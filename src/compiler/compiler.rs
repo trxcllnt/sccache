@@ -24,6 +24,8 @@ use crate::compiler::msvc::Msvc;
 use crate::compiler::nvcc::Nvcc;
 use crate::compiler::nvcc::NvccHostCompiler;
 use crate::compiler::nvhpc::Nvhpc;
+use crate::compiler::cicc::Cicc;
+use crate::compiler::ptxas::Ptxas;
 use crate::compiler::rust::{Rust, RustupProxy};
 use crate::compiler::tasking_vx::TaskingVX;
 #[cfg(feature = "dist-client")]
@@ -112,6 +114,8 @@ pub enum Language {
     ObjectiveC,
     ObjectiveCxx,
     Cuda,
+    Ptx,
+    Cubin,
     Rust,
     Hip,
 }
@@ -134,6 +138,8 @@ impl Language {
             Some("M") | Some("mm") => Some(Language::ObjectiveCxx),
             // TODO mii
             Some("cu") => Some(Language::Cuda),
+            Some("ptx") => Some(Language::Ptx),
+            Some("cubin") => Some(Language::Cubin),
             // TODO cy
             Some("rs") => Some(Language::Rust),
             Some("hip") => Some(Language::Hip),
@@ -152,6 +158,8 @@ impl Language {
             Language::ObjectiveC => "objc",
             Language::ObjectiveCxx => "objc++",
             Language::Cuda => "cuda",
+            Language::Ptx => "ptx",
+            Language::Cubin => "cubin",
             Language::Rust => "rust",
             Language::Hip => "hip",
         }
@@ -169,6 +177,8 @@ impl CompilerKind {
             | Language::ObjectiveC
             | Language::ObjectiveCxx => "C/C++",
             Language::Cuda => "CUDA",
+            Language::Ptx => "PTX",
+            Language::Cubin => "CUBIN",
             Language::Rust => "Rust",
             Language::Hip => "HIP",
         }
@@ -181,8 +191,10 @@ impl CompilerKind {
             CompilerKind::C(CCompilerKind::Diab) => textual_lang + " [diab]",
             CompilerKind::C(CCompilerKind::Gcc) => textual_lang + " [gcc]",
             CompilerKind::C(CCompilerKind::Msvc) => textual_lang + " [msvc]",
-            CompilerKind::C(CCompilerKind::Nvhpc) => textual_lang + " [nvhpc]",
             CompilerKind::C(CCompilerKind::Nvcc) => textual_lang + " [nvcc]",
+            CompilerKind::C(CCompilerKind::Cicc) => textual_lang + " [cicc]",
+            CompilerKind::C(CCompilerKind::Ptxas) => textual_lang + " [ptxas]",
+            CompilerKind::C(CCompilerKind::Nvhpc) => textual_lang + " [nvhpc]",
             CompilerKind::C(CCompilerKind::TaskingVX) => textual_lang + " [taskingvx]",
             CompilerKind::Rust => textual_lang,
         }
@@ -984,6 +996,28 @@ fn is_rustc_like<P: AsRef<Path>>(p: P) -> bool {
     )
 }
 
+/// Returns true if the given path looks like cicc
+fn is_nvidia_cicc<P: AsRef<Path>>(p: P) -> bool {
+    matches!(
+        p.as_ref()
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .as_deref(),
+        Some("cicc")
+    )
+}
+
+/// Returns true if the given path looks like ptxas
+fn is_nvidia_ptxas<P: AsRef<Path>>(p: P) -> bool {
+    matches!(
+        p.as_ref()
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .as_deref(),
+        Some("ptxas")
+    )
+}
+
 /// Returns true if the given path looks like a c compiler program
 ///
 /// This does not check c compilers, it only report programs that are definitely not rustc
@@ -1045,6 +1079,30 @@ where
 
     let rustc_executable = if let Some(ref rustc_executable) = maybe_rustc_executable {
         rustc_executable
+    } else if is_nvidia_cicc(executable) {
+        debug!("Found cicc");
+        return CCompiler::new(
+            Cicc {
+                // TODO: Use nvcc --version
+                version: Some(String::new()),
+            },
+            executable.to_owned(),
+            &pool,
+        )
+        .await
+        .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
+    } else if is_nvidia_ptxas(executable) {
+        debug!("Found ptxas");
+        return CCompiler::new(
+            Ptxas {
+                // TODO: Use nvcc --version
+                version: Some(String::new()),
+            },
+            executable.to_owned(),
+            &pool,
+        )
+        .await
+        .map(|c|( Box::new(c) as Box<dyn Compiler<T>>, None));
     } else if is_known_c_compiler(executable) {
         let cc = detect_c_compiler(creator, executable, args, env.to_vec(), pool).await;
         return cc.map(|c| (c, None));
