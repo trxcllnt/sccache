@@ -151,8 +151,12 @@ pub enum CCompilerKind {
     Diab,
     /// Microsoft Visual C++
     Msvc,
-    /// NVIDIA cuda compiler
+    /// NVIDIA CUDA compiler
     Nvcc,
+    /// NVIDIA CUDA optimizer and PTX generator
+    Cicc,
+    /// NVIDIA CUDA PTX assembler
+    Ptxas,
     /// NVIDIA hpc c, c++ compiler
     Nvhpc,
     /// Tasking VX
