@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use crate::errors::*;
-use clap::{error::ErrorKind, Arg, ArgAction, ArgGroup, ValueEnum};
+use clap::{error::ErrorKind, Arg, ArgAction, ArgGroup, ArgMatches, ValueEnum};
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::str::FromStr;
 use which::which_in;
@@ -56,6 +56,7 @@ impl Default for StatsFormat {
 }
 
 /// A specific command to run.
+#[derive(Debug)]
 pub enum Command {
     /// Show cache statistics and exit.
     ShowStats(StatsFormat, bool),
@@ -85,6 +86,9 @@ pub enum Command {
         env_vars: Vec<(OsString, OsString)>,
     },
     DebugPreprocessorCacheEntries,
+    ExecuteMany {
+        commands: Vec<Command>
+    },
 }
 
 fn flag_infer_long_and_short(name: &'static str) -> Arg {
@@ -162,6 +166,10 @@ fn get_clap_command() -> clap::Command {
                 .value_name("FMT")
                 .value_parser(clap::value_parser!(StatsFormat))
                 .default_value(StatsFormat::default().as_str()),
+            flag_infer_long("exec")
+                .hide(true)
+                .value_parser(clap::value_parser!(OsString))
+                .action(ArgAction::Append),
             Arg::new("CMD")
                 .value_parser(clap::value_parser!(OsString))
                 .trailing_var_arg(true)
@@ -179,6 +187,7 @@ fn get_clap_command() -> clap::Command {
                     "stop-server",
                     "zero-stats",
                     "package-toolchain",
+                    "exec",
                     "CMD",
                 ])
                 .required(true),
@@ -195,6 +204,7 @@ pub fn try_parse() -> Result<Command> {
     // We only care if it's `1`
     let internal_start_server = env::var(ENV_VAR_INTERNAL_START_SERVER).as_deref() == Ok("1");
     let mut args: Vec<_> = env::args_os().collect();
+    trace!("args: {:?}", args);
 
     if !internal_start_server {
         if let Ok(exe) = env::current_exe() {
@@ -232,6 +242,46 @@ pub fn try_parse() -> Result<Command> {
                     }
                 }
             }
+        }
+    }
+
+    fn make_command_env_vars() -> Vec<(OsString, OsString)> {
+        let mut env_vars = env::vars_os().collect::<Vec<_>>();
+
+        // If we're running under rr, avoid the `LD_PRELOAD` bits, as it will
+        // almost surely do the wrong thing, as the compiler gets executed
+        // in a different process tree.
+        env_vars.retain(|(k, _v)| {
+            k != "LD_PRELOAD"
+                && k != "RUNNING_UNDER_RR"
+                && k != "HOSTNAME"
+                && k != "PWD"
+                && k != "HOST"
+                && k != "RPM_BUILD_ROOT"
+                && k != "SOURCE_DATE_EPOCH"
+                && k != "RPM_PACKAGE_RELEASE"
+                && k != "MINICOM"
+                && k != "DESTDIR"
+                && k != "RPM_PACKAGE_VERSION"
+        });
+
+        env_vars
+    }
+
+    fn make_compile_command(cwd: &PathBuf, matches: ArgMatches) -> anyhow::Result<Command, Error> {
+        let cmd = matches
+            .get_many("CMD")
+            .expect("CMD is required")
+            .cloned()
+            .collect::<Vec<OsString>>();
+        match cmd.as_slice() {
+            [exe, cmdline @ ..] => Ok(Command::Compile {
+                exe: exe.to_owned(),
+                cmdline: cmdline.to_owned(),
+                cwd: cwd.to_owned(),
+                env_vars: make_command_env_vars(),
+            }),
+            _ => unreachable!("1: clap should enforce at least one value in CMD"),
         }
     }
 
@@ -292,40 +342,35 @@ pub fn try_parse() -> Result<Command> {
                     (Some(exe), Some(out)) => Ok(Command::PackageToolchain(exe, out)),
                     _ => unreachable!("clap should enforce two values"),
                 }
+            } else if matches.contains_id("exec") {
+                let (cmd_exe, cmd_arg) = if cfg!(target_os = "windows") {
+                    ("cmd", "/C")
+                } else {
+                    ("sh", "-c")
+                };
+                Ok(Command::ExecuteMany {
+                    commands: matches
+                        .get_many("exec")
+                        .expect("`exec` requires a command argument")
+                        .cloned()
+                        .collect::<Vec<OsString>>()
+                        .into_iter()
+                        .map(|arg| arg.to_string_lossy().to_string())
+                        .map(|cmd| {
+                            Command::Compile {
+                                exe: cmd_exe.into(),
+                                cmdline: vec![
+                                    cmd_arg.into(),
+                                    OsStr::new(&cmd).to_os_string()
+                                ],
+                                cwd: cwd.to_owned(),
+                                env_vars: make_command_env_vars(),
+                            }
+                        })
+                        .collect::<Vec<Command>>(),
+                })
             } else if matches.contains_id("CMD") {
-                let mut env_vars = env::vars_os().collect::<Vec<_>>();
-
-                // If we're running under rr, avoid the `LD_PRELOAD` bits, as it will
-                // almost surely do the wrong thing, as the compiler gets executed
-                // in a different process tree.
-                env_vars.retain(|(k, _v)| {
-                    k != "LD_PRELOAD"
-                        && k != "RUNNING_UNDER_RR"
-                        && k != "HOSTNAME"
-                        && k != "PWD"
-                        && k != "HOST"
-                        && k != "RPM_BUILD_ROOT"
-                        && k != "SOURCE_DATE_EPOCH"
-                        && k != "RPM_PACKAGE_RELEASE"
-                        && k != "MINICOM"
-                        && k != "DESTDIR"
-                        && k != "RPM_PACKAGE_VERSION"
-                });
-
-                let cmd = matches
-                    .get_many("CMD")
-                    .expect("CMD is required")
-                    .cloned()
-                    .collect::<Vec<OsString>>();
-                match cmd.as_slice() {
-                    [exe, cmdline @ ..] => Ok(Command::Compile {
-                        exe: exe.to_owned(),
-                        cmdline: cmdline.to_owned(),
-                        cwd,
-                        env_vars,
-                    }),
-                    _ => unreachable!("clap should enforce at least one value in cmd"),
-                }
+                make_compile_command(&cwd, matches)
             } else {
                 unreachable!("Either the arg group or env variable should provide a command");
             }

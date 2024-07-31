@@ -779,6 +779,47 @@ pub fn run_command(cmd: Command) -> Result<i32> {
         Command::PackageToolchain(_executable, _out) => bail!(
             "Toolchain packaging not compiled in, please rebuild with the dist-client feature"
         ),
+        Command::ExecuteMany {
+            commands
+        } => {
+            trace!("Command::ExecuteMany {{ {:?} }}", commands);
+
+            let runtime = Runtime::new()?;
+
+            #[allow(clippy::manual_try_fold)]
+
+            return commands
+                .into_iter()
+                .map(|cmd| {
+                    match cmd {
+                        Command::Compile {
+                            exe,
+                            cmdline,
+                            cwd,
+                            env_vars,
+                        } => {
+                            let mut proc = process::Command::new(exe);
+                            proc.args(&cmdline)
+                                .env_clear()
+                                .envs(env_vars.clone())
+                                .current_dir(cwd.clone());
+                            proc
+                        },
+                        _ => unreachable!("Command:ExecuteMany sequential can only have Compile commands. Received {:?}", cmd)
+                    }
+                })
+                .fold(Ok(0), |ret, mut proc| ret.and_then(|_| {
+                    trace!("executing `{:?} {:?}`", proc.get_program(), proc.get_args());
+                    runtime.block_on(async move {
+                        proc.stdin(process::Stdio::null())
+                            .stdout(process::Stdio::inherit())
+                            .stderr(process::Stdio::inherit())
+                            .status()
+                            .map_err(|e| anyhow!(e.to_string()))
+                            .map(|status| status.code().unwrap())
+                    })
+                }));
+        },
         Command::Compile {
             exe,
             cmdline,
