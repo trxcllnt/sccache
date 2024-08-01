@@ -28,11 +28,13 @@ use async_trait::async_trait;
 use fs::File;
 use fs_err as fs;
 use log::Level::Trace;
-use std::ffi::OsString;
+use regex::Regex;
+use std::ffi::{OsStr, OsString};
 use std::future::Future;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use which::which_in;
 
 use crate::errors::*;
 
@@ -190,6 +192,7 @@ impl CCompilerImpl for Nvcc {
         }
     }
 
+    #[allow(clippy::manual_try_fold)]
     fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
@@ -199,16 +202,215 @@ impl CCompilerImpl for Nvcc {
         env_vars: &[(OsString, OsString)],
         rewrite_includes_only: bool,
     ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
-        gcc::generate_compile_commands(
-            path_transformer,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            self.kind(),
-            rewrite_includes_only,
-        )
+
+        let mut new_args = parsed_args.clone();
+        new_args.dependency_args.clear();
+
+        let (cmd, _, cacheable) = gcc::generate_compile_commands(
+                path_transformer,
+                executable,
+                parsed_args,
+                cwd,
+                env_vars,
+                self.kind(),
+                rewrite_includes_only,
+            )
+            .context("Failed to generate compile commands")?;
+
+        let mut envvars = env_vars.to_vec();
+        let nvcc_commands = get_nvcc_subcommand_groups(cmd, cwd, &mut envvars);
+
+        let (cmd_exe, cmd_arg, cmd_pre) = if cfg!(target_os = "windows") {
+            ("cmd", "/C", "")
+        } else {
+            ("sh", "-c", "exec ")
+        };
+
+        fn exec_cmd(exe: &str, arg: &str, pre: &str, cwd: &Path, env: &[(OsString, OsString)], cmd: &str) -> Result<i32> {
+            let cmd = (pre.to_owned() + cmd).to_owned();
+            trace!("executing nvcc subcommand: `{:?} {:?} '{:?}'`", exe, arg, cmd);
+            std::process::Command::new(exe)
+                .env_clear()
+                .current_dir(cwd)
+                .envs(env.to_owned())
+                .args(vec![arg.to_owned(), cmd])
+                .status()
+                .map_err(|e| anyhow!(e.to_string()))
+                .map(|status| status.code().unwrap())
+            }
+
+        let last_group = nvcc_commands.last().unwrap();
+        let last_command = last_group.last().unwrap();
+
+        nvcc_commands
+            .iter()
+            .take(nvcc_commands.len() - 1)
+            .fold(Ok(0), |ret, cmds| {
+                cmds.iter().fold(ret, |ret, cmd| ret.and_then(|_| {
+                    exec_cmd(cmd_exe, cmd_arg, cmd_pre, cwd, &envvars.clone(), cmd)
+                }))
+            })
+            .and_then(|_| {
+                last_group
+                    .iter()
+                    .take(last_group.len() - 1)
+                    .fold(Ok(0), |ret, cmd| ret.and_then(|_| {
+                        exec_cmd(cmd_exe, cmd_arg, cmd_pre, cwd, &envvars.clone(), cmd)
+                    }))
+            })
+            .and(Ok((CompileCommand {
+                cwd: cwd.to_owned(),
+                env_vars: envvars.to_owned(),
+                executable: cmd_exe.into(),
+                arguments: vec![
+                    cmd_arg.into(),
+                    last_command.into()
+                ],
+            }, None, cacheable)))
     }
+}
+
+fn get_nvcc_subcommand_groups(
+    cmd: CompileCommand,
+    cwd: &Path,
+    envvars: &mut Vec<(OsString, OsString)>,
+) -> Vec<Vec<String>> {
+
+    let sccache_bin = std::env::current_exe().unwrap();
+    let sccache_str = sccache_bin.to_str().unwrap();
+
+    let mut envpath: OsString = std::env::var("PATH").unwrap().into();
+    for (key, val) in envvars.iter() {
+        if key == "PATH" {
+            envpath = val.clone();
+            break;
+        }
+    }
+
+    let mut nvcc_dryrun_args = cmd.arguments.clone();
+    nvcc_dryrun_args.extend(vec!["--dryrun".into()]);
+
+    let mut nvcc_dryrun_cmd = std::process::Command::new(cmd.executable)
+        .env_clear()
+        .args(nvcc_dryrun_args)
+        .envs(envvars.to_vec())
+        .current_dir(cwd)
+        .stdin(process::Stdio::null())
+        .stdout(process::Stdio::null())
+        .stderr(process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    fn select_lines_with_hash_dollar_space(line: io::Result<String>) -> Option<String> {
+        match line {
+            Ok(line) => {
+                let re = Regex::new(r"^#\$ (.*)$").unwrap();
+                match re.captures(line.as_str()) {
+                    Some(caps) => {
+                        let (_, [rest]) = caps.extract();
+                        Some(rest.to_string())
+                    },
+                    _ => None
+                }
+            },
+            Err(_) => None
+        }
+    }
+
+    fn select_nvcc_envvars(
+        envvars: &mut Vec<(OsString, OsString)>,
+        envpath: &mut OsString,
+        line: &str
+    ) -> Option<String> {
+        if let Some(var) = Regex::new(r"^([_A-Z]+)=(.*)$").unwrap().captures(line) {
+            let (_, [var, val]) = var.extract();
+            if var == "PATH" {
+                envpath.clear();
+                envpath.push(val);
+            }
+            // Handle the special `_SPACE_= ` line
+            if val == " " {
+                envvars.extend(vec![(var.into(), val.into())]);
+            } else {
+                envvars.extend(vec![(
+                    var.into(),
+                    val.trim()
+                        .split(" ")
+                        .map(|x| x
+                            .trim_start_matches("\"")
+                            .trim_end_matches("\""))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .into()
+                )]);
+            }
+            return None;
+        }
+        Some(line.to_string())
+    }
+
+    fn skip_rm_fatbin(line: &str) -> Option<String> {
+        if Regex::new(r"^rm .*$").unwrap().is_match(line) {
+            return None;
+        }
+        Some(line.to_string())
+    }
+
+    fn passthrough_host_compiler_preprocessor(line: &str) -> Option<String> {
+        if Regex::new(r".* -E .*$").unwrap().is_match(line) {
+            return Some(line.to_string())
+        }
+        None
+    }
+
+    fn prefix_device_compiler_calls(sccache_str: &str, line: &str) -> Option<String> {
+        if Regex::new(r"^(cicc|ptxas) (.*)$").unwrap().is_match(line) {
+            return Some(sccache_str.to_owned() + " " + line);
+        }
+        None
+    }
+
+    fn passthrough_cudafe_and_fatbinary(line: &str) -> Option<String> {
+        if Regex::new(r"^(cudafe\+\+|fatbinary) (.*)$").unwrap().is_match(line) {
+            return Some(line.to_string());
+        }
+        None
+    }
+
+    let stderr = nvcc_dryrun_cmd.stderr.as_mut().unwrap();
+    let reader = io::BufReader::new(stderr);
+    let nvcc_subcommand_groups = reader
+        .lines()
+        .filter_map(|line| {
+            Some(line)
+                // Select lines that match the `#$ ` prefix from nvcc --dryrun
+                .and_then(select_lines_with_hash_dollar_space)
+                // Select the envvar lines and add them to the envvars list
+                .and_then(|line| select_nvcc_envvars(envvars, &mut envpath, &line))
+                // Ignore the `rm /tmp/tmpxft_*.fatbin` line
+                .and_then(|line| skip_rm_fatbin(&line))
+                .and_then(|line| None
+                    // Pass through host compiler preprocessor calls
+                    .or_else(|| passthrough_host_compiler_preprocessor(&line))
+                    // Prefix `cicc` and `ptxas` invocations with `sccache`
+                    .or_else(|| prefix_device_compiler_calls(sccache_str, &line))
+                    // Canonicalize `cudafe++` and `fatbinary` paths
+                    .or_else(|| passthrough_cudafe_and_fatbinary(&line))
+                    // Prefix non-preprocessor host compiler invocations with `sccache`
+                    .or_else(|| Some(sccache_str.to_owned() + " " + line.as_str())))
+        })
+        .fold(vec![], |mut groups, value| {
+            if Regex::new(r".* -E .*$").unwrap().is_match(value.as_str()) {
+                groups.push(vec![]);
+            }
+            let idx = groups.len() - 1;
+            groups[idx].push(value);
+            groups
+        });
+
+    nvcc_dryrun_cmd.wait().unwrap();
+
+    nvcc_subcommand_groups
 }
 
 counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
