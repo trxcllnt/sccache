@@ -355,13 +355,12 @@ pub fn try_parse() -> Result<Command> {
                         .cloned()
                         .collect::<Vec<OsString>>()
                         .into_iter()
-                        .map(|arg| arg.to_string_lossy().to_string())
                         .map(|cmd| {
                             Command::Compile {
                                 exe: cmd_exe.into(),
                                 cmdline: vec![
                                     cmd_arg.into(),
-                                    OsStr::new(&cmd).to_os_string()
+                                    cmd
                                 ],
                                 cwd: cwd.to_owned(),
                                 env_vars: make_command_env_vars(),

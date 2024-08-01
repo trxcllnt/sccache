@@ -21,7 +21,7 @@ use crate::jobserver::Client;
 use crate::mock_command::{CommandChild, CommandCreatorSync, ProcessCommandCreator, RunCommand};
 use crate::protocol::{Compile, CompileFinished, CompileResponse, Request, Response};
 use crate::server::{self, DistInfo, ServerInfo, ServerStartup, ServerStats};
-use crate::util::daemonize;
+use crate::util::{daemonize, run_input_output};
 use byteorder::{BigEndian, ByteOrder};
 use fs::{File, OpenOptions};
 use fs_err as fs;
@@ -782,9 +782,11 @@ pub fn run_command(cmd: Command) -> Result<i32> {
         Command::ExecuteMany {
             commands
         } => {
-            trace!("Command::ExecuteMany {{ {:?} }}", commands);
+            // trace!("Command::ExecuteMany {{ {:?} }}", commands);
 
             let runtime = Runtime::new()?;
+            let jobserver = unsafe { Client::new() };
+            let creator = ProcessCommandCreator::new(&jobserver);
 
             #[allow(clippy::manual_try_fold)]
 
@@ -798,25 +800,22 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                             cwd,
                             env_vars,
                         } => {
-                            let mut proc = process::Command::new(exe);
-                            proc.args(&cmdline)
-                                .env_clear()
-                                .envs(env_vars.clone())
-                                .current_dir(cwd.clone());
-                            proc
+                            trace!("Command:ExecuteMany command: `{:?} {:?}`", exe, cmdline);
+                            let mut cmd = creator.clone().new_command_sync(exe);
+                            cmd.args(&cmdline)
+                               .env_clear()
+                               .envs(env_vars.clone())
+                               .current_dir(cwd.clone());
+                            cmd
                         },
                         _ => unreachable!("Command:ExecuteMany sequential can only have Compile commands. Received {:?}", cmd)
                     }
                 })
-                .fold(Ok(0), |ret, mut proc| ret.and_then(|_| {
-                    trace!("executing `{:?} {:?}`", proc.get_program(), proc.get_args());
+                .fold(Ok(0), |ret, cmd| ret.and_then(|_| {
                     runtime.block_on(async move {
-                        proc.stdin(process::Stdio::null())
-                            .stdout(process::Stdio::inherit())
-                            .stderr(process::Stdio::inherit())
-                            .status()
-                            .map_err(|e| anyhow!(e.to_string()))
-                            .map(|status| status.code().unwrap())
+                        run_input_output(cmd, None)
+                            .await
+                            .map(|o| o.status.code().unwrap())
                     })
                 }));
         },
