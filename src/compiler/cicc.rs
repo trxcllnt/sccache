@@ -170,6 +170,7 @@ where
         common_args,
         arch_args: vec![],
         unhashed_args,
+        extra_dist_files: inputs,
         extra_hash_files: vec![],
         msvc_show_includes: false,
         profile_generate: false,
@@ -244,7 +245,7 @@ pub fn generate_compile_commands(
             path_transformer.as_dist(out_file)?,
         ]);
         Some(dist::CompileCommand {
-            executable: path_transformer.as_dist(executable)?,
+            executable: path_transformer.as_dist(executable.canonicalize().unwrap().as_path())?,
             arguments,
             env_vars: dist::osstring_tuples_to_strings(env_vars)?,
             cwd: path_transformer.as_dist_abs(cwd)?,
