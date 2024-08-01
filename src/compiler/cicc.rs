@@ -95,6 +95,7 @@ where
     S: SearchableArgInfo<ArgData>,
 {
     let mut take_next = false;
+    let mut inputs = vec![];
     let mut input = OsString::new();
     let mut outputs = HashMap::new();
 
@@ -109,6 +110,12 @@ where
                         take_next = false;
                         &mut common_args
                     },
+                    Some(Input(o)) => {
+                        take_next = false;
+                        let path = o.to_path_buf();
+                        inputs.push(path);
+                        &mut unhashed_args
+                    }
                     Some(Output(o)) => {
                         take_next = false;
                         let path = o.to_path_buf();
@@ -249,6 +256,7 @@ pub fn generate_compile_commands(
 
 ArgData! { pub
     PassThrough(OsString),
+    Input(PathBuf),
     Output(PathBuf),
     Unhashed(OsString),
 }
@@ -260,7 +268,7 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("--gen_c_file_name", OsString, Separated, Unhashed),
     take_arg!("--gen_device_file_name", OsString, Separated, Unhashed),
     take_arg!("--include_file_name", OsString, Separated, Unhashed),
-    take_arg!("--module_id_file_name", OsString, Separated, Unhashed),
+    take_arg!("--module_id_file_name", PathBuf, Separated, Input),
     take_arg!("--stub_file_name", PathBuf, Separated, Output),
     take_arg!("-o", PathBuf, Separated, Output),
 ]);
