@@ -48,8 +48,8 @@ impl CCompilerImpl for Ptxas {
     fn version(&self) -> Option<String> {
         self.version.clone()
     }
-    fn parse_arguments(&self, arguments: &[OsString], _cwd: &Path) -> CompilerArguments<ParsedArguments> {
-        cicc::parse_arguments(arguments, Language::Cubin, &ARGS[..])
+    fn parse_arguments(&self, arguments: &[OsString], cwd: &Path) -> CompilerArguments<ParsedArguments> {
+        cicc::parse_arguments(arguments, cwd, Language::Cubin, &ARGS[..])
     }
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
@@ -57,7 +57,7 @@ impl CCompilerImpl for Ptxas {
         _creator: &T,
         _executable: &Path,
         parsed_args: &ParsedArguments,
-        _cwd: &Path,
+        cwd: &Path,
         _env_vars: &[(OsString, OsString)],
         _may_dist: bool,
         _rewrite_includes_only: bool,
@@ -66,7 +66,8 @@ impl CCompilerImpl for Ptxas {
     where
         T: CommandCreatorSync,
     {
-        cicc::preprocess(parsed_args).await
+        trace!("ptxas preprocessed input file: cwd={:?} path={:?}", cwd, &parsed_args.input);
+        cicc::preprocess(cwd, parsed_args).await
     }
     fn generate_compile_commands(
         &self,

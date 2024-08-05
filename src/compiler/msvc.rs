@@ -665,7 +665,8 @@ pub fn parse_arguments(
                 | Some(PassThroughPath(_))
                 | Some(PedanticFlag)
                 | Some(Standard(_)) => &mut common_args,
-                Some(Unhashed(_)) => &mut unhashed_args,
+                Some(UnhashedFlag)
+                | Some(Unhashed(_)) => &mut unhashed_args,
 
                 Some(ProfileGenerate) => {
                     profile_generate = true;

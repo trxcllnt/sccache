@@ -127,6 +127,7 @@ ArgData! { pub
     PreprocessorArgument(OsString),
     PreprocessorArgumentPath(PathBuf),
     // Used for arguments that shouldn't affect the computed hash
+    UnhashedFlag,
     Unhashed(OsString),
     DoCompilation,
     Output(PathBuf),
@@ -370,6 +371,7 @@ where
             | Some(PreprocessorArgumentPath(_))
             | Some(PassThrough(_))
             | Some(PassThroughPath(_))
+            | Some(UnhashedFlag)
             | Some(Unhashed(_)) => {}
             Some(Language(lang)) => {
                 language = match lang.to_string_lossy().as_ref() {
@@ -429,7 +431,8 @@ where
             | Some(PassThroughFlag)
             | Some(PassThrough(_))
             | Some(PassThroughPath(_)) => &mut common_args,
-            Some(Unhashed(_)) => &mut unhashed_args,
+            Some(UnhashedFlag)
+            | Some(Unhashed(_)) => &mut unhashed_args,
             Some(Arch(_)) => &mut arch_args,
             Some(ExtraHashFile(path)) => {
                 extra_hash_files.push(cwd.join(path));
@@ -507,7 +510,8 @@ where
             | Some(PassThrough(_))
             | Some(PassThroughFlag)
             | Some(PassThroughPath(_)) => &mut common_args,
-            Some(Unhashed(_)) => &mut unhashed_args,
+            Some(UnhashedFlag)
+            | Some(Unhashed(_)) => &mut unhashed_args,
             Some(ExtraHashFile(path)) => {
                 extra_hash_files.push(cwd.join(path));
                 &mut common_args
@@ -637,7 +641,7 @@ where
     })
 }
 
-fn language_to_gcc_arg(lang: Language) -> Option<&'static str> {
+pub fn language_to_gcc_arg(lang: Language) -> Option<&'static str> {
     match lang {
         Language::C => Some("c"),
         Language::CHeader => Some("c-header"),

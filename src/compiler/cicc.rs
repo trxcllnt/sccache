@@ -47,8 +47,8 @@ impl CCompilerImpl for Cicc {
     fn version(&self) -> Option<String> {
         self.version.clone()
     }
-    fn parse_arguments(&self, arguments: &[OsString], _cwd: &Path) -> CompilerArguments<ParsedArguments> {
-        parse_arguments(arguments, Language::Ptx, &ARGS[..])
+    fn parse_arguments(&self, arguments: &[OsString], cwd: &Path) -> CompilerArguments<ParsedArguments> {
+        parse_arguments(arguments, cwd, Language::Ptx, &ARGS[..])
     }
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
@@ -56,7 +56,7 @@ impl CCompilerImpl for Cicc {
         _creator: &T,
         _executable: &Path,
         parsed_args: &ParsedArguments,
-        _cwd: &Path,
+        cwd: &Path,
         _env_vars: &[(OsString, OsString)],
         _may_dist: bool,
         _rewrite_includes_only: bool,
@@ -65,7 +65,8 @@ impl CCompilerImpl for Cicc {
     where
         T: CommandCreatorSync,
     {
-        preprocess(parsed_args).await
+        trace!("cicc preprocessed input file: cwd={:?} path={:?}", cwd, &parsed_args.input);
+        preprocess(cwd, parsed_args).await
     }
     fn generate_compile_commands(
         &self,
@@ -88,6 +89,7 @@ impl CCompilerImpl for Cicc {
 
 pub fn parse_arguments<S>(
     arguments: &[OsString],
+    cwd: &Path,
     language: Language,
     arg_info: S,
 ) -> CompilerArguments<ParsedArguments>
@@ -95,7 +97,7 @@ where
     S: SearchableArgInfo<ArgData>,
 {
     let mut take_next = false;
-    let mut inputs = vec![];
+    let mut extra_inputs = vec![];
     let mut input = OsString::new();
     let mut outputs = HashMap::new();
 
@@ -110,30 +112,30 @@ where
                         take_next = false;
                         &mut common_args
                     },
-                    Some(Input(o)) => {
-                        take_next = false;
-                        let path = o.to_path_buf();
-                        inputs.push(path);
-                        &mut unhashed_args
-                    }
                     Some(Output(o)) => {
                         take_next = false;
-                        let path = o.to_path_buf();
-                        if let Some(lang) = Language::from_file_name(path.as_path()) {
-                            outputs.insert(
-                                lang.as_str(),
-                                ArtifactDescriptor { path, optional: false }
-                            );
-                        }
-                        match arg.flag_str() {
-                            Some("-o") => continue,
-                            _ => &mut unhashed_args
-                        }
+                        let path = cwd.join(o);
+                        outputs.insert("obj", ArtifactDescriptor { path, optional: false });
+                        continue
                     },
                     Some(Unhashed(_)) => {
                         take_next = false;
                         &mut unhashed_args
                     },
+                    Some(UnhashedInput(o)) => {
+                        take_next = false;
+                        let path = cwd.join(o);
+                        extra_inputs.push(path);
+                        &mut unhashed_args
+                    }
+                    Some(UnhashedOutput(o)) => {
+                        take_next = false;
+                        let path = cwd.join(o);
+                        if let Some(flag) = arg.flag_str() {
+                            outputs.insert(flag, ArtifactDescriptor { path, optional: false });
+                        }
+                        &mut unhashed_args
+                    }
                     None => match arg {
                         Argument::Raw(ref p) => {
                             if take_next {
@@ -170,7 +172,7 @@ where
         common_args,
         arch_args: vec![],
         unhashed_args,
-        extra_dist_files: inputs,
+        extra_dist_files: extra_inputs,
         extra_hash_files: vec![],
         msvc_show_includes: false,
         profile_generate: false,
@@ -181,10 +183,11 @@ where
 }
 
 pub async fn preprocess(
+    cwd: &Path,
     parsed_args: &ParsedArguments,
 ) -> Result<process::Output>
 {
-    std::fs::read(&parsed_args.input)
+    std::fs::read(cwd.join(&parsed_args.input))
         .map_err(|e| { anyhow::Error::new(e) })
         .map(|s| {
             process::Output {
@@ -211,7 +214,7 @@ pub fn generate_compile_commands(
     trace!("compile");
 
     let lang_str = &parsed_args.language.as_str();
-    let out_file = match parsed_args.outputs.get(lang_str) {
+    let out_file = match parsed_args.outputs.get("obj") {
         Some(obj) => &obj.path,
         None => return Err(anyhow!("Missing {:?} file output", lang_str)),
     };
@@ -256,20 +259,21 @@ pub fn generate_compile_commands(
 }
 
 ArgData! { pub
-    PassThrough(OsString),
-    Input(PathBuf),
     Output(PathBuf),
+    PassThrough(OsString),
     Unhashed(OsString),
+    UnhashedInput(PathBuf),
+    UnhashedOutput(PathBuf),
 }
 
 use self::ArgData::*;
 
 counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     // These are always randomly generated/different between nvcc invocations
-    take_arg!("--gen_c_file_name", OsString, Separated, Unhashed),
-    take_arg!("--gen_device_file_name", OsString, Separated, Unhashed),
-    take_arg!("--include_file_name", OsString, Separated, Unhashed),
-    take_arg!("--module_id_file_name", PathBuf, Separated, Input),
-    take_arg!("--stub_file_name", PathBuf, Separated, Output),
+    take_arg!("--gen_c_file_name", PathBuf, Separated, UnhashedOutput),
+    take_arg!("--gen_device_file_name", PathBuf, Separated, UnhashedOutput),
+    take_arg!("--include_file_name", OsString, Separated, PassThrough),
+    take_arg!("--module_id_file_name", PathBuf, Separated, UnhashedInput),
+    take_arg!("--stub_file_name", PathBuf, Separated, UnhashedOutput),
     take_arg!("-o", PathBuf, Separated, Output),
 ]);
