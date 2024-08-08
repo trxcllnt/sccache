@@ -17,7 +17,7 @@
 
 use crate::compiler::args::*;
 use crate::compiler::cicc;
-use crate::compiler::{Cacheable, ColorMode, CompileCommand, CompilerArguments, Language};
+use crate::compiler::{Cacheable, ColorMode, CompileCommand, CCompileCommand, CompilerArguments, Language, SingleCompileCommand};
 use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
 use crate::{counted_array, dist};
 
@@ -69,7 +69,7 @@ impl CCompilerImpl for Ptxas {
         trace!("ptxas preprocessed input file: cwd={:?} path={:?}", cwd, &parsed_args.input);
         cicc::preprocess(cwd, parsed_args).await
     }
-    fn generate_compile_commands(
+    fn generate_compile_commands<T>(
         &self,
         path_transformer: &mut dist::PathTransformer,
         executable: &Path,
@@ -77,7 +77,10 @@ impl CCompilerImpl for Ptxas {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         _rewrite_includes_only: bool,
-    ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
+    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)>
+    where
+        T: CommandCreatorSync
+    {
         cicc::generate_compile_commands(
             path_transformer,
             executable,
@@ -85,6 +88,11 @@ impl CCompilerImpl for Ptxas {
             cwd,
             env_vars
         )
+        .map(|(command, dist_command, cacheable)| (
+            CCompileCommand::new(command),
+            dist_command,
+            cacheable
+        ))
     }
 }
 

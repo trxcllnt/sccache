@@ -197,7 +197,7 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         T: CommandCreatorSync;
     /// Generate a command that can be used to invoke the C compiler to perform
     /// the compilation.
-    fn generate_compile_commands(
+    fn generate_compile_commands<T>(
         &self,
         path_transformer: &mut dist::PathTransformer,
         executable: &Path,
@@ -205,7 +205,9 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         rewrite_includes_only: bool,
-    ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)>;
+    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)>
+    where
+        T: CommandCreatorSync;
 }
 
 impl<I> CCompiler<I>
@@ -362,7 +364,7 @@ where
         rewrite_includes_only: bool,
         storage: Arc<dyn Storage>,
         cache_control: CacheControl,
-    ) -> Result<HashResult> {
+    ) -> Result<HashResult<T>> {
         let start_of_compilation = std::time::SystemTime::now();
         let CCompilerHasher {
             parsed_args,
@@ -396,10 +398,36 @@ where
                 arg
             );
         }
+
+        let use_preprocessor_cache_mode = {
+            let can_use_preprocessor_cache_mode = !may_dist
+                && preprocessor_cache_mode_config.use_preprocessor_cache_mode
+                && !too_hard_for_preprocessor_cache_mode;
+
+            let mut use_preprocessor_cache_mode = can_use_preprocessor_cache_mode;
+
+            // Allow overrides from the env
+            for (key, val) in env_vars.iter() {
+                if key == "SCCACHE_DIRECT" {
+                    if let Some(val) = val.to_str() {
+                        use_preprocessor_cache_mode = match val.to_lowercase().as_str() {
+                            "false" | "off" | "0" => false,
+                            _ => can_use_preprocessor_cache_mode,
+                        };
+                    }
+                    break;
+                }
+            }
+
+            if can_use_preprocessor_cache_mode && !use_preprocessor_cache_mode {
+                debug!("parse_arguments: Disabling preprocessor cache because SCCACHE_DIRECT=false");
+            }
+
+            use_preprocessor_cache_mode
+        };
+
         // Disable preprocessor cache when doing distributed compilation
-        let mut preprocessor_key = if !may_dist
-            && preprocessor_cache_mode_config.use_preprocessor_cache_mode
-            && !too_hard_for_preprocessor_cache_mode
+        let mut preprocessor_key = if use_preprocessor_cache_mode
         {
             preprocessor_cache_entry_hash_key(
                 &executable_digest,
@@ -1113,12 +1141,12 @@ fn include_is_too_new(
     false
 }
 
-impl<I: CCompilerImpl> Compilation for CCompilation<I> {
+impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I> {
     fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
         rewrite_includes_only: bool,
-    ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
+    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)> {
         let CCompilation {
             ref parsed_args,
             ref executable,

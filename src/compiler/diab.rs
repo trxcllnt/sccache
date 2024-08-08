@@ -18,7 +18,7 @@ use crate::compiler::args::{
     NormalizedDisposition, PathTransformerFn, SearchableArgInfo,
 };
 use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
-use crate::compiler::{Cacheable, ColorMode, CompileCommand, CompilerArguments, Language};
+use crate::compiler::{Cacheable, ColorMode, CompileCommand, CCompileCommand, CompilerArguments, Language, SingleCompileCommand};
 use crate::errors::*;
 use crate::mock_command::{CommandCreatorSync, RunCommand};
 use crate::util::{run_input_output, OsStrExt};
@@ -75,7 +75,7 @@ impl CCompilerImpl for Diab {
         preprocess(creator, executable, parsed_args, cwd, env_vars, may_dist).await
     }
 
-    fn generate_compile_commands(
+    fn generate_compile_commands<T>(
         &self,
         path_transformer: &mut dist::PathTransformer,
         executable: &Path,
@@ -83,8 +83,22 @@ impl CCompilerImpl for Diab {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         _rewrite_includes_only: bool,
-    ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
-        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
+    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)>
+    where
+        T: CommandCreatorSync
+    {
+        generate_compile_commands(
+            path_transformer,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars
+        )
+        .map(|(command, dist_command, cacheable)| (
+            CCompileCommand::new(command),
+            dist_command,
+            cacheable
+        ))
     }
 }
 
@@ -339,7 +353,7 @@ pub fn generate_compile_commands(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
+) -> Result<(SingleCompileCommand, Option<dist::CompileCommand>, Cacheable)> {
     trace!("compile");
 
     let out_file = match parsed_args.outputs.get("obj") {
@@ -356,7 +370,7 @@ pub fn generate_compile_commands(
     arguments.extend_from_slice(&parsed_args.preprocessor_args);
     arguments.extend_from_slice(&parsed_args.unhashed_args);
     arguments.extend_from_slice(&parsed_args.common_args);
-    let command = CompileCommand {
+    let command = SingleCompileCommand {
         executable: executable.to_owned(),
         arguments,
         env_vars: env_vars.to_owned(),
@@ -445,6 +459,8 @@ mod test {
     use crate::compiler::c::ArtifactDescriptor;
     use crate::compiler::*;
     use crate::mock_command::*;
+    use crate::server;
+    use crate::test::mock_storage::MockStorage;
     use crate::test::utils::*;
     use fs::File;
     use std::io::Write;
@@ -772,6 +788,10 @@ mod test {
             suppress_rewrite_includes_only: false,
             too_hard_for_preprocessor_cache_mode: None,
         };
+        let runtime = single_threaded_runtime();
+        let storage = MockStorage::new(None, false);
+        let storage: std::sync::Arc<MockStorage> = std::sync::Arc::new(storage);
+        let service = server::SccacheService::mock_with_storage(storage, runtime.handle().clone());
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
@@ -784,7 +804,7 @@ mod test {
             &[],
         )
         .unwrap();
-        let _ = command.execute(&creator).wait();
+        let _ = command.execute(&service, &creator).wait();
         assert_eq!(Cacheable::Yes, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());

@@ -55,7 +55,6 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 #[cfg(feature = "dist-client")]
 use std::time::Instant;
-use std::u64;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::{
@@ -145,7 +144,7 @@ pub struct DistClientContainer {
 }
 
 #[cfg(feature = "dist-client")]
-struct DistClientConfig {
+pub struct DistClientConfig {
     // Reusable items tied to an SccacheServer instance
     pool: tokio::runtime::Handle,
 
@@ -159,7 +158,7 @@ struct DistClientConfig {
 }
 
 #[cfg(feature = "dist-client")]
-enum DistClientState {
+pub enum DistClientState {
     #[cfg(feature = "dist-client")]
     Some(Box<DistClientConfig>, Arc<dyn dist::Client>),
     #[cfg(feature = "dist-client")]
@@ -180,6 +179,10 @@ impl DistClientContainer {
     }
 
     pub fn new_disabled() -> Self {
+        Self {}
+    }
+
+    pub fn new_with_state(_: DistClientState) -> Self {
         Self {}
     }
 
@@ -208,6 +211,12 @@ impl DistClientContainer {
         };
         let state = Self::create_state(config);
         let state = pool.block_on(state);
+        Self {
+            state: futures::lock::Mutex::new(state),
+        }
+    }
+
+    pub fn new_with_state(state: DistClientState) -> Self {
         Self {
             state: futures::lock::Mutex::new(state),
         }
@@ -709,7 +718,7 @@ impl<C> CompilerCacheEntry<C> {
 }
 /// Service implementation for sccache
 #[derive(Clone)]
-struct SccacheService<C>
+pub struct SccacheService<C>
 where
     C: Send,
 {
@@ -756,7 +765,7 @@ where
 }
 
 type SccacheRequest = Message<Request, Body<()>>;
-type SccacheResponse = Message<Response, Body<Response>>;
+pub type SccacheResponse = Message<Response, Body<Response>>;
 
 /// Messages sent from all services to the main event loop indicating activity.
 ///
@@ -865,6 +874,61 @@ where
         }
     }
 
+    pub fn mock_with_storage(
+        storage: Arc<dyn Storage>,
+        rt: tokio::runtime::Handle,
+    ) -> SccacheService<C> {
+        let (tx, _) = mpsc::channel(1);
+        let (_, info) = WaitUntilZero::new();
+        let client = Client::new_num(1);
+        let dist_client = DistClientContainer::new_disabled();
+        SccacheService {
+            stats: Arc::default(),
+            dist_client: Arc::new(dist_client),
+            storage,
+            compilers: Arc::default(),
+            compiler_proxies: Arc::default(),
+            rt,
+            creator: C::new(&client),
+            tx,
+            info,
+        }
+    }
+
+    pub fn mock_with_dist_client(
+        dist_client: Arc<dyn dist::Client>,
+        storage: Arc<dyn Storage>,
+        rt: tokio::runtime::Handle,
+    ) -> SccacheService<C> {
+        let (tx, _) = mpsc::channel(1);
+        let (_, info) = WaitUntilZero::new();
+        let client = Client::new_num(1);
+        SccacheService {
+            stats: Arc::default(),
+            dist_client: Arc::new(DistClientContainer::new_with_state(
+                DistClientState::Some(
+                    Box::new(DistClientConfig {
+                        pool: rt.clone(),
+                        scheduler_url: None,
+                        auth: config::DistAuth::Token { token: "".into() },
+                        cache_dir: "".into(),
+                        toolchain_cache_size: 0,
+                        toolchains: vec![],
+                        rewrite_includes_only: false,
+                    }),
+                    dist_client
+                )
+            )),
+            storage,
+            compilers: Arc::default(),
+            compiler_proxies: Arc::default(),
+            rt: rt.clone(),
+            creator: C::new(&client),
+            tx,
+            info,
+        }
+    }
+
     fn bind<T>(self, socket: T) -> impl Future<Output = Result<()>> + Send + Sized + 'static
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -929,7 +993,7 @@ where
     /// This will handle a compile request entirely, generating a response with
     /// the initial information and an optional body which will eventually
     /// contain the results of the compilation.
-    async fn handle_compile(&self, compile: Compile) -> Result<SccacheResponse> {
+    pub async fn handle_compile(&self, compile: Compile) -> Result<SccacheResponse> {
         let exe = compile.exe;
         let cmd = compile.args;
         let cwd: PathBuf = compile.cwd.into();
@@ -1189,6 +1253,7 @@ where
             let dist_client = me.dist_client.get_client().await;
             let result = match dist_client {
                 Ok(client) => std::panic::AssertUnwindSafe(hasher.get_cached_or_compile(
+                    me.clone(),
                     client,
                     creator,
                     storage,
@@ -1834,7 +1899,7 @@ enum Frame<R, R1> {
     Message { message: R },
 }
 
-struct Body<R> {
+pub struct Body<R> {
     receiver: mpsc::Receiver<Result<R>>,
 }
 
@@ -1855,7 +1920,7 @@ impl<R> futures::Stream for Body<R> {
     }
 }
 
-enum Message<R, B> {
+pub enum Message<R, B> {
     WithBody(R, B),
     WithoutBody(R),
 }
@@ -1999,7 +2064,7 @@ struct WaitUntilZero {
 
 #[derive(Clone)]
 #[allow(dead_code)]
-struct ActiveInfo {
+pub struct ActiveInfo {
     info: Arc<std::sync::Mutex<Info>>,
 }
 

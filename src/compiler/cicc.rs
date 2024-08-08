@@ -16,7 +16,7 @@
 #![allow(unused_imports, dead_code, unused_variables)]
 
 use crate::compiler::args::*;
-use crate::compiler::{Cacheable, ColorMode, CompileCommand, CompilerArguments, Language};
+use crate::compiler::{Cacheable, ColorMode, CompileCommand, CCompileCommand, CompilerArguments, Language, SingleCompileCommand};
 use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
 use crate::{counted_array, dist};
 
@@ -68,7 +68,7 @@ impl CCompilerImpl for Cicc {
         trace!("cicc preprocessed input file: cwd={:?} path={:?}", cwd, &parsed_args.input);
         preprocess(cwd, parsed_args).await
     }
-    fn generate_compile_commands(
+    fn generate_compile_commands<T>(
         &self,
         path_transformer: &mut dist::PathTransformer,
         executable: &Path,
@@ -76,7 +76,10 @@ impl CCompilerImpl for Cicc {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         _rewrite_includes_only: bool,
-    ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
+    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)>
+    where
+        T: CommandCreatorSync,
+    {
         generate_compile_commands(
             path_transformer,
             executable,
@@ -84,6 +87,11 @@ impl CCompilerImpl for Cicc {
             cwd,
             env_vars
         )
+        .map(|(command, dist_command, cacheable)| (
+            CCompileCommand::new(command),
+            dist_command,
+            cacheable
+        ))
     }
 }
 
@@ -204,7 +212,7 @@ pub fn generate_compile_commands(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
+) -> Result<(SingleCompileCommand, Option<dist::CompileCommand>, Cacheable)> {
     // Unused arguments
     #[cfg(not(feature = "dist-client"))]
     {
@@ -228,7 +236,7 @@ pub fn generate_compile_commands(
         out_file.into()
     ]);
 
-    let command = CompileCommand {
+    let command = SingleCompileCommand {
         executable: executable.to_owned(),
         arguments,
         env_vars: env_vars.to_owned(),

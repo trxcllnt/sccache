@@ -14,7 +14,7 @@
 
 use crate::compiler::args::*;
 use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
-use crate::compiler::{clang, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language};
+use crate::compiler::{clang, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language, CCompileCommand, SingleCompileCommand};
 use crate::mock_command::{CommandCreatorSync, RunCommand};
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist};
@@ -91,7 +91,7 @@ impl CCompilerImpl for Gcc {
         .await
     }
 
-    fn generate_compile_commands(
+    fn generate_compile_commands<T>(
         &self,
         path_transformer: &mut dist::PathTransformer,
         executable: &Path,
@@ -99,7 +99,10 @@ impl CCompilerImpl for Gcc {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         rewrite_includes_only: bool,
-    ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
+    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)>
+    where
+        T: CommandCreatorSync
+    {
         generate_compile_commands(
             path_transformer,
             executable,
@@ -109,6 +112,11 @@ impl CCompilerImpl for Gcc {
             self.kind(),
             rewrite_includes_only,
         )
+        .map(|(command, dist_command, cacheable)| (
+            CCompileCommand::new(command),
+            dist_command,
+            cacheable
+        ))
     }
 }
 
@@ -704,7 +712,6 @@ fn preprocess_cmd<T>(
     // Explicitly rewrite the -arch args to be preprocessor defines of the form
     // __arch__ so that they affect the preprocessor output but don't cause
     // clang to error.
-    debug!("arch args before rewrite: {:?}", parsed_args.arch_args);
     let rewritten_arch_args = parsed_args
         .arch_args
         .iter()
@@ -722,6 +729,9 @@ fn preprocess_cmd<T>(
     if unique_rewritten.len() <= 1 {
         // don't use rewritten arch args if there is only one arch
         arch_args_to_use = &parsed_args.arch_args;
+    } else {
+        debug!("-arch args before rewrite: {:?}", parsed_args.arch_args);
+        debug!("-arch args after rewrite:  {:?}", arch_args_to_use);
     }
 
     cmd.args(&parsed_args.preprocessor_args)
@@ -735,7 +745,6 @@ fn preprocess_cmd<T>(
         .env_clear()
         .envs(env_vars.to_vec())
         .current_dir(cwd);
-    debug!("cmd after -arch rewrite: {:?}", cmd);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -779,7 +788,7 @@ pub fn generate_compile_commands(
     env_vars: &[(OsString, OsString)],
     kind: CCompilerKind,
     rewrite_includes_only: bool,
-) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
+) -> Result<(SingleCompileCommand, Option<dist::CompileCommand>, Cacheable)> {
     // Unused arguments
     #[cfg(not(feature = "dist-client"))]
     {
@@ -815,7 +824,7 @@ pub fn generate_compile_commands(
         arguments.push("--".into());
     }
     arguments.push(parsed_args.input.clone().into());
-    let command = CompileCommand {
+    let command = SingleCompileCommand {
         executable: executable.to_owned(),
         arguments,
         env_vars: env_vars.to_owned(),
@@ -956,6 +965,8 @@ mod test {
     use super::*;
     use crate::compiler::*;
     use crate::mock_command::*;
+    use crate::server;
+    use crate::test::mock_storage::MockStorage;
     use crate::test::utils::*;
 
     use temp_env::{with_var, with_var_unset};
@@ -2041,6 +2052,10 @@ mod test {
             suppress_rewrite_includes_only: false,
             too_hard_for_preprocessor_cache_mode: None,
         };
+        let runtime = single_threaded_runtime();
+        let storage = MockStorage::new(None, false);
+        let storage: std::sync::Arc<MockStorage> = std::sync::Arc::new(storage);
+        let service = server::SccacheService::mock_with_storage(storage, runtime.handle().clone());
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
@@ -2059,7 +2074,7 @@ mod test {
         assert!(dist_command.is_some());
         #[cfg(not(feature = "dist-client"))]
         assert!(dist_command.is_none());
-        let _ = command.execute(&creator).wait();
+        let _ = command.execute(&service, &creator).wait();
         assert_eq!(Cacheable::Yes, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());
@@ -2086,7 +2101,7 @@ mod test {
         )
         .unwrap();
         let expected_args = ovec!["-x", "c", "-c", "-o", "foo.o", "--", "foo.c"];
-        assert_eq!(command.arguments, expected_args);
+        assert_eq!(command.get_arguments(), expected_args);
     }
 
     #[test]

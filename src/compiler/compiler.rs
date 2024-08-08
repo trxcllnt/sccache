@@ -28,6 +28,7 @@ use crate::compiler::cicc::Cicc;
 use crate::compiler::ptxas::Ptxas;
 use crate::compiler::rust::{Rust, RustupProxy};
 use crate::compiler::tasking_vx::TaskingVX;
+use crate::server;
 #[cfg(feature = "dist-client")]
 use crate::dist::pkg;
 #[cfg(feature = "dist-client")]
@@ -73,27 +74,157 @@ pub const CAN_DIST_DYLIBS: bool = true;
 ))]
 pub const CAN_DIST_DYLIBS: bool = false;
 
+#[async_trait]
+pub trait CompileCommand<T>: Send + Sync + 'static
+where
+    T: CommandCreatorSync,
+{
+    async fn execute(&self, service: &server::SccacheService<T>, creator: &T) -> Result<process::Output>;
+
+    fn get_executable(&self) -> PathBuf;
+    fn get_arguments(&self) -> Vec<OsString>;
+    fn get_env_vars(&self) -> Vec<(OsString, OsString)>;
+    fn get_cwd(&self) -> PathBuf;
+}
+
 #[derive(Clone, Debug)]
-pub struct CompileCommand {
+pub struct CCompileCommand<I>
+where
+    I: CompileCommandImpl,
+{
+    cmd: I,
+}
+
+impl<I> CCompileCommand<I>
+where
+    I: CompileCommandImpl,
+{
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new<T>(cmd: I) -> Box<dyn CompileCommand<T>>
+    where
+        T: CommandCreatorSync
+    {
+        Box::new(CCompileCommand { cmd }) as Box<dyn CompileCommand<T>>
+    }
+}
+
+#[async_trait]
+impl<T, I> CompileCommand<T> for CCompileCommand<I>
+where
+    T: CommandCreatorSync,
+    I: CompileCommandImpl,
+{
+    fn get_executable(&self) -> PathBuf { self.cmd.get_executable() }
+    fn get_arguments(&self) -> Vec<OsString> { self.cmd.get_arguments() }
+    fn get_env_vars(&self) -> Vec<(OsString, OsString)> { self.cmd.get_env_vars() }
+    fn get_cwd(&self) -> PathBuf { self.cmd.get_cwd() }
+
+    async fn execute(&self, service: &server::SccacheService<T>, creator: &T) -> Result<process::Output> {
+        self.cmd.execute(service, creator).await
+    }
+}
+
+#[async_trait]
+pub trait CompileCommandImpl: Send + Sync + 'static {
+    fn get_executable(&self) -> PathBuf;
+    fn get_arguments(&self) -> Vec<OsString>;
+    fn get_env_vars(&self) -> Vec<(OsString, OsString)>;
+    fn get_cwd(&self) -> PathBuf;
+
+    async fn execute<T>(&self, service: &server::SccacheService<T>, creator: &T) -> Result<process::Output>
+    where
+        T: CommandCreatorSync;
+}
+
+#[derive(Clone, Debug)]
+pub struct SingleCompileCommand {
     pub executable: PathBuf,
     pub arguments: Vec<OsString>,
     pub env_vars: Vec<(OsString, OsString)>,
     pub cwd: PathBuf,
 }
 
-impl CompileCommand {
-    pub async fn execute<T>(self, creator: &T) -> Result<process::Output>
+#[async_trait]
+impl CompileCommandImpl for SingleCompileCommand {
+    fn get_executable(&self) -> PathBuf { self.executable.clone() }
+    fn get_arguments(&self) -> Vec<OsString> { self.arguments.clone() }
+    fn get_env_vars(&self) -> Vec<(OsString, OsString)> { self.env_vars.clone() }
+    fn get_cwd(&self) -> PathBuf { self.cwd.clone() }
+
+    async fn execute<T>(&self, _: &server::SccacheService<T>, creator: &T) -> Result<process::Output>
     where
-        T: CommandCreatorSync,
+        T: CommandCreatorSync
     {
-        let mut cmd = creator.clone().new_command_sync(self.executable);
-        cmd.args(&self.arguments)
+        let SingleCompileCommand {
+            executable,
+            arguments,
+            env_vars,
+            cwd,
+        } = self;
+        let mut cmd = creator.clone().new_command_sync(executable);
+        cmd.args(arguments)
             .env_clear()
-            .envs(self.env_vars)
-            .current_dir(self.cwd);
+            .envs(env_vars.to_vec())
+            .current_dir(cwd);
         run_input_output(cmd, None).await
     }
 }
+
+// #[async_trait]
+// pub trait CompileCommand<T>: Send + Sync + 'static
+// where
+//     T: CommandCreatorSync,
+// {
+//     fn execute(&self, creator: &T) -> Pin<Box<dyn Future<Output = Result<process::Output>> + Send + 'static>>;
+
+//     fn get_executable(&self) -> PathBuf;
+//     fn get_arguments(&self) -> Vec<OsString>;
+//     fn get_env_vars(&self) -> Vec<(OsString, OsString)>;
+//     fn get_cwd(&self) -> PathBuf;
+
+//     fn box_clone(&self) -> Box<dyn CompileCommand<T>>;
+// }
+
+// impl<T: CommandCreatorSync> Clone for Box<dyn CompileCommand<T>> {
+//     fn clone(&self) -> Box<dyn CompileCommand<T>> {
+//         self.box_clone()
+//     }
+// }
+
+// #[derive(Clone, Debug)]
+// pub struct SingleCompileCommand {
+//     pub executable: PathBuf,
+//     pub arguments: Vec<OsString>,
+//     pub env_vars: Vec<(OsString, OsString)>,
+//     pub cwd: PathBuf,
+// }
+
+// #[async_trait]
+// impl<T: CommandCreatorSync> CompileCommand<T> for SingleCompileCommand {
+//     fn get_executable(&self) -> PathBuf { self.executable.clone() }
+//     fn get_arguments(&self) -> Vec<OsString> { self.arguments.clone() }
+//     fn get_env_vars(&self) -> Vec<(OsString, OsString)> { self.env_vars.clone() }
+//     fn get_cwd(&self) -> PathBuf { self.cwd.clone() }
+
+//     fn box_clone(&self) -> Box<dyn CompileCommand<T>> {
+//         Box::new((*self).clone())
+//     }
+
+//     fn execute(&self, creator: &T) -> Pin<Box<dyn Future<Output = Result<process::Output>> + Send + 'static>> {
+//         let SingleCompileCommand {
+//             executable,
+//             arguments,
+//             env_vars,
+//             cwd,
+//         } = self;
+//         let mut cmd = creator.clone().new_command_sync(executable);
+//         cmd.args(arguments)
+//             .env_clear()
+//             .envs(env_vars.to_vec())
+//             .current_dir(cwd);
+//         run_input_output(cmd, None).boxed()
+//     }
+// }
 
 /// Supported compilers.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -286,7 +417,7 @@ where
         rewrite_includes_only: bool,
         storage: Arc<dyn Storage>,
         cache_control: CacheControl,
-    ) -> Result<HashResult>;
+    ) -> Result<HashResult<T>>;
 
     /// Return the state of any `--color` option passed to the compiler.
     fn color_mode(&self) -> ColorMode;
@@ -296,6 +427,7 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn get_cached_or_compile(
         self: Box<Self>,
+        service: server::SccacheService<T>,
         dist_client: Option<Arc<dyn dist::Client>>,
         creator: T,
         storage: Arc<dyn Storage>,
@@ -443,6 +575,7 @@ where
                 let start = Instant::now();
 
                 let (cacheable, dist_type, compiler_result) = dist_or_local_compile(
+                    service,
                     dist_client,
                     creator,
                     cwd,
@@ -526,6 +659,7 @@ where
 
 #[cfg(not(feature = "dist-client"))]
 async fn dist_or_local_compile<T>(
+    service: server::SccacheService<T>,
     _dist_client: Option<Arc<dyn dist::Client>>,
     creator: T,
     _cwd: PathBuf,
@@ -543,17 +677,18 @@ where
 
     debug!("[{}]: Compiling locally", out_pretty);
     compile_cmd
-        .execute(&creator)
+        .execute(service.clone(), &creator)
         .await
         .map(move |o| (cacheable, DistType::NoDist, o))
 }
 
 #[cfg(feature = "dist-client")]
 async fn dist_or_local_compile<T>(
+    service: server::SccacheService<T>,
     dist_client: Option<Arc<dyn dist::Client>>,
     creator: T,
     cwd: PathBuf,
-    compilation: Box<dyn Compilation>,
+    compilation: Box<dyn Compilation<T>>,
     weak_toolchain_key: String,
     out_pretty: String,
 ) -> Result<(Cacheable, DistType, process::Output)>
@@ -576,7 +711,7 @@ where
         None => {
             debug!("[{}]: Compiling locally", out_pretty);
             return compile_cmd
-                .execute(&creator)
+                .execute(&service, &creator)
                 .await
                 .map(move |o| (cacheable, DistType::NoDist, o));
         }
@@ -585,8 +720,8 @@ where
     debug!("[{}]: Attempting distributed compilation", out_pretty);
     let out_pretty2 = out_pretty.clone();
 
-    let local_executable = compile_cmd.executable.clone();
-    let local_executable2 = compile_cmd.executable.clone();
+    let local_executable = compile_cmd.get_executable();
+    let local_executable2 = compile_cmd.get_executable();
 
     let do_dist_compile = async move {
         let mut dist_compile_cmd =
@@ -747,7 +882,7 @@ where
                 );
 
                 compile_cmd
-                    .execute(&creator)
+                    .execute(&service, &creator)
                     .await
                     .map(|o| (DistType::Error, o))
             }
@@ -763,14 +898,17 @@ impl<T: CommandCreatorSync> Clone for Box<dyn CompilerHasher<T>> {
 }
 
 /// An interface to a compiler for actually invoking compilation.
-pub trait Compilation: Send {
+pub trait Compilation<T>: Send
+where
+    T: CommandCreatorSync,
+{
     /// Given information about a compiler command, generate a command that can
     /// execute the compiler.
     fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
         rewrite_includes_only: bool,
-    ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)>;
+    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)>;
 
     /// Create a function that will create the inputs used to perform a distributed compilation
     #[cfg(feature = "dist-client")]
@@ -812,11 +950,14 @@ impl OutputsRewriter for NoopOutputsRewriter {
 }
 
 /// Result of generating a hash from a compiler command.
-pub struct HashResult {
+pub struct HashResult<T>
+where
+    T: CommandCreatorSync,
+{
     /// The hash key of the inputs.
     pub key: String,
     /// An object to use for the actual compilation, if necessary.
-    pub compilation: Box<dyn Compilation + 'static>,
+    pub compilation: Box<dyn Compilation<T> + 'static>,
     /// A weak key that may be used to identify the toolchain
     pub weak_toolchain_key: String,
 }
@@ -1518,7 +1659,6 @@ mod test {
     use std::io::{Cursor, Write};
     use std::sync::Arc;
     use std::time::Duration;
-    use std::u64;
     use test_case::test_case;
     use tokio::runtime::Runtime;
 
@@ -2038,6 +2178,8 @@ LLVM version: 6.0",
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
         let storage = Arc::new(storage);
+        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
+
         // Pretend to be GCC.
         next_command(
             &creator,
@@ -2086,6 +2228,7 @@ LLVM version: 6.0",
             .block_on(async {
                 hasher
                     .get_cached_or_compile(
+                        service.clone(),
                         None,
                         creator.clone(),
                         storage.clone(),
@@ -2122,6 +2265,7 @@ LLVM version: 6.0",
             .block_on(async {
                 hasher2
                     .get_cached_or_compile(
+                        service.clone(),
                         None,
                         creator,
                         storage,
@@ -2192,11 +2336,13 @@ LLVM version: 6.0",
         const COMPILER_STDERR: &[u8] = b"compiler stderr";
         let obj = f.tempdir.path().join("foo.o");
         // Dist client will do the compilation
-        let dist_client = Some(test_dist::OneshotClient::new(
+        let dist_client = test_dist::OneshotClient::new(
             0,
             COMPILER_STDOUT.to_owned(),
             COMPILER_STDERR.to_owned(),
-        ));
+        );
+        let service = server::SccacheService::mock_with_dist_client(dist_client.clone(), storage.clone(), pool.clone());
+
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
         let hasher = match c.parse_arguments(&arguments, ".".as_ref(), &[]) {
@@ -2208,7 +2354,8 @@ LLVM version: 6.0",
             .block_on(async {
                 hasher
                     .get_cached_or_compile(
-                        dist_client.clone(),
+                        service.clone(),
+                        Some(dist_client.clone()),
                         creator.clone(),
                         storage.clone(),
                         arguments.clone(),
@@ -2244,7 +2391,8 @@ LLVM version: 6.0",
             .block_on(async {
                 hasher2
                     .get_cached_or_compile(
-                        dist_client.clone(),
+                        service.clone(),
+                        Some(dist_client.clone()),
                         creator,
                         storage,
                         arguments,
@@ -2277,6 +2425,8 @@ LLVM version: 6.0",
         let pool = runtime.handle().clone();
         let storage = MockStorage::new(None, preprocessor_cache_mode);
         let storage: Arc<MockStorage> = Arc::new(storage);
+        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
+
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
         // Pretend to be GCC.
@@ -2326,6 +2476,7 @@ LLVM version: 6.0",
         storage.next_get(Err(anyhow!("Some Error")));
         let (cached, res) = runtime
             .block_on(hasher.get_cached_or_compile(
+                service.clone(),
                 None,
                 creator,
                 storage,
@@ -2367,6 +2518,7 @@ LLVM version: 6.0",
         let storage_delay = Duration::from_millis(2);
         let storage = MockStorage::new(Some(storage_delay), preprocessor_cache_mode);
         let storage: Arc<MockStorage> = Arc::new(storage);
+        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
         // Pretend to be GCC.
         next_command(
             &creator,
@@ -2416,6 +2568,7 @@ LLVM version: 6.0",
         storage.next_get(Ok(Cache::Hit(entry)));
         let (cached, _res) = runtime
             .block_on(hasher.get_cached_or_compile(
+                service.clone(),
                 None,
                 creator,
                 storage,
@@ -2454,6 +2607,7 @@ LLVM version: 6.0",
             CacheMode::ReadWrite,
         );
         let storage = Arc::new(storage);
+        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
         // Pretend to be GCC.
@@ -2508,6 +2662,7 @@ LLVM version: 6.0",
             .block_on(async {
                 hasher
                     .get_cached_or_compile(
+                        service.clone(),
                         None,
                         creator.clone(),
                         storage.clone(),
@@ -2536,6 +2691,7 @@ LLVM version: 6.0",
         fs::remove_file(&obj).unwrap();
         let (cached, res) = hasher2
             .get_cached_or_compile(
+                service.clone(),
                 None,
                 creator,
                 storage,
@@ -2581,6 +2737,8 @@ LLVM version: 6.0",
             CacheMode::ReadWrite,
         );
         let storage = Arc::new(storage);
+        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
+
         // Pretend to be GCC.  Also inject a fake object file that the subsequent
         // preprocessor failure should remove.
         let obj = f.tempdir.path().join("foo.o");
@@ -2626,6 +2784,7 @@ LLVM version: 6.0",
             .block_on(async {
                 hasher
                     .get_cached_or_compile(
+                        service.clone(),
                         None,
                         creator,
                         storage,
@@ -2725,12 +2884,15 @@ LLVM version: 6.0",
         };
         // All these dist clients will fail, but should still result in successful compiles
         for dist_client in dist_clients {
+            let service = server::SccacheService::mock_with_dist_client(dist_client.clone(), storage.clone(), pool.clone());
+
             if obj.is_file() {
                 fs::remove_file(&obj).unwrap();
             }
             let hasher = hasher.clone();
             let (cached, res) = hasher
                 .get_cached_or_compile(
+                    service.clone(),
                     Some(dist_client.clone()),
                     creator.clone(),
                     storage.clone(),
