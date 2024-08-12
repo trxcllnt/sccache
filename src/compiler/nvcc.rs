@@ -73,8 +73,28 @@ impl CCompilerImpl for Nvcc {
         arguments: &[OsString],
         cwd: &Path,
     ) -> CompilerArguments<ParsedArguments> {
+        let mut arguments = arguments.to_vec();
+
+        if let Ok(flags) = std::env::var("NVCC_PREPEND_FLAGS") {
+            arguments.extend(
+                shlex::split(&flags)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|s| s.clone().into_arg_os_string())
+            );
+        }
+
+        if let Ok(flags) = std::env::var("NVCC_APPEND_FLAGS") {
+            arguments.extend(
+                shlex::split(&flags)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|s| s.clone().into_arg_os_string())
+            );
+        }
+
         let parsed_args = gcc::parse_arguments(
-            arguments,
+            &arguments,
             cwd,
             (&gcc::ARGS[..], &ARGS[..]),
             false,
@@ -151,6 +171,8 @@ impl CCompilerImpl for Nvcc {
                 .args(&transformed_deps)
                 .env_clear()
                 .envs(env_vars.to_vec())
+                .env("NVCC_PREPEND_FLAGS", "")
+                .env("NVCC_APPEND_FLAGS", "")
                 .current_dir(cwd);
 
             if log_enabled!(Trace) {
@@ -177,6 +199,8 @@ impl CCompilerImpl for Nvcc {
             .arg(no_line_num_flag)
             .env_clear()
             .envs(env_vars.to_vec())
+            .env("NVCC_PREPEND_FLAGS", "")
+            .env("NVCC_APPEND_FLAGS", "")
             .current_dir(cwd);
         if log_enabled!(Trace) {
             trace!("preprocess: {:?}", cmd);
@@ -477,7 +501,7 @@ impl CompileCommandImpl for NvccCompileCommand {
         let grouped_subcommands = get_nvcc_subcommand_groups(
             creator,
             executable,
-            arguments,
+            &arguments,
             cwd,
             temp.as_path(),
             keep.clone(),
@@ -557,6 +581,8 @@ where
         .env_clear()
         .args(arguments)
         .envs(env_vars.to_vec())
+        .env("NVCC_PREPEND_FLAGS", "")
+        .env("NVCC_APPEND_FLAGS", "")
         .current_dir(cwd)
         .stdin(process::Stdio::null())
         .stdout(process::Stdio::null())
@@ -796,10 +822,14 @@ where
         let out = match cacheable {
             Cacheable::No => {
                 let mut cmd = creator.clone().new_command_sync(exe);
+
                 cmd.args(args)
                     .env_clear()
                     .current_dir(cwd)
-                    .envs(env_vars.to_vec());
+                    .envs(env_vars.to_vec())
+                    .env("NVCC_PREPEND_FLAGS", "")
+                    .env("NVCC_APPEND_FLAGS", "");
+
                 run_input_output(cmd, None)
                     .map_ok_or_else(
                         |err| match err.downcast::<ProcessError>() {
