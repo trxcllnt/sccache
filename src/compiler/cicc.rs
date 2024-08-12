@@ -120,6 +120,20 @@ where
                         take_next = false;
                         &mut common_args
                     },
+                    Some(ExtraInput(o)) => {
+                        take_next = false;
+                        let path = cwd.join(o);
+                        extra_inputs.push(path);
+                        &mut common_args
+                    }
+                    Some(ExtraOutput(o)) => {
+                        take_next = false;
+                        let path = cwd.join(o);
+                        if let Some(flag) = arg.flag_str() {
+                            outputs.insert(flag, ArtifactDescriptor { path, optional: false });
+                        }
+                        &mut common_args
+                    }
                     Some(Output(o)) => {
                         take_next = false;
                         let path = cwd.join(o);
@@ -130,20 +144,6 @@ where
                         take_next = false;
                         &mut unhashed_args
                     },
-                    Some(UnhashedInput(o)) => {
-                        take_next = false;
-                        let path = cwd.join(o);
-                        extra_inputs.push(path);
-                        &mut unhashed_args
-                    }
-                    Some(UnhashedOutput(o)) => {
-                        take_next = false;
-                        let path = cwd.join(o);
-                        if let Some(flag) = arg.flag_str() {
-                            outputs.insert(flag, ArtifactDescriptor { path, optional: false });
-                        }
-                        &mut unhashed_args
-                    }
                     None => match arg {
                         Argument::Raw(ref p) => {
                             if take_next {
@@ -274,20 +274,19 @@ pub fn generate_compile_commands(
 
 ArgData! { pub
     Output(PathBuf),
+    ExtraInput(PathBuf),
+    ExtraOutput(PathBuf),
     PassThrough(OsString),
     Unhashed(OsString),
-    UnhashedInput(PathBuf),
-    UnhashedOutput(PathBuf),
 }
 
 use self::ArgData::*;
 
 counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
-    // These are always randomly generated/different between nvcc invocations
-    take_arg!("--gen_c_file_name", PathBuf, Separated, UnhashedOutput),
-    take_arg!("--gen_device_file_name", PathBuf, Separated, UnhashedOutput),
+    take_arg!("--gen_c_file_name", PathBuf, Separated, ExtraOutput),
+    take_arg!("--gen_device_file_name", PathBuf, Separated, ExtraOutput),
     take_arg!("--include_file_name", OsString, Separated, PassThrough),
-    take_arg!("--module_id_file_name", PathBuf, Separated, UnhashedInput),
-    take_arg!("--stub_file_name", PathBuf, Separated, UnhashedOutput),
+    take_arg!("--module_id_file_name", PathBuf, Separated, ExtraInput),
+    take_arg!("--stub_file_name", PathBuf, Separated, ExtraOutput),
     take_arg!("-o", PathBuf, Separated, Output),
 ]);
