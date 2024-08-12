@@ -353,13 +353,6 @@ pub fn generate_compile_commands(
         .context("Missing object file output").unwrap()
         .path.clone();
 
-    // Not sure if there's cases where we want this, so disabling for now
-    // let output = if output.is_absolute() {
-    //     output
-    // } else {
-    //     cwd.join(output)
-    // };
-
     arguments.extend(vec![
         parsed_args.compilation_flag.clone(),
         "-o".into(),
@@ -764,11 +757,6 @@ where
     } else {
         Err(ProcessError(output).into())
     }
-    // match output.await {
-    //     Ok((output, nvcc_subcommand_groups)) => {
-    //     },
-    //     Err(err) => Err(err)
-    // }
 }
 
 async fn run_nvcc_subcommands<T>(
