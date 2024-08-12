@@ -645,9 +645,8 @@ where
                     .fold_ok((
                         vec![],
                         HashMap::<String, String>::new(),
-                        HashMap::<String, String>::new(),
                         HashMap::<String, i32>::new()
-                    ), |(mut command_groups, mut old_to_new, mut new_to_old, mut ext_counts), (exe, mut args)| {
+                    ), |(mut command_groups, mut old_to_new, mut ext_counts), (exe, mut args)| {
 
                         // Remap nvcc's generated file names to deterministic names
                         if remap_filenames {
@@ -678,9 +677,7 @@ where
                                             }
                                             .and_then(|count| {
                                                 let new = count.to_string() + ext;
-                                                None.or(old_to_new.insert(old.clone(), new.clone()))
-                                                    .or(new_to_old.insert(new.clone(), old.clone()))
-                                                    .or(Some(new.clone()))
+                                                old_to_new.insert(old.clone(), new.clone()).or(Some(new.clone()))
                                             })
                                         } else {
                                             old_to_new.get(&old).map(|p| p.to_owned())
@@ -749,7 +746,7 @@ where
                             cacheable
                         });
 
-                        (command_groups, old_to_new, new_to_old, ext_counts)
+                        (command_groups, old_to_new, ext_counts)
                     })
                     .map(|t| t.0);
 
