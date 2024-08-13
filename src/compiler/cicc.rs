@@ -123,30 +123,31 @@ where
                         take_next = false;
                         &mut common_args
                     },
-                    Some(ExtraInput(o)) => {
-                        take_next = false;
-                        let path = cwd.join(o);
-                        if !path.exists() {
-                            continue;
-                        }
-                        extra_inputs.push(path);
-                        &mut common_args
-                    }
-                    Some(ExtraOutput(o)) => {
-                        take_next = false;
-                        let path = cwd.join(o);
-                        if let Some(flag) = arg.flag_str() {
-                            outputs.insert(flag, ArtifactDescriptor { path, optional: false });
-                        }
-                        &mut common_args
-                    }
                     Some(Output(o)) => {
                         take_next = false;
                         let path = cwd.join(o);
                         outputs.insert("obj", ArtifactDescriptor { path, optional: false });
                         continue
                     },
-                    Some(Unhashed(_)) => {
+                    Some(UnhashedInput(o)) => {
+                        take_next = false;
+                        let path = cwd.join(o);
+                        if !path.exists() {
+                            continue;
+                        }
+                        extra_inputs.push(path);
+                        &mut unhashed_args
+                    }
+                    Some(UnhashedOutput(o)) => {
+                        take_next = false;
+                        let path = cwd.join(o);
+                        if let Some(flag) = arg.flag_str() {
+                            outputs.insert(flag, ArtifactDescriptor { path, optional: false });
+                        }
+                        &mut unhashed_args
+                    }
+                    Some(UnhashedFlag)
+                    | Some(Unhashed(_)) => {
                         take_next = false;
                         &mut unhashed_args
                     },
@@ -204,7 +205,7 @@ pub async fn preprocess(
     let input = if parsed_args.input.is_absolute() {
         parsed_args.input.clone()
     } else {
-        cwd.join(&parsed_args.input)
+        cwd.join(&parsed_args.input).canonicalize().unwrap()
     };
     std::fs::read(input)
         .map_err(|e| { anyhow::Error::new(e) })
@@ -279,8 +280,9 @@ pub fn generate_compile_commands(
 
 ArgData! { pub
     Output(PathBuf),
-    ExtraInput(PathBuf),
-    ExtraOutput(PathBuf),
+    UnhashedInput(PathBuf),
+    UnhashedOutput(PathBuf),
+    UnhashedFlag,
     PassThrough(OsString),
     Unhashed(OsString),
 }
@@ -288,10 +290,11 @@ ArgData! { pub
 use self::ArgData::*;
 
 counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
-    take_arg!("--gen_c_file_name", PathBuf, Separated, ExtraOutput),
-    take_arg!("--gen_device_file_name", PathBuf, Separated, ExtraOutput),
+    take_arg!("--gen_c_file_name", PathBuf, Separated, UnhashedOutput),
+    take_arg!("--gen_device_file_name", PathBuf, Separated, UnhashedOutput),
+    flag!("--gen_module_id_file", UnhashedFlag),
     take_arg!("--include_file_name", OsString, Separated, PassThrough),
-    take_arg!("--module_id_file_name", PathBuf, Separated, ExtraInput),
-    take_arg!("--stub_file_name", PathBuf, Separated, ExtraOutput),
+    take_arg!("--module_id_file_name", PathBuf, Separated, UnhashedInput),
+    take_arg!("--stub_file_name", PathBuf, Separated, UnhashedOutput),
     take_arg!("-o", PathBuf, Separated, Output),
 ]);
