@@ -170,62 +170,6 @@ impl CompileCommandImpl for SingleCompileCommand {
     }
 }
 
-// #[async_trait]
-// pub trait CompileCommand<T>: Send + Sync + 'static
-// where
-//     T: CommandCreatorSync,
-// {
-//     fn execute(&self, creator: &T) -> Pin<Box<dyn Future<Output = Result<process::Output>> + Send + 'static>>;
-
-//     fn get_executable(&self) -> PathBuf;
-//     fn get_arguments(&self) -> Vec<OsString>;
-//     fn get_env_vars(&self) -> Vec<(OsString, OsString)>;
-//     fn get_cwd(&self) -> PathBuf;
-
-//     fn box_clone(&self) -> Box<dyn CompileCommand<T>>;
-// }
-
-// impl<T: CommandCreatorSync> Clone for Box<dyn CompileCommand<T>> {
-//     fn clone(&self) -> Box<dyn CompileCommand<T>> {
-//         self.box_clone()
-//     }
-// }
-
-// #[derive(Clone, Debug)]
-// pub struct SingleCompileCommand {
-//     pub executable: PathBuf,
-//     pub arguments: Vec<OsString>,
-//     pub env_vars: Vec<(OsString, OsString)>,
-//     pub cwd: PathBuf,
-// }
-
-// #[async_trait]
-// impl<T: CommandCreatorSync> CompileCommand<T> for SingleCompileCommand {
-//     fn get_executable(&self) -> PathBuf { self.executable.clone() }
-//     fn get_arguments(&self) -> Vec<OsString> { self.arguments.clone() }
-//     fn get_env_vars(&self) -> Vec<(OsString, OsString)> { self.env_vars.clone() }
-//     fn get_cwd(&self) -> PathBuf { self.cwd.clone() }
-
-//     fn box_clone(&self) -> Box<dyn CompileCommand<T>> {
-//         Box::new((*self).clone())
-//     }
-
-//     fn execute(&self, creator: &T) -> Pin<Box<dyn Future<Output = Result<process::Output>> + Send + 'static>> {
-//         let SingleCompileCommand {
-//             executable,
-//             arguments,
-//             env_vars,
-//             cwd,
-//         } = self;
-//         let mut cmd = creator.clone().new_command_sync(executable);
-//         cmd.args(arguments)
-//             .env_clear()
-//             .envs(env_vars.to_vec())
-//             .current_dir(cwd);
-//         run_input_output(cmd, None).boxed()
-//     }
-// }
-
 /// Supported compilers.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum CompilerKind {
