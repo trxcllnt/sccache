@@ -383,10 +383,13 @@ pub fn generate_compile_commands(
         cwd.join(output)
     };
 
+    if parsed_args.compilation_flag == "-c" {
+        arguments.push(parsed_args.compilation_flag.clone());
+    }
+
     arguments.extend(vec![
-        parsed_args.compilation_flag.clone(),
         "-o".into(),
-        output.into(),
+        output.clone().into(),
     ]);
 
     arguments.extend_from_slice(&preprocessor_args);
@@ -408,6 +411,7 @@ pub fn generate_compile_commands(
     ).into());
 
     let command = NvccCompileCommand {
+        outpath: output.clone().to_string_lossy().to_string(),
         tempdir,
         keepdir,
         num_parallel,
@@ -422,6 +426,7 @@ pub fn generate_compile_commands(
 
 #[derive(Clone, Debug)]
 pub struct NvccCompileCommand {
+    pub outpath: String,
     pub tempdir: PathBuf,
     pub keepdir: Option<PathBuf>,
     pub num_parallel: usize,
@@ -452,6 +457,7 @@ impl CompileCommandImpl for NvccCompileCommand {
         T: CommandCreatorSync
     {
         let NvccCompileCommand {
+            outpath,
             tempdir: temp,
             keepdir: keep,
             num_parallel,
@@ -483,28 +489,9 @@ impl CompileCommandImpl for NvccCompileCommand {
             }
         }
 
-        let maybe_keep_temps_then_clean = || {
-            keep.as_ref()
-                .and_then(|dst|
-                    fs::create_dir_all(dst)
-                        .and_then(|_| fs::read_dir(temp))
-                        .and_then(|files| files
-                            .filter_map(|path| path.ok())
-                            .filter_map(|path| path.file_name().to_str().map(|file| (path.path(), file.to_owned())))
-                            .try_fold((), |res, (path, file)| fs::rename(path, dst.join(file)))
-                        )
-                        .ok()
-                )
-                .map_or_else(
-                    | | fs::remove_dir_all(temp).ok(),
-                    |_| fs::remove_dir_all(temp).ok(),
-                )
-                .unwrap_or(());
-        };
-
         let mut env_vars = env_vars.to_vec();
 
-        let grouped_subcommands = get_nvcc_subcommand_groups(
+        let (grouped_subcommands, old_to_new_name_map) = get_nvcc_subcommand_groups(
             creator,
             executable,
             arguments,
@@ -513,6 +500,33 @@ impl CompileCommandImpl for NvccCompileCommand {
             keep.clone(),
             &mut env_vars
         ).await?;
+
+        let maybe_keep_temps_then_clean = || {
+
+            let maybe_rename_output = old_to_new_name_map
+                .get(outpath)
+                .and_then(|newname| fs::copy(temp.join(newname), temp.join(outpath)).ok())
+                .or(Some(0));
+
+            let maybe_keep_temps = keep.as_ref().and_then(|dst|
+                fs::create_dir_all(dst)
+                    .and_then(|_| fs::read_dir(temp))
+                    .and_then(|files| files
+                        .filter_map(|path| path.ok())
+                        .filter_map(|path| path.file_name().to_str().map(|file| (path.path(), file.to_owned())))
+                        .try_fold((), |res, (path, file)| fs::rename(path, dst.join(file)))
+                    )
+                    .ok()
+            );
+
+            maybe_rename_output
+                .and(maybe_keep_temps)
+                .map_or_else(
+                    | | fs::remove_dir_all(temp).ok(),
+                    |_| fs::remove_dir_all(temp).ok(),
+                )
+                .unwrap_or(());
+        };
 
         let mut output = process::Output {
             status: process::ExitStatus::default(),
@@ -566,7 +580,7 @@ async fn get_nvcc_subcommand_groups<T>(
     tmp: &Path,
     keepdir: Option<PathBuf>,
     env_vars: &mut Vec<(OsString, OsString)>,
-) -> Result<Vec<Vec<NvccGeneratedCommand>>>
+) -> Result<(Vec<Vec<NvccGeneratedCommand>>, HashMap::<String, String>)>
 where
     T: CommandCreatorSync
 {
@@ -676,7 +690,7 @@ where
                 let reader = io::BufReader::new(cursor);
                 let remap_filenames = keepdir.is_none();
 
-                let nvcc_subcommand_groups = reader.lines()
+                reader.lines()
                     .map(|line| line.map_err(|e| anyhow!(e.to_string())))
                     // Select lines that match the `#$ ` prefix from nvcc --dryrun
                     .map(|line| line.and_then(select_lines_with_hash_dollar_space))
@@ -686,8 +700,9 @@ where
                     .fold_ok((
                         vec![],
                         HashMap::<String, String>::new(),
+                        HashMap::<String, String>::new(),
                         HashMap::<String, i32>::new()
-                    ), |(mut command_groups, mut old_to_new, mut ext_counts), (exe, mut args)| {
+                    ), |(mut command_groups, mut old_to_new, mut new_to_old, mut ext_counts), (exe, mut args)| {
 
                         // Remap nvcc's generated file names to deterministic names
                         if remap_filenames {
@@ -718,7 +733,9 @@ where
                                             }
                                             .and_then(|count| {
                                                 let new = count.to_string() + ext;
-                                                old_to_new.insert(old.clone(), new.clone()).or(Some(new.clone()))
+                                                None.or(old_to_new.insert(old.clone(), new.clone()))
+                                                    .or(new_to_old.insert(new.clone(), old.clone()))
+                                                    .or(Some(new.clone()))
                                             })
                                         } else {
                                             old_to_new.get(&old).map(|p| p.to_owned())
@@ -787,11 +804,9 @@ where
                             cacheable
                         });
 
-                        (command_groups, old_to_new, ext_counts)
+                        (command_groups, old_to_new, new_to_old, ext_counts)
                     })
-                    .map(|t| t.0);
-
-                nvcc_subcommand_groups
+                    .map(|t| (t.0, t.1))
             }
         }
     };

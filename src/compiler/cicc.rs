@@ -123,6 +123,9 @@ where
                     Some(ExtraInput(o)) => {
                         take_next = false;
                         let path = cwd.join(o);
+                        if !path.exists() {
+                            continue;
+                        }
                         extra_inputs.push(path);
                         &mut common_args
                     }
