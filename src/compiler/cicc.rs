@@ -104,15 +104,18 @@ pub fn parse_arguments<S>(
 where
     S: SearchableArgInfo<ArgData>,
 {
+    let mut args = arguments.to_vec();
+    let input_loc = arguments.len() - 3;
+    let input = args.splice(input_loc..input_loc+1, []).next().unwrap();
+
     let mut take_next = false;
     let mut extra_inputs = vec![];
-    let mut input = OsString::new();
     let mut outputs = HashMap::new();
 
     let mut common_args = vec![];
     let mut unhashed_args = vec![];
 
-    for arg in ArgsIter::new(arguments.iter().cloned(), arg_info) {
+    for arg in ArgsIter::new(args.iter().cloned(), arg_info) {
         match arg {
             Ok(arg) => {
                 let args = match arg.get_data() {
@@ -153,7 +156,6 @@ where
                                 take_next = false;
                                 &mut common_args
                             } else {
-                                input.clone_from(p);
                                 continue
                             }
                         }
