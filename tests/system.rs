@@ -572,7 +572,8 @@ fn test_cuda_compiles(compiler: &Compiler, tempdir: &Path) {
             name,
             exe,
             INPUT_FOR_CUDA_A,
-            OUTPUT,
+            // relative path for output
+            out_file.file_name().unwrap().to_string_lossy().as_ref(),
             Vec::new(),
         ))
         .current_dir(tempdir)
@@ -580,7 +581,8 @@ fn test_cuda_compiles(compiler: &Compiler, tempdir: &Path) {
         .assert()
         .success();
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
-    trace!("request stats");
+    fs::remove_file(&out_file).unwrap();
+    trace!("compile A request stats");
     get_stats(|info| {
         assert_eq!(1, info.stats.compile_requests);
         assert_eq!(4, info.stats.requests_executed);
@@ -597,14 +599,15 @@ fn test_cuda_compiles(compiler: &Compiler, tempdir: &Path) {
         assert_eq!(&1, info.stats.cache_misses.get_adv(&adv_ptx_key).unwrap());
         assert_eq!(&1, info.stats.cache_misses.get_adv(&adv_cubin_key).unwrap());
     });
+
     trace!("compile A");
-    fs::remove_file(&out_file).unwrap();
     sccache_command()
         .args(compile_cuda_cmdline(
             name,
             exe,
             INPUT_FOR_CUDA_A,
-            OUTPUT,
+            // absolute path for output
+            out_file.to_string_lossy().as_ref(),
             Vec::new(),
         ))
         .current_dir(tempdir)
@@ -612,13 +615,16 @@ fn test_cuda_compiles(compiler: &Compiler, tempdir: &Path) {
         .assert()
         .success();
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
-    trace!("request stats");
+    fs::remove_file(&out_file).unwrap();
+    trace!("compile A request stats");
     get_stats(|info| {
         assert_eq!(2, info.stats.compile_requests);
         assert_eq!(5, info.stats.requests_executed);
         assert_eq!(1, info.stats.cache_hits.all());
         assert_eq!(4, info.stats.cache_misses.all());
         assert_eq!(&1, info.stats.cache_hits.get("CUDA").unwrap());
+        assert!(info.stats.cache_hits.get("PTX").is_none());
+        assert!(info.stats.cache_hits.get("CUBIN").is_none());
         assert_eq!(&1, info.stats.cache_misses.get("CUDA").unwrap());
         assert_eq!(&1, info.stats.cache_misses.get("PTX").unwrap());
         assert_eq!(&1, info.stats.cache_misses.get("CUBIN").unwrap());
@@ -627,10 +633,13 @@ fn test_cuda_compiles(compiler: &Compiler, tempdir: &Path) {
         let adv_ptx_key = adv_key_kind("ptx", compiler.name);
         let adv_cubin_key = adv_key_kind("cubin", compiler.name);
         assert_eq!(&1, info.stats.cache_hits.get_adv(&adv_cuda_key).unwrap());
+        assert!(info.stats.cache_hits.get_adv(&adv_ptx_key).is_none());
+        assert!(info.stats.cache_hits.get_adv(&adv_cubin_key).is_none());
         assert_eq!(&1, info.stats.cache_misses.get_adv(&adv_cuda_key).unwrap());
         assert_eq!(&1, info.stats.cache_misses.get_adv(&adv_ptx_key).unwrap());
         assert_eq!(&1, info.stats.cache_misses.get_adv(&adv_cubin_key).unwrap());
     });
+
     // By compiling another input source we verify that the pre-processor
     // phase is correctly running and outputting text
     trace!("compile B");
@@ -639,7 +648,8 @@ fn test_cuda_compiles(compiler: &Compiler, tempdir: &Path) {
             name,
             exe,
             INPUT_FOR_CUDA_B,
-            OUTPUT,
+            // absolute path for output
+            out_file.to_string_lossy().as_ref(),
             Vec::new(),
         ))
         .current_dir(tempdir)
@@ -647,13 +657,16 @@ fn test_cuda_compiles(compiler: &Compiler, tempdir: &Path) {
         .assert()
         .success();
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
-    trace!("request stats");
+    fs::remove_file(&out_file).unwrap();
+    trace!("compile B request stats");
     get_stats(|info| {
         assert_eq!(3, info.stats.compile_requests);
         assert_eq!(9, info.stats.requests_executed);
         assert_eq!(2, info.stats.cache_hits.all());
         assert_eq!(7, info.stats.cache_misses.all());
         assert_eq!(&1, info.stats.cache_hits.get("CUDA").unwrap());
+        assert!(info.stats.cache_hits.get("PTX").is_none());
+        assert_eq!(&1, info.stats.cache_hits.get("CUBIN").unwrap());
         assert_eq!(&2, info.stats.cache_misses.get("CUDA").unwrap());
         assert_eq!(&2, info.stats.cache_misses.get("PTX").unwrap());
         assert_eq!(&1, info.stats.cache_misses.get("CUBIN").unwrap());
@@ -662,7 +675,91 @@ fn test_cuda_compiles(compiler: &Compiler, tempdir: &Path) {
         let adv_ptx_key = adv_key_kind("ptx", compiler.name);
         let adv_cubin_key = adv_key_kind("cubin", compiler.name);
         assert_eq!(&1, info.stats.cache_hits.get_adv(&adv_cuda_key).unwrap());
+        assert!(info.stats.cache_hits.get_adv(&adv_ptx_key).is_none());
+        assert_eq!(&1, info.stats.cache_hits.get_adv(&adv_cubin_key).unwrap());
         assert_eq!(&2, info.stats.cache_misses.get_adv(&adv_cuda_key).unwrap());
+        assert_eq!(&2, info.stats.cache_misses.get_adv(&adv_ptx_key).unwrap());
+        assert_eq!(&1, info.stats.cache_misses.get_adv(&adv_cubin_key).unwrap());
+    });
+
+    trace!("compile ptx");
+    let out_file = tempdir.join("test.ptx");
+    sccache_command()
+        .args(compile_cuda_cmdline(
+            name,
+            exe,
+            INPUT_FOR_CUDA_A,
+            // relative path for output
+            out_file.file_name().unwrap().to_string_lossy().as_ref(),
+            vec!["-ptx".into()],
+        ))
+        .current_dir(tempdir)
+        .envs(env_vars.clone())
+        .assert()
+        .success();
+    assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
+    fs::remove_file(&out_file).unwrap();
+    trace!("compile ptx request stats");
+    get_stats(|info| {
+        assert_eq!(4, info.stats.compile_requests);
+        assert_eq!(11, info.stats.requests_executed);
+        assert_eq!(3, info.stats.cache_hits.all());
+        assert_eq!(8, info.stats.cache_misses.all());
+        assert_eq!(&1, info.stats.cache_hits.get("CUDA").unwrap());
+        assert_eq!(&1, info.stats.cache_hits.get("PTX").unwrap());
+        assert_eq!(&1, info.stats.cache_hits.get("CUBIN").unwrap());
+        assert_eq!(&3, info.stats.cache_misses.get("CUDA").unwrap());
+        assert_eq!(&2, info.stats.cache_misses.get("PTX").unwrap());
+        assert_eq!(&1, info.stats.cache_misses.get("CUBIN").unwrap());
+        assert_eq!(&2, info.stats.cache_misses.get("C/C++").unwrap());
+        let adv_cuda_key = adv_key_kind("cuda", compiler.name);
+        let adv_ptx_key = adv_key_kind("ptx", compiler.name);
+        let adv_cubin_key = adv_key_kind("cubin", compiler.name);
+        assert_eq!(&1, info.stats.cache_hits.get_adv(&adv_cuda_key).unwrap());
+        assert_eq!(&1, info.stats.cache_hits.get_adv(&adv_ptx_key).unwrap());
+        assert_eq!(&1, info.stats.cache_hits.get_adv(&adv_cubin_key).unwrap());
+        assert_eq!(&3, info.stats.cache_misses.get_adv(&adv_cuda_key).unwrap());
+        assert_eq!(&2, info.stats.cache_misses.get_adv(&adv_ptx_key).unwrap());
+        assert_eq!(&1, info.stats.cache_misses.get_adv(&adv_cubin_key).unwrap());
+    });
+
+    trace!("compile cubin");
+    let out_file = tempdir.join("test.cubin");
+    sccache_command()
+        .args(compile_cuda_cmdline(
+            name,
+            exe,
+            INPUT_FOR_CUDA_A,
+            // absolute path for output
+            out_file.to_string_lossy().as_ref(),
+            vec!["-cubin".into()],
+        ))
+        .current_dir(tempdir)
+        .envs(env_vars.clone())
+        .assert()
+        .success();
+    assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
+    fs::remove_file(&out_file).unwrap();
+    trace!("compile cubin request stats");
+    get_stats(|info| {
+        assert_eq!(5, info.stats.compile_requests);
+        assert_eq!(14, info.stats.requests_executed);
+        assert_eq!(5, info.stats.cache_hits.all());
+        assert_eq!(9, info.stats.cache_misses.all());
+        assert_eq!(&1, info.stats.cache_hits.get("CUDA").unwrap());
+        assert_eq!(&2, info.stats.cache_hits.get("PTX").unwrap());
+        assert_eq!(&2, info.stats.cache_hits.get("CUBIN").unwrap());
+        assert_eq!(&4, info.stats.cache_misses.get("CUDA").unwrap());
+        assert_eq!(&2, info.stats.cache_misses.get("PTX").unwrap());
+        assert_eq!(&1, info.stats.cache_misses.get("CUBIN").unwrap());
+        assert_eq!(&2, info.stats.cache_misses.get("C/C++").unwrap());
+        let adv_cuda_key = adv_key_kind("cuda", compiler.name);
+        let adv_ptx_key = adv_key_kind("ptx", compiler.name);
+        let adv_cubin_key = adv_key_kind("cubin", compiler.name);
+        assert_eq!(&1, info.stats.cache_hits.get_adv(&adv_cuda_key).unwrap());
+        assert_eq!(&2, info.stats.cache_hits.get_adv(&adv_ptx_key).unwrap());
+        assert_eq!(&2, info.stats.cache_hits.get_adv(&adv_cubin_key).unwrap());
+        assert_eq!(&4, info.stats.cache_misses.get_adv(&adv_cuda_key).unwrap());
         assert_eq!(&2, info.stats.cache_misses.get_adv(&adv_ptx_key).unwrap());
         assert_eq!(&1, info.stats.cache_misses.get_adv(&adv_cubin_key).unwrap());
     });
