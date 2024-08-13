@@ -516,7 +516,7 @@ where
                 &env_vars,
                 may_dist,
                 rewrite_includes_only,
-                preprocessor_cache_mode_config.use_preprocessor_cache_mode,
+                use_preprocessor_cache_mode,
             )
             .await;
         let out_pretty = parsed_args.output_pretty().into_owned();
