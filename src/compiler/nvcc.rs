@@ -187,10 +187,10 @@ impl CCompilerImpl for Nvcc {
         trace!("preprocess");
         let mut cmd = initialize_cmd_and_args();
 
-        //NVCC only supports `-E` when it comes after preprocessor
-        //and common flags.
+        // NVCC only supports `-E` when it comes after preprocessor
+        // and common flags.
         //
-        // nvc/nvc++  don't support no line numbers to console
+        // nvc/nvc++ don't support no line numbers to console
         // msvc requires the `-EP` flag to output no line numbers to console
         // other host compilers are presumed to match `gcc` behavior
         let no_line_num_flag = match self.host_compiler {
@@ -203,18 +203,19 @@ impl CCompilerImpl for Nvcc {
             .env_clear()
             .envs(env_vars.clone())
             .current_dir(cwd);
+
         if log_enabled!(Trace) {
             trace!("preprocess: {:?}", cmd);
         }
 
-        //Need to chain the dependency generation and the preprocessor
-        //to emulate a `proper` front end
+        // Need to chain the dependency generation and the preprocessor
+        // to emulate a `proper` front end
         if !parsed_args.dependency_args.is_empty() {
             let first = run_input_output(dep_before_preprocessor(), None);
             let second = run_input_output(cmd, None);
             // TODO: If we need to chain these to emulate a frontend, shouldn't
             // we explicitly wait on the first one before starting the second one?
-            // (rather than via which drives these concurrently)
+            // (rather than via try_join, which drives these concurrently)
             let (_f, s) = futures::future::try_join(first, second).await?;
             Ok(s)
         } else {
