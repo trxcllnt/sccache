@@ -205,7 +205,7 @@ pub async fn preprocess(
     let input = if parsed_args.input.is_absolute() {
         parsed_args.input.clone()
     } else {
-        cwd.join(&parsed_args.input).canonicalize().unwrap()
+        cwd.join(&parsed_args.input)
     };
     std::fs::read(input)
         .map_err(|e| { anyhow::Error::new(e) })
