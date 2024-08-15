@@ -318,7 +318,9 @@ pub fn strings_to_osstrings(strings: &[String]) -> Vec<OsString> {
 }
 
 // TODO: TryFrom
-pub fn try_compile_command_to_dist(command: compiler::SingleCompileCommand) -> Option<CompileCommand> {
+pub fn try_compile_command_to_dist(
+    command: compiler::SingleCompileCommand,
+) -> Option<CompileCommand> {
     let compiler::SingleCompileCommand {
         executable,
         arguments,

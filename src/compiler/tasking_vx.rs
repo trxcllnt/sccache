@@ -20,7 +20,8 @@ use crate::{
             NormalizedDisposition, PathTransformerFn, SearchableArgInfo,
         },
         c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments},
-        Cacheable, ColorMode, CompileCommand, CCompileCommand, CompilerArguments, Language, SingleCompileCommand
+        CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language,
+        SingleCompileCommand,
     },
     counted_array, dist,
     errors::*,
@@ -96,22 +97,19 @@ impl CCompilerImpl for TaskingVX {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         _rewrite_includes_only: bool,
-    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)>
+    ) -> Result<(
+        Box<dyn CompileCommand<T>>,
+        Option<dist::CompileCommand>,
+        Cacheable,
+    )>
     where
-        T: CommandCreatorSync
+        T: CommandCreatorSync,
     {
-        generate_compile_commands(
-            path_transformer,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars
+        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars).map(
+            |(command, dist_command, cacheable)| {
+                (CCompileCommand::new(command), dist_command, cacheable)
+            },
         )
-        .map(|(command, dist_command, cacheable)| (
-            CCompileCommand::new(command),
-            dist_command,
-            cacheable
-        ))
     }
 }
 
@@ -368,7 +366,11 @@ fn generate_compile_commands(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-) -> Result<(SingleCompileCommand, Option<dist::CompileCommand>, Cacheable)> {
+) -> Result<(
+    SingleCompileCommand,
+    Option<dist::CompileCommand>,
+    Cacheable,
+)> {
     trace!("compile");
 
     let out_file = match parsed_args.outputs.get("obj") {

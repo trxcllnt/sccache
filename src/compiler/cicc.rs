@@ -16,17 +16,20 @@
 #![allow(unused_imports, dead_code, unused_variables)]
 
 use crate::compiler::args::*;
-use crate::compiler::{Cacheable, ColorMode, CompileCommand, CCompileCommand, CompilerArguments, Language, SingleCompileCommand};
 use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
+use crate::compiler::{
+    CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language,
+    SingleCompileCommand,
+};
 use crate::{counted_array, dist};
 
 use crate::mock_command::{CommandCreator, CommandCreatorSync, RunCommand};
 
 use async_trait::async_trait;
 
-use std::fs;
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -43,11 +46,17 @@ impl CCompilerImpl for Cicc {
     fn kind(&self) -> CCompilerKind {
         CCompilerKind::Cicc
     }
-    fn plusplus(&self) -> bool { true }
+    fn plusplus(&self) -> bool {
+        true
+    }
     fn version(&self) -> Option<String> {
         self.version.clone()
     }
-    fn parse_arguments(&self, arguments: &[OsString], cwd: &Path) -> CompilerArguments<ParsedArguments> {
+    fn parse_arguments(
+        &self,
+        arguments: &[OsString],
+        cwd: &Path,
+    ) -> CompilerArguments<ParsedArguments> {
         parse_arguments(arguments, cwd, Language::Ptx, &ARGS[..])
     }
     #[allow(clippy::too_many_arguments)]
@@ -65,7 +74,11 @@ impl CCompilerImpl for Cicc {
     where
         T: CommandCreatorSync,
     {
-        trace!("cicc preprocessed input file: cwd={:?} path={:?}", cwd, &parsed_args.input);
+        trace!(
+            "cicc preprocessed input file: cwd={:?} path={:?}",
+            cwd,
+            &parsed_args.input
+        );
         preprocess(cwd, parsed_args).await
     }
     fn generate_compile_commands<T>(
@@ -76,22 +89,19 @@ impl CCompilerImpl for Cicc {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         _rewrite_includes_only: bool,
-    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)>
+    ) -> Result<(
+        Box<dyn CompileCommand<T>>,
+        Option<dist::CompileCommand>,
+        Cacheable,
+    )>
     where
         T: CommandCreatorSync,
     {
-        generate_compile_commands(
-            path_transformer,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars
+        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars).map(
+            |(command, dist_command, cacheable)| {
+                (CCompileCommand::new(command), dist_command, cacheable)
+            },
         )
-        .map(|(command, dist_command, cacheable)| (
-            CCompileCommand::new(command),
-            dist_command,
-            cacheable
-        ))
     }
 }
 
@@ -106,7 +116,7 @@ where
 {
     let mut args = arguments.to_vec();
     let input_loc = arguments.len() - 3;
-    let input = args.splice(input_loc..input_loc+1, []).next().unwrap();
+    let input = args.splice(input_loc..input_loc + 1, []).next().unwrap();
 
     let mut take_next = false;
     let mut extra_inputs = vec![];
@@ -122,13 +132,19 @@ where
                     Some(PassThrough(_)) => {
                         take_next = false;
                         &mut common_args
-                    },
+                    }
                     Some(Output(o)) => {
                         take_next = false;
                         let path = cwd.join(o);
-                        outputs.insert("obj", ArtifactDescriptor { path, optional: false });
-                        continue
-                    },
+                        outputs.insert(
+                            "obj",
+                            ArtifactDescriptor {
+                                path,
+                                optional: false,
+                            },
+                        );
+                        continue;
+                    }
                     Some(UnhashedInput(o)) => {
                         take_next = false;
                         let path = cwd.join(o);
@@ -142,34 +158,39 @@ where
                         take_next = false;
                         let path = cwd.join(o);
                         if let Some(flag) = arg.flag_str() {
-                            outputs.insert(flag, ArtifactDescriptor { path, optional: false });
+                            outputs.insert(
+                                flag,
+                                ArtifactDescriptor {
+                                    path,
+                                    optional: false,
+                                },
+                            );
                         }
                         &mut unhashed_args
                     }
-                    Some(UnhashedFlag)
-                    | Some(Unhashed(_)) => {
+                    Some(UnhashedFlag) | Some(Unhashed(_)) => {
                         take_next = false;
                         &mut unhashed_args
-                    },
+                    }
                     None => match arg {
                         Argument::Raw(ref p) => {
                             if take_next {
                                 take_next = false;
                                 &mut common_args
                             } else {
-                                continue
+                                continue;
                             }
                         }
                         Argument::UnknownFlag(ref p) => {
                             let s = p.to_string_lossy();
                             take_next = s.starts_with('-');
                             &mut common_args
-                        },
+                        }
                         _ => unreachable!(),
                     },
                 };
                 args.extend(arg.iter_os_strings());
-            },
+            }
             _ => continue,
         };
     }
@@ -192,15 +213,11 @@ where
         profile_generate: false,
         color_mode: ColorMode::Off,
         suppress_rewrite_includes_only: false,
-        too_hard_for_preprocessor_cache_mode: None
+        too_hard_for_preprocessor_cache_mode: None,
     })
 }
 
-pub async fn preprocess(
-    cwd: &Path,
-    parsed_args: &ParsedArguments,
-) -> Result<process::Output>
-{
+pub async fn preprocess(cwd: &Path, parsed_args: &ParsedArguments) -> Result<process::Output> {
     // cicc and ptxas expect input to be an absolute path
     let input = if parsed_args.input.is_absolute() {
         parsed_args.input.clone()
@@ -208,13 +225,11 @@ pub async fn preprocess(
         cwd.join(&parsed_args.input)
     };
     std::fs::read(input)
-        .map_err(|e| { anyhow::Error::new(e) })
-        .map(|s| {
-            process::Output {
-                status: process::ExitStatus::default(),
-                stdout: s.to_vec(),
-                stderr: vec![],
-            }
+        .map_err(|e| anyhow::Error::new(e))
+        .map(|s| process::Output {
+            status: process::ExitStatus::default(),
+            stdout: s.to_vec(),
+            stderr: vec![],
         })
 }
 
@@ -224,7 +239,11 @@ pub fn generate_compile_commands(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-) -> Result<(SingleCompileCommand, Option<dist::CompileCommand>, Cacheable)> {
+) -> Result<(
+    SingleCompileCommand,
+    Option<dist::CompileCommand>,
+    Cacheable,
+)> {
     // Unused arguments
     #[cfg(not(feature = "dist-client"))]
     {
@@ -245,7 +264,7 @@ pub fn generate_compile_commands(
     arguments.extend(vec![
         (&parsed_args.input).into(),
         "-o".into(),
-        out_file.into()
+        out_file.into(),
     ]);
 
     let command = SingleCompileCommand {

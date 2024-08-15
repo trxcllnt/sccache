@@ -205,7 +205,11 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         rewrite_includes_only: bool,
-    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)>
+    ) -> Result<(
+        Box<dyn CompileCommand<T>>,
+        Option<dist::CompileCommand>,
+        Cacheable,
+    )>
     where
         T: CommandCreatorSync;
 }
@@ -420,15 +424,16 @@ where
             }
 
             if can_use_preprocessor_cache_mode && !use_preprocessor_cache_mode {
-                debug!("parse_arguments: Disabling preprocessor cache because SCCACHE_DIRECT=false");
+                debug!(
+                    "parse_arguments: Disabling preprocessor cache because SCCACHE_DIRECT=false"
+                );
             }
 
             use_preprocessor_cache_mode
         };
 
         // Disable preprocessor cache when doing distributed compilation
-        let mut preprocessor_key = if use_preprocessor_cache_mode
-        {
+        let mut preprocessor_key = if use_preprocessor_cache_mode {
             preprocessor_cache_entry_hash_key(
                 &executable_digest,
                 parsed_args.language,
@@ -1146,7 +1151,11 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
         &self,
         path_transformer: &mut dist::PathTransformer,
         rewrite_includes_only: bool,
-    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)> {
+    ) -> Result<(
+        Box<dyn CompileCommand<T>>,
+        Option<dist::CompileCommand>,
+        Cacheable,
+    )> {
         let CCompilation {
             ref parsed_args,
             ref executable,
@@ -1374,9 +1383,9 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                 add_named_file(&mut package_builder, "liblto_plugin.so")?;
             }
 
-            CCompilerKind::Cicc => {},
+            CCompilerKind::Cicc => {}
 
-            CCompilerKind::Ptxas => {},
+            CCompilerKind::Ptxas => {}
 
             CCompilerKind::Nvcc => {
                 // Various programs called by the nvcc front end.

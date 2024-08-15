@@ -18,7 +18,10 @@ use crate::compiler::args::{
     NormalizedDisposition, PathTransformerFn, SearchableArgInfo,
 };
 use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
-use crate::compiler::{Cacheable, ColorMode, CompileCommand, CCompileCommand, CompilerArguments, Language, SingleCompileCommand};
+use crate::compiler::{
+    CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language,
+    SingleCompileCommand,
+};
 use crate::errors::*;
 use crate::mock_command::{CommandCreatorSync, RunCommand};
 use crate::util::{run_input_output, OsStrExt};
@@ -83,22 +86,19 @@ impl CCompilerImpl for Diab {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         _rewrite_includes_only: bool,
-    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)>
+    ) -> Result<(
+        Box<dyn CompileCommand<T>>,
+        Option<dist::CompileCommand>,
+        Cacheable,
+    )>
     where
-        T: CommandCreatorSync
+        T: CommandCreatorSync,
     {
-        generate_compile_commands(
-            path_transformer,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars
+        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars).map(
+            |(command, dist_command, cacheable)| {
+                (CCompileCommand::new(command), dist_command, cacheable)
+            },
         )
-        .map(|(command, dist_command, cacheable)| (
-            CCompileCommand::new(command),
-            dist_command,
-            cacheable
-        ))
     }
 }
 
@@ -353,7 +353,11 @@ pub fn generate_compile_commands(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-) -> Result<(SingleCompileCommand, Option<dist::CompileCommand>, Cacheable)> {
+) -> Result<(
+    SingleCompileCommand,
+    Option<dist::CompileCommand>,
+    Cacheable,
+)> {
     trace!("compile");
 
     let out_file = match parsed_args.outputs.get("obj") {

@@ -19,10 +19,12 @@ use crate::compiler::args::*;
 use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
 use crate::compiler::gcc::ArgData::*;
 use crate::compiler::{
-    self,
-    gcc, get_compiler_info, write_temp_file, Cacheable, CompileCommand, CCompileCommand, CompileCommandImpl, CompilerArguments, Language,
+    self, gcc, get_compiler_info, write_temp_file, CCompileCommand, Cacheable, CompileCommand,
+    CompileCommandImpl, CompilerArguments, Language,
 };
-use crate::mock_command::{exit_status, CommandCreator, CommandCreatorSync, CommandChild, RunCommand};
+use crate::mock_command::{
+    exit_status, CommandChild, CommandCreator, CommandCreatorSync, RunCommand,
+};
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist, protocol, server};
 use async_trait::async_trait;
@@ -89,7 +91,7 @@ impl CCompilerImpl for Nvcc {
                 shlex::split(&flags)
                     .unwrap_or_default()
                     .iter()
-                    .map(|s| s.clone().into_arg_os_string())
+                    .map(|s| s.clone().into_arg_os_string()),
             );
         }
 
@@ -129,7 +131,8 @@ impl CCompilerImpl for Nvcc {
     where
         T: CommandCreatorSync,
     {
-        let env_vars = env_vars.iter()
+        let env_vars = env_vars
+            .iter()
             .filter(|(k, _)| k != "NVCC_PREPEND_FLAGS" && k != "NVCC_APPEND_FLAGS")
             .cloned()
             .collect::<Vec<_>>();
@@ -231,21 +234,19 @@ impl CCompilerImpl for Nvcc {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         rewrite_includes_only: bool,
-    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)>
+    ) -> Result<(
+        Box<dyn CompileCommand<T>>,
+        Option<dist::CompileCommand>,
+        Cacheable,
+    )>
     where
-        T: CommandCreatorSync
+        T: CommandCreatorSync,
     {
-        generate_compile_commands(
-            parsed_args,
-            executable,
-            cwd,
-            env_vars,
+        generate_compile_commands(parsed_args, executable, cwd, env_vars).map(
+            |(command, dist_command, cacheable)| {
+                (CCompileCommand::new(command), dist_command, cacheable)
+            },
         )
-        .map(|(command, dist_command, cacheable)| (
-            CCompileCommand::new(command),
-            dist_command,
-            cacheable
-        ))
     }
 }
 
@@ -253,15 +254,19 @@ pub fn generate_compile_commands(
     parsed_args: &ParsedArguments,
     executable: &Path,
     cwd: &Path,
-    env_vars: &[(OsString, OsString)]
+    env_vars: &[(OsString, OsString)],
 ) -> Result<(NvccCompileCommand, Option<dist::CompileCommand>, Cacheable)> {
-
-    let env_vars = env_vars.iter()
+    let env_vars = env_vars
+        .iter()
         .filter(|(k, _)| k != "NVCC_PREPEND_FLAGS" && k != "NVCC_APPEND_FLAGS")
         .cloned()
         .collect::<Vec<_>>();
 
-    let temp_dir = tempfile::Builder::new().prefix("sccache_nvcc").tempdir().unwrap().into_path();
+    let temp_dir = tempfile::Builder::new()
+        .prefix("sccache_nvcc")
+        .tempdir()
+        .unwrap()
+        .into_path();
 
     let mut arguments: Vec<OsString> = vec![
         "--dryrun".into(),
@@ -276,13 +281,22 @@ pub fn generate_compile_commands(
         let mut keep_dir = None;
         // Remove all occurrences of `-keep` and `-keep-dir`, but save the keep dir for copying to later
         loop {
-            if let Some(idx) = unhashed_args.iter().position(|x| x == "-keep-dir" || x == "--keep-dir") {
+            if let Some(idx) = unhashed_args
+                .iter()
+                .position(|x| x == "-keep-dir" || x == "--keep-dir")
+            {
                 let dir = PathBuf::from(unhashed_args[idx + 1].as_os_str());
-                let dir = if dir.is_absolute() { dir } else { cwd.join(dir) };
+                let dir = if dir.is_absolute() {
+                    dir
+                } else {
+                    cwd.join(dir)
+                };
                 unhashed_args.splice(idx..(idx + 2), []);
                 keep_dir = Some(dir);
                 continue;
-            } else if let Some(idx) = unhashed_args.iter().position(|x| x == "-keep" || x == "--keep" || x == "-save-temps" || x == "--save-temps") {
+            } else if let Some(idx) = unhashed_args.iter().position(|x| {
+                x == "-keep" || x == "--keep" || x == "-save-temps" || x == "--save-temps"
+            }) {
                 keep = true;
                 unhashed_args.splice(idx..(idx + 1), []);
                 if keep_dir.is_none() {
@@ -291,7 +305,7 @@ pub fn generate_compile_commands(
                 continue;
             }
             break;
-        };
+        }
         // Match nvcc behavior where intermediate files are kept if:
         // * Only `-keep` is specified (files copied to cwd)
         // * Both `-keep -keep-dir=<dir>` are specified (files copied to <dir>)
@@ -311,17 +325,17 @@ pub fn generate_compile_commands(
                         num_parallel = arg;
                     }
                 }
-                unhashed_args.splice(idx..(idx+1), []);
+                unhashed_args.splice(idx..(idx + 1), []);
                 continue;
             }
             if let Some(idx) = unhashed_args.iter().position(|x| x == "--threads") {
-                let arg = unhashed_args.get(idx+1);
+                let arg = unhashed_args.get(idx + 1);
                 if let Some(arg) = arg.and_then(|arg| arg.to_str()) {
                     if let Ok(arg) = arg.parse::<usize>() {
                         num_parallel = arg;
                     }
                 }
-                unhashed_args.splice(idx..(idx+2), []);
+                unhashed_args.splice(idx..(idx + 2), []);
                 continue;
             }
             break;
@@ -333,19 +347,19 @@ pub fn generate_compile_commands(
         arguments.extend(vec!["-x".into(), lang.into()])
     }
 
-    let output = parsed_args.outputs
+    let output = parsed_args
+        .outputs
         .get("obj")
-        .context("Missing object file output").unwrap()
-        .path.clone();
+        .context("Missing object file output")
+        .unwrap()
+        .path
+        .clone();
 
     if parsed_args.compilation_flag == "-c" {
         arguments.push(parsed_args.compilation_flag.clone());
     }
 
-    arguments.extend(vec![
-        "-o".into(),
-        output.clone().into(),
-    ]);
+    arguments.extend(vec!["-o".into(), output.clone().into()]);
 
     arguments.extend_from_slice(&parsed_args.preprocessor_args);
     arguments.extend_from_slice(&unhashed_args);
@@ -364,13 +378,14 @@ pub fn generate_compile_commands(
     // canonicalizing here, cicc will get cache misses on otherwise identical
     // input that should produce a cache hit.
 
-    arguments.push((
-        if parsed_args.input.is_absolute() {
+    arguments.push(
+        (if parsed_args.input.is_absolute() {
             parsed_args.input.clone()
         } else {
             cwd.join(&parsed_args.input).canonicalize().unwrap()
-        }
-    ).into());
+        })
+        .into(),
+    );
 
     let command = NvccCompileCommand {
         out_path: output.clone(),
@@ -400,15 +415,26 @@ pub struct NvccCompileCommand {
 
 #[async_trait]
 impl CompileCommandImpl for NvccCompileCommand {
+    fn get_executable(&self) -> PathBuf {
+        self.executable.clone()
+    }
+    fn get_arguments(&self) -> Vec<OsString> {
+        self.arguments.clone()
+    }
+    fn get_env_vars(&self) -> Vec<(OsString, OsString)> {
+        self.env_vars.clone()
+    }
+    fn get_cwd(&self) -> PathBuf {
+        self.cwd.clone()
+    }
 
-    fn get_executable(&self) -> PathBuf { self.executable.clone() }
-    fn get_arguments(&self) -> Vec<OsString> { self.arguments.clone() }
-    fn get_env_vars(&self) -> Vec<(OsString, OsString)> { self.env_vars.clone() }
-    fn get_cwd(&self) -> PathBuf { self.cwd.clone() }
-
-    async fn execute<T>(&self, service: &server::SccacheService<T>, creator: &T) -> Result<process::Output>
+    async fn execute<T>(
+        &self,
+        service: &server::SccacheService<T>,
+        creator: &T,
+    ) -> Result<process::Output>
     where
-        T: CommandCreatorSync
+        T: CommandCreatorSync,
     {
         let NvccCompileCommand {
             out_path,
@@ -423,31 +449,37 @@ impl CompileCommandImpl for NvccCompileCommand {
 
         let mut env_vars = env_vars.to_vec();
 
-        let (nvcc_subcommand_groups, old_to_new_name_map) = group_nvcc_subcommands_by_compilation_stage(
-            creator,
-            executable,
-            arguments,
-            cwd,
-            temp_dir.as_path(),
-            keep_dir.clone(),
-            &mut env_vars
-        ).await?;
+        let (nvcc_subcommand_groups, old_to_new_name_map) =
+            group_nvcc_subcommands_by_compilation_stage(
+                creator,
+                executable,
+                arguments,
+                cwd,
+                temp_dir.as_path(),
+                keep_dir.clone(),
+                &mut env_vars,
+            )
+            .await?;
 
         let maybe_keep_temps_then_clean = || {
-
             // If the caller passed `-keep` or `-keep-dir`, copy the
             // temp files to the requested location. We do this because we
             // override `-keep` and `-keep-dir` in our `nvcc --dryrun` call.
-            let maybe_keep_temps = keep_dir.as_ref().and_then(|dst|
+            let maybe_keep_temps = keep_dir.as_ref().and_then(|dst| {
                 fs::create_dir_all(dst)
                     .and_then(|_| fs::read_dir(temp_dir))
-                    .and_then(|files| files
-                        .filter_map(|path| path.ok())
-                        .filter_map(|path| path.file_name().to_str().map(|file| (path.path(), file.to_owned())))
-                        .try_fold((), |res, (path, file)| fs::rename(path, dst.join(file)))
-                    )
+                    .and_then(|files| {
+                        files
+                            .filter_map(|path| path.ok())
+                            .filter_map(|path| {
+                                path.file_name()
+                                    .to_str()
+                                    .map(|file| (path.path(), file.to_owned()))
+                            })
+                            .try_fold((), |res, (path, file)| fs::rename(path, dst.join(file)))
+                    })
                     .ok()
-            );
+            });
 
             // If the compilation flag was `-ptx`, `-cubin`, or `-dc`,
             // copy and rename the output file to the expected location.
@@ -459,23 +491,27 @@ impl CompileCommandImpl for NvccCompileCommand {
             // It's important _not_ to canonicalize `out_path` before this
             // point because the original `parsed_args.output` is the key in
             // the `old_to_new_name_map`.
-            let maybe_copy_renamed_output = out_path.to_str()
+            let maybe_copy_renamed_output = out_path
+                .to_str()
                 .and_then(|old| old_to_new_name_map.get(old))
-                .and_then(|new| fs::copy(
-                    temp_dir.join(new),
-                    // output can either be absolute or relative to `cwd`
-                    if out_path.is_absolute() {
-                        out_path.clone()
-                    } else {
-                        cwd.join(out_path)
-                    }
-                ).ok())
+                .and_then(|new| {
+                    fs::copy(
+                        temp_dir.join(new),
+                        // output can either be absolute or relative to `cwd`
+                        if out_path.is_absolute() {
+                            out_path.clone()
+                        } else {
+                            cwd.join(out_path)
+                        },
+                    )
+                    .ok()
+                })
                 .or(Some(0));
 
             maybe_keep_temps
                 .and(maybe_copy_renamed_output)
                 .map_or_else(
-                    | | fs::remove_dir_all(temp_dir).ok(),
+                    || fs::remove_dir_all(temp_dir).ok(),
                     |_| fs::remove_dir_all(temp_dir).ok(),
                 )
                 .unwrap_or(());
@@ -489,8 +525,8 @@ impl CompileCommandImpl for NvccCompileCommand {
 
         let n = nvcc_subcommand_groups.len();
         let cuda_front_end_range = if n < 1 { 0..0 } else { 0..1 };
-        let device_compile_range = if n < 2 { 0..0 } else { 1..n-1 };
-        let final_assembly_range = if n < 3 { 0..0 } else { n-1..n };
+        let device_compile_range = if n < 2 { 0..0 } else { 1..n - 1 };
+        let final_assembly_range = if n < 3 { 0..0 } else { n - 1..n };
 
         let num_parallel = device_compile_range.len().min(*num_parallel).max(1);
 
@@ -501,19 +537,21 @@ impl CompileCommandImpl for NvccCompileCommand {
             nvcc_subcommand_groups[final_assembly_range].chunks(1),
         ] {
             for command_groups in command_group_chunks {
-
-                let results = futures::future::join_all(
-                    command_groups.iter().map(|commands|
-                        run_nvcc_subcommands_group(service, creator, cwd, &env_vars, commands)
-                    )
-                )
+                let results = futures::future::join_all(command_groups.iter().map(|commands| {
+                    run_nvcc_subcommands_group(service, creator, cwd, &env_vars, commands)
+                }))
                 .await;
 
                 for result in results {
                     aggregate_output(&mut output, result);
                 }
 
-                if output.status.code().and_then(|c| (c != 0).then_some(c)).is_some() {
+                if output
+                    .status
+                    .code()
+                    .and_then(|c| (c != 0).then_some(c))
+                    .is_some()
+                {
                     maybe_keep_temps_then_clean();
                     return Err(ProcessError(output).into());
                 }
@@ -542,19 +580,25 @@ async fn group_nvcc_subcommands_by_compilation_stage<T>(
     temp_dir: &Path,
     keep_dir: Option<PathBuf>,
     env_vars: &mut Vec<(OsString, OsString)>,
-) -> Result<(Vec<Vec<NvccGeneratedSubcommand>>, HashMap::<String, String>)>
+) -> Result<(Vec<Vec<NvccGeneratedSubcommand>>, HashMap<String, String>)>
 where
-    T: CommandCreatorSync
+    T: CommandCreatorSync,
 {
-
     if log_enabled!(log::Level::Trace) {
-        trace!("nvcc dryrun cmd: {:?}", [
-            vec![executable.as_os_str().to_owned()],
-            arguments.to_owned()
-        ].concat().join(OsStr::new(" ")));
+        trace!(
+            "nvcc dryrun cmd: {:?}",
+            [
+                vec![executable.as_os_str().to_owned()],
+                arguments.to_owned()
+            ]
+            .concat()
+            .join(OsStr::new(" "))
+        );
     }
 
-    let mut nvcc_dryrun_cmd = creator.clone().new_command_sync(executable)
+    let mut nvcc_dryrun_cmd = creator
+        .clone()
+        .new_command_sync(executable)
         .env_clear()
         .args(arguments)
         .envs(env_vars.to_vec())
@@ -570,7 +614,7 @@ where
             Some(caps) => {
                 let (_, [rest]) = caps.extract();
                 Ok(rest.to_string())
-            },
+            }
             _ => Err(anyhow!("nvcc error: {:?}", line)),
         }
     }
@@ -581,13 +625,12 @@ where
         cwd: &Path,
         line: &str,
     ) -> Option<(PathBuf, Vec<String>)> {
-
         // Intercept the environment variable lines and add them to the env_vars list
         if let Some(var) = re.captures(line) {
             let (_, [var, val]) = var.extract();
 
             let loc = if let Some(idx) = env_vars.iter().position(|(key, _)| key == var) {
-                idx..idx+1
+                idx..idx + 1
             } else {
                 env_vars.len()..env_vars.len()
             };
@@ -595,11 +638,10 @@ where
             let mut pair = (var.into(), val.into());
             // Handle the special `_SPACE_= ` line
             if val != " " {
-                pair.1 = val.trim()
+                pair.1 = val
+                    .trim()
                     .split(" ")
-                    .map(|x| x
-                        .trim_start_matches("\"")
-                        .trim_end_matches("\""))
+                    .map(|x| x.trim_start_matches("\"").trim_end_matches("\""))
                     .collect::<Vec<_>>()
                     .join(" ")
                     .into();
@@ -623,13 +665,14 @@ where
         let args = shlex::split(&line)?;
         let (exe, args) = args.split_first()?;
 
-        let env_path = env_vars.iter()
+        let env_path = env_vars
+            .iter()
             .find(|(k, _)| k == "PATH")
             .map(|(_, p)| p.to_owned())
             .unwrap();
 
         if let Ok(exe) = which_in(exe, env_path.into(), cwd) {
-            return Some((exe.clone(), args.to_vec()))
+            return Some((exe.clone(), args.to_vec()));
         }
 
         None
@@ -637,22 +680,27 @@ where
 
     fn remap_generated_filenames(
         args: &mut [String],
-        old_to_new: &mut HashMap::<String, String>,
-        new_to_old: &mut HashMap::<String, String>,
-        ext_counts: &mut HashMap::<String, i32>
+        old_to_new: &mut HashMap<String, String>,
+        new_to_old: &mut HashMap<String, String>,
+        ext_counts: &mut HashMap<String, i32>,
     ) {
         for arg in &mut args[..] {
-            let maybe_ext = (!arg.starts_with("-")).then(||
-                [
-                    ".ptx",
-                    ".cubin",
-                    ".cpp1.ii",
-                    ".cudafe1.c",
-                    ".cudafe1.cpp",
-                    ".cudafe1.gpu",
-                    ".cudafe1.stub.c",
-                ].iter().find(|ext| arg.ends_with(*ext)).copied()
-            ).unwrap_or(None);
+            let maybe_ext = (!arg.starts_with("-"))
+                .then(|| {
+                    [
+                        ".ptx",
+                        ".cubin",
+                        ".cpp1.ii",
+                        ".cudafe1.c",
+                        ".cudafe1.cpp",
+                        ".cudafe1.gpu",
+                        ".cudafe1.stub.c",
+                    ]
+                    .iter()
+                    .find(|ext| arg.ends_with(*ext))
+                    .copied()
+                })
+                .unwrap_or(None);
             match maybe_ext {
                 Some(ext) => {
                     let old = arg.clone();
@@ -663,7 +711,10 @@ where
                             ext_counts.insert(ext.into(), 0).or(Some(0))
                         } else {
                             // Update the count
-                            ext_counts.get_mut(ext).map(|c| { *c += 1; *c })
+                            ext_counts.get_mut(ext).map(|c| {
+                                *c += 1;
+                                *c
+                            })
                         }
                         .and_then(|count| {
                             let new = count.to_string() + ext;
@@ -675,7 +726,7 @@ where
                         old_to_new.get(&old).map(|p| p.to_owned())
                     }
                     .unwrap_or(old)
-                },
+                }
                 None => {
                     for (old_name, new_name) in old_to_new.iter() {
                         *arg = arg.replace(old_name, new_name);
@@ -690,7 +741,6 @@ where
         match nvcc_subcommand_groups {
             None => Err(anyhow!("failed to read stderr")),
             Some(stderr) => {
-
                 let remap_filenames = keep_dir.is_none();
                 let is_valid_line_re = Regex::new(r"^#\$ (.*)$").unwrap();
                 let is_envvar_line_re = Regex::new(r"^([_A-Z]+)=(.*)$").unwrap();
@@ -700,7 +750,8 @@ where
                 let mut new_to_old = HashMap::<String, String>::new();
                 let mut ext_counts = HashMap::<String, i32>::new();
 
-                let tmp_name = |name: &String| temp_dir.join(name).into_os_string().into_string().ok();
+                let tmp_name =
+                    |name: &String| temp_dir.join(name).into_os_string().into_string().ok();
 
                 let reader = tokio::io::BufReader::new(stderr);
                 let mut lines = reader.lines();
@@ -708,7 +759,12 @@ where
                 while let Some(line) = lines.next_line().await? {
                     // Select lines that match the `#$ ` prefix from nvcc --dryrun
                     let line = select_valid_dryrun_lines(&is_valid_line_re, &line)?;
-                    let maybe_exe_and_args = fold_env_vars_or_split_into_exe_and_args(&is_envvar_line_re, env_vars, cwd, &line);
+                    let maybe_exe_and_args = fold_env_vars_or_split_into_exe_and_args(
+                        &is_envvar_line_re,
+                        env_vars,
+                        cwd,
+                        &line,
+                    );
                     let (exe, mut args) = match maybe_exe_and_args {
                         Some(exe_and_args) => exe_and_args,
                         None => continue,
@@ -716,7 +772,12 @@ where
 
                     // Remap nvcc's generated file names to deterministic names
                     if remap_filenames {
-                        remap_generated_filenames(&mut args, &mut old_to_new, &mut new_to_old, &mut ext_counts);
+                        remap_generated_filenames(
+                            &mut args,
+                            &mut old_to_new,
+                            &mut new_to_old,
+                            &mut ext_counts,
+                        );
                     }
 
                     // * cicc and ptxas are cacheable
@@ -730,7 +791,7 @@ where
                             // The fatbinary command represents the start of the last group
                             command_groups.push(vec![]);
                             (temp_dir, Cacheable::No)
-                        },
+                        }
                         // Otherwise this is a host compiler command
                         _ => {
                             if args.contains(&"-E".to_owned()) {
@@ -755,7 +816,7 @@ where
                                 }
                                 (cwd, Cacheable::Yes)
                             }
-                        },
+                        }
                     };
 
                     // Initialize the first group in case the first command isn't a call to the host preprocessor,
@@ -765,15 +826,15 @@ where
                     }
 
                     match command_groups.last_mut() {
-                        None => {},
+                        None => {}
                         Some(group) => {
                             group.push(NvccGeneratedSubcommand {
                                 exe,
                                 args,
                                 cwd: dir.into(),
-                                cacheable
+                                cacheable,
                             });
-                        },
+                        }
                     };
                 }
 
@@ -782,7 +843,9 @@ where
         }
     };
 
-    let output = nvcc_dryrun_cmd.wait_with_output().map_err(|e| anyhow!(e.to_string()));
+    let output = nvcc_dryrun_cmd
+        .wait_with_output()
+        .map_err(|e| anyhow!(e.to_string()));
 
     match futures::future::try_join(output, nvcc_subcommand_groups).await {
         Err(err) => Err(ProcessError(error_to_output(err)).into()),
@@ -804,7 +867,7 @@ async fn run_nvcc_subcommands_group<T>(
     commands: &[NvccGeneratedSubcommand],
 ) -> Result<process::Output>
 where
-    T: CommandCreatorSync
+    T: CommandCreatorSync,
 {
     let mut output = process::Output {
         status: process::ExitStatus::default(),
@@ -821,47 +884,65 @@ where
         } = cmd;
 
         if log_enabled!(log::Level::Trace) {
-            trace!("run_commands_sequential cwd={:?}, cmd={:?}", cwd, [
-                vec![exe.clone().into_os_string().into_string().unwrap()],
-                args.iter().map(|x| shlex::try_quote(x).unwrap().to_string()).collect::<Vec<_>>()
-            ].concat().join(" "));
+            trace!(
+                "run_commands_sequential cwd={:?}, cmd={:?}",
+                cwd,
+                [
+                    vec![exe.clone().into_os_string().into_string().unwrap()],
+                    args.iter()
+                        .map(|x| shlex::try_quote(x).unwrap().to_string())
+                        .collect::<Vec<_>>()
+                ]
+                .concat()
+                .join(" ")
+            );
         }
 
         let out = match cacheable {
             Cacheable::No => {
                 let mut cmd = creator.clone().new_command_sync(exe);
 
-                cmd
-                    .args(args)
+                cmd.args(args)
                     .current_dir(cwd)
                     .env_clear()
                     .envs(env_vars.to_vec());
 
-                run_input_output(cmd, None).await.unwrap_or_else(error_to_output)
-            },
+                run_input_output(cmd, None)
+                    .await
+                    .unwrap_or_else(error_to_output)
+            }
             Cacheable::Yes => {
-
                 let args = dist::strings_to_osstrings(args);
 
-                match service.compiler_info(exe.clone(), cwd.to_owned(), &args, env_vars).await {
+                match service
+                    .compiler_info(exe.clone(), cwd.to_owned(), &args, env_vars)
+                    .await
+                {
                     Err(err) => error_to_output(err),
-                    Ok(c) => {
-                        match c.parse_arguments(&args, cwd, env_vars) {
-                            CompilerArguments::NotCompilation => Err(anyhow!("Not compilation")),
-                            CompilerArguments::CannotCache(why, extra_info) => Err(
-                                extra_info.map_or_else(
-                                    || anyhow!("Cannot cache({}): {:?} {:?}", why, exe, args),
-                                    |desc| anyhow!("Cannot cache({}, {}): {:?} {:?}", why, desc, exe, args)
+                    Ok(c) => match c.parse_arguments(&args, cwd, env_vars) {
+                        CompilerArguments::NotCompilation => Err(anyhow!("Not compilation")),
+                        CompilerArguments::CannotCache(why, extra_info) => Err(extra_info
+                            .map_or_else(
+                                || anyhow!("Cannot cache({}): {:?} {:?}", why, exe, args),
+                                |desc| {
+                                    anyhow!("Cannot cache({}, {}): {:?} {:?}", why, desc, exe, args)
+                                },
+                            )),
+                        CompilerArguments::Ok(hasher) => {
+                            service
+                                .start_compile_task(
+                                    c,
+                                    hasher,
+                                    args,
+                                    cwd.to_owned(),
+                                    env_vars.to_owned(),
                                 )
-                            ),
-                            CompilerArguments::Ok(hasher) => service
-                                .start_compile_task(c, hasher, args, cwd.to_owned(), env_vars.to_owned())
                                 .await
                         }
-                        .map_or_else(error_to_output, compile_result_to_output)
                     }
+                    .map_or_else(error_to_output, compile_result_to_output),
                 }
-            },
+            }
         };
 
         aggregate_output(&mut output, Ok(out));
@@ -878,7 +959,7 @@ fn aggregate_output(acc: &mut process::Output, res: Result<process::Output>) {
     let out = res.unwrap_or_else(error_to_output);
     acc.status = exit_status(std::cmp::max(
         acc.status.code().unwrap_or(0),
-        out.status.code().unwrap_or(0)
+        out.status.code().unwrap_or(0),
     ));
     acc.stdout.extend(out.stdout);
     acc.stderr.extend(out.stderr);
@@ -891,15 +972,13 @@ fn error_to_output(err: Error) -> process::Output {
             status: exit_status(1),
             stdout: vec![],
             stderr: err.to_string().into_bytes(),
-        }
+        },
     }
 }
 
 fn compile_result_to_output(res: protocol::CompileFinished) -> process::Output {
     process::Output {
-        status: exit_status(
-            res.retcode.or(res.signal).unwrap_or(0)
-        ),
+        status: exit_status(res.retcode.or(res.signal).unwrap_or(0)),
         stdout: res.stdout,
         stderr: res.stderr,
     }

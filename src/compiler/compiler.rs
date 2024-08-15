@@ -16,6 +16,7 @@
 use crate::cache::{Cache, CacheWrite, DecompressionFailure, FileObjectSource, Storage};
 use crate::compiler::args::*;
 use crate::compiler::c::{CCompiler, CCompilerKind};
+use crate::compiler::cicc::Cicc;
 use crate::compiler::clang::Clang;
 use crate::compiler::diab::Diab;
 use crate::compiler::gcc::Gcc;
@@ -24,16 +25,15 @@ use crate::compiler::msvc::Msvc;
 use crate::compiler::nvcc::Nvcc;
 use crate::compiler::nvcc::NvccHostCompiler;
 use crate::compiler::nvhpc::Nvhpc;
-use crate::compiler::cicc::Cicc;
 use crate::compiler::ptxas::Ptxas;
 use crate::compiler::rust::{Rust, RustupProxy};
 use crate::compiler::tasking_vx::TaskingVX;
-use crate::server;
 #[cfg(feature = "dist-client")]
 use crate::dist::pkg;
 #[cfg(feature = "dist-client")]
 use crate::lru_disk_cache;
 use crate::mock_command::{exit_status, CommandChild, CommandCreatorSync, RunCommand};
+use crate::server;
 use crate::util::{fmt_duration_as_secs, run_input_output};
 use crate::{counted_array, dist};
 use async_trait::async_trait;
@@ -79,7 +79,11 @@ pub trait CompileCommand<T>: Send + Sync + 'static
 where
     T: CommandCreatorSync,
 {
-    async fn execute(&self, service: &server::SccacheService<T>, creator: &T) -> Result<process::Output>;
+    async fn execute(
+        &self,
+        service: &server::SccacheService<T>,
+        creator: &T,
+    ) -> Result<process::Output>;
 
     fn get_executable(&self) -> PathBuf;
     fn get_arguments(&self) -> Vec<OsString>;
@@ -102,7 +106,7 @@ where
     #[allow(clippy::new_ret_no_self)]
     pub fn new<T>(cmd: I) -> Box<dyn CompileCommand<T>>
     where
-        T: CommandCreatorSync
+        T: CommandCreatorSync,
     {
         Box::new(CCompileCommand { cmd }) as Box<dyn CompileCommand<T>>
     }
@@ -114,12 +118,24 @@ where
     T: CommandCreatorSync,
     I: CompileCommandImpl,
 {
-    fn get_executable(&self) -> PathBuf { self.cmd.get_executable() }
-    fn get_arguments(&self) -> Vec<OsString> { self.cmd.get_arguments() }
-    fn get_env_vars(&self) -> Vec<(OsString, OsString)> { self.cmd.get_env_vars() }
-    fn get_cwd(&self) -> PathBuf { self.cmd.get_cwd() }
+    fn get_executable(&self) -> PathBuf {
+        self.cmd.get_executable()
+    }
+    fn get_arguments(&self) -> Vec<OsString> {
+        self.cmd.get_arguments()
+    }
+    fn get_env_vars(&self) -> Vec<(OsString, OsString)> {
+        self.cmd.get_env_vars()
+    }
+    fn get_cwd(&self) -> PathBuf {
+        self.cmd.get_cwd()
+    }
 
-    async fn execute(&self, service: &server::SccacheService<T>, creator: &T) -> Result<process::Output> {
+    async fn execute(
+        &self,
+        service: &server::SccacheService<T>,
+        creator: &T,
+    ) -> Result<process::Output> {
         self.cmd.execute(service, creator).await
     }
 }
@@ -131,7 +147,11 @@ pub trait CompileCommandImpl: Send + Sync + 'static {
     fn get_env_vars(&self) -> Vec<(OsString, OsString)>;
     fn get_cwd(&self) -> PathBuf;
 
-    async fn execute<T>(&self, service: &server::SccacheService<T>, creator: &T) -> Result<process::Output>
+    async fn execute<T>(
+        &self,
+        service: &server::SccacheService<T>,
+        creator: &T,
+    ) -> Result<process::Output>
     where
         T: CommandCreatorSync;
 }
@@ -146,14 +166,26 @@ pub struct SingleCompileCommand {
 
 #[async_trait]
 impl CompileCommandImpl for SingleCompileCommand {
-    fn get_executable(&self) -> PathBuf { self.executable.clone() }
-    fn get_arguments(&self) -> Vec<OsString> { self.arguments.clone() }
-    fn get_env_vars(&self) -> Vec<(OsString, OsString)> { self.env_vars.clone() }
-    fn get_cwd(&self) -> PathBuf { self.cwd.clone() }
+    fn get_executable(&self) -> PathBuf {
+        self.executable.clone()
+    }
+    fn get_arguments(&self) -> Vec<OsString> {
+        self.arguments.clone()
+    }
+    fn get_env_vars(&self) -> Vec<(OsString, OsString)> {
+        self.env_vars.clone()
+    }
+    fn get_cwd(&self) -> PathBuf {
+        self.cwd.clone()
+    }
 
-    async fn execute<T>(&self, _: &server::SccacheService<T>, creator: &T) -> Result<process::Output>
+    async fn execute<T>(
+        &self,
+        _: &server::SccacheService<T>,
+        creator: &T,
+    ) -> Result<process::Output>
     where
-        T: CommandCreatorSync
+        T: CommandCreatorSync,
     {
         let SingleCompileCommand {
             executable,
@@ -852,7 +884,11 @@ where
         &self,
         path_transformer: &mut dist::PathTransformer,
         rewrite_includes_only: bool,
-    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)>;
+    ) -> Result<(
+        Box<dyn CompileCommand<T>>,
+        Option<dist::CompileCommand>,
+        Cacheable,
+    )>;
 
     /// Create a function that will create the inputs used to perform a distributed compilation
     #[cfg(feature = "dist-client")]
@@ -1187,7 +1223,7 @@ where
             &pool,
         )
         .await
-        .map(|c|( Box::new(c) as Box<dyn Compiler<T>>, None));
+        .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
     } else if is_known_c_compiler(executable) {
         let cc = detect_c_compiler(creator, executable, args, env.to_vec(), pool).await;
         return cc.map(|c| (c, None));
@@ -2285,7 +2321,11 @@ LLVM version: 6.0",
             COMPILER_STDOUT.to_owned(),
             COMPILER_STDERR.to_owned(),
         );
-        let service = server::SccacheService::mock_with_dist_client(dist_client.clone(), storage.clone(), pool.clone());
+        let service = server::SccacheService::mock_with_dist_client(
+            dist_client.clone(),
+            storage.clone(),
+            pool.clone(),
+        );
 
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
@@ -2828,7 +2868,11 @@ LLVM version: 6.0",
         };
         // All these dist clients will fail, but should still result in successful compiles
         for dist_client in dist_clients {
-            let service = server::SccacheService::mock_with_dist_client(dist_client.clone(), storage.clone(), pool.clone());
+            let service = server::SccacheService::mock_with_dist_client(
+                dist_client.clone(),
+                storage.clone(),
+                pool.clone(),
+            );
 
             if obj.is_file() {
                 fs::remove_file(&obj).unwrap();

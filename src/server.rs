@@ -905,20 +905,18 @@ where
         let client = Client::new_num(1);
         SccacheService {
             stats: Arc::default(),
-            dist_client: Arc::new(DistClientContainer::new_with_state(
-                DistClientState::Some(
-                    Box::new(DistClientConfig {
-                        pool: rt.clone(),
-                        scheduler_url: None,
-                        auth: config::DistAuth::Token { token: "".into() },
-                        cache_dir: "".into(),
-                        toolchain_cache_size: 0,
-                        toolchains: vec![],
-                        rewrite_includes_only: false,
-                    }),
-                    dist_client
-                )
-            )),
+            dist_client: Arc::new(DistClientContainer::new_with_state(DistClientState::Some(
+                Box::new(DistClientConfig {
+                    pool: rt.clone(),
+                    scheduler_url: None,
+                    auth: config::DistAuth::Token { token: "".into() },
+                    cache_dir: "".into(),
+                    toolchain_cache_size: 0,
+                    toolchains: vec![],
+                    rewrite_includes_only: false,
+                }),
+                dist_client,
+            ))),
             storage,
             compilers: Arc::default(),
             compiler_proxies: Arc::default(),
@@ -1197,8 +1195,10 @@ where
                                     send.send(Ok(Response::CompileFinished(res)))
                                         .map_err(|e| anyhow!("send on finish failed").context(e))
                                         .await
-                                        .unwrap_or_else(|e| warn!("send on finish failed: {:?}", e));
-                                },
+                                        .unwrap_or_else(|e| {
+                                            warn!("send on finish failed: {:?}", e)
+                                        });
+                                }
                                 Err(err) => {
                                     warn!("Failed to execute task: {:?}", err);
                                 }
@@ -1243,7 +1243,6 @@ where
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
     ) -> Result<CompileFinished> {
-
         let mut stats = self.stats.lock().await;
         stats.requests_executed += 1;
         stats.active_compilations += 1;
@@ -1288,9 +1287,7 @@ where
                 let thread = std::thread::current();
                 let thread_name = thread.name().unwrap_or("unnamed");
                 if let Some((file, line, column)) = PANIC_LOCATION.with(|l| l.take()) {
-                    anyhow!(
-                        "thread '{thread_name}' panicked at {file}:{line}:{column}: {panic}"
-                    )
+                    anyhow!("thread '{thread_name}' panicked at {file}:{line}:{column}: {panic}")
                 } else {
                     anyhow!("thread '{thread_name}' panicked: {panic}")
                 }
@@ -1327,8 +1324,7 @@ where
                             DistType::NoDist => {}
                             DistType::Ok(id) => {
                                 let server = id.addr().to_string();
-                                let server_count =
-                                    stats.dist_compiles.entry(server).or_insert(0);
+                                let server_count = stats.dist_compiles.entry(server).or_insert(0);
                                 *server_count += 1;
                             }
                             DistType::Error => stats.dist_errors += 1,
@@ -1401,8 +1397,7 @@ where
                             // Make sure the write guard has been dropped ASAP.
                             drop(stats);
                             self.dist_client.reset_state().await;
-                            let errmsg =
-                                format!("[{:?}] http error status: {}", out_pretty, msg);
+                            let errmsg = format!("[{:?}] http error status: {}", out_pretty, msg);
                             error!("{}", errmsg);
                             res.retcode = Some(1);
                             res.stderr = errmsg.as_bytes().to_vec();

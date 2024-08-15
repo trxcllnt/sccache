@@ -16,18 +16,21 @@
 #![allow(unused_imports, dead_code, unused_variables)]
 
 use crate::compiler::args::*;
-use crate::compiler::cicc;
-use crate::compiler::{Cacheable, ColorMode, CompileCommand, CCompileCommand, CompilerArguments, Language, SingleCompileCommand};
 use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
+use crate::compiler::cicc;
+use crate::compiler::{
+    CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language,
+    SingleCompileCommand,
+};
 use crate::{counted_array, dist};
 
 use crate::mock_command::{CommandCreator, CommandCreatorSync, RunCommand};
 
 use async_trait::async_trait;
 
-use std::fs;
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -44,11 +47,17 @@ impl CCompilerImpl for Ptxas {
     fn kind(&self) -> CCompilerKind {
         CCompilerKind::Ptxas
     }
-    fn plusplus(&self) -> bool { true }
+    fn plusplus(&self) -> bool {
+        true
+    }
     fn version(&self) -> Option<String> {
         self.version.clone()
     }
-    fn parse_arguments(&self, arguments: &[OsString], cwd: &Path) -> CompilerArguments<ParsedArguments> {
+    fn parse_arguments(
+        &self,
+        arguments: &[OsString],
+        cwd: &Path,
+    ) -> CompilerArguments<ParsedArguments> {
         cicc::parse_arguments(arguments, cwd, Language::Cubin, &ARGS[..])
     }
     #[allow(clippy::too_many_arguments)]
@@ -66,7 +75,11 @@ impl CCompilerImpl for Ptxas {
     where
         T: CommandCreatorSync,
     {
-        trace!("ptxas preprocessed input file: cwd={:?} path={:?}", cwd, &parsed_args.input);
+        trace!(
+            "ptxas preprocessed input file: cwd={:?} path={:?}",
+            cwd,
+            &parsed_args.input
+        );
         cicc::preprocess(cwd, parsed_args).await
     }
     fn generate_compile_commands<T>(
@@ -77,22 +90,18 @@ impl CCompilerImpl for Ptxas {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         _rewrite_includes_only: bool,
-    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)>
+    ) -> Result<(
+        Box<dyn CompileCommand<T>>,
+        Option<dist::CompileCommand>,
+        Cacheable,
+    )>
     where
-        T: CommandCreatorSync
+        T: CommandCreatorSync,
     {
-        cicc::generate_compile_commands(
-            path_transformer,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars
-        )
-        .map(|(command, dist_command, cacheable)| (
-            CCompileCommand::new(command),
-            dist_command,
-            cacheable
-        ))
+        cicc::generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
+            .map(|(command, dist_command, cacheable)| {
+                (CCompileCommand::new(command), dist_command, cacheable)
+            })
     }
 }
 

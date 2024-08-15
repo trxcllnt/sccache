@@ -14,7 +14,10 @@
 
 use crate::compiler::args::*;
 use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
-use crate::compiler::{clang, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language, CCompileCommand, SingleCompileCommand};
+use crate::compiler::{
+    clang, CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language,
+    SingleCompileCommand,
+};
 use crate::mock_command::{CommandCreatorSync, RunCommand};
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist};
@@ -99,9 +102,13 @@ impl CCompilerImpl for Gcc {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         rewrite_includes_only: bool,
-    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)>
+    ) -> Result<(
+        Box<dyn CompileCommand<T>>,
+        Option<dist::CompileCommand>,
+        Cacheable,
+    )>
     where
-        T: CommandCreatorSync
+        T: CommandCreatorSync,
     {
         generate_compile_commands(
             path_transformer,
@@ -112,11 +119,9 @@ impl CCompilerImpl for Gcc {
             self.kind(),
             rewrite_includes_only,
         )
-        .map(|(command, dist_command, cacheable)| (
-            CCompileCommand::new(command),
-            dist_command,
-            cacheable
-        ))
+        .map(|(command, dist_command, cacheable)| {
+            (CCompileCommand::new(command), dist_command, cacheable)
+        })
     }
 }
 
@@ -439,8 +444,7 @@ where
             | Some(PassThroughFlag)
             | Some(PassThrough(_))
             | Some(PassThroughPath(_)) => &mut common_args,
-            Some(UnhashedFlag)
-            | Some(Unhashed(_)) => &mut unhashed_args,
+            Some(UnhashedFlag) | Some(Unhashed(_)) => &mut unhashed_args,
             Some(Arch(_)) => &mut arch_args,
             Some(ExtraHashFile(path)) => {
                 extra_hash_files.push(cwd.join(path));
@@ -518,8 +522,7 @@ where
             | Some(PassThrough(_))
             | Some(PassThroughFlag)
             | Some(PassThroughPath(_)) => &mut common_args,
-            Some(UnhashedFlag)
-            | Some(Unhashed(_)) => &mut unhashed_args,
+            Some(UnhashedFlag) | Some(Unhashed(_)) => &mut unhashed_args,
             Some(ExtraHashFile(path)) => {
                 extra_hash_files.push(cwd.join(path));
                 &mut common_args
@@ -788,7 +791,11 @@ pub fn generate_compile_commands(
     env_vars: &[(OsString, OsString)],
     kind: CCompilerKind,
     rewrite_includes_only: bool,
-) -> Result<(SingleCompileCommand, Option<dist::CompileCommand>, Cacheable)> {
+) -> Result<(
+    SingleCompileCommand,
+    Option<dist::CompileCommand>,
+    Cacheable,
+)> {
     // Unused arguments
     #[cfg(not(feature = "dist-client"))]
     {

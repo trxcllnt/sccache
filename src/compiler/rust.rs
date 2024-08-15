@@ -15,8 +15,9 @@
 use crate::cache::{FileObjectSource, Storage};
 use crate::compiler::args::*;
 use crate::compiler::{
-    c::ArtifactDescriptor, Cacheable, ColorMode, Compilation, CompileCommand, CCompileCommand, Compiler,
-    CompilerArguments, CompilerHasher, CompilerKind, CompilerProxy, HashResult, Language, SingleCompileCommand
+    c::ArtifactDescriptor, CCompileCommand, Cacheable, ColorMode, Compilation, CompileCommand,
+    Compiler, CompilerArguments, CompilerHasher, CompilerKind, CompilerProxy, HashResult, Language,
+    SingleCompileCommand,
 };
 #[cfg(feature = "dist-client")]
 use crate::compiler::{DistPackagers, OutputsRewriter};
@@ -1604,7 +1605,11 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
         &self,
         path_transformer: &mut dist::PathTransformer,
         _rewrite_includes_only: bool,
-    ) -> Result<(Box<dyn CompileCommand<T>>, Option<dist::CompileCommand>, Cacheable)> {
+    ) -> Result<(
+        Box<dyn CompileCommand<T>>,
+        Option<dist::CompileCommand>,
+        Cacheable,
+    )> {
         let RustCompilation {
             ref executable,
             ref arguments,
