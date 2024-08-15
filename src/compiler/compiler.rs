@@ -87,7 +87,7 @@ where
     fn get_cwd(&self) -> PathBuf;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct CCompileCommand<I>
 where
     I: CompileCommandImpl,
@@ -136,7 +136,7 @@ pub trait CompileCommandImpl: Send + Sync + 'static {
         T: CommandCreatorSync;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct SingleCompileCommand {
     pub executable: PathBuf,
     pub arguments: Vec<OsString>,
@@ -371,7 +371,7 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn get_cached_or_compile(
         self: Box<Self>,
-        service: server::SccacheService<T>,
+        service: &server::SccacheService<T>,
         dist_client: Option<Arc<dyn dist::Client>>,
         creator: T,
         storage: Arc<dyn Storage>,
@@ -621,14 +621,14 @@ where
 
     debug!("[{}]: Compiling locally", out_pretty);
     compile_cmd
-        .execute(service.clone(), &creator)
+        .execute(&service, &creator)
         .await
         .map(move |o| (cacheable, DistType::NoDist, o))
 }
 
 #[cfg(feature = "dist-client")]
 async fn dist_or_local_compile<T>(
-    service: server::SccacheService<T>,
+    service: &server::SccacheService<T>,
     dist_client: Option<Arc<dyn dist::Client>>,
     creator: T,
     cwd: PathBuf,
@@ -655,7 +655,7 @@ where
         None => {
             debug!("[{}]: Compiling locally", out_pretty);
             return compile_cmd
-                .execute(&service, &creator)
+                .execute(service, &creator)
                 .await
                 .map(move |o| (cacheable, DistType::NoDist, o));
         }
@@ -826,7 +826,7 @@ where
                 );
 
                 compile_cmd
-                    .execute(&service, &creator)
+                    .execute(service, &creator)
                     .await
                     .map(|o| (DistType::Error, o))
             }
@@ -2172,7 +2172,7 @@ LLVM version: 6.0",
             .block_on(async {
                 hasher
                     .get_cached_or_compile(
-                        service.clone(),
+                        &service,
                         None,
                         creator.clone(),
                         storage.clone(),
@@ -2209,7 +2209,7 @@ LLVM version: 6.0",
             .block_on(async {
                 hasher2
                     .get_cached_or_compile(
-                        service.clone(),
+                        &service,
                         None,
                         creator,
                         storage,
@@ -2298,7 +2298,7 @@ LLVM version: 6.0",
             .block_on(async {
                 hasher
                     .get_cached_or_compile(
-                        service.clone(),
+                        &service,
                         Some(dist_client.clone()),
                         creator.clone(),
                         storage.clone(),
@@ -2335,7 +2335,7 @@ LLVM version: 6.0",
             .block_on(async {
                 hasher2
                     .get_cached_or_compile(
-                        service.clone(),
+                        &service,
                         Some(dist_client.clone()),
                         creator,
                         storage,
@@ -2420,7 +2420,7 @@ LLVM version: 6.0",
         storage.next_get(Err(anyhow!("Some Error")));
         let (cached, res) = runtime
             .block_on(hasher.get_cached_or_compile(
-                service.clone(),
+                &service,
                 None,
                 creator,
                 storage,
@@ -2512,7 +2512,7 @@ LLVM version: 6.0",
         storage.next_get(Ok(Cache::Hit(entry)));
         let (cached, _res) = runtime
             .block_on(hasher.get_cached_or_compile(
-                service.clone(),
+                &service,
                 None,
                 creator,
                 storage,
@@ -2606,7 +2606,7 @@ LLVM version: 6.0",
             .block_on(async {
                 hasher
                     .get_cached_or_compile(
-                        service.clone(),
+                        &service,
                         None,
                         creator.clone(),
                         storage.clone(),
@@ -2635,7 +2635,7 @@ LLVM version: 6.0",
         fs::remove_file(&obj).unwrap();
         let (cached, res) = hasher2
             .get_cached_or_compile(
-                service.clone(),
+                &service,
                 None,
                 creator,
                 storage,
@@ -2728,7 +2728,7 @@ LLVM version: 6.0",
             .block_on(async {
                 hasher
                     .get_cached_or_compile(
-                        service.clone(),
+                        &service,
                         None,
                         creator,
                         storage,
@@ -2836,7 +2836,7 @@ LLVM version: 6.0",
             let hasher = hasher.clone();
             let (cached, res) = hasher
                 .get_cached_or_compile(
-                    service.clone(),
+                    &service,
                     Some(dist_client.clone()),
                     creator.clone(),
                     storage.clone(),

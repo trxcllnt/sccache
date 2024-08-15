@@ -248,18 +248,6 @@ impl CCompilerImpl for Nvcc {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct NvccCompileCommand {
-    pub out_path: PathBuf,
-    pub temp_dir: PathBuf,
-    pub keep_dir: Option<PathBuf>,
-    pub num_parallel: usize,
-    pub executable: PathBuf,
-    pub arguments: Vec<OsString>,
-    pub env_vars: Vec<(OsString, OsString)>,
-    pub cwd: PathBuf,
-}
-
 pub fn generate_compile_commands(
     parsed_args: &ParsedArguments,
     executable: &Path,
@@ -397,6 +385,18 @@ pub fn generate_compile_commands(
     Ok((command, None, Cacheable::Yes))
 }
 
+#[derive(Clone, Debug)]
+pub struct NvccCompileCommand {
+    pub out_path: PathBuf,
+    pub temp_dir: PathBuf,
+    pub keep_dir: Option<PathBuf>,
+    pub num_parallel: usize,
+    pub executable: PathBuf,
+    pub arguments: Vec<OsString>,
+    pub env_vars: Vec<(OsString, OsString)>,
+    pub cwd: PathBuf,
+}
+
 #[async_trait]
 impl CompileCommandImpl for NvccCompileCommand {
 
@@ -420,28 +420,6 @@ impl CompileCommandImpl for NvccCompileCommand {
             cwd,
         } = self;
 
-        fn aggregate_output(acc: process::Output, res: Result<process::Output>) -> process::Output {
-            match res {
-                Ok(out) => {
-                    process::Output {
-                        status: exit_status(*[
-                            acc.status.code().unwrap_or(0),
-                            out.status.code().unwrap_or(0)
-                        ].iter().max().unwrap_or(&0)),
-                        stdout: [acc.stdout, out.stdout].concat(),
-                        stderr: [acc.stderr, out.stderr].concat(),
-                    }
-                },
-                Err(err) => {
-                    process::Output {
-                        status: exit_status(1),
-                        stdout: [acc.stdout, vec![]].concat(),
-                        stderr: [acc.stderr, err.to_string().into_bytes()].concat(),
-                    }
-                },
-            }
-        }
-
         let mut env_vars = env_vars.to_vec();
 
         let (nvcc_subcommand_groups, old_to_new_name_map) = group_nvcc_subcommands_by_compilation_stage(
@@ -456,7 +434,7 @@ impl CompileCommandImpl for NvccCompileCommand {
 
         let maybe_keep_temps_then_clean = || {
 
-            // If the caller passed `-keep` or `-keep-dir=/x/y`, copy the
+            // If the caller passed `-keep` or `-keep-dir`, copy the
             // temp files to the requested location. We do this because we
             // override `-keep` and `-keep-dir` in our `nvcc --dryrun` call.
             let maybe_keep_temps = keep_dir.as_ref().and_then(|dst|
@@ -470,12 +448,16 @@ impl CompileCommandImpl for NvccCompileCommand {
                     .ok()
             );
 
-            // If the compile flag was `-ptx` or `-cubin`, copy and rename it
-            // to the expected out path.
+            // If the compilation flag was `-ptx`, `-cubin`, or `-dc`,
+            // copy and rename the output file to the expected location.
             //
-            // It's important _not_ to canonicalize the path before this point
-            // because the original `parsed_args.output` is the key in the
-            // `old_to_new_name_map`.
+            // This is necessary in the case where we renamed the ptx and
+            // cubin files to more deterministic names to aid caching.
+            //
+            //
+            // It's important _not_ to canonicalize `out_path` before this
+            // point because the original `parsed_args.output` is the key in
+            // the `old_to_new_name_map`.
             let maybe_copy_renamed_output = out_path.to_str()
                 .and_then(|old| old_to_new_name_map.get(old))
                 .and_then(|new| fs::copy(
@@ -527,7 +509,7 @@ impl CompileCommandImpl for NvccCompileCommand {
                 .await;
 
                 for result in results {
-                    output = aggregate_output(output, result);
+                    aggregate_output(&mut output, result);
                 }
 
                 if output.status.code().and_then(|c| (c != 0).then_some(c)).is_some() {
@@ -653,58 +635,53 @@ where
     }
 
     fn remap_generated_filenames(
-        args: &[String],
+        args: &mut [String],
         old_to_new: &mut HashMap::<String, String>,
         new_to_old: &mut HashMap::<String, String>,
         ext_counts: &mut HashMap::<String, i32>
-    ) -> Vec<String> {
-        args.iter()
-            .map(|arg| {
-                match (!arg.starts_with("-"))
-                    .then(||
-                        [
-                            ".ptx",
-                            ".cubin",
-                            ".cpp1.ii",
-                            ".cudafe1.c",
-                            ".cudafe1.cpp",
-                            ".cudafe1.gpu",
-                            ".cudafe1.stub.c",
-                        ].iter().find(|ext| arg.ends_with(*ext)).cloned()
-                    ).unwrap_or(None)
-                {
-                    Some(ext) => {
-                        let old = arg.clone();
-                        if !old_to_new.contains_key(&old) {
-                            // Get or initialize count for the extension
-                            if !ext_counts.contains_key(ext) {
-                                // Initialize to 0
-                                ext_counts.insert(ext.into(), 0).or(Some(0))
-                            } else {
-                                // Update the count
-                                ext_counts.get_mut(ext).map(|c| { *c += 1; *c })
-                            }
-                            .and_then(|count| {
-                                let new = count.to_string() + ext;
-                                None.or(old_to_new.insert(old.clone(), new.clone()))
-                                    .or(new_to_old.insert(new.clone(), old.clone()))
-                                    .or(Some(new.clone()))
-                            })
+    ) {
+        for arg in &mut args[..] {
+            let maybe_ext = (!arg.starts_with("-")).then(||
+                [
+                    ".ptx",
+                    ".cubin",
+                    ".cpp1.ii",
+                    ".cudafe1.c",
+                    ".cudafe1.cpp",
+                    ".cudafe1.gpu",
+                    ".cudafe1.stub.c",
+                ].iter().find(|ext| arg.ends_with(*ext)).copied()
+            ).unwrap_or(None);
+            match maybe_ext {
+                Some(ext) => {
+                    let old = arg.clone();
+                    *arg = if !old_to_new.contains_key(&old) {
+                        // Get or initialize count for the extension
+                        if !ext_counts.contains_key(ext) {
+                            // Initialize to 0
+                            ext_counts.insert(ext.into(), 0).or(Some(0))
                         } else {
-                            old_to_new.get(&old).map(|p| p.to_owned())
+                            // Update the count
+                            ext_counts.get_mut(ext).map(|c| { *c += 1; *c })
                         }
-                        .unwrap_or(old)
-                    },
-                    None => {
-                        let mut arg = arg.to_owned();
-                        for (old_name, new_name) in old_to_new.iter() {
-                            arg = arg.replace(old_name, new_name);
-                        }
-                        arg
+                        .and_then(|count| {
+                            let new = count.to_string() + ext;
+                            None.or(old_to_new.insert(old.clone(), new.clone()))
+                                .or(new_to_old.insert(new.clone(), old.clone()))
+                                .or(Some(new.clone()))
+                        })
+                    } else {
+                        old_to_new.get(&old).map(|p| p.to_owned())
+                    }
+                    .unwrap_or(old)
+                },
+                None => {
+                    for (old_name, new_name) in old_to_new.iter() {
+                        *arg = arg.replace(old_name, new_name);
                     }
                 }
-            })
-            .collect::<Vec<String>>()
+            }
+        }
     }
 
     let nvcc_subcommand_groups = nvcc_dryrun_cmd.take_stderr();
@@ -724,27 +701,28 @@ where
 
                 let tmp_name = |name: &String| temp_dir.join(name).into_os_string().into_string().ok();
 
-                let mut reader = tokio::io::BufReader::new(stderr).lines();
+                let reader = tokio::io::BufReader::new(stderr);
+                let mut lines = reader.lines();
 
-                while let Some(line) = reader.next_line().await? {
+                while let Some(line) = lines.next_line().await? {
                     // Select lines that match the `#$ ` prefix from nvcc --dryrun
                     let line = select_valid_dryrun_lines(&is_valid_line_re, &line)?;
                     let maybe_exe_and_args = fold_env_vars_or_split_into_exe_and_args(&is_envvar_line_re, env_vars, cwd, &line);
                     let (exe, mut args) = match maybe_exe_and_args {
-                        Some(t) => t,
+                        Some(exe_and_args) => exe_and_args,
                         None => continue,
                     };
 
                     // Remap nvcc's generated file names to deterministic names
                     if remap_filenames {
-                        args = remap_generated_filenames(&args, &mut old_to_new, &mut new_to_old, &mut ext_counts);
+                        remap_generated_filenames(&mut args, &mut old_to_new, &mut new_to_old, &mut ext_counts);
                     }
 
                     // * cicc and ptxas are cacheable
                     // * cudafe++ and fatbinary are not cacheable
                     // * Run cudafe++, cicc, ptxas, and fatbinary in `temp_dir`
                     // * Run host preprocessing and compilation steps in `cwd`
-                    let (build_dir, cacheable) = match exe.file_name().and_then(|s| s.to_str()) {
+                    let (dir, cacheable) = match exe.file_name().and_then(|s| s.to_str()) {
                         Some("cicc") | Some("ptxas") => (temp_dir, Cacheable::Yes),
                         Some("cudafe++") => (temp_dir, Cacheable::No),
                         Some("fatbinary") => {
@@ -791,7 +769,7 @@ where
                             group.push(NvccGeneratedSubcommand {
                                 exe,
                                 args,
-                                cwd: build_dir.into(),
+                                cwd: dir.into(),
                                 cacheable
                             });
                         },
@@ -804,13 +782,16 @@ where
     };
 
     let output = nvcc_dryrun_cmd.wait_with_output().map_err(|e| anyhow!(e.to_string()));
-    let (output, nvcc_subcommand_groups) = futures::future::try_join(output, nvcc_subcommand_groups).await?;
 
-    let code = output.status.code().unwrap();
-    if code == 0 {
-        Ok(nvcc_subcommand_groups)
-    } else {
-        Err(ProcessError(output).into())
+    match futures::future::try_join(output, nvcc_subcommand_groups).await {
+        Err(err) => Err(ProcessError(error_to_output(err)).into()),
+        Ok((output, nvcc_subcommand_groups)) => {
+            if output.status.code().unwrap_or(0) == 0 {
+                Ok(nvcc_subcommand_groups)
+            } else {
+                Err(ProcessError(output).into())
+            }
+        }
     }
 }
 
@@ -839,7 +820,7 @@ where
         } = cmd;
 
         if log_enabled!(log::Level::Trace) {
-            debug!("run_commands_sequential cwd={:?}, cmd={:?}", cwd, [
+            trace!("run_commands_sequential cwd={:?}, cmd={:?}", cwd, [
                 vec![exe.clone().into_os_string().into_string().unwrap()],
                 args.iter().map(|x| shlex::try_quote(x).unwrap().to_string()).collect::<Vec<_>>()
             ].concat().join(" "));
@@ -852,89 +833,37 @@ where
                 cmd
                     .args(args)
                     .current_dir(cwd)
-
-                run_input_output(cmd, None)
-                    .map_ok_or_else(
-                        |err| match err.downcast::<ProcessError>() {
-                            Ok(ProcessError(out)) => out,
-                            Err(err) => process::Output {
-                                status: exit_status(1),
-                                stdout: vec![],
-                                stderr: err.to_string().into_bytes(),
-                            }
-                        },
-                        |out| out
-                    )
-                    .await
-                },
                     .env_clear()
                     .envs(env_vars.to_vec());
+
+                run_input_output(cmd, None).await.unwrap_or_else(error_to_output)
+            },
             Cacheable::Yes => {
 
-                use futures::future;
-                use protocol::Response::*;
-                use protocol::CompileResponse::*;
+                let args = dist::strings_to_osstrings(args);
 
-                let args = args.iter().map(|x| OsStr::new(x).to_os_string()).collect::<Vec<_>>();
-
-                service
-                    .clone()
-                    .handle_compile(protocol::Compile {
-                        exe: exe.into(),
-                        cwd: cwd.into(),
-                        args,
-                        env_vars: [
-                            env_vars,
-                            // Disable preprocessor cache mode
-                            &[("SCCACHE_DIRECT".into(), "false".into())]
-                        ].concat(),
-                    })
-                    .map_ok_or_else(
-                        Err,
-                        |res| match res {
-                            server::Message::WithoutBody(res) => Err(anyhow!(
-                                match res {
-                                    Compile(UnhandledCompile) => "Unhandled compile".into(),
-                                    Compile(UnsupportedCompiler(msg)) => format!("Unsupported compiler: {:?}", msg),
-                                    _ => "Unknown response".into(),
-                                }
-                            )),
-                            server::Message::WithBody(_, body) => Ok(body
-                                .filter_map(|res| async move {
-                                    match res {
-                                        Ok(CompileFinished(output)) => Some(output),
-                                        _ => None
-                                    }
-                                })
-                                .take(1)
-                                .fold(
-                                    Err(anyhow!("Empty response body")),
-                                    |opt, out| async { Ok(out) }
+                match service.compiler_info(exe.clone(), cwd.to_owned(), &args, env_vars).await {
+                    Err(err) => error_to_output(err),
+                    Ok(c) => {
+                        match c.parse_arguments(&args, cwd, env_vars) {
+                            CompilerArguments::NotCompilation => Err(anyhow!("Not compilation")),
+                            CompilerArguments::CannotCache(why, extra_info) => Err(
+                                extra_info.map_or_else(
+                                    || anyhow!("Cannot cache({}): {:?} {:?}", why, exe, args),
+                                    |desc| anyhow!("Cannot cache({}, {}): {:?} {:?}", why, desc, exe, args)
                                 )
-                            )
-                        },
-                    )
-                    .try_flatten()
-                    .map_ok_or_else(
-                        |err| process::Output {
-                            status: exit_status(1),
-                            stdout: vec![],
-                            stderr: err.to_string().into_bytes(),
-                        },
-                        |out| process::Output {
-                            status: exit_status(
-                                out.retcode.or(out.signal).unwrap_or(0)
                             ),
-                            stdout: out.stdout,
-                            stderr: out.stderr,
+                            CompilerArguments::Ok(hasher) => service
+                                .start_compile_task(c, hasher, args, cwd.to_owned(), env_vars.to_owned())
+                                .await
                         }
-                    ).await
+                        .map_or_else(error_to_output, compile_result_to_output)
+                    }
+                }
             },
         };
 
-        output.status = out.status;
-        output.stdout = [output.stdout, out.stdout].concat();
-        output.stderr = [output.stderr, out.stderr].concat();
+        aggregate_output(&mut output, Ok(out));
 
         if output.status.code().unwrap_or(0) != 0 {
             break;
@@ -942,6 +871,37 @@ where
     }
 
     Ok(output)
+}
+
+fn aggregate_output(acc: &mut process::Output, res: Result<process::Output>) {
+    let out = res.unwrap_or_else(error_to_output);
+    acc.status = exit_status(std::cmp::max(
+        acc.status.code().unwrap_or(0),
+        out.status.code().unwrap_or(0)
+    ));
+    acc.stdout.extend(out.stdout);
+    acc.stderr.extend(out.stderr);
+}
+
+fn error_to_output(err: Error) -> process::Output {
+    match err.downcast::<ProcessError>() {
+        Ok(ProcessError(out)) => out,
+        Err(err) => process::Output {
+            status: exit_status(1),
+            stdout: vec![],
+            stderr: err.to_string().into_bytes(),
+        }
+    }
+}
+
+fn compile_result_to_output(res: protocol::CompileFinished) -> process::Output {
+    process::Output {
+        status: exit_status(
+            res.retcode.or(res.signal).unwrap_or(0)
+        ),
+        stdout: res.stdout,
+        stderr: res.stderr,
+    }
 }
 
 counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
