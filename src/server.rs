@@ -1243,11 +1243,7 @@ where
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
     ) -> Result<CompileFinished> {
-        let mut stats = self.stats.lock().await;
-        stats.requests_executed += 1;
-        stats.active_compilations += 1;
-        // Make sure the write guard has been dropped ASAP.
-        drop(stats);
+        self.stats.lock().await.requests_executed += 1;
 
         let force_recache = env_vars
             .iter()
@@ -1430,9 +1426,7 @@ where
             match cache_write.await {
                 Err(e) => {
                     debug!("Error executing cache write: {}", e);
-                    let mut stats = self.stats.lock().await;
-                    stats.cache_write_errors += 1;
-                    stats.active_compilations -= 1;
+                    self.stats.lock().await.cache_write_errors += 1;
                 }
                 //TODO: save cache stats!
                 Ok(info) => {
@@ -1444,11 +1438,8 @@ where
                     let mut stats = self.stats.lock().await;
                     stats.cache_writes += 1;
                     stats.cache_write_duration += info.duration;
-                    stats.active_compilations -= 1;
                 }
             }
-        } else {
-            self.stats.lock().await.active_compilations -= 1;
         }
 
         Ok(res)
@@ -1535,8 +1526,6 @@ pub struct ServerStats {
     pub dist_compiles: HashMap<String, usize>,
     /// The count of compilations that were distributed but failed and had to be re-run locally
     pub dist_errors: u64,
-    /// Number of current active compilations
-    pub active_compilations: u64,
 }
 
 /// Info and stats about the server.
@@ -1584,7 +1573,6 @@ impl Default for ServerStats {
             not_cached: HashMap::new(),
             dist_compiles: HashMap::new(),
             dist_errors: u64::default(),
-            active_compilations: u64::default(),
         }
     }
 }
@@ -1648,7 +1636,6 @@ impl ServerStats {
 
         let mut stats_vec = vec![];
         //TODO: this would be nice to replace with a custom derive implementation.
-        set_stat!(stats_vec, self.active_compilations, "Active compilations");
         set_stat!(stats_vec, self.compile_requests, "Compile requests");
         set_stat!(
             stats_vec,
