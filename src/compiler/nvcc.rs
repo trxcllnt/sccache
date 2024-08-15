@@ -76,12 +76,12 @@ impl CCompilerImpl for Nvcc {
         let mut arguments = arguments.to_vec();
 
         if let Ok(flags) = std::env::var("NVCC_PREPEND_FLAGS") {
-            arguments.extend(
-                shlex::split(&flags)
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|s| s.clone().into_arg_os_string())
-            );
+            arguments = shlex::split(&flags)
+                .unwrap_or_default()
+                .iter()
+                .map(|s| s.clone().into_arg_os_string())
+                .chain(arguments.iter().cloned())
+                .collect::<Vec<_>>();
         }
 
         if let Ok(flags) = std::env::var("NVCC_APPEND_FLAGS") {
@@ -129,6 +129,11 @@ impl CCompilerImpl for Nvcc {
     where
         T: CommandCreatorSync,
     {
+        let env_vars = env_vars.iter()
+            .filter(|(k, _)| k != "NVCC_PREPEND_FLAGS" && k != "NVCC_APPEND_FLAGS")
+            .cloned()
+            .collect::<Vec<_>>();
+
         let language = match parsed_args.language {
             Language::C => Ok("c"),
             Language::Cxx => Ok("c++"),
@@ -170,9 +175,7 @@ impl CCompilerImpl for Nvcc {
             dep_cmd
                 .args(&transformed_deps)
                 .env_clear()
-                .envs(env_vars.to_vec())
-                .env("NVCC_PREPEND_FLAGS", "")
-                .env("NVCC_APPEND_FLAGS", "")
+                .envs(env_vars.clone())
                 .current_dir(cwd);
 
             if log_enabled!(Trace) {
@@ -198,9 +201,7 @@ impl CCompilerImpl for Nvcc {
         cmd.arg("-E")
             .arg(no_line_num_flag)
             .env_clear()
-            .envs(env_vars.to_vec())
-            .env("NVCC_PREPEND_FLAGS", "")
-            .env("NVCC_APPEND_FLAGS", "")
+            .envs(env_vars.clone())
             .current_dir(cwd);
         if log_enabled!(Trace) {
             trace!("preprocess: {:?}", cmd);
@@ -265,6 +266,11 @@ pub fn generate_compile_commands(
     cwd: &Path,
     env_vars: &[(OsString, OsString)]
 ) -> Result<(NvccCompileCommand, Option<dist::CompileCommand>, Cacheable)> {
+
+    let env_vars = env_vars.iter()
+        .filter(|(k, _)| k != "NVCC_PREPEND_FLAGS" && k != "NVCC_APPEND_FLAGS")
+        .cloned()
+        .collect::<Vec<_>>();
 
     let temp_dir = tempfile::Builder::new().prefix("sccache_nvcc").tempdir().unwrap().into_path();
 
@@ -384,7 +390,7 @@ pub fn generate_compile_commands(
         num_parallel,
         executable: executable.to_owned(),
         arguments,
-        env_vars: env_vars.to_vec(),
+        env_vars,
         cwd: cwd.to_owned(),
     };
 
@@ -569,8 +575,6 @@ where
         .env_clear()
         .args(arguments)
         .envs(env_vars.to_vec())
-        .env("NVCC_PREPEND_FLAGS", "")
-        .env("NVCC_APPEND_FLAGS", "")
         .current_dir(cwd)
         .stdin(process::Stdio::null())
         .stdout(process::Stdio::null())
@@ -845,12 +849,9 @@ where
             Cacheable::No => {
                 let mut cmd = creator.clone().new_command_sync(exe);
 
-                cmd.args(args)
-                    .env_clear()
+                cmd
+                    .args(args)
                     .current_dir(cwd)
-                    .envs(env_vars.to_vec())
-                    .env("NVCC_PREPEND_FLAGS", "")
-                    .env("NVCC_APPEND_FLAGS", "");
 
                 run_input_output(cmd, None)
                     .map_ok_or_else(
@@ -866,6 +867,8 @@ where
                     )
                     .await
                 },
+                    .env_clear()
+                    .envs(env_vars.to_vec());
             Cacheable::Yes => {
 
                 use futures::future;
