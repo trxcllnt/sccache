@@ -23,7 +23,7 @@ use crate::compiler::{
     CompileCommandImpl, CompilerArguments, Language,
 };
 use crate::mock_command::{
-    exit_status, ExitStatusValue, CommandChild, CommandCreator, CommandCreatorSync, RunCommand,
+    exit_status, CommandChild, CommandCreator, CommandCreatorSync, ExitStatusValue, RunCommand,
 };
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist, protocol, server};
