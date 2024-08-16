@@ -225,7 +225,7 @@ pub async fn preprocess(cwd: &Path, parsed_args: &ParsedArguments) -> Result<pro
         cwd.join(&parsed_args.input)
     };
     std::fs::read(input)
-        .map_err(|e| anyhow::Error::new(e))
+        .map_err(anyhow::Error::new)
         .map(|s| process::Output {
             status: process::ExitStatus::default(),
             stdout: s.to_vec(),

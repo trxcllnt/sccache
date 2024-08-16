@@ -635,11 +635,11 @@ where
 
 #[cfg(not(feature = "dist-client"))]
 async fn dist_or_local_compile<T>(
-    service: server::SccacheService<T>,
+    service: &server::SccacheService<T>,
     _dist_client: Option<Arc<dyn dist::Client>>,
     creator: T,
     _cwd: PathBuf,
-    compilation: Box<dyn Compilation>,
+    compilation: Box<dyn Compilation<T>>,
     _weak_toolchain_key: String,
     out_pretty: String,
 ) -> Result<(Cacheable, DistType, process::Output)>

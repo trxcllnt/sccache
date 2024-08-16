@@ -182,6 +182,7 @@ impl DistClientContainer {
         Self {}
     }
 
+    #[cfg(feature = "dist-client")]
     pub fn new_with_state(_: DistClientState) -> Self {
         Self {}
     }
@@ -216,6 +217,7 @@ impl DistClientContainer {
         }
     }
 
+    #[cfg(feature = "dist-client")]
     pub fn new_with_state(state: DistClientState) -> Self {
         Self {
             state: futures::lock::Mutex::new(state),
@@ -895,6 +897,7 @@ where
         }
     }
 
+    #[cfg(feature = "dist-client")]
     pub fn mock_with_dist_client(
         dist_client: Arc<dyn dist::Client>,
         storage: Arc<dyn Storage>,

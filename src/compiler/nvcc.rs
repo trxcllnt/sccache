@@ -23,7 +23,7 @@ use crate::compiler::{
     CompileCommandImpl, CompilerArguments, Language,
 };
 use crate::mock_command::{
-    exit_status, CommandChild, CommandCreator, CommandCreatorSync, RunCommand,
+    exit_status, ExitStatusValue, CommandChild, CommandCreator, CommandCreatorSync, RunCommand,
 };
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist, protocol, server};
@@ -640,8 +640,8 @@ where
             if val != " " {
                 pair.1 = val
                     .trim()
-                    .split(" ")
-                    .map(|x| x.trim_start_matches("\"").trim_end_matches("\""))
+                    .split(' ')
+                    .map(|x| x.trim_start_matches('\"').trim_end_matches('\"'))
                     .collect::<Vec<_>>()
                     .join(" ")
                     .into();
@@ -685,7 +685,7 @@ where
         ext_counts: &mut HashMap<String, i32>,
     ) {
         for arg in &mut args[..] {
-            let maybe_ext = (!arg.starts_with("-"))
+            let maybe_ext = (!arg.starts_with('-'))
                 .then(|| {
                     [
                         ".ptx",
@@ -960,7 +960,7 @@ fn aggregate_output(acc: &mut process::Output, res: Result<process::Output>) {
     acc.status = exit_status(std::cmp::max(
         acc.status.code().unwrap_or(0),
         out.status.code().unwrap_or(0),
-    ));
+    ) as ExitStatusValue);
     acc.stdout.extend(out.stdout);
     acc.stderr.extend(out.stderr);
 }
@@ -969,7 +969,7 @@ fn error_to_output(err: Error) -> process::Output {
     match err.downcast::<ProcessError>() {
         Ok(ProcessError(out)) => out,
         Err(err) => process::Output {
-            status: exit_status(1),
+            status: exit_status(1 as ExitStatusValue),
             stdout: vec![],
             stderr: err.to_string().into_bytes(),
         },
@@ -978,7 +978,7 @@ fn error_to_output(err: Error) -> process::Output {
 
 fn compile_result_to_output(res: protocol::CompileFinished) -> process::Output {
     process::Output {
-        status: exit_status(res.retcode.or(res.signal).unwrap_or(0)),
+        status: exit_status(res.retcode.or(res.signal).unwrap_or(0) as ExitStatusValue),
         stdout: res.stdout,
         stderr: res.stderr,
     }
