@@ -57,7 +57,7 @@ impl CCompilerImpl for Cicc {
         arguments: &[OsString],
         cwd: &Path,
     ) -> CompilerArguments<ParsedArguments> {
-        parse_arguments(arguments, cwd, Language::Ptx, 3, &ARGS[..])
+        parse_arguments(arguments, cwd, Language::Ptx, &ARGS[..])
     }
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
@@ -74,6 +74,11 @@ impl CCompilerImpl for Cicc {
     where
         T: CommandCreatorSync,
     {
+        trace!(
+            "cicc preprocessed input file: cwd={:?} path={:?}",
+            cwd,
+            &parsed_args.input
+        );
         preprocess(cwd, parsed_args).await
     }
     fn generate_compile_commands<T>(
@@ -104,20 +109,16 @@ pub fn parse_arguments<S>(
     arguments: &[OsString],
     cwd: &Path,
     language: Language,
-    input_distance_from_end: usize,
     arg_info: S,
 ) -> CompilerArguments<ParsedArguments>
 where
     S: SearchableArgInfo<ArgData>,
 {
     let mut args = arguments.to_vec();
-    let input_loc = arguments.len() - input_distance_from_end;
+    let input_loc = arguments.len() - 3;
     let input = args.splice(input_loc..input_loc + 1, []).next().unwrap();
 
     let mut take_next = false;
-    let mut gen_module_id_file = false;
-    let mut module_id_file_name = None;
-
     let mut extra_inputs = vec![];
     let mut outputs = HashMap::new();
 
@@ -128,46 +129,46 @@ where
         match arg {
             Ok(arg) => {
                 let args = match arg.get_data() {
-                    Some(GenModuleIdFileFlag) => {
-                        take_next = false;
-                        gen_module_id_file = true;
-                        &mut common_args
-                    }
-                    Some(ModuleIdFileName(o)) => {
-                        take_next = false;
-                        module_id_file_name = Some(cwd.join(o));
-                        &mut common_args
-                    }
-
                     Some(PassThrough(_)) => {
                         take_next = false;
                         &mut common_args
                     }
                     Some(Output(o)) => {
                         take_next = false;
+                        let path = cwd.join(o);
                         outputs.insert(
                             "obj",
                             ArtifactDescriptor {
-                                path: cwd.join(o),
+                                path,
                                 optional: false,
                             },
                         );
                         continue;
                     }
+                    Some(UnhashedInput(o)) => {
+                        take_next = false;
+                        let path = cwd.join(o);
+                        if !path.exists() {
+                            continue;
+                        }
+                        extra_inputs.push(path);
+                        &mut unhashed_args
+                    }
                     Some(UnhashedOutput(o)) => {
                         take_next = false;
+                        let path = cwd.join(o);
                         if let Some(flag) = arg.flag_str() {
                             outputs.insert(
                                 flag,
                                 ArtifactDescriptor {
-                                    path: cwd.join(o),
+                                    path,
                                     optional: false,
                                 },
                             );
                         }
                         &mut unhashed_args
                     }
-                    Some(Unhashed(_)) => {
+                    Some(UnhashedFlag) | Some(Unhashed(_)) => {
                         take_next = false;
                         &mut unhashed_args
                     }
@@ -194,20 +195,6 @@ where
         };
     }
 
-    if let Some(path) = module_id_file_name {
-        if gen_module_id_file {
-            outputs.insert(
-                "--gen_module_id_file",
-                ArtifactDescriptor {
-                    path,
-                    optional: language == Language::Ptx,
-                },
-            );
-        } else {
-            extra_inputs.push(path);
-        }
-    }
-
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),
         outputs,
@@ -220,17 +207,18 @@ where
         common_args,
         arch_args: vec![],
         unhashed_args,
-        extra_dist_files: extra_inputs.clone(),
-        extra_hash_files: extra_inputs.clone(),
+        extra_dist_files: extra_inputs,
+        extra_hash_files: vec![],
         msvc_show_includes: false,
         profile_generate: false,
-        color_mode: ColorMode::Auto,
+        color_mode: ColorMode::Off,
         suppress_rewrite_includes_only: false,
         too_hard_for_preprocessor_cache_mode: None,
     })
 }
 
 pub async fn preprocess(cwd: &Path, parsed_args: &ParsedArguments) -> Result<process::Output> {
+    // cicc and ptxas expect input to be an absolute path
     let input = if parsed_args.input.is_absolute() {
         parsed_args.input.clone()
     } else {
@@ -262,6 +250,8 @@ pub fn generate_compile_commands(
         let _ = path_transformer;
     }
 
+    trace!("compile");
+
     let lang_str = &parsed_args.language.as_str();
     let out_file = match parsed_args.outputs.get("obj") {
         Some(obj) => &obj.path,
@@ -273,16 +263,9 @@ pub fn generate_compile_commands(
     arguments.extend_from_slice(&parsed_args.unhashed_args);
     arguments.extend(vec![
         (&parsed_args.input).into(),
+        "-o".into(),
+        out_file.into(),
     ]);
-
-    // hack -- don't add `-o` for cudafe++
-    if parsed_args.language != Language::Cxx {
-        arguments.extend(vec![
-            "-o".into(),
-            out_file.into(),
-        ]);
-    }
-
 
     let command = SingleCompileCommand {
         executable: executable.to_owned(),
@@ -290,17 +273,6 @@ pub fn generate_compile_commands(
         env_vars: env_vars.to_owned(),
         cwd: cwd.to_owned(),
     };
-
-    if log_enabled!(log::Level::Trace) {
-        trace!("cicc::generate_compile_commands {:?}",
-            [
-                vec![command.executable.as_os_str().to_owned()],
-                command.arguments.to_owned()
-            ]
-            .concat()
-            .join(std::ffi::OsStr::new(" "))
-        );
-    }
 
     #[cfg(not(feature = "dist-client"))]
     let dist_command = None;
@@ -326,10 +298,10 @@ pub fn generate_compile_commands(
 }
 
 ArgData! { pub
-    GenModuleIdFileFlag,
-    ModuleIdFileName(PathBuf),
     Output(PathBuf),
+    UnhashedInput(PathBuf),
     UnhashedOutput(PathBuf),
+    UnhashedFlag,
     PassThrough(OsString),
     Unhashed(OsString),
 }
@@ -339,9 +311,9 @@ use self::ArgData::*;
 counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("--gen_c_file_name", PathBuf, Separated, UnhashedOutput),
     take_arg!("--gen_device_file_name", PathBuf, Separated, UnhashedOutput),
-    flag!("--gen_module_id_file", GenModuleIdFileFlag),
+    flag!("--gen_module_id_file", UnhashedFlag),
     take_arg!("--include_file_name", OsString, Separated, PassThrough),
-    take_arg!("--module_id_file_name", PathBuf, Separated, ModuleIdFileName),
+    take_arg!("--module_id_file_name", PathBuf, Separated, UnhashedInput),
     take_arg!("--stub_file_name", PathBuf, Separated, UnhashedOutput),
     take_arg!("-o", PathBuf, Separated, Output),
 ]);

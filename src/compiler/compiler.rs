@@ -26,7 +26,6 @@ use crate::compiler::nvcc::Nvcc;
 use crate::compiler::nvcc::NvccHostCompiler;
 use crate::compiler::nvhpc::Nvhpc;
 use crate::compiler::ptxas::Ptxas;
-use crate::compiler::cudafe::Cudafe;
 use crate::compiler::rust::{Rust, RustupProxy};
 use crate::compiler::tasking_vx::TaskingVX;
 #[cfg(feature = "dist-client")]
@@ -301,7 +300,6 @@ impl CompilerKind {
             CompilerKind::C(CCompilerKind::Msvc) => textual_lang + " [msvc]",
             CompilerKind::C(CCompilerKind::Nvcc) => textual_lang + " [nvcc]",
             CompilerKind::C(CCompilerKind::Cicc) => textual_lang + " [cicc]",
-            CompilerKind::C(CCompilerKind::Cudafe) => textual_lang + " [cudafe]",
             CompilerKind::C(CCompilerKind::Ptxas) => textual_lang + " [ptxas]",
             CompilerKind::C(CCompilerKind::Nvhpc) => textual_lang + " [nvhpc]",
             CompilerKind::C(CCompilerKind::TaskingVX) => textual_lang + " [taskingvx]",
@@ -1119,17 +1117,6 @@ fn is_rustc_like<P: AsRef<Path>>(p: P) -> bool {
     )
 }
 
-/// Returns true if the given path looks like cudafe++
-fn is_nvidia_cudafe<P: AsRef<Path>>(p: P) -> bool {
-    matches!(
-        p.as_ref()
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_lowercase())
-            .as_deref(),
-        Some("cudafe++")
-    )
-}
-
 /// Returns true if the given path looks like cicc
 fn is_nvidia_cicc<P: AsRef<Path>>(p: P) -> bool {
     matches!(
@@ -1213,18 +1200,6 @@ where
 
     let rustc_executable = if let Some(ref rustc_executable) = maybe_rustc_executable {
         rustc_executable
-    } else if is_nvidia_cudafe(executable) {
-        debug!("Found cudafe++");
-        return CCompiler::new(
-            Cudafe {
-                // TODO: Use nvcc --version
-                version: Some(String::new()),
-            },
-            executable.to_owned(),
-            &pool,
-        )
-        .await
-        .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
     } else if is_nvidia_cicc(executable) {
         debug!("Found cicc");
         return CCompiler::new(
