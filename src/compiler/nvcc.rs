@@ -785,7 +785,9 @@ where
                     // * Run cudafe++, cicc, ptxas, and fatbinary in `temp_dir`
                     // * Run host preprocessing and compilation steps in `cwd`
                     let (dir, cacheable) = match exe.file_name().and_then(|s| s.to_str()) {
-                        Some("cudafe++") | Some("cicc") | Some("ptxas") => (temp_dir, Cacheable::Yes),
+                        Some("cudafe++") | Some("cicc") | Some("ptxas") => {
+                            (temp_dir, Cacheable::Yes)
+                        }
                         Some("fatbinary") => {
                             // The fatbinary command represents the start of the last group
                             command_groups.push(vec![]);
