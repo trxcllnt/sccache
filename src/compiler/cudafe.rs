@@ -38,14 +38,14 @@ use crate::errors::*;
 
 /// A unit struct on which to implement `CCompilerImpl`.
 #[derive(Clone, Debug)]
-pub struct Ptxas {
+pub struct Cudafe {
     pub version: Option<String>,
 }
 
 #[async_trait]
-impl CCompilerImpl for Ptxas {
+impl CCompilerImpl for Cudafe {
     fn kind(&self) -> CCompilerKind {
-        CCompilerKind::Ptxas
+        CCompilerKind::Cudafe
     }
     fn plusplus(&self) -> bool {
         true
@@ -58,7 +58,16 @@ impl CCompilerImpl for Ptxas {
         arguments: &[OsString],
         cwd: &Path,
     ) -> CompilerArguments<ParsedArguments> {
-        cicc::parse_arguments(arguments, cwd, Language::Cubin, 3, &ARGS[..])
+        let parsed_args = cicc::parse_arguments(arguments, cwd, Language::Cxx, 1, &ARGS[..]);
+        match parsed_args {
+            CompilerArguments::Ok(mut parsed_args) => {
+                if let Some(f) = parsed_args.outputs.remove("--gen_c_file_name") {
+                    parsed_args.outputs.insert("obj", f);
+                }
+                CompilerArguments::Ok(parsed_args)
+            }
+            CompilerArguments::CannotCache(_, _) | CompilerArguments::NotCompilation => parsed_args,
+        }
     }
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
@@ -95,7 +104,7 @@ impl CCompilerImpl for Ptxas {
     {
         cicc::generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
             .map(|(command, dist_command, cacheable)| {
-                (CCompileCommand::new(command), dist_command, cacheable)
+                (CCompileCommand::new(command), None, cacheable)
             })
     }
 }
@@ -103,7 +112,7 @@ impl CCompilerImpl for Ptxas {
 use cicc::ArgData::*;
 
 counted_array!(pub static ARGS: [ArgInfo<cicc::ArgData>; _] = [
-    take_arg!("-arch", OsString, CanBeSeparated, PassThrough),
-    take_arg!("-m", OsString, CanBeSeparated, PassThrough),
-    take_arg!("-o", PathBuf, Separated, Output),
+    take_arg!("--gen_c_file_name", PathBuf, Separated, UnhashedOutput),
+    flag!("--gen_module_id_file", GenModuleIdFileFlag),
+    take_arg!("--module_id_file_name", PathBuf, Separated, ModuleIdFileName),
 ]);
