@@ -271,12 +271,18 @@ pub fn generate_compile_commands(
     let mut arguments: Vec<OsString> = vec![];
     arguments.extend_from_slice(&parsed_args.common_args);
     arguments.extend_from_slice(&parsed_args.unhashed_args);
-    arguments.extend(vec![(&parsed_args.input).into()]);
+    arguments.extend(vec![
+        (&parsed_args.input).into(),
+    ]);
 
     // hack -- don't add `-o` for cudafe++
     if parsed_args.language != Language::Cxx {
-        arguments.extend(vec!["-o".into(), out_file.into()]);
+        arguments.extend(vec![
+            "-o".into(),
+            out_file.into(),
+        ]);
     }
+
 
     let command = SingleCompileCommand {
         executable: executable.to_owned(),
@@ -286,8 +292,7 @@ pub fn generate_compile_commands(
     };
 
     if log_enabled!(log::Level::Trace) {
-        trace!(
-            "cicc::generate_compile_commands {:?}",
+        trace!("cicc::generate_compile_commands {:?}",
             [
                 vec![command.executable.as_os_str().to_owned()],
                 command.arguments.to_owned()

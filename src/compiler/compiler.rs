@@ -18,7 +18,6 @@ use crate::compiler::args::*;
 use crate::compiler::c::{CCompiler, CCompilerKind};
 use crate::compiler::cicc::Cicc;
 use crate::compiler::clang::Clang;
-use crate::compiler::cudafe::Cudafe;
 use crate::compiler::diab::Diab;
 use crate::compiler::gcc::Gcc;
 use crate::compiler::msvc;
@@ -27,6 +26,7 @@ use crate::compiler::nvcc::Nvcc;
 use crate::compiler::nvcc::NvccHostCompiler;
 use crate::compiler::nvhpc::Nvhpc;
 use crate::compiler::ptxas::Ptxas;
+use crate::compiler::cudafe::Cudafe;
 use crate::compiler::rust::{Rust, RustupProxy};
 use crate::compiler::tasking_vx::TaskingVX;
 #[cfg(feature = "dist-client")]
