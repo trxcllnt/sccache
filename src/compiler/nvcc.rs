@@ -104,13 +104,27 @@ impl CCompilerImpl for Nvcc {
         );
 
         match parsed_args {
-            CompilerArguments::Ok(pargs) => {
-                if pargs.compilation_flag != "-c" {
-                    let mut new_args = pargs.clone();
-                    new_args.common_args.push(pargs.compilation_flag);
-                    return CompilerArguments::Ok(new_args);
+            CompilerArguments::Ok(mut parsed_args) => {
+                match parsed_args.compilation_flag.to_str() {
+                    Some("") => { /* no compile flag is valid */ }
+                    Some(flag) => {
+                        // Add the compilation flag to `parsed_args.common_args` so
+                        // it's considered when computing the hash.
+                        //
+                        // Consider the following cases:
+                        //  $ sccache nvcc x.cu -o x.bin
+                        //  $ sccache nvcc x.cu -o x.cu.o -c
+                        //  $ sccache nvcc x.cu -o x.ptx -ptx
+                        //  $ sccache nvcc x.cu -o x.cubin -cubin
+                        //
+                        // The preprocessor output for all four are identical, so
+                        // without including the compilation flag in the hasher's
+                        // inputs, the same hash would be generated for all four.
+                        parsed_args.common_args.push(flag.into());
+                    }
+                    _ => unreachable!(),
                 }
-                CompilerArguments::Ok(pargs)
+                CompilerArguments::Ok(parsed_args)
             }
             CompilerArguments::CannotCache(_, _) | CompilerArguments::NotCompilation => parsed_args,
         }
@@ -148,82 +162,66 @@ impl CCompilerImpl for Nvcc {
 
         let initialize_cmd_and_args = || {
             let mut command = creator.clone().new_command_sync(executable);
-            command.args(&parsed_args.preprocessor_args);
-            command.args(&parsed_args.common_args);
-            //We need to add "-rdc=true" if we are compiling with `-dc`
-            //So that the preprocessor has the correct implicit defines
-            if parsed_args.compilation_flag == "-dc" {
-                command.arg("-rdc=true");
-            }
-            command.arg("-x").arg(language).arg(&parsed_args.input);
-
+            command
+                .current_dir(cwd)
+                .env_clear()
+                .envs(env_vars.clone())
+                .args(&parsed_args.preprocessor_args)
+                .args(&parsed_args.common_args)
+                .arg("-x")
+                .arg(language)
+                .arg(&parsed_args.input);
             command
         };
 
-        let dep_before_preprocessor = || {
-            //NVCC doesn't support generating both the dependency information
-            //and the preprocessor output at the same time. So if we have
-            //need for both we need separate compiler invocations
-            let mut dep_cmd = initialize_cmd_and_args();
-            let mut transformed_deps = vec![];
-            for item in parsed_args.dependency_args.iter() {
-                if item == "-MD" {
-                    transformed_deps.push(OsString::from("-M"));
-                } else if item == "-MMD" {
-                    transformed_deps.push(OsString::from("-MM"));
-                } else {
-                    transformed_deps.push(item.clone());
-                }
-            }
-            dep_cmd
-                .args(&transformed_deps)
-                .env_clear()
-                .envs(env_vars.clone())
-                .current_dir(cwd);
-
+        let dependencies_command = || {
+            // NVCC doesn't support generating both the dependency information
+            // and the preprocessor output at the same time. So if we have
+            // need for both, we need separate compiler invocations
+            let mut dependency_cmd = initialize_cmd_and_args();
+            dependency_cmd.args(
+                &parsed_args
+                    .dependency_args
+                    .iter()
+                    .map(|arg| match arg.to_str().unwrap_or_default() {
+                        "-MD" | "--generate-dependencies-with-compile" => "-M",
+                        "-MMD" | "--generate-nonsystem-dependencies-with-compile" => "-MM",
+                        arg => arg,
+                    })
+                    // protect against duplicate -M and -MM flags after transform
+                    .unique()
+                    .collect::<Vec<_>>(),
+            );
             if log_enabled!(Trace) {
-                trace!("dep-gen command: {:?}", dep_cmd);
+                trace!("dependencies command: {:?}", dependency_cmd);
             }
-            dep_cmd
+            dependency_cmd
         };
 
-        trace!("preprocess");
-        let mut cmd = initialize_cmd_and_args();
-
-        // NVCC only supports `-E` when it comes after preprocessor
-        // and common flags.
-        //
-        // nvc/nvc++ don't support no line numbers to console
-        // msvc requires the `-EP` flag to output no line numbers to console
-        // other host compilers are presumed to match `gcc` behavior
-        let no_line_num_flag = match self.host_compiler {
-            NvccHostCompiler::Nvhpc => "",
-            NvccHostCompiler::Msvc => "-Xcompiler=-EP",
-            NvccHostCompiler::Gcc => "-Xcompiler=-P",
+        let preprocessor_command = || {
+            let mut preprocess_cmd = initialize_cmd_and_args();
+            // NVCC only supports `-E` when it comes after preprocessor and common flags.
+            preprocess_cmd.arg("-E");
+            preprocess_cmd.arg(match self.host_compiler {
+                // nvc/nvc++ don't support eliding line numbers
+                NvccHostCompiler::Nvhpc => "",
+                // msvc requires the `-EP` flag to elide line numbers
+                NvccHostCompiler::Msvc => "-Xcompiler=-EP",
+                // other host compilers are presumed to match `gcc` behavior
+                NvccHostCompiler::Gcc => "-Xcompiler=-P",
+            });
+            if log_enabled!(Trace) {
+                trace!("preprocessor command: {:?}", preprocess_cmd);
+            }
+            preprocess_cmd
         };
-        cmd.arg("-E")
-            .arg(no_line_num_flag)
-            .env_clear()
-            .envs(env_vars.clone())
-            .current_dir(cwd);
 
-        if log_enabled!(Trace) {
-            trace!("preprocess: {:?}", cmd);
-        }
-
-        // Need to chain the dependency generation and the preprocessor
-        // to emulate a `proper` front end
+        // Chain dependency generation and the preprocessor command to emulate a `proper` front end
         if !parsed_args.dependency_args.is_empty() {
-            let first = run_input_output(dep_before_preprocessor(), None);
-            let second = run_input_output(cmd, None);
-            // TODO: If we need to chain these to emulate a frontend, shouldn't
-            // we explicitly wait on the first one before starting the second one?
-            // (rather than via try_join, which drives these concurrently)
-            let (_f, s) = futures::future::try_join(first, second).await?;
-            Ok(s)
-        } else {
-            run_input_output(cmd, None).await
+            run_input_output(dependencies_command(), None).await?;
         }
+
+        run_input_output(preprocessor_command(), None).await
     }
 
     fn generate_compile_commands<T>(
@@ -992,11 +990,15 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("--compiler-bindir", OsString, CanBeSeparated('='), PassThrough),
     take_arg!("--compiler-options", OsString, CanBeSeparated('='), PreprocessorArgument),
     flag!("--cubin", DoCompilation),
+    flag!("--device-c", DoCompilation),
+    flag!("--device-w", DoCompilation),
     flag!("--expt-extended-lambda", PreprocessorArgumentFlag),
     flag!("--expt-relaxed-constexpr", PreprocessorArgumentFlag),
     flag!("--extended-lambda", PreprocessorArgumentFlag),
     flag!("--fatbin", DoCompilation),
     take_arg!("--generate-code", OsString, CanBeSeparated('='), PassThrough),
+    flag!("--generate-dependencies-with-compile", NeedDepTarget),
+    flag!("--generate-nonsystem-dependencies-with-compile", NeedDepTarget),
     take_arg!("--gpu-architecture", OsString, CanBeSeparated('='), PassThrough),
     take_arg!("--gpu-code", OsString, CanBeSeparated('='), PassThrough),
     take_arg!("--include-path", PathBuf, CanBeSeparated('='), PreprocessorArgumentPath),
@@ -1026,6 +1028,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("-code", OsString, CanBeSeparated('='), PassThrough),
     flag!("-cubin", DoCompilation),
     flag!("-dc", DoCompilation),
+    flag!("-dw", DoCompilation),
     flag!("-expt-extended-lambda", PreprocessorArgumentFlag),
     flag!("-expt-relaxed-constexpr", PreprocessorArgumentFlag),
     flag!("-extended-lambda", PreprocessorArgumentFlag),
@@ -1120,7 +1123,7 @@ mod test {
             )
         );
         assert!(a.preprocessor_args.is_empty());
-        assert!(a.common_args.is_empty());
+        assert_eq!(ovec!["-c"], a.common_args);
     }
 
     #[test]
@@ -1139,7 +1142,7 @@ mod test {
             )
         );
         assert!(a.preprocessor_args.is_empty());
-        assert!(a.common_args.is_empty());
+        assert_eq!(ovec!["-c"], a.common_args);
     }
 
     #[test]
@@ -1158,7 +1161,7 @@ mod test {
             )
         );
         assert!(a.preprocessor_args.is_empty());
-        assert!(a.common_args.is_empty());
+        assert_eq!(ovec!["-c"], a.common_args);
     }
 
     fn test_parse_arguments_simple_cu_msvc() {
@@ -1176,7 +1179,7 @@ mod test {
             )
         );
         assert!(a.preprocessor_args.is_empty());
-        assert!(a.common_args.is_empty());
+        assert_eq!(ovec!["-c"], a.common_args);
     }
 
     #[test]
@@ -1195,7 +1198,7 @@ mod test {
             )
         );
         assert!(a.preprocessor_args.is_empty());
-        assert_eq!(ovec!["-ccbin", "gcc"], a.common_args);
+        assert_eq!(ovec!["-ccbin", "gcc", "-c"], a.common_args);
     }
 
     #[test]
@@ -1214,7 +1217,7 @@ mod test {
             )
         );
         assert!(a.preprocessor_args.is_empty());
-        assert_eq!(ovec!["-ccbin", "/usr/bin/"], a.common_args);
+        assert_eq!(ovec!["-ccbin", "/usr/bin/", "-c"], a.common_args);
     }
 
     #[test]
@@ -1265,7 +1268,7 @@ mod test {
             )
         );
         assert!(a.preprocessor_args.is_empty());
-        assert!(a.common_args.is_empty());
+        assert_eq!(ovec!["-c"], a.common_args);
     }
 
     #[test]
@@ -1372,7 +1375,7 @@ mod test {
             a.preprocessor_args
         );
         assert!(a.dependency_args.is_empty());
-        assert_eq!(ovec!["-fabc"], a.common_args);
+        assert_eq!(ovec!["-fabc", "-c"], a.common_args);
     }
 
     #[test]
@@ -1398,7 +1401,7 @@ mod test {
             ovec!["-MD", "-MF", "foo.o.d", "-MT", "foo.o"],
             a.dependency_args
         );
-        assert_eq!(ovec!["-fabc"], a.common_args);
+        assert_eq!(ovec!["-fabc", "-c"], a.common_args);
     }
 
     #[test]
@@ -1426,7 +1429,7 @@ mod test {
         );
         assert!(a.preprocessor_args.is_empty());
         assert_eq!(
-            ovec!["--generate-code", "arch=compute_61,code=sm_61"],
+            ovec!["--generate-code", "arch=compute_61,code=sm_61", "-c"],
             a.common_args
         );
     }
@@ -1478,7 +1481,8 @@ mod test {
                 "-Xnvlink",
                 "--suppress-stack-size-warning",
                 "-Xcudafe",
-                "--display_error_number"
+                "--display_error_number",
+                "-c"
             ],
             a.common_args
         );
@@ -1515,7 +1519,7 @@ mod test {
             a.preprocessor_args
         );
         assert_eq!(
-            ovec!["-forward-unknown-to-host-compiler", "-std=c++14"],
+            ovec!["-forward-unknown-to-host-compiler", "-std=c++14", "-c"],
             a.common_args
         );
     }

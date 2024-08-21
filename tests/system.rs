@@ -115,17 +115,18 @@ fn compile_cmdline<T: AsRef<OsStr>>(
 fn compile_cuda_cmdline<T: AsRef<OsStr>>(
     compiler: &str,
     exe: T,
+    compile_flag: &str,
     input: &str,
     output: &str,
     mut extra_args: Vec<OsString>,
 ) -> Vec<OsString> {
     let mut arg = match compiler {
-        "nvcc" => vec_from!(OsString, exe.as_ref(), "-c", input, "-o", output),
+        "nvcc" => vec_from!(OsString, exe.as_ref(), compile_flag, input, "-o", output),
         "clang++" => {
             vec_from!(
                 OsString,
                 exe,
-                "-c",
+                compile_flag,
                 input,
                 "--cuda-gpu-arch=sm_50",
                 format!("-Fo{}", output)
@@ -571,6 +572,7 @@ fn test_cuda_compiles(compiler: &Compiler, tempdir: &Path) {
         .args(compile_cuda_cmdline(
             name,
             exe,
+            "-c",
             INPUT_FOR_CUDA_A,
             // relative path for output
             out_file.file_name().unwrap().to_string_lossy().as_ref(),
@@ -605,6 +607,7 @@ fn test_cuda_compiles(compiler: &Compiler, tempdir: &Path) {
         .args(compile_cuda_cmdline(
             name,
             exe,
+            "-c",
             INPUT_FOR_CUDA_A,
             // absolute path for output
             out_file.to_string_lossy().as_ref(),
@@ -647,6 +650,7 @@ fn test_cuda_compiles(compiler: &Compiler, tempdir: &Path) {
         .args(compile_cuda_cmdline(
             name,
             exe,
+            "-c",
             INPUT_FOR_CUDA_B,
             // absolute path for output
             out_file.to_string_lossy().as_ref(),
@@ -688,10 +692,11 @@ fn test_cuda_compiles(compiler: &Compiler, tempdir: &Path) {
         .args(compile_cuda_cmdline(
             name,
             exe,
+            "-ptx",
             INPUT_FOR_CUDA_A,
             // relative path for output
             out_file.file_name().unwrap().to_string_lossy().as_ref(),
-            vec!["-ptx".into()],
+            Vec::new(),
         ))
         .current_dir(tempdir)
         .envs(env_vars.clone())
@@ -729,10 +734,11 @@ fn test_cuda_compiles(compiler: &Compiler, tempdir: &Path) {
         .args(compile_cuda_cmdline(
             name,
             exe,
+            "-cubin",
             INPUT_FOR_CUDA_A,
             // absolute path for output
             out_file.to_string_lossy().as_ref(),
-            vec!["-cubin".into()],
+            Vec::new(),
         ))
         .current_dir(tempdir)
         .envs(env_vars.clone())
