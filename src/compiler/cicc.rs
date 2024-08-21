@@ -74,11 +74,6 @@ impl CCompilerImpl for Cicc {
     where
         T: CommandCreatorSync,
     {
-        trace!(
-            "cicc preprocessed input file: cwd={:?} path={:?}",
-            cwd,
-            &parsed_args.input
-        );
         preprocess(cwd, parsed_args).await
     }
     fn generate_compile_commands<T>(

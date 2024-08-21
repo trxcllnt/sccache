@@ -75,11 +75,6 @@ impl CCompilerImpl for Ptxas {
     where
         T: CommandCreatorSync,
     {
-        trace!(
-            "ptxas preprocessed input file: cwd={:?} path={:?}",
-            cwd,
-            &parsed_args.input
-        );
         cicc::preprocess(cwd, parsed_args).await
     }
     fn generate_compile_commands<T>(
