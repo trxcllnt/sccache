@@ -223,7 +223,7 @@ pub async fn preprocess(cwd: &Path, parsed_args: &ParsedArguments) -> Result<pro
         .map_err(anyhow::Error::new)
         .map(|s| process::Output {
             status: process::ExitStatus::default(),
-            stdout: s.to_vec(),
+            stdout: s,
             stderr: vec![],
         })
 }
