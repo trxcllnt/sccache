@@ -40,7 +40,6 @@ use std::future::{Future, IntoFuture};
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
-use tokio::io::AsyncBufReadExt;
 use which::which_in;
 
 use crate::errors::*;
@@ -523,7 +522,7 @@ impl CompileCommandImpl for NvccCompileCommand {
                 .await;
 
                 for result in results {
-                    aggregate_output(&mut output, result);
+                    output = aggregate_output(output, result.unwrap_or_else(error_to_output));
                 }
 
                 if output
@@ -532,14 +531,17 @@ impl CompileCommandImpl for NvccCompileCommand {
                     .and_then(|c| (c != 0).then_some(c))
                     .is_some()
                 {
+                    output.stdout.shrink_to_fit();
+                    output.stderr.shrink_to_fit();
                     maybe_keep_temps_then_clean();
                     return Err(ProcessError(output).into());
                 }
             }
         }
 
+        output.stdout.shrink_to_fit();
+        output.stderr.shrink_to_fit();
         maybe_keep_temps_then_clean();
-
         Ok(output)
     }
 }
@@ -575,19 +577,6 @@ where
             .join(OsStr::new(" "))
         );
     }
-
-    let mut nvcc_dryrun_cmd = creator.clone().new_command_sync(executable);
-
-    nvcc_dryrun_cmd
-        .env_clear()
-        .args(arguments)
-        .envs(env_vars.to_vec())
-        .current_dir(cwd)
-        .stdin(process::Stdio::null())
-        .stdout(process::Stdio::null())
-        .stderr(process::Stdio::piped());
-
-    let mut nvcc_dryrun_cmd = nvcc_dryrun_cmd.spawn().await?;
 
     fn select_valid_dryrun_lines(re: &Regex, line: &str) -> Result<String> {
         match re.captures(line) {
@@ -723,121 +712,118 @@ where
             .collect::<Vec<_>>()
     }
 
-    let nvcc_subcommand_groups = nvcc_dryrun_cmd.take_stderr();
-    let nvcc_subcommand_groups = async move {
-        match nvcc_subcommand_groups {
-            None => Err(anyhow!("failed to read stderr")),
-            Some(stderr) => {
-                let remap_filenames = keep_dir.is_none();
-                let is_valid_line_re = Regex::new(r"^#\$ (.*)$").unwrap();
-                let is_envvar_line_re = Regex::new(r"^([_A-Z]+)=(.*)$").unwrap();
+    let mut nvcc_dryrun_cmd = creator.clone().new_command_sync(executable);
 
-                let mut command_groups: Vec<Vec<NvccGeneratedSubcommand>> = vec![];
-                let mut old_to_new = HashMap::<String, String>::new();
-                let mut ext_counts = HashMap::<String, i32>::new();
+    nvcc_dryrun_cmd
+        .env_clear()
+        .args(arguments)
+        .envs(env_vars.to_vec())
+        .current_dir(cwd);
 
-                let tmp_name =
-                    |name: &String| temp_dir.join(name).into_os_string().into_string().ok();
+    let nvcc_dryrun_output = run_input_output(nvcc_dryrun_cmd, None).await?;
 
-                let reader = tokio::io::BufReader::new(stderr);
-                let mut lines = reader.lines();
+    let remap_filenames = keep_dir.is_none();
+    let is_valid_line_re = Regex::new(r"^#\$ (.*)$").unwrap();
+    let is_envvar_line_re = Regex::new(r"^([_A-Z]+)=(.*)$").unwrap();
 
-                while let Some(line) = lines.next_line().await? {
-                    // Select lines that match the `#$ ` prefix from nvcc --dryrun
-                    let line = select_valid_dryrun_lines(&is_valid_line_re, &line)?;
-                    let maybe_exe_and_args = fold_env_vars_or_split_into_exe_and_args(
-                        &is_envvar_line_re,
-                        env_vars,
-                        cwd,
-                        &line,
-                    );
-                    let (exe, mut args) = match maybe_exe_and_args {
-                        Some(exe_and_args) => exe_and_args,
-                        None => continue,
-                    };
+    let mut no_more_groups = false;
+    let mut command_groups: Vec<Vec<NvccGeneratedSubcommand>> = vec![];
+    let mut old_to_new = HashMap::<String, String>::new();
+    let mut ext_counts = HashMap::<String, i32>::new();
 
-                    // Remap nvcc's generated file names to deterministic names
-                    if remap_filenames {
-                        args = remap_generated_filenames(&args, &mut old_to_new, &mut ext_counts);
-                    }
+    let tmp_name = |name: &String| temp_dir.join(name).into_os_string().into_string().ok();
 
-                    // * cicc and ptxas are cacheable
-                    // * cudafe++ and fatbinary are not cacheable
-                    // * Run cudafe++, cicc, ptxas, and fatbinary in `temp_dir`
-                    // * Run host preprocessing and compilation steps in `cwd`
-                    let (dir, cacheable) = match exe.file_name().and_then(|s| s.to_str()) {
-                        Some("cicc") | Some("ptxas") => (temp_dir, Cacheable::Yes),
-                        Some("cudafe++") => (temp_dir, Cacheable::No),
-                        Some("fatbinary") => {
-                            // The fatbinary command represents the start of the last group
-                            command_groups.push(vec![]);
-                            (temp_dir, Cacheable::No)
-                        }
-                        // Otherwise this is a host compiler command
-                        _ => {
-                            if args.contains(&"-E".to_owned()) {
-                                // Each preprocessor step represents the start of a new command group
-                                command_groups.push(vec![]);
-                                // Rewrite the output path of the preprocessor result to be the tempdir,
-                                // not the cwd where sccache was invoked. cudafe++ embeds the path to the
-                                // device stub as an #include in the file that produces the final object,
-                                // so it must be a deterministic path and name to get cache hits.
-                                let idx = args.len() - 1;
-                                if let Some(path) = args.get(idx).and_then(tmp_name) {
-                                    args[idx] = path;
-                                }
-                                // Do not run preprocessor calls through sccache
-                                (cwd, Cacheable::No)
-                            } else {
-                                // Rewrite the input path of the file compiled by the host compiler into
-                                // the final object. This is the other half of the process described above.
-                                let idx = args.len() - 3;
-                                if let Some(path) = args.get(idx).and_then(tmp_name) {
-                                    args[idx] = path;
-                                }
-                                (cwd, Cacheable::Yes)
-                            }
-                        }
-                    };
+    let reader = std::io::BufReader::new(&nvcc_dryrun_output.stderr[..]);
 
-                    // Initialize the first group in case the first command isn't a call to the host preprocessor,
-                    // i.e. `nvcc -o test.o -c test.c`
-                    if command_groups.is_empty() {
+    for line in reader.lines() {
+        // Select lines that match the `#$ ` prefix from nvcc --dryrun
+        let line = select_valid_dryrun_lines(&is_valid_line_re, &line?)?;
+        let maybe_exe_and_args =
+            fold_env_vars_or_split_into_exe_and_args(&is_envvar_line_re, env_vars, cwd, &line);
+        let (exe, mut args) = match maybe_exe_and_args {
+            Some(exe_and_args) => exe_and_args,
+            None => continue,
+        };
+
+        // Remap nvcc's generated file names to deterministic names
+        if remap_filenames {
+            args = remap_generated_filenames(&args, &mut old_to_new, &mut ext_counts);
+        }
+
+        // * cicc and ptxas are cacheable
+        // * cudafe++ and fatbinary are not cacheable
+        // * Run cudafe++, nvlink, cicc, ptxas, and fatbinary in `temp_dir`
+        // * Run host preprocessing and compilation steps in `cwd`
+        let (dir, cacheable) = match exe.file_name().and_then(|s| s.to_str()) {
+            Some("cicc") | Some("ptxas") => (temp_dir, Cacheable::Yes),
+            Some("cudafe++") | Some("nvlink") => (temp_dir, Cacheable::No),
+            Some("fatbinary") => {
+                // The fatbinary command represents the start of the last group
+                if !no_more_groups {
+                    command_groups.push(vec![]);
+                }
+                no_more_groups = true;
+                (temp_dir, Cacheable::No)
+            }
+            // Otherwise this potentially a host compiler command
+            _ => {
+                // All generated host compiler commands include `-D__CUDA_ARCH_LIST__=`.
+                // If this definition isn't present, this command is either a new binary
+                // in the CTK that we don't know about, or a line like `rm x_dlink.reg.c`
+                // that nvcc generates in certain cases.
+                if !args
+                    .iter()
+                    .any(|arg| arg.starts_with("-D__CUDA_ARCH_LIST__"))
+                {
+                    continue;
+                }
+                if args.contains(&"-E".to_owned()) {
+                    // Each preprocessor step represents the start of a new command group
+                    if !no_more_groups {
                         command_groups.push(vec![]);
                     }
-
-                    match command_groups.last_mut() {
-                        None => {}
-                        Some(group) => {
-                            group.push(NvccGeneratedSubcommand {
-                                exe,
-                                args,
-                                cwd: dir.into(),
-                                cacheable,
-                            });
-                        }
-                    };
+                    // Rewrite the output path of the preprocessor result to be the tempdir,
+                    // not the cwd where sccache was invoked. cudafe++ embeds the path to the
+                    // device stub as an #include in the file that produces the final object,
+                    // so it must be a deterministic path and name to get cache hits.
+                    let idx = args.len() - 1;
+                    if let Some(path) = args.get(idx).and_then(tmp_name) {
+                        args[idx] = path;
+                    }
+                    // Do not run preprocessor calls through sccache
+                    (cwd, Cacheable::No)
+                } else {
+                    // Rewrite the input path of the file compiled by the host compiler into
+                    // the final object. This is the other half of the process described above.
+                    let idx = args.len() - 3;
+                    if let Some(path) = args.get(idx).and_then(tmp_name) {
+                        args[idx] = path;
+                    }
+                    (cwd, Cacheable::Yes)
                 }
-
-                Ok(command_groups)
             }
+        };
+
+        // Initialize the first group in case the first command isn't a call to the host preprocessor,
+        // i.e. `nvcc -o test.o -c test.c`
+        if command_groups.is_empty() {
+            command_groups.push(vec![]);
         }
-    };
 
-    let output = nvcc_dryrun_cmd
-        .wait_with_output()
-        .map_err(|e| anyhow!(e.to_string()));
-
-    match futures::future::try_join(output, nvcc_subcommand_groups).await {
-        Err(err) => Err(ProcessError(error_to_output(err)).into()),
-        Ok((output, nvcc_subcommand_groups)) => {
-            if output.status.code().unwrap_or(0) == 0 {
-                Ok(nvcc_subcommand_groups)
-            } else {
-                Err(ProcessError(output).into())
+        match command_groups.last_mut() {
+            None => {}
+            Some(group) => {
+                group.push(NvccGeneratedSubcommand {
+                    exe,
+                    args,
+                    cwd: dir.into(),
+                    cacheable,
+                });
             }
-        }
+        };
     }
+
+    Ok(command_groups)
 }
 
 async fn run_nvcc_subcommands_group<T>(
@@ -893,14 +879,15 @@ where
                     .unwrap_or_else(error_to_output)
             }
             Cacheable::Yes => {
+                let srvc = service.clone();
                 let args = dist::strings_to_osstrings(args);
 
-                match service
+                match srvc
                     .compiler_info(exe.clone(), cwd.to_owned(), &args, env_vars)
                     .await
                 {
                     Err(err) => error_to_output(err),
-                    Ok(c) => match c.parse_arguments(&args, cwd, env_vars) {
+                    Ok(compiler) => match compiler.parse_arguments(&args, cwd, env_vars) {
                         CompilerArguments::NotCompilation => Err(anyhow!("Not compilation")),
                         CompilerArguments::CannotCache(why, extra_info) => Err(extra_info
                             .map_or_else(
@@ -910,15 +897,18 @@ where
                                 },
                             )),
                         CompilerArguments::Ok(hasher) => {
-                            service
-                                .start_compile_task(
-                                    c,
-                                    hasher,
-                                    args,
-                                    cwd.to_owned(),
-                                    env_vars.to_owned(),
-                                )
-                                .await
+                            srvc.start_compile_task(
+                                compiler,
+                                hasher,
+                                args,
+                                cwd.to_owned(),
+                                env_vars
+                                    .iter()
+                                    .chain([("SCCACHE_DIRECT".into(), "false".into())].iter())
+                                    .cloned()
+                                    .collect::<Vec<_>>(),
+                            )
+                            .await
                         }
                     }
                     .map_or_else(error_to_output, compile_result_to_output),
@@ -926,7 +916,7 @@ where
             }
         };
 
-        aggregate_output(&mut output, Ok(out));
+        output = aggregate_output(output, out);
 
         if output.status.code().unwrap_or(0) != 0 {
             break;
@@ -936,14 +926,15 @@ where
     Ok(output)
 }
 
-fn aggregate_output(acc: &mut process::Output, res: Result<process::Output>) {
-    let out = res.unwrap_or_else(error_to_output);
-    acc.status = exit_status(std::cmp::max(
-        acc.status.code().unwrap_or(0),
-        out.status.code().unwrap_or(0),
-    ) as ExitStatusValue);
-    acc.stdout.extend(out.stdout);
-    acc.stderr.extend(out.stderr);
+fn aggregate_output(lhs: process::Output, rhs: process::Output) -> process::Output {
+    process::Output {
+        status: exit_status(std::cmp::max(
+            lhs.status.code().unwrap_or(0),
+            rhs.status.code().unwrap_or(0),
+        ) as ExitStatusValue),
+        stdout: [lhs.stdout, rhs.stdout].concat(),
+        stderr: [lhs.stderr, rhs.stderr].concat(),
+    }
 }
 
 fn error_to_output(err: Error) -> process::Output {
