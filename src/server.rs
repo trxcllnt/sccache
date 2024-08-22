@@ -767,7 +767,7 @@ where
 }
 
 type SccacheRequest = Message<Request, Body<()>>;
-type SccacheResponse = Message<Response, Body<Response>>;
+type SccacheResponse = Message<Response, Pin<Box<dyn Future<Output = Result<Response>> + Send>>>;
 
 /// Messages sent from all services to the main event loop indicating activity.
 ///
@@ -954,15 +954,18 @@ where
         stream
             .err_into::<Error>()
             .and_then(move |input| me.clone().call(input))
-            .and_then(move |message| async move {
-                let fut = match message {
+            .and_then(move |response| async move {
+                let fut = match response {
                     Message::WithoutBody(message) => {
                         let stream = stream::once(async move { Ok(Frame::Message { message }) });
                         Either::Left(stream)
                     }
                     Message::WithBody(message, body) => {
                         let stream = stream::once(async move { Ok(Frame::Message { message }) })
-                            .chain(body.map_ok(|chunk| Frame::Body { chunk: Some(chunk) }))
+                            .chain(
+                                body.into_stream()
+                                    .map_ok(|chunk| Frame::Body { chunk: Some(chunk) }),
+                            )
                             .chain(stream::once(async move { Ok(Frame::Body { chunk: None }) }));
                         Either::Right(stream)
                     }
@@ -1190,25 +1193,45 @@ where
                 match c.parse_arguments(&cmd, &cwd, &env_vars) {
                     CompilerArguments::Ok(hasher) => {
                         debug!("parse_arguments: Ok: {:?}", cmd);
-                        let (mut send, body) = Body::pair();
                         let me = self.clone();
-                        self.rt.spawn(async move {
-                            match me.start_compile_task(c, hasher, cmd, cwd, env_vars).await {
-                                Ok(res) => {
-                                    send.send(Ok(Response::CompileFinished(res)))
-                                        .map_err(|e| anyhow!("send on finish failed").context(e))
-                                        .await
-                                        .unwrap_or_else(|e| {
-                                            warn!("send on finish failed: {:?}", e)
-                                        });
+
+                        let res = self
+                            .rt
+                            .spawn(async move {
+                                std::panic::AssertUnwindSafe(
+                                    me.start_compile_task(c, hasher, cmd, cwd, env_vars)
+                                )
+                                .catch_unwind()
+                                .await
+                                .map_err(|e| {
+                                    let panic = e
+                                        .downcast_ref::<&str>()
+                                        .map(|s| &**s)
+                                        .or_else(|| e.downcast_ref::<String>().map(|s| &**s))
+                                        .unwrap_or("An unknown panic was caught.");
+                                    let thread = std::thread::current();
+                                    let thread_name = thread.name().unwrap_or("unnamed");
+                                    if let Some((file, line, column)) = PANIC_LOCATION.with(|l| l.take()) {
+                                        anyhow!("thread '{thread_name}' panicked at {file}:{line}:{column}: {panic}")
+                                    } else {
+                                        anyhow!("thread '{thread_name}' panicked: {panic}")
+                                    }
+                                })
+                                .and_then(std::convert::identity)
+                            })
+                            .map_err(anyhow::Error::new)
+                            .and_then(|res| async {
+                                match res {
+                                    Ok(res) => Ok(Response::CompileFinished(res)),
+                                    Err(err) => Err(err),
                                 }
-                                Err(err) => {
-                                    warn!("Failed to execute task: {:?}", err);
-                                }
-                            }
-                        });
-                        let res = CompileResponse::CompileStarted;
-                        return Message::WithBody(Response::Compile(res), body);
+                            })
+                            .boxed();
+
+                        return Message::WithBody(
+                            Response::Compile(CompileResponse::CompileStarted),
+                            res,
+                        );
                     }
                     CompilerArguments::CannotCache(why, extra_info) => {
                         if let Some(extra_info) = extra_info {
@@ -1264,34 +1287,21 @@ where
         let lang = hasher.language();
 
         let result = match self.dist_client.get_client().await {
-            Ok(client) => std::panic::AssertUnwindSafe(hasher.get_cached_or_compile(
-                self,
-                client,
-                self.creator.clone(),
-                self.storage.clone(),
-                arguments,
-                cwd,
-                env_vars,
-                cache_control,
-                self.rt.clone(),
-            ))
-            .catch_unwind()
-            .await
-            .map_err(|e| {
-                let panic = e
-                    .downcast_ref::<&str>()
-                    .map(|s| &**s)
-                    .or_else(|| e.downcast_ref::<String>().map(|s| &**s))
-                    .unwrap_or("An unknown panic was caught.");
-                let thread = std::thread::current();
-                let thread_name = thread.name().unwrap_or("unnamed");
-                if let Some((file, line, column)) = PANIC_LOCATION.with(|l| l.take()) {
-                    anyhow!("thread '{thread_name}' panicked at {file}:{line}:{column}: {panic}")
-                } else {
-                    anyhow!("thread '{thread_name}' panicked: {panic}")
-                }
-            })
-            .and_then(std::convert::identity),
+            Ok(client) => {
+                hasher
+                    .get_cached_or_compile(
+                        self,
+                        client,
+                        self.creator.clone(),
+                        self.storage.clone(),
+                        arguments,
+                        cwd,
+                        env_vars,
+                        cache_control,
+                        self.rt.clone(),
+                    )
+                    .await
+            }
             Err(e) => Err(e),
         };
         let mut cache_write = None;
@@ -1908,12 +1918,12 @@ struct Body<R> {
     receiver: mpsc::Receiver<Result<R>>,
 }
 
-impl<R> Body<R> {
-    fn pair() -> (mpsc::Sender<Result<R>>, Self) {
-        let (tx, rx) = mpsc::channel(0);
-        (tx, Body { receiver: rx })
-    }
-}
+// impl<R> Body<R> {
+//     fn pair() -> (mpsc::Sender<Result<R>>, Self) {
+//         let (tx, rx) = mpsc::channel(0);
+//         (tx, Body { receiver: rx })
+//     }
+// }
 
 impl<R> futures::Stream for Body<R> {
     type Item = Result<R>;
