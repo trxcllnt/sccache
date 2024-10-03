@@ -1290,6 +1290,7 @@ where
             Ok(client) => {
                 hasher
                     .get_cached_or_compile(
+                        self,
                         client,
                         self.creator.clone(),
                         self.storage.clone(),
