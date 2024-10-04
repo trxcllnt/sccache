@@ -686,7 +686,7 @@ where
     })
 }
 
-fn language_to_gcc_arg(lang: Language) -> Option<&'static str> {
+pub fn language_to_gcc_arg(lang: Language) -> Option<&'static str> {
     match lang {
         Language::C => Some("c"),
         Language::CHeader => Some("c-header"),
@@ -695,6 +695,8 @@ fn language_to_gcc_arg(lang: Language) -> Option<&'static str> {
         Language::ObjectiveC => Some("objective-c"),
         Language::ObjectiveCxx => Some("objective-c++"),
         Language::Cuda => Some("cu"),
+        Language::Ptx => None,
+        Language::Cubin => None,
         Language::Rust => None, // Let the compiler decide
         Language::Hip => Some("hip"),
         Language::GenericHeader => None, // Let the compiler decide
@@ -747,7 +749,6 @@ fn preprocess_cmd<T>(
     // Explicitly rewrite the -arch args to be preprocessor defines of the form
     // __arch__ so that they affect the preprocessor output but don't cause
     // clang to error.
-    debug!("arch args before rewrite: {:?}", parsed_args.arch_args);
     let rewritten_arch_args = parsed_args
         .arch_args
         .iter()
@@ -765,6 +766,9 @@ fn preprocess_cmd<T>(
     if unique_rewritten.len() <= 1 {
         // don't use rewritten arch args if there is only one arch
         arch_args_to_use = &parsed_args.arch_args;
+    } else {
+        debug!("-arch args before rewrite: {:?}", parsed_args.arch_args);
+        debug!("-arch args after rewrite:  {:?}", arch_args_to_use);
     }
 
     cmd.args(&parsed_args.preprocessor_args)
@@ -778,7 +782,6 @@ fn preprocess_cmd<T>(
         .env_clear()
         .envs(env_vars.to_vec())
         .current_dir(cwd);
-    debug!("cmd after -arch rewrite: {:?}", cmd);
 }
 
 #[allow(clippy::too_many_arguments)]

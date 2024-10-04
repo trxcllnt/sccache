@@ -16,6 +16,7 @@
 use crate::cache::{Cache, CacheWrite, DecompressionFailure, FileObjectSource, Storage};
 use crate::compiler::args::*;
 use crate::compiler::c::{CCompiler, CCompilerKind};
+use crate::compiler::cicc::Cicc;
 use crate::compiler::clang::Clang;
 use crate::compiler::diab::Diab;
 use crate::compiler::gcc::Gcc;
@@ -24,6 +25,7 @@ use crate::compiler::msvc::Msvc;
 use crate::compiler::nvcc::Nvcc;
 use crate::compiler::nvcc::NvccHostCompiler;
 use crate::compiler::nvhpc::Nvhpc;
+use crate::compiler::ptxas::Ptxas;
 use crate::compiler::rust::{Rust, RustupProxy};
 use crate::compiler::tasking_vx::TaskingVX;
 #[cfg(feature = "dist-client")]
@@ -219,6 +221,8 @@ pub enum Language {
     ObjectiveC,
     ObjectiveCxx,
     Cuda,
+    Ptx,
+    Cubin,
     Rust,
     Hip,
 }
@@ -241,6 +245,8 @@ impl Language {
             Some("M") | Some("mm") => Some(Language::ObjectiveCxx),
             // TODO mii
             Some("cu") => Some(Language::Cuda),
+            Some("ptx") => Some(Language::Ptx),
+            Some("cubin") => Some(Language::Cubin),
             // TODO cy
             Some("rs") => Some(Language::Rust),
             Some("hip") => Some(Language::Hip),
@@ -259,6 +265,8 @@ impl Language {
             Language::ObjectiveC => "objc",
             Language::ObjectiveCxx => "objc++",
             Language::Cuda => "cuda",
+            Language::Ptx => "cuda",
+            Language::Cubin => "cuda",
             Language::Rust => "rust",
             Language::Hip => "hip",
         }
@@ -276,6 +284,8 @@ impl CompilerKind {
             | Language::ObjectiveC
             | Language::ObjectiveCxx => "C/C++",
             Language::Cuda => "CUDA",
+            Language::Ptx => "CUDA",
+            Language::Cubin => "CUDA",
             Language::Rust => "Rust",
             Language::Hip => "HIP",
         }
@@ -288,8 +298,10 @@ impl CompilerKind {
             CompilerKind::C(CCompilerKind::Diab) => textual_lang + " [diab]",
             CompilerKind::C(CCompilerKind::Gcc) => textual_lang + " [gcc]",
             CompilerKind::C(CCompilerKind::Msvc) => textual_lang + " [msvc]",
-            CompilerKind::C(CCompilerKind::Nvhpc) => textual_lang + " [nvhpc]",
             CompilerKind::C(CCompilerKind::Nvcc) => textual_lang + " [nvcc]",
+            CompilerKind::C(CCompilerKind::Cicc) => textual_lang + " [nvcc]",
+            CompilerKind::C(CCompilerKind::Ptxas) => textual_lang + " [nvcc]",
+            CompilerKind::C(CCompilerKind::Nvhpc) => textual_lang + " [nvhpc]",
             CompilerKind::C(CCompilerKind::TaskingVX) => textual_lang + " [taskingvx]",
             CompilerKind::Rust => textual_lang,
         }
@@ -670,7 +682,7 @@ where
         .generate_compile_commands(&mut path_transformer, rewrite_includes_only)
         .context("Failed to generate compile commands")?;
 
-    let dist_client = match dist_client {
+    let dist_client = match dist_compile_cmd.clone().and(dist_client) {
         Some(dc) => dc,
         None => {
             debug!("[{}]: Compiling locally", out_pretty);
@@ -1105,6 +1117,28 @@ fn is_rustc_like<P: AsRef<Path>>(p: P) -> bool {
     )
 }
 
+/// Returns true if the given path looks like cicc
+fn is_nvidia_cicc<P: AsRef<Path>>(p: P) -> bool {
+    matches!(
+        p.as_ref()
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .as_deref(),
+        Some("cicc")
+    )
+}
+
+/// Returns true if the given path looks like ptxas
+fn is_nvidia_ptxas<P: AsRef<Path>>(p: P) -> bool {
+    matches!(
+        p.as_ref()
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .as_deref(),
+        Some("ptxas")
+    )
+}
+
 /// Returns true if the given path looks like a c compiler program
 ///
 /// This does not check c compilers, it only report programs that are definitely not rustc
@@ -1166,6 +1200,30 @@ where
 
     let rustc_executable = if let Some(ref rustc_executable) = maybe_rustc_executable {
         rustc_executable
+    } else if is_nvidia_cicc(executable) {
+        debug!("Found cicc");
+        return CCompiler::new(
+            Cicc {
+                // TODO: Use nvcc --version
+                version: Some(String::new()),
+            },
+            executable.to_owned(),
+            &pool,
+        )
+        .await
+        .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
+    } else if is_nvidia_ptxas(executable) {
+        debug!("Found ptxas");
+        return CCompiler::new(
+            Ptxas {
+                // TODO: Use nvcc --version
+                version: Some(String::new()),
+            },
+            executable.to_owned(),
+            &pool,
+        )
+        .await
+        .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
     } else if is_known_c_compiler(executable) {
         let cc = detect_c_compiler(creator, executable, args, env.to_vec(), pool).await;
         return cc.map(|c| (c, None));
@@ -2262,7 +2320,6 @@ LLVM version: 6.0",
             0,
             COMPILER_STDOUT.to_owned(),
             COMPILER_STDERR.to_owned(),
-        ));
         );
         let service = server::SccacheService::mock_with_dist_client(
             dist_client.clone(),
