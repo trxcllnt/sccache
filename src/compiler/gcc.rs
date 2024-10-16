@@ -90,6 +90,7 @@ impl CCompilerImpl for Gcc {
             self.kind(),
             rewrite_includes_only,
             ignorable_whitespace_flags,
+            language_to_gcc_arg,
         )
         .await
     }
@@ -118,6 +119,7 @@ impl CCompilerImpl for Gcc {
             env_vars,
             self.kind(),
             rewrite_includes_only,
+            language_to_gcc_arg,
         )
         .map(|(command, dist_command, cacheable)| {
             (CCompileCommand::new(command), dist_command, cacheable)
@@ -704,7 +706,7 @@ pub fn language_to_gcc_arg(lang: Language) -> Option<&'static str> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn preprocess_cmd<T>(
+fn preprocess_cmd<F, T>(
     cmd: &mut T,
     parsed_args: &ParsedArguments,
     cwd: &Path,
@@ -713,10 +715,12 @@ fn preprocess_cmd<T>(
     kind: CCompilerKind,
     rewrite_includes_only: bool,
     ignorable_whitespace_flags: Vec<String>,
+    language_to_arg: F,
 ) where
+    F: Fn(Language) -> Option<&'static str>,
     T: RunCommand,
 {
-    let language = language_to_gcc_arg(parsed_args.language);
+    let language = language_to_arg(parsed_args.language);
     if let Some(lang) = &language {
         cmd.arg("-x").arg(lang);
     }
@@ -785,7 +789,7 @@ fn preprocess_cmd<T>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn preprocess<T>(
+pub async fn preprocess<F, T>(
     creator: &T,
     executable: &Path,
     parsed_args: &ParsedArguments,
@@ -795,8 +799,10 @@ pub async fn preprocess<T>(
     kind: CCompilerKind,
     rewrite_includes_only: bool,
     ignorable_whitespace_flags: Vec<String>,
+    language_to_arg: F,
 ) -> Result<process::Output>
 where
+    F: Fn(Language) -> Option<&'static str>,
     T: CommandCreatorSync,
 {
     trace!("preprocess");
@@ -810,6 +816,7 @@ where
         kind,
         rewrite_includes_only,
         ignorable_whitespace_flags,
+        language_to_arg,
     );
     if log_enabled!(Trace) {
         trace!("preprocess: {:?}", cmd);
@@ -817,7 +824,8 @@ where
     run_input_output(cmd, None).await
 }
 
-pub fn generate_compile_commands(
+#[allow(clippy::too_many_arguments)]
+pub fn generate_compile_commands<F>(
     path_transformer: &mut dist::PathTransformer,
     executable: &Path,
     parsed_args: &ParsedArguments,
@@ -825,11 +833,15 @@ pub fn generate_compile_commands(
     env_vars: &[(OsString, OsString)],
     kind: CCompilerKind,
     rewrite_includes_only: bool,
+    language_to_arg: F,
 ) -> Result<(
     SingleCompileCommand,
     Option<dist::CompileCommand>,
     Cacheable,
-)> {
+)>
+where
+    F: Fn(Language) -> Option<&'static str>,
+{
     // Unused arguments
     #[cfg(not(feature = "dist-client"))]
     {
@@ -847,7 +859,7 @@ pub fn generate_compile_commands(
 
     // Pass the language explicitly as we might have gotten it from the
     // command line.
-    let language = language_to_gcc_arg(parsed_args.language);
+    let language = language_to_arg(parsed_args.language);
     let mut arguments: Vec<OsString> = vec![];
     if let Some(lang) = &language {
         arguments.extend(vec!["-x".into(), lang.into()])
@@ -879,7 +891,7 @@ pub fn generate_compile_commands(
     let dist_command = (|| {
         // https://gcc.gnu.org/onlinedocs/gcc-4.9.0/gcc/Overall-Options.html
         let mut language: Option<String> =
-            language_to_gcc_arg(parsed_args.language).map(|lang| lang.into());
+            language_to_arg(parsed_args.language).map(|lang| lang.into());
         if !rewrite_includes_only {
             match parsed_args.language {
                 Language::C => language = Some("cpp-output".into()),
@@ -1677,6 +1689,7 @@ mod test {
                 CCompilerKind::Gcc,
                 true,
                 vec![],
+                language_to_gcc_arg,
             );
             // make sure the architectures were rewritten to prepocessor defines
             let expected_args = ovec![
@@ -1712,6 +1725,7 @@ mod test {
             CCompilerKind::Gcc,
             true,
             vec![],
+            language_to_gcc_arg,
         );
         // make sure the architectures were rewritten to prepocessor defines
         let expected_args = ovec![
@@ -1746,6 +1760,7 @@ mod test {
             CCompilerKind::Clang,
             true,
             vec![],
+            language_to_gcc_arg,
         );
         let expected_args = ovec!["-x", "c", "-E", "-frewrite-includes", "--", "foo.c"];
         assert_eq!(cmd.args, expected_args);
@@ -1771,6 +1786,7 @@ mod test {
             CCompilerKind::Gcc,
             true,
             vec![],
+            language_to_gcc_arg,
         );
         // disable with extensions enabled
         assert!(!cmd.args.contains(&"-fdirectives-only".into()));
@@ -1796,6 +1812,7 @@ mod test {
             CCompilerKind::Gcc,
             true,
             vec![],
+            language_to_gcc_arg,
         );
         // no reason to disable it with no extensions enabled
         assert!(cmd.args.contains(&"-fdirectives-only".into()));
@@ -1821,6 +1838,7 @@ mod test {
             CCompilerKind::Gcc,
             true,
             vec![],
+            language_to_gcc_arg,
         );
         // disable with extensions enabled
         assert!(!cmd.args.contains(&"-fdirectives-only".into()));
@@ -2166,6 +2184,7 @@ mod test {
             &[],
             CCompilerKind::Gcc,
             false,
+            language_to_gcc_arg,
         )
         .unwrap();
         #[cfg(feature = "dist-client")]
@@ -2196,6 +2215,7 @@ mod test {
             &[],
             CCompilerKind::Clang,
             false,
+            language_to_gcc_arg,
         )
         .unwrap();
         let expected_args = ovec!["-x", "c", "-c", "-o", "foo.o", "--", "foo.c"];
@@ -2256,6 +2276,7 @@ mod test {
             CCompilerKind::Gcc,
             true,
             vec![],
+            language_to_gcc_arg,
         );
         assert!(cmd.args.contains(&"-x".into()) && cmd.args.contains(&"c++-header".into()));
     }
@@ -2280,6 +2301,7 @@ mod test {
             CCompilerKind::Gcc,
             true,
             vec![],
+            language_to_gcc_arg,
         );
         assert!(cmd.args.contains(&"-x".into()) && cmd.args.contains(&"c++-header".into()));
     }
@@ -2304,6 +2326,7 @@ mod test {
             CCompilerKind::Gcc,
             true,
             vec![],
+            language_to_gcc_arg,
         );
         assert!(!cmd.args.contains(&"-x".into()));
     }
