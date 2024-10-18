@@ -35,7 +35,7 @@ use cmdline::{AuthSubcommand, Command};
 
 pub const INSECURE_DIST_SERVER_TOKEN: &str = "dangerously_insecure_server";
 
-// Only supported on x86_64 Linux machines and on FreeBSD
+// Only supported on x86_64/aarch64 Linux machines and on FreeBSD
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "linux", target_arch = "aarch64"),
@@ -691,10 +691,18 @@ impl SchedulerIncoming for Scheduler {
                     if let Some(entry) = server_details {
                         assert!(entry.jobs_assigned.remove(&job_id))
                     } else {
-                        bail!("Job was marked as finished, but server is not known to scheduler")
+                        bail!(
+                            "Job {} was marked as finished, but server is not known to scheduler",
+                            job_id
+                        )
                     }
                 }
-                (from, to) => bail!("Invalid job state transition from {} to {}", from, to),
+                (from, to) => bail!(
+                    "Invalid job state transition from {} to {} for job {}",
+                    from,
+                    to,
+                    job_id
+                ),
             }
             info!("Job {} updated state to {:?}", job_id, job_state);
         } else {

@@ -623,7 +623,12 @@ where
                 ))
             }
         }
-        .with_context(|| format!("failed to store `{}` to cache", out_pretty))
+        .with_context(|| {
+            format!(
+                "[{}]: failed to store `{}` in cache",
+                out_pretty, out_pretty
+            )
+        })
     }
 
     /// A descriptive string about the file that we're going to be producing.
@@ -653,7 +658,10 @@ where
     let mut path_transformer = dist::PathTransformer::new();
     let (compile_cmd, _dist_compile_cmd, cacheable) = compilation
         .generate_compile_commands(&mut path_transformer, true)
-        .context("Failed to generate compile commands")?;
+        .context(format!(
+            "[{}]: Failed to generate compile commands",
+            out_pretty
+        ))?;
 
     debug!("[{}]: Compiling locally", out_pretty);
     compile_cmd
@@ -684,7 +692,10 @@ where
     let mut path_transformer = dist::PathTransformer::new();
     let (compile_cmd, dist_compile_cmd, cacheable) = compilation
         .generate_compile_commands(&mut path_transformer, rewrite_includes_only)
-        .context("Failed to generate compile commands")?;
+        .context(format!(
+            "[{}]: Failed to generate compile commands",
+            out_pretty
+        ))?;
 
     let dist_client = match dist_compile_cmd.clone().and(dist_client) {
         Some(dc) => dc,
@@ -704,8 +715,10 @@ where
     let local_executable2 = compile_cmd.get_executable();
 
     let do_dist_compile = async move {
-        let mut dist_compile_cmd =
-            dist_compile_cmd.context("Could not create distributed compile command")?;
+        let mut dist_compile_cmd = dist_compile_cmd.context(format!(
+            "[{}]: Could not create distributed compile command",
+            out_pretty
+        ))?;
         debug!("[{}]: Creating distributed compile request", out_pretty);
         let dist_output_paths = compilation
             .outputs()
@@ -736,6 +749,10 @@ where
                 need_toolchain: true,
             } => {
                 debug!(
+                    "[{}]: Successfully allocated job {}",
+                    out_pretty, job_alloc.job_id
+                );
+                debug!(
                     "[{}]: Sending toolchain {} for job {}",
                     out_pretty, dist_toolchain.archive_id, job_alloc.job_id
                 );
@@ -747,10 +764,15 @@ where
                 {
                     dist::SubmitToolchainResult::Success => Ok(job_alloc),
                     dist::SubmitToolchainResult::JobNotFound => {
-                        bail!("Job {} not found on server", job_alloc.job_id)
+                        bail!(
+                            "[{}]: Job {} not found on server",
+                            out_pretty,
+                            job_alloc.job_id
+                        )
                     }
                     dist::SubmitToolchainResult::CannotCache => bail!(
-                        "Toolchain for job {} could not be cached by server",
+                        "[{}]: Toolchain for job {} could not be cached by server",
+                        out_pretty,
                         job_alloc.job_id
                     ),
                 }
@@ -758,14 +780,20 @@ where
             dist::AllocJobResult::Success {
                 job_alloc,
                 need_toolchain: false,
-            } => Ok(job_alloc),
+            } => {
+                debug!(
+                    "[{}]: Successfully allocated job {}",
+                    out_pretty, job_alloc.job_id
+                );
+                Ok(job_alloc)
+            }
             dist::AllocJobResult::Fail { msg } => {
-                Err(anyhow!("Failed to allocate job").context(msg))
+                Err(anyhow!("[{}]: Failed to allocate job", out_pretty).context(msg))
             }
         }?;
         let job_id = job_alloc.job_id;
         let server_id = job_alloc.server_id;
-        debug!("[{}]: Running job", out_pretty);
+        debug!("[{}]: Running job {}", out_pretty, job_id);
         let ((job_id, server_id), (jres, path_transformer)) = dist_client
             .do_run_job(
                 job_alloc,
@@ -777,17 +805,20 @@ where
             .map(move |res| ((job_id, server_id), res))
             .with_context(|| {
                 format!(
-                    "could not run distributed compilation job on {:?}",
-                    server_id
+                    "[{}]: Could not run distributed compilation job {} on {:?}",
+                    out_pretty, job_id, server_id
                 )
             })?;
 
         let jc = match jres {
             dist::RunJobResult::Complete(jc) => jc,
-            dist::RunJobResult::JobNotFound => bail!("Job {} not found on server", job_id),
+            dist::RunJobResult::JobNotFound => {
+                bail!("[{}]: Job {} not found on server", out_pretty, job_id)
+            }
         };
         debug!(
-            "fetched {:?}",
+            "[{}]: Fetched {:?}",
+            out_pretty,
             jc.outputs
                 .iter()
                 .map(|(p, bs)| (p, bs.lens().to_string()))
@@ -804,7 +835,7 @@ where
                         for local_path in output_paths.iter() {
                             if let Err(e) = fs::remove_file(local_path) {
                                 if e.kind() != io::ErrorKind::NotFound {
-                                    warn!("{} while attempting to clear up {}", e, local_path.display())
+                                    warn!("[{}]: {} while attempting to clear up {}", out_pretty, e, local_path.display())
                                 }
                             }
                         }
@@ -816,17 +847,24 @@ where
 
         for (path, output_data) in jc.outputs {
             let len = output_data.lens().actual;
-            let local_path = try_or_cleanup!(path_transformer
-                .to_local(&path)
-                .with_context(|| format!("unable to transform output path {}", path)));
+            let local_path = try_or_cleanup!(path_transformer.to_local(&path).with_context(
+                || format!("[{}]: unable to transform output path {}", out_pretty, path)
+            ));
             output_paths.push(local_path);
             // Do this first so cleanup works correctly
             let local_path = output_paths.last().expect("nothing in vec after push");
 
-            let mut file = try_or_cleanup!(File::create(local_path)
-                .with_context(|| format!("Failed to create output file {}", local_path.display())));
+            let mut file = try_or_cleanup!(File::create(local_path).with_context(|| format!(
+                "[{}]: Failed to create output file {}",
+                out_pretty,
+                local_path.display()
+            )));
             let count = try_or_cleanup!(io::copy(&mut output_data.into_reader(), &mut file)
-                .with_context(|| format!("Failed to write output to {}", local_path.display())));
+                .with_context(|| format!(
+                    "[{}]: Failed to write output to {}",
+                    out_pretty,
+                    local_path.display()
+                )));
 
             assert!(count == len);
         }
@@ -836,7 +874,7 @@ where
         };
         try_or_cleanup!(outputs_rewriter
             .handle_outputs(&path_transformer, &output_paths, &extra_inputs)
-            .with_context(|| "failed to rewrite outputs from compile"));
+            .with_context(|| format!("[{}]: Failed to rewrite outputs from compile", out_pretty)));
         Ok((DistType::Ok(server_id), jc.output.into()))
     };
 

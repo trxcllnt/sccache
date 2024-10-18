@@ -269,6 +269,7 @@ pub mod urls {
 
 #[cfg(feature = "dist-server")]
 mod server {
+    use crate::dist::http::{get_connect_timeout, get_request_timeout};
     use crate::util::new_reqwest_blocking_client;
     use byteorder::{BigEndian, ReadBytesExt};
     use flate2::read::ZlibDecoder as ZlibReadDecoder;
@@ -767,6 +768,8 @@ mod server {
                 }
                 // Finish the client
                 let new_client = client_builder
+                    .timeout(get_request_timeout())
+                    .connect_timeout(get_connect_timeout())
                     // Disable connection pool to avoid broken connection
                     // between runtime
                     .pool_max_idle_per_host(0)
@@ -1174,6 +1177,7 @@ mod client {
             // Finish the client
             let new_client_async = client_async_builder
                 .timeout(get_request_timeout())
+                .connect_timeout(get_connect_timeout())
                 // Disable keep-alive
                 .pool_max_idle_per_host(0)
                 .build()
