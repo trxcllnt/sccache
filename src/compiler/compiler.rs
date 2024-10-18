@@ -220,6 +220,7 @@ pub enum Language {
     CxxHeader,
     ObjectiveC,
     ObjectiveCxx,
+    ObjectiveCxxHeader,
     Cuda,
     Ptx,
     Cubin,
@@ -259,11 +260,13 @@ impl Language {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Language::C | Language::CHeader => "c",
-            Language::Cxx | Language::CxxHeader => "c++",
+            Language::C => "c",
+            Language::CHeader => "cHeader",
+            Language::Cxx => "c++",
+            Language::CxxHeader => "c++Header",
             Language::GenericHeader => "c/c++",
             Language::ObjectiveC => "objc",
-            Language::ObjectiveCxx => "objc++",
+            Language::ObjectiveCxx | Language::ObjectiveCxxHeader => "objc++",
             Language::Cuda => "cuda",
             Language::Ptx => "ptx",
             Language::Cubin => "cubin",
@@ -282,7 +285,8 @@ impl CompilerKind {
             | Language::CxxHeader
             | Language::GenericHeader
             | Language::ObjectiveC
-            | Language::ObjectiveCxx => "C/C++",
+            | Language::ObjectiveCxx
+            | Language::ObjectiveCxxHeader => "C/C++",
             Language::Cuda => "CUDA",
             Language::Ptx => "PTX",
             Language::Cubin => "CUBIN",

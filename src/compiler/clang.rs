@@ -185,6 +185,7 @@ pub fn language_to_clang_arg(lang: Language) -> Option<&'static str> {
         Language::CxxHeader => Some("c++-header"),
         Language::ObjectiveC => Some("objective-c"),
         Language::ObjectiveCxx => Some("objective-c++"),
+        Language::ObjectiveCxxHeader => Some("objective-c++-header"),
         Language::Cuda => Some("cuda"),
         Language::Ptx => None,
         Language::Cubin => None,
