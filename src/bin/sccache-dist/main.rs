@@ -230,7 +230,7 @@ fn run(command: Command) -> Result<i32> {
             scheduler_auth,
             toolchain_cache_size,
         }) => {
-            let bind_addr = bind_addr.unwrap_or_else(|| public_addr);
+            let bind_addr = bind_addr.unwrap_or(public_addr);
             let builder: Box<dyn dist::BuilderIncoming> = match builder {
                 #[cfg(not(target_os = "freebsd"))]
                 server_config::BuilderType::Docker => {
@@ -697,7 +697,11 @@ impl SchedulerIncoming for Scheduler {
             }
             info!("Job {} updated state to {:?}", job_id, job_state);
         } else {
-            bail!("Unknown job")
+            bail!(
+                "Cannot update unknown job {} to state {:?}",
+                job_id,
+                job_state
+            )
         }
         Ok(UpdateJobStateResult::Success)
     }

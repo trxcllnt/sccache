@@ -20,6 +20,34 @@ pub use self::server::{
     ClientAuthCheck, ClientVisibleMsg, Scheduler, ServerAuthCheck, HEARTBEAT_TIMEOUT,
 };
 
+use std::env;
+use std::time::Duration;
+
+const REQUEST_TIMEOUT_SECS: u64 = 1200;
+const CONNECT_TIMEOUT_SECS: u64 = 30;
+
+/// Timeout for connections to an sccache-dist server
+pub fn get_connect_timeout() -> Duration {
+    Duration::new(
+        env::var("SCCACHE_DIST_CONNECT_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(CONNECT_TIMEOUT_SECS),
+        0,
+    )
+}
+
+/// Timeout for compile requests to an sccache-dist server
+pub fn get_request_timeout() -> Duration {
+    Duration::new(
+        env::var("SCCACHE_DIST_REQUEST_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(REQUEST_TIMEOUT_SECS),
+        0,
+    )
+}
+
 mod common {
     use reqwest::header;
     use serde::{Deserialize, Serialize};
@@ -71,9 +99,7 @@ mod common {
     pub async fn bincode_req_fut<T: serde::de::DeserializeOwned + 'static>(
         req: reqwest::RequestBuilder,
     ) -> Result<T> {
-        // Work around tiny_http issue #151 by disabling HTTP pipeline with
-        // `Connection: close`.
-        let res = req.header(header::CONNECTION, "close").send().await?;
+        let res = req.send().await?;
 
         let status = res.status();
         let bytes = res.bytes().await?;
@@ -279,9 +305,7 @@ mod server {
     pub fn bincode_req<T: serde::de::DeserializeOwned + 'static>(
         req: reqwest::blocking::RequestBuilder,
     ) -> Result<T> {
-        // Work around tiny_http issue #151 by disabling HTTP pipeline with
-        // `Connection: close`.
-        let mut res = req.header(reqwest::header::CONNECTION, "close").send()?;
+        let mut res = req.send()?;
         let status = res.status();
         let mut body = vec![];
         res.copy_to(&mut body)
@@ -1051,7 +1075,10 @@ mod server {
                     .bearer_auth(self.scheduler_auth.clone())
                     .bincode(&state)?,
             )
-            .context("POST to scheduler job_state failed")
+            .context(format!(
+                "POST to update scheduler job {} to state {:?} failed",
+                job_id, state
+            ))
         }
     }
 }
@@ -1076,17 +1103,13 @@ mod client {
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
 
     use super::common::{
         bincode_req_fut, AllocJobHttpResponse, ReqwestRequestBuilderExt, RunJobHttpRequest,
         ServerCertificateHttpResponse,
     };
-    use super::urls;
+    use super::{get_connect_timeout, get_request_timeout, urls};
     use crate::errors::*;
-
-    const REQUEST_TIMEOUT_SECS: u64 = 1200;
-    const CONNECT_TIMEOUT_SECS: u64 = 5;
 
     pub struct Client {
         auth_token: String,
@@ -1109,11 +1132,9 @@ mod client {
             auth_token: String,
             rewrite_includes_only: bool,
         ) -> Result<Self> {
-            let timeout = Duration::new(REQUEST_TIMEOUT_SECS, 0);
-            let connect_timeout = Duration::new(CONNECT_TIMEOUT_SECS, 0);
             let client = reqwest::ClientBuilder::new()
-                .timeout(timeout)
-                .connect_timeout(connect_timeout)
+                .timeout(get_request_timeout())
+                .connect_timeout(get_connect_timeout())
                 // Disable connection pool to avoid broken connection
                 // between runtime
                 .pool_max_idle_per_host(0)
@@ -1151,9 +1172,8 @@ mod client {
                 );
             }
             // Finish the client
-            let timeout = Duration::new(REQUEST_TIMEOUT_SECS, 0);
             let new_client_async = client_async_builder
-                .timeout(timeout)
+                .timeout(get_request_timeout())
                 // Disable keep-alive
                 .pool_max_idle_per_host(0)
                 .build()
