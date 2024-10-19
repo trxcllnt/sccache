@@ -623,12 +623,7 @@ where
                 ))
             }
         }
-        .with_context(|| {
-            format!(
-                "[{}]: failed to store `{}` in cache",
-                out_pretty, out_pretty
-            )
-        })
+        .with_context(|| format!("failed to store `{}` to cache", out_pretty))
     }
 
     /// A descriptive string about the file that we're going to be producing.
@@ -658,10 +653,7 @@ where
     let mut path_transformer = dist::PathTransformer::new();
     let (compile_cmd, _dist_compile_cmd, cacheable) = compilation
         .generate_compile_commands(&mut path_transformer, true)
-        .context(format!(
-            "[{}]: Failed to generate compile commands",
-            out_pretty
-        ))?;
+        .context("Failed to generate compile commands")?;
 
     debug!("[{}]: Compiling locally", out_pretty);
     compile_cmd
@@ -692,10 +684,7 @@ where
     let mut path_transformer = dist::PathTransformer::new();
     let (compile_cmd, dist_compile_cmd, cacheable) = compilation
         .generate_compile_commands(&mut path_transformer, rewrite_includes_only)
-        .context(format!(
-            "[{}]: Failed to generate compile commands",
-            out_pretty
-        ))?;
+        .context("Failed to generate compile commands")?;
 
     let dist_client = match dist_compile_cmd.clone().and(dist_client) {
         Some(dc) => dc,
@@ -715,10 +704,8 @@ where
     let local_executable2 = compile_cmd.get_executable();
 
     let do_dist_compile = async move {
-        let mut dist_compile_cmd = dist_compile_cmd.context(format!(
-            "[{}]: Could not create distributed compile command",
-            out_pretty
-        ))?;
+        let mut dist_compile_cmd =
+            dist_compile_cmd.context("Could not create distributed compile command")?;
         debug!("[{}]: Creating distributed compile request", out_pretty);
         let dist_output_paths = compilation
             .outputs()
@@ -788,7 +775,7 @@ where
                 Ok(job_alloc)
             }
             dist::AllocJobResult::Fail { msg } => {
-                Err(anyhow!("[{}]: Failed to allocate job", out_pretty).context(msg))
+                Err(anyhow!("Failed to allocate job").context(msg))
             }
         }?;
         let job_id = job_alloc.job_id;
@@ -805,8 +792,8 @@ where
             .map(move |res| ((job_id, server_id), res))
             .with_context(|| {
                 format!(
-                    "[{}]: Could not run distributed compilation job {} on {:?}",
-                    out_pretty, job_id, server_id
+                    "Could not run distributed compilation job on {:?}",
+                    server_id
                 )
             })?;
 
@@ -854,17 +841,10 @@ where
             // Do this first so cleanup works correctly
             let local_path = output_paths.last().expect("nothing in vec after push");
 
-            let mut file = try_or_cleanup!(File::create(local_path).with_context(|| format!(
-                "[{}]: Failed to create output file {}",
-                out_pretty,
-                local_path.display()
-            )));
+            let mut file = try_or_cleanup!(File::create(local_path)
+                .with_context(|| format!("Failed to create output file {}", local_path.display())));
             let count = try_or_cleanup!(io::copy(&mut output_data.into_reader(), &mut file)
-                .with_context(|| format!(
-                    "[{}]: Failed to write output to {}",
-                    out_pretty,
-                    local_path.display()
-                )));
+                .with_context(|| format!("Failed to write output to {}", local_path.display())));
 
             assert!(count == len);
         }
@@ -874,7 +854,7 @@ where
         };
         try_or_cleanup!(outputs_rewriter
             .handle_outputs(&path_transformer, &output_paths, &extra_inputs)
-            .with_context(|| format!("[{}]: Failed to rewrite outputs from compile", out_pretty)));
+            .with_context(|| "Failed to rewrite outputs from compile"));
         Ok((DistType::Ok(server_id), jc.output.into()))
     };
 
