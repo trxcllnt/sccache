@@ -316,7 +316,7 @@ fn init_logging() {
 const MAX_PER_CORE_LOAD: f64 = 10f64;
 const SERVER_REMEMBER_ERROR_TIMEOUT: Duration = Duration::from_secs(300);
 const UNCLAIMED_PENDING_TIMEOUT: Duration = Duration::from_secs(300);
-const UNCLAIMED_READY_TIMEOUT: Duration = Duration::from_secs(60);
+const UNCLAIMED_READY_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Copy, Clone)]
 struct JobDetail {
