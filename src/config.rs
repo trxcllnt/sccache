@@ -1399,6 +1399,7 @@ fn test_s3_no_credentials_valid_false() {
 }
 
 #[test]
+#[serial]
 fn test_gcs_service_account() {
     env::set_var("SCCACHE_GCS_BUCKET", "my-bucket");
     env::set_var("SCCACHE_GCS_SERVICE_ACCOUNT", "my@example.com");
