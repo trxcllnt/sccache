@@ -744,12 +744,20 @@ where
                     out_pretty, dist_toolchain.archive_id, job_alloc.job_id
                 );
 
+                let archive_id = dist_toolchain.archive_id.clone();
+
                 match dist_client
                     .do_submit_toolchain(job_alloc.clone(), dist_toolchain)
                     .await
                     .map_err(|e| e.context("Could not submit toolchain"))?
                 {
-                    dist::SubmitToolchainResult::Success => Ok(job_alloc),
+                    dist::SubmitToolchainResult::Success => {
+                        debug!(
+                            "[{}]: Successfully sent toolchain {} for job {}",
+                            out_pretty, archive_id, job_alloc.job_id
+                        );
+                        Ok(job_alloc)
+                    }
                     dist::SubmitToolchainResult::JobNotFound => {
                         bail!(
                             "[{}]: Job {} not found on server",
@@ -780,7 +788,12 @@ where
         }?;
         let job_id = job_alloc.job_id;
         let server_id = job_alloc.server_id;
-        debug!("[{}]: Running job {}", out_pretty, job_id);
+        debug!(
+            "[{}]: Running job {} on server {:?}",
+            out_pretty,
+            job_id,
+            server_id.addr()
+        );
         let ((job_id, server_id), (jres, path_transformer)) = dist_client
             .do_run_job(
                 job_alloc,
@@ -793,7 +806,7 @@ where
             .with_context(|| {
                 format!(
                     "Could not run distributed compilation job on {:?}",
-                    server_id
+                    server_id.addr()
                 )
             })?;
 
