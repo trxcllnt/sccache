@@ -1405,7 +1405,13 @@ fn test_gcs_service_account() {
     env::set_var("SCCACHE_GCS_SERVICE_ACCOUNT", "my@example.com");
     env::set_var("SCCACHE_GCS_RW_MODE", "READ_WRITE");
 
-    let env_cfg = config_from_env().unwrap();
+    let cfg = config_from_env();
+
+    env::remove_var("SCCACHE_GCS_BUCKET");
+    env::remove_var("SCCACHE_GCS_SERVICE_ACCOUNT");
+    env::remove_var("SCCACHE_GCS_RW_MODE");
+
+    let env_cfg = cfg.unwrap();
     match env_cfg.cache.gcs {
         Some(GCSCacheConfig {
             ref bucket,
@@ -1419,10 +1425,6 @@ fn test_gcs_service_account() {
         }
         None => unreachable!(),
     };
-
-    env::remove_var("SCCACHE_GCS_BUCKET");
-    env::remove_var("SCCACHE_GCS_SERVICE_ACCOUNT");
-    env::remove_var("SCCACHE_GCS_RW_MODE");
 }
 
 #[test]
