@@ -689,7 +689,12 @@ impl SchedulerIncoming for Scheduler {
                 (JobState::Started, JobState::Complete) => {
                     let (job_id, _) = entry.remove_entry();
                     if let Some(entry) = server_details {
-                        assert!(entry.jobs_assigned.remove(&job_id))
+                        if !entry.jobs_assigned.remove(&job_id) {
+                            bail!(
+                                "Job {} was marked as finished, but job is not known to scheduler",
+                                job_id
+                            )
+                        }
                     } else {
                         bail!(
                             "Job {} was marked as finished, but server is not known to scheduler",
