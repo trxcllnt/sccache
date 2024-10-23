@@ -677,12 +677,28 @@ impl SchedulerIncoming for Scheduler {
             };
 
             match (job_detail.state, job_state) {
-                (JobState::Pending, JobState::Ready) => entry.get_mut().state = job_state,
+                (JobState::Pending, JobState::Ready) => {
+                    if let Some(details) = server_details {
+                        details
+                            .jobs_unclaimed
+                            .entry(job_id)
+                            .and_modify(|e| *e = now);
+                    } else {
+                        warn!(
+                            "Job state updated to {}, but server is not known to scheduler",
+                            job_state
+                        )
+                    }
+                    entry.get_mut().state = job_state
+                }
                 (JobState::Ready, JobState::Started) => {
                     if let Some(details) = server_details {
                         details.jobs_unclaimed.remove(&job_id);
                     } else {
-                        warn!("Job state updated, but server is not known to scheduler")
+                        warn!(
+                            "Job state updated to {}, but server is not known to scheduler",
+                            job_state
+                        )
                     }
                     entry.get_mut().state = job_state
                 }
