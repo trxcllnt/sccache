@@ -664,9 +664,9 @@ impl SchedulerIncoming for Scheduler {
             let job_detail = entry.get();
             if job_detail.server_id != server_id {
                 bail!(
-                    "Job id {} is not registered on server {:?}",
+                    "[update_job_state({}, {})]: Job is not registered to server",
                     job_id,
-                    server_id
+                    server_id.addr()
                 )
             }
 
@@ -675,6 +675,8 @@ impl SchedulerIncoming for Scheduler {
             if let Some(ref mut details) = server_details {
                 details.last_seen = now;
             };
+
+            let cur_state = job_detail.state;
 
             match (job_detail.state, job_state) {
                 (JobState::Pending, JobState::Ready) => {
@@ -685,8 +687,8 @@ impl SchedulerIncoming for Scheduler {
                             .and_modify(|e| *e = now);
                     } else {
                         warn!(
-                            "Job state updated to {}, but server is not known to scheduler",
-                            job_state
+                            "[update_job_state({}, {})]: Job state updated from {:?} to {:?}, but server is not known to scheduler",
+                            job_id, server_id.addr(), cur_state, job_state
                         )
                     }
                     entry.get_mut().state = job_state
@@ -696,8 +698,8 @@ impl SchedulerIncoming for Scheduler {
                         details.jobs_unclaimed.remove(&job_id);
                     } else {
                         warn!(
-                            "Job state updated to {}, but server is not known to scheduler",
-                            job_state
+                            "[update_job_state({}, {})]: Job state updated from {:?} to {:?}, but server is not known to scheduler",
+                            job_id, server_id.addr(), cur_state, job_state
                         )
                     }
                     entry.get_mut().state = job_state
@@ -707,31 +709,39 @@ impl SchedulerIncoming for Scheduler {
                     if let Some(entry) = server_details {
                         if !entry.jobs_assigned.remove(&job_id) {
                             bail!(
-                                "Job {} was marked as finished, but job is not known to scheduler",
-                                job_id
+                                "[update_job_state({}, {})]: Job was marked as finished, but job is not known to scheduler",
+                                job_id, server_id.addr()
                             )
                         }
                     } else {
                         bail!(
-                            "Job {} was marked as finished, but server is not known to scheduler",
-                            job_id
+                            "[update_job_state({}, {})]: Job was marked as finished, but server is not known to scheduler",
+                            job_id, server_id.addr()
                         )
                     }
                 }
                 (from, to) => bail!(
-                    "Invalid job state transition from {} to {} for job {}",
+                    "[update_job_state({}, {})]: Invalid job state transition from {:?} to {:?}",
+                    job_id,
+                    server_id.addr(),
                     from,
                     to,
-                    job_id
                 ),
             }
-            info!("Job {} updated state to {:?}", job_id, job_state);
+            info!(
+                "[update_job_state({}, {})]: Job state updated from {:?} to {:?}",
+                job_id,
+                server_id.addr(),
+                cur_state,
+                job_state
+            );
         } else {
             bail!(
-                "Cannot update unknown job {} to state {:?}",
+                "[update_job_state({}, {})]: Cannot update unknown job state to {:?}",
                 job_id,
+                server_id.addr(),
                 job_state
-            )
+            );
         }
         Ok(UpdateJobStateResult::Success)
     }
@@ -776,12 +786,19 @@ impl Server {
 impl ServerIncoming for Server {
     fn handle_assign_job(&self, job_id: JobId, tc: Toolchain) -> Result<AssignJobResult> {
         let need_toolchain = !self.cache.lock().unwrap().contains_toolchain(&tc);
-        assert!(self
+        if let Some(other_tc) = self
             .job_toolchains
             .lock()
             .unwrap()
-            .insert(job_id, tc)
-            .is_none());
+            .insert(job_id, tc.clone())
+        {
+            bail!(
+                "[{}]: Failed to replace toolchain {:?} with {:?}",
+                job_id,
+                other_tc,
+                tc
+            );
+        };
         let state = if need_toolchain {
             JobState::Pending
         } else {
@@ -837,7 +854,7 @@ impl ServerIncoming for Server {
             Some(tc) => {
                 match self
                     .builder
-                    .run_build(tc, command, outputs, inputs_rdr, &self.cache)
+                    .run_build(job_id, tc, command, outputs, inputs_rdr, &self.cache)
                 {
                     Err(e) => Err(e.context("run build failed")),
                     Ok(res) => Ok(RunJobResult::Complete(JobComplete {

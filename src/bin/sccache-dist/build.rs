@@ -17,8 +17,8 @@ use flate2::read::GzDecoder;
 use fs_err as fs;
 use libmount::Overlay;
 use sccache::dist::{
-    BuildResult, BuilderIncoming, CompileCommand, InputsReader, OutputData, ProcessOutput, TcCache,
-    Toolchain,
+    BuildResult, BuilderIncoming, CompileCommand, InputsReader, JobId, OutputData, ProcessOutput,
+    TcCache, Toolchain,
 };
 use sccache::lru_disk_cache::Error as LruError;
 use std::collections::{hash_map, HashMap};
@@ -439,21 +439,22 @@ impl OverlayBuilder {
 impl BuilderIncoming for OverlayBuilder {
     fn run_build(
         &self,
+        job_id: JobId,
         tc: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
         inputs_rdr: InputsReader,
         tccache: &Mutex<TcCache>,
     ) -> Result<BuildResult> {
-        debug!("Preparing overlay");
+        debug!("[run_build({})]: Preparing overlay", job_id);
         let overlay = self
             .prepare_overlay_dirs(&tc, tccache)
             .context("failed to prepare overlay dirs")?;
-        debug!("Performing build in {:?}", overlay);
+        debug!("[run_build({})]: Performing build in {:?}", job_id, overlay);
         let res = Self::perform_build(&self.bubblewrap, command, inputs_rdr, outputs, &overlay);
-        debug!("Finishing with overlay");
+        debug!("[run_build({})]: Finishing with overlay", job_id);
         self.finish_overlay(&tc, overlay);
-        debug!("Returning result");
+        debug!("[run_build({})]: Returning result", job_id);
         res.context("Compilation execution failed")
     }
 }
@@ -852,6 +853,7 @@ impl BuilderIncoming for DockerBuilder {
     // From Server
     fn run_build(
         &self,
+        job_id: JobId,
         tc: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
@@ -862,12 +864,15 @@ impl BuilderIncoming for DockerBuilder {
         let cid = self
             .get_container(&tc, tccache)
             .context("Failed to get a container for build")?;
-        debug!("Performing build with container {}", cid);
+        debug!(
+            "[run_build({})]: Performing build with container {}",
+            job_id, cid
+        );
         let res = Self::perform_build(command, inputs_rdr, outputs, &cid)
             .context("Failed to perform build")?;
-        debug!("Finishing with container {}", cid);
+        debug!("[run_build({})]: Finishing with container {}", job_id, cid);
         self.finish_container(&tc, cid);
-        debug!("Returning result");
+        debug!("[run_build({})]: Returning result", job_id);
         Ok(res)
     }
 }
