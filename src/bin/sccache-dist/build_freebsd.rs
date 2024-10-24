@@ -15,8 +15,8 @@
 use anyhow::{bail, Context, Error, Result};
 use flate2::read::GzDecoder;
 use sccache::dist::{
-    BuildResult, BuilderIncoming, CompileCommand, InputsReader, OutputData, ProcessOutput, TcCache,
-    Toolchain,
+    BuildResult, BuilderIncoming, CompileCommand, InputsReader, JobId, OutputData, ProcessOutput,
+    TcCache, Toolchain,
 };
 use sccache::lru_disk_cache::Error as LruError;
 use std::collections::{hash_map, HashMap};
@@ -402,20 +402,24 @@ impl BuilderIncoming for PotBuilder {
     // From Server
     fn run_build(
         &self,
+        job_id: JobId,
         tc: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
         inputs_rdr: InputsReader,
         tccache: &Mutex<TcCache>,
     ) -> Result<BuildResult> {
-        debug!("Finding container");
+        debug!("[run_build({})]: Finding container", job_id);
         let cid = self
             .get_container(&tc, tccache)
             .context("Failed to get a container for build")?;
-        debug!("Performing build with container {}", cid);
+        debug!(
+            "[run_build({})]: Performing build with container {}",
+            job_id, cid
+        );
         let res = Self::perform_build(command, inputs_rdr, outputs, &cid, &self.pot_fs_root)
             .context("Failed to perform build")?;
-        debug!("Finishing with container {}", cid);
+        debug!("[run_build({})]: Finishing with container {}", job_id, cid);
         let cloned = self.clone();
         let tc = tc;
         while cloned.cleanup_thread_count.fetch_add(1, Ordering::SeqCst)
@@ -428,7 +432,7 @@ impl BuilderIncoming for PotBuilder {
             Self::finish_container(cloned.container_lists, tc, cid, &cloned.pot_cmd);
             cloned.cleanup_thread_count.fetch_sub(1, Ordering::SeqCst);
         });
-        debug!("Returning result");
+        debug!("[run_build({})]: Returning result", job_id);
         Ok(res)
     }
 }
