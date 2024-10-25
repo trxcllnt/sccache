@@ -855,14 +855,14 @@ where
                     me.handle_compile(compile).await
                 }
                 Request::GetStats => {
-                    debug!("handle_client: get_stats");
+                    trace!("handle_client: get_stats");
                     me.get_info()
                         .await
                         .map(|i| Response::Stats(Box::new(i)))
                         .map(Message::WithoutBody)
                 }
                 Request::DistStatus => {
-                    debug!("handle_client: dist_status");
+                    trace!("handle_client: dist_status");
                     me.get_dist_status()
                         .await
                         .map(Response::DistStatus)
@@ -1493,12 +1493,12 @@ where
         if let Some(cache_write) = cache_write {
             match cache_write.await {
                 Err(e) => {
-                    debug!("[{}]: Error executing cache write: {}", out_pretty, e);
+                    warn!("[{}]: Error executing cache write: {}", out_pretty, e);
                     self.stats.lock().await.cache_write_errors += 1;
                 }
                 //TODO: save cache stats!
                 Ok(info) => {
-                    debug!(
+                    trace!(
                         "[{}]: Cache write finished in {}",
                         info.object_file_pretty,
                         util::fmt_duration_as_secs(&info.duration)
