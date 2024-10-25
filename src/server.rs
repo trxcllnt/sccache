@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::future::Future;
 use std::io::{self, Write};
 use std::marker::Unpin;
@@ -1271,11 +1271,13 @@ where
     ) -> Result<CompileFinished> {
         self.stats.lock().await.requests_executed += 1;
 
-        let force_recache = env_vars
-            .iter()
-            .any(|(k, _v)| k.as_os_str() == OsStr::new("SCCACHE_RECACHE"));
+        let force_recache = env_vars.iter().any(|(k, _v)| k == "SCCACHE_RECACHE");
 
-        let cache_control = if force_recache {
+        let force_no_cache = env_vars.iter().any(|(k, _v)| k == "SCCACHE_NO_CACHE");
+
+        let cache_control = if force_no_cache {
+            CacheControl::ForceNoCache
+        } else if force_recache {
             CacheControl::ForceRecache
         } else {
             CacheControl::Default
@@ -1340,6 +1342,7 @@ where
                         }
                         match miss_type {
                             MissType::Normal => {}
+                            MissType::ForcedNoCache => {}
                             MissType::ForcedRecache => {
                                 stats.forced_recaches += 1;
                             }
@@ -1354,6 +1357,9 @@ where
                         stats.compiler_write_duration += duration;
                         trace!("[{}]: stats after compile result: {:?}", out_pretty, stats);
                         cache_write = Some(future);
+                    }
+                    CompileResult::NotCached => {
+                        debug!("[{}]: compile result: not cached", out_pretty);
                     }
                     CompileResult::NotCacheable => {
                         debug!("[{}]: compile result: not cacheable", out_pretty);

@@ -470,7 +470,9 @@ where
         // If `ForceRecache` is enabled, we won't check the cache.
         let start = Instant::now();
         let cache_status = async {
-            if cache_control == CacheControl::ForceRecache {
+            if cache_control == CacheControl::ForceNoCache {
+                Ok(Cache::None)
+            } else if cache_control == CacheControl::ForceRecache {
                 Ok(Cache::Recache)
             } else {
                 storage.get(&key).await
@@ -530,6 +532,14 @@ where
                 );
                 Ok(CacheLookupResult::Miss(MissType::Normal))
             }
+            (Ok(Ok(Cache::None)), duration) => {
+                debug!(
+                    "[{}]: Cache none in {}",
+                    out_pretty,
+                    fmt_duration_as_secs(&duration)
+                );
+                Ok(CacheLookupResult::Miss(MissType::ForcedNoCache))
+            }
             (Ok(Ok(Cache::Recache)), duration) => {
                 debug!(
                     "[{}]: Cache recache in {}",
@@ -583,6 +593,15 @@ where
                         fmt_duration_as_secs(&duration_compilation)
                     );
                     return Ok((CompileResult::CompileFailed, compiler_result));
+                }
+                if miss_type == MissType::ForcedNoCache {
+                    // Do not cache
+                    debug!(
+                        "[{}]: Compiled in {}, but not caching",
+                        out_pretty,
+                        fmt_duration_as_secs(&duration_compilation)
+                    );
+                    return Ok((CompileResult::NotCached, compiler_result));
                 }
                 if cacheable != Cacheable::Yes {
                     // Not cacheable
@@ -1108,6 +1127,8 @@ pub enum DistType {
 pub enum MissType {
     /// The compilation was not found in the cache, nothing more.
     Normal,
+    /// Do not cache the results of the compilation.
+    ForcedNoCache,
     /// Cache lookup was overridden, recompilation was forced.
     ForcedRecache,
     /// Cache took too long to respond.
@@ -1138,6 +1159,8 @@ pub enum CompileResult {
         Duration, // Compilation time
         Pin<Box<dyn Future<Output = Result<CacheWriteInfo>> + Send>>,
     ),
+    /// Not in cache and do not cache the results of the compilation.
+    NotCached,
     /// Not in cache, but the compilation result was determined to be not cacheable.
     NotCacheable,
     /// Not in cache, but compilation failed.
@@ -1162,6 +1185,7 @@ impl fmt::Debug for CompileResult {
             CompileResult::CacheMiss(ref m, ref dt, ref d, _) => {
                 write!(f, "CompileResult::CacheMiss({:?}, {:?}, {:?}, _)", d, m, dt)
             }
+            CompileResult::NotCached => write!(f, "CompileResult::NotCached"),
             CompileResult::NotCacheable => write!(f, "CompileResult::NotCacheable"),
             CompileResult::CompileFailed => write!(f, "CompileResult::CompileFailed"),
         }
@@ -1177,6 +1201,7 @@ impl PartialEq<CompileResult> for CompileResult {
             (CompileResult::CacheMiss(m, dt, _, _), CompileResult::CacheMiss(n, dt2, _, _)) => {
                 m == n && dt == dt2
             }
+            (&CompileResult::NotCached, &CompileResult::NotCached) => true,
             (&CompileResult::NotCacheable, &CompileResult::NotCacheable) => true,
             (&CompileResult::CompileFailed, &CompileResult::CompileFailed) => true,
             _ => false,
@@ -1196,6 +1221,8 @@ pub enum Cacheable {
 pub enum CacheControl {
     /// Default caching behavior.
     Default,
+    /// Do not cache the results of the compilation.
+    ForceNoCache,
     /// Ignore existing cache entries, force recompilation.
     ForceRecache,
 }
