@@ -863,6 +863,17 @@ mod server {
                         prepare_response(request, &res)
                     },
                     (GET) (/api/v1/scheduler/status) => {
+                        let bearer_auth = match bearer_http_auth(request) {
+                            Some(s) => s,
+                            None => return make_401("no_bearer_auth"),
+                        };
+                        match check_client_auth.check(bearer_auth) {
+                            Ok(()) => (),
+                            Err(client_msg) => {
+                                warn!("Bearer auth failed: {:?}", client_msg);
+                                return make_401_with_body("bearer_auth_failed", client_msg)
+                            },
+                        }
                         let res: SchedulerStatusResult = try_or_500_log!(req_id, handler.handle_status());
                         prepare_response(request, &res)
                     },
@@ -1286,7 +1297,8 @@ mod client {
         async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
             let scheduler_url = self.scheduler_url.clone();
             let url = urls::scheduler_status(&scheduler_url);
-            let req = self.client.lock().unwrap().get(url);
+            let mut req = self.client.lock().unwrap().get(url);
+            req = req.bearer_auth(self.auth_token.clone());
             bincode_req_fut(req).await
         }
 

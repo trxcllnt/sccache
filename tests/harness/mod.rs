@@ -489,10 +489,11 @@ impl DistSystem {
     }
 
     fn scheduler_status(&self) -> SchedulerStatusResult {
-        let res = reqwest::blocking::get(dist::http::urls::scheduler_status(
-            &self.scheduler_url().to_url(),
-        ))
-        .unwrap();
+        let mut req = reqwest::blocking::Client::builder().build().unwrap().get(
+            dist::http::urls::scheduler_status(&self.scheduler_url().to_url()),
+        );
+        req = req.bearer_auth(sccache::config::INSECURE_DIST_CLIENT_TOKEN);
+        let res = req.send().unwrap();
         assert!(res.status().is_success());
         bincode::deserialize_from(res).unwrap()
     }
