@@ -765,8 +765,11 @@ where
         )
         .await
         {
-            Ok(res) => {
-                break Ok(res);
+            Ok((dt, output)) => {
+                if !output.status.success() {
+                    break Err(anyhow!("Distributed compilation failed: {:?}", output));
+                }
+                break Ok((dt, output));
             }
             Err(err) => {
                 if num_dist_attempts < dist_retry_limit
