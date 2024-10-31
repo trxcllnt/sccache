@@ -105,12 +105,19 @@ fn run_server_process(startup_timeout: Option<Duration>) -> Result<ServerStartup
         tokio::net::UnixListener::bind(&socket_path)?
     };
 
-    let _child = process::Command::new(&exe_path)
-        .current_dir(workdir)
+    let mut cmd = process::Command::new(&exe_path);
+
+    cmd.current_dir(workdir)
         .env("SCCACHE_START_SERVER", "1")
         .env("SCCACHE_STARTUP_NOTIFY", &socket_path)
-        .env("RUST_BACKTRACE", "1")
-        .spawn()?;
+        .env("RUST_BACKTRACE", "1");
+
+    // Don't output colorized logs if redirecting to a file.
+    if env::var("SCCACHE_ERROR_LOG").is_ok() {
+        cmd.env("RUST_LOG_STYLE", "never");
+    }
+
+    let _child = cmd.spawn()?;
 
     let startup = async move {
         let (socket, _) = listener.accept().await?;
