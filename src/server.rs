@@ -850,31 +850,31 @@ where
         Box::pin(async move {
             match req.into_inner() {
                 Request::Compile(compile) => {
-                    debug!("handle_client: compile");
+                    trace!("handle_client: compile");
                     me.stats.lock().await.compile_requests += 1;
                     me.handle_compile(compile).await
                 }
                 Request::GetStats => {
-                    debug!("handle_client: get_stats");
+                    trace!("handle_client: get_stats");
                     me.get_info()
                         .await
                         .map(|i| Response::Stats(Box::new(i)))
                         .map(Message::WithoutBody)
                 }
                 Request::DistStatus => {
-                    debug!("handle_client: dist_status");
+                    trace!("handle_client: dist_status");
                     me.get_dist_status()
                         .await
                         .map(Response::DistStatus)
                         .map(Message::WithoutBody)
                 }
                 Request::ZeroStats => {
-                    debug!("handle_client: zero_stats");
+                    trace!("handle_client: zero_stats");
                     me.zero_stats().await;
                     Ok(Message::WithoutBody(Response::ZeroStats))
                 }
                 Request::Shutdown => {
-                    debug!("handle_client: shutdown");
+                    trace!("handle_client: shutdown");
                     let mut tx = me.tx.clone();
                     future::try_join(
                         async {
@@ -1229,19 +1229,19 @@ where
     ) -> SccacheResponse {
         match compiler {
             Err(e) => {
-                debug!("check_compiler: Unsupported compiler: {}", e.to_string());
+                warn!("check_compiler: Unsupported compiler: {}", e.to_string());
                 self.stats.lock().await.requests_unsupported_compiler += 1;
                 return Message::WithoutBody(Response::Compile(
                     CompileResponse::UnsupportedCompiler(OsString::from(e.to_string())),
                 ));
             }
             Ok(c) => {
-                debug!("check_compiler: Supported compiler");
+                trace!("check_compiler: Supported compiler");
                 // Now check that we can handle this compiler with
                 // the provided commandline.
                 match c.parse_arguments(&cmd, &cwd, &env_vars) {
                     CompilerArguments::Ok(hasher) => {
-                        debug!("parse_arguments: Ok: {:?}", cmd);
+                        trace!("parse_arguments: Ok: {:?}", cmd);
 
                         let body = self
                             .clone()
@@ -1360,18 +1360,18 @@ where
                     Ok((compiled, out)) => {
                         match compiled {
                             CompileResult::Error => {
-                                debug!("[{}]: compile result: cache error", out_pretty);
+                                trace!("[{}]: compile result: error", out_pretty);
 
                                 stats.cache_errors.increment(&kind, &lang);
                             }
                             CompileResult::CacheHit(duration) => {
-                                debug!("[{}]: compile result: cache hit", out_pretty);
+                                trace!("[{}]: compile result: cache hit", out_pretty);
 
                                 stats.cache_hits.increment(&kind, &lang);
                                 stats.cache_read_hit_duration += duration;
                             }
                             CompileResult::CacheMiss(miss_type, dist_type, duration, future) => {
-                                debug!("[{}]: compile result: cache miss", out_pretty);
+                                trace!("[{}]: compile result: cache miss", out_pretty);
 
                                 match dist_type {
                                     DistType::NoDist => {}
@@ -1401,16 +1401,16 @@ where
                                 cache_write = Some(future);
                             }
                             CompileResult::NotCached => {
-                                debug!("[{}]: compile result: not cached", out_pretty);
+                                trace!("[{}]: compile result: not cached", out_pretty);
                             }
                             CompileResult::NotCacheable => {
-                                debug!("[{}]: compile result: not cacheable", out_pretty);
+                                trace!("[{}]: compile result: not cacheable", out_pretty);
 
                                 stats.cache_misses.increment(&kind, &lang);
                                 stats.non_cacheable_compilations += 1;
                             }
                             CompileResult::CompileFailed => {
-                                debug!("[{}]: compile result: compile failed", out_pretty);
+                                trace!("[{}]: compile result: compile failed", out_pretty);
 
                                 stats.compile_fails += 1;
                             }
@@ -1424,7 +1424,7 @@ where
                             stderr,
                         } = out;
 
-                        debug!("[{}]: CompileFinished retcode: {}", out_pretty, status);
+                        trace!("[{}]: CompileFinished retcode: {}", out_pretty, status);
 
                         match status.code() {
                             Some(code) => res.retcode = Some(code),
@@ -1437,7 +1437,7 @@ where
                     Err(err) => {
                         match err.downcast::<ProcessError>() {
                             Ok(ProcessError(output)) => {
-                                debug!("[{}]: Compilation failed: {:?}", out_pretty, output);
+                                warn!("[{}]: Compilation failed: {:?}", out_pretty, output);
                                 stats.compile_fails += 1;
                                 // Make sure the write guard has been dropped ASAP.
                                 drop(stats);

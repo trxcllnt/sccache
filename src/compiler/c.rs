@@ -398,7 +398,7 @@ where
         let too_hard_for_preprocessor_cache_mode =
             parsed_args.too_hard_for_preprocessor_cache_mode.is_some();
         if let Some(arg) = &parsed_args.too_hard_for_preprocessor_cache_mode {
-            debug!(
+            trace!(
                 "parse_arguments: Cannot use preprocessor cache because of {:?}",
                 arg
             );
@@ -527,7 +527,7 @@ where
             .await;
         let out_pretty = parsed_args.output_pretty().into_owned();
         let result = result.map_err(|e| {
-            debug!("[{}]: preprocessor failed: {:?}", out_pretty, e);
+            warn!("[{}]: preprocessor failed: {:?}", out_pretty, e);
             e
         });
 
@@ -536,7 +536,7 @@ where
 
         let mut preprocessor_result = result.or_else(move |err| {
             // Errors remove all traces of potential output.
-            debug!("removing files {:?}", &outputs);
+            trace!("removing files {:?}", &outputs);
 
             let v: std::result::Result<(), std::io::Error> =
                 outputs.values().try_for_each(|output| {
@@ -549,7 +549,10 @@ where
                     }
                 });
             if v.is_err() {
-                warn!("Could not remove files after preprocessing failed!");
+                warn!(
+                    "Could not remove files after preprocessing failed: {:?}",
+                    &outputs
+                );
             }
 
             match err.downcast::<ProcessError>() {
@@ -557,7 +560,7 @@ where
                     debug!(
                         "[{}]: preprocessor returned error status {:?}",
                         out_pretty,
-                        output.status.code()
+                        output.status.code().unwrap_or(0)
                     );
                     // Drop the stdout since it's the preprocessor output,
                     // just hand back stderr and the exit status.
@@ -1309,7 +1312,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
     fn write_pkg(self: Box<Self>, f: fs::File) -> Result<()> {
         use std::os::unix::ffi::OsStringExt;
 
-        info!("Generating toolchain {}", self.executable.display());
+        debug!("Generating toolchain {}", self.executable.display());
         let mut package_builder = pkg::ToolchainPackageBuilder::new();
         package_builder.add_common()?;
         package_builder.add_executable_and_deps(self.executable.clone())?;

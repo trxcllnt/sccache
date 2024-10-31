@@ -450,7 +450,7 @@ where
                 cache_control,
             )
             .await;
-        debug!(
+        trace!(
             "[{}]: generate_hash_key took {}",
             out_pretty,
             fmt_duration_as_secs(&start.elapsed())
@@ -468,7 +468,7 @@ where
                 weak_toolchain_key,
             }) => (key, compilation, weak_toolchain_key),
         };
-        debug!("[{}]: Hash key: {}", out_pretty, key);
+        trace!("[{}]: Hash key: {}", out_pretty, key);
         // If `ForceRecache` is enabled, we won't check the cache.
         let start = Instant::now();
         let cache_status = async {
@@ -501,7 +501,7 @@ where
 
         let lookup = match cache_status.await {
             (Ok(Ok(Cache::Hit(mut entry))), duration) => {
-                debug!(
+                trace!(
                     "[{}]: Cache hit in {}",
                     out_pretty,
                     fmt_duration_as_secs(&duration)
@@ -535,7 +535,7 @@ where
                 Ok(CacheLookupResult::Miss(MissType::Normal))
             }
             (Ok(Ok(Cache::None)), duration) => {
-                debug!(
+                trace!(
                     "[{}]: Cache none in {}",
                     out_pretty,
                     fmt_duration_as_secs(&duration)
@@ -543,7 +543,7 @@ where
                 Ok(CacheLookupResult::Miss(MissType::ForcedNoCache))
             }
             (Ok(Ok(Cache::Recache)), duration) => {
-                debug!(
+                trace!(
                     "[{}]: Cache recache in {}",
                     out_pretty,
                     fmt_duration_as_secs(&duration)
@@ -560,7 +560,7 @@ where
                 Ok(CacheLookupResult::Miss(MissType::CacheReadError))
             }
             (Err(_), duration) => {
-                debug!(
+                trace!(
                     "[{}]: Cache timed out {}",
                     out_pretty,
                     fmt_duration_as_secs(&duration)
@@ -589,7 +589,7 @@ where
                 .await?;
                 let duration_compilation = start.elapsed();
                 if !compiler_result.status.success() {
-                    debug!(
+                    trace!(
                         "[{}]: Compiled in {}, but failed, not storing in cache",
                         out_pretty,
                         fmt_duration_as_secs(&duration_compilation)
@@ -598,7 +598,7 @@ where
                 }
                 if miss_type == MissType::ForcedNoCache {
                     // Do not cache
-                    debug!(
+                    trace!(
                         "[{}]: Compiled in {}, but not caching",
                         out_pretty,
                         fmt_duration_as_secs(&duration_compilation)
@@ -607,14 +607,14 @@ where
                 }
                 if cacheable != Cacheable::Yes {
                     // Not cacheable
-                    debug!(
+                    trace!(
                         "[{}]: Compiled in {}, but not cacheable",
                         out_pretty,
                         fmt_duration_as_secs(&duration_compilation)
                     );
                     return Ok((CompileResult::NotCacheable, compiler_result));
                 }
-                debug!(
+                trace!(
                     "[{}]: Compiled in {}, storing in cache",
                     out_pretty,
                     fmt_duration_as_secs(&duration_compilation)
@@ -626,7 +626,7 @@ where
 
                 entry.put_stdout(&compiler_result.stdout)?;
                 entry.put_stderr(&compiler_result.stderr)?;
-                debug!(
+                trace!(
                     "[{}]: Created cache artifact in {}",
                     out_pretty,
                     fmt_duration_as_secs(&start_create_artifact.elapsed())
@@ -639,7 +639,7 @@ where
                     let start = Instant::now();
                     match storage.put(&key, entry).await {
                         Ok(_) => {
-                            debug!("[{}]: Stored in cache successfully!", out_pretty2);
+                            trace!("[{}]: Stored in cache successfully!", out_pretty2);
                             Ok(CacheWriteInfo {
                                 object_file_pretty: out_pretty2,
                                 duration: start.elapsed(),
@@ -687,7 +687,7 @@ where
         .generate_compile_commands(&mut path_transformer, true)
         .context("Failed to generate compile commands")?;
 
-    debug!("[{}]: Compiling locally", out_pretty);
+    trace!("[{}]: Compiling locally", out_pretty);
     compile_cmd
         .execute(&service, &creator)
         .await
@@ -734,7 +734,7 @@ where
     let dist_client = match dist_compile_cmd.clone().and(dist_client) {
         Some(dc) => dc,
         None => {
-            debug!("[{}]: Compiling locally", out_pretty);
+            trace!("[{}]: Compiling locally", out_pretty);
             return compile_cmd
                 .execute(service, &creator)
                 .await
@@ -746,9 +746,11 @@ where
     let mut num_dist_attempts = 1;
 
     let dist_compile_attempts = loop {
-        debug!(
-            "[{}]: Run distributed compilation (attempt {} of {})",
-            out_pretty, num_dist_attempts, dist_retry_limit
+        trace!(
+            "[{}]: Running distributed compilation (attempt {} of {})",
+            out_pretty,
+            num_dist_attempts,
+            dist_retry_limit
         );
 
         match dist_compile(
@@ -771,7 +773,7 @@ where
                     && err.downcast_ref::<lru_disk_cache::Error>().is_none()
                 {
                     warn!(
-                        "[{}]: Error running distributed compilation (attempt {} of {}), retrying. {:#}",
+                        "[{}]: Distributed compilation error (attempt {} of {}), retrying: {:#}",
                         out_pretty, num_dist_attempts, dist_retry_limit, err
                     );
                     num_dist_attempts += 1;
@@ -832,7 +834,7 @@ where
     let mut dist_compile_cmd =
         dist_compile_cmd.context("Could not create distributed compile command")?;
 
-    debug!("[{}]: Creating distributed compile request", out_pretty);
+    trace!("[{}]: Creating distributed compile request", out_pretty);
 
     let dist_output_paths = compilation
         .outputs()
@@ -842,7 +844,7 @@ where
     let (inputs_packager, toolchain_packager, outputs_rewriter) =
         compilation.into_dist_packagers(path_transformer)?;
 
-    debug!(
+    trace!(
         "[{}]: Identifying dist toolchain for {:?}",
         out_pretty,
         compile_cmd.get_executable()
@@ -860,7 +862,7 @@ where
         tc_archive = Some(archive_path);
     }
 
-    debug!("[{}]: Requesting allocation", out_pretty);
+    trace!("[{}]: Requesting allocation", out_pretty);
     let jares = dist_client.do_alloc_job(dist_toolchain.clone()).await?;
     let job_alloc = match jares {
         dist::AllocJobResult::Success {
@@ -868,8 +870,10 @@ where
             need_toolchain: true,
         } => {
             debug!(
-                "[{}]: Successfully allocated job {}",
-                out_pretty, job_alloc.job_id
+                "[{}]: Successfully allocated job {} on server {}",
+                out_pretty,
+                job_alloc.job_id,
+                job_alloc.server_id.addr()
             );
             debug!(
                 "[{}]: Sending toolchain {} for job {}",
@@ -884,9 +888,11 @@ where
                 .map_err(|e| e.context("Could not submit toolchain"))?
             {
                 dist::SubmitToolchainResult::Success => {
-                    debug!(
+                    trace!(
                         "[{}]: Successfully sent toolchain {} for job {}",
-                        out_pretty, archive_id, job_alloc.job_id
+                        out_pretty,
+                        archive_id,
+                        job_alloc.job_id
                     );
                     Ok(job_alloc)
                 }
@@ -909,8 +915,10 @@ where
             need_toolchain: false,
         } => {
             debug!(
-                "[{}]: Successfully allocated job {}",
-                out_pretty, job_alloc.job_id
+                "[{}]: Successfully allocated job {} on server {}",
+                out_pretty,
+                job_alloc.job_id,
+                job_alloc.server_id.addr()
             );
             Ok(job_alloc)
         }
@@ -946,7 +954,7 @@ where
             bail!("[{}]: Job {} not found on server", out_pretty, job_id)
         }
     };
-    debug!(
+    trace!(
         "[{}]: Fetched {:?}",
         out_pretty,
         jc.outputs
@@ -1351,7 +1359,7 @@ where
     let rustc_executable = if let Some(ref rustc_executable) = maybe_rustc_executable {
         rustc_executable
     } else if is_nvidia_cicc(executable) {
-        debug!("Found cicc");
+        trace!("Found cicc");
         return CCompiler::new(
             Cicc {
                 // TODO: Use nvcc --version
@@ -1363,7 +1371,7 @@ where
         .await
         .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
     } else if is_nvidia_ptxas(executable) {
-        debug!("Found ptxas");
+        trace!("Found ptxas");
         return CCompiler::new(
             Ptxas {
                 // TODO: Use nvcc --version

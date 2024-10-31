@@ -208,7 +208,7 @@ mod client {
             // to create the same toolchain, just a waste of time
             let mut cache = self.cache.lock().unwrap();
             if let Some(archive_id) = self.weak_to_strong(weak_key) {
-                debug!("Using cached toolchain {} -> {}", weak_key, archive_id);
+                trace!("Using cached toolchain {} -> {}", weak_key, archive_id);
                 return Ok((Toolchain { archive_id }, None));
             }
             debug!("Weak key {} appears to be new", weak_key);
