@@ -1362,18 +1362,22 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                 Ok(())
             };
 
-        // Add basic |as| and |objcopy| programs.
-        add_named_prog(&mut package_builder, "as")?;
-        add_named_prog(&mut package_builder, "objcopy")?;
+        let mut add_default_files = || -> Result<()> {
+            // Add basic |as| and |objcopy| programs.
+            add_named_prog(&mut package_builder, "as")?;
+            add_named_prog(&mut package_builder, "objcopy")?;
 
-        // Linker configuration.
-        if Path::new("/etc/ld.so.conf").is_file() {
-            package_builder.add_file("/etc/ld.so.conf".into())?;
-        }
+            // Linker configuration.
+            if Path::new("/etc/ld.so.conf").is_file() {
+                package_builder.add_file("/etc/ld.so.conf".into())?;
+            }
+            Ok(())
+        };
 
         // Compiler-specific handling
         match self.kind {
             CCompilerKind::Clang => {
+                add_default_files()?;
                 // Clang uses internal header files, so add them.
                 if let Some(limits_h) = named_file("file", "include/limits.h") {
                     info!("limits_h = {}", limits_h.display());
@@ -1383,6 +1387,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 
             CCompilerKind::Gcc => {
                 // Various external programs / files which may be needed by gcc
+                add_default_files()?;
                 add_named_prog(&mut package_builder, "cc1")?;
                 add_named_prog(&mut package_builder, "cc1plus")?;
                 add_named_file(&mut package_builder, "specs")?;
@@ -1393,17 +1398,11 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 
             CCompilerKind::Ptxas => {}
 
-            CCompilerKind::Nvcc => {
-                // Various programs called by the nvcc front end.
-                // presumes the underlying host compiler is consistent
-                add_named_file(&mut package_builder, "cudafe++")?;
-                add_named_file(&mut package_builder, "fatbinary")?;
-                add_named_prog(&mut package_builder, "nvlink")?;
-                add_named_prog(&mut package_builder, "ptxas")?;
-            }
+            CCompilerKind::Nvcc => {}
 
             CCompilerKind::Nvhpc => {
                 // Various programs called by the nvc nvc++ front end.
+                add_default_files()?;
                 add_named_file(&mut package_builder, "cpp1")?;
                 add_named_file(&mut package_builder, "cpp2")?;
                 add_named_file(&mut package_builder, "opt")?;
