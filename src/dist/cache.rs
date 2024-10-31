@@ -302,7 +302,10 @@ mod client {
                 Box::new(PanicToolchainPackager)
             }
         }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+        ))]
         impl crate::dist::pkg::ToolchainPackager for PanicToolchainPackager {
             fn write_pkg(self: Box<Self>, _f: super::fs::File) -> crate::errors::Result<()> {
                 panic!("should not have called packager")

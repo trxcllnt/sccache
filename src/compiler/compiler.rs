@@ -61,6 +61,7 @@ use crate::errors::*;
     feature = "dist-client",
     any(
         all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
         target_os = "freebsd"
     )
 ))]
@@ -69,6 +70,7 @@ pub const CAN_DIST_DYLIBS: bool = true;
     feature = "dist-client",
     not(any(
         all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
         target_os = "freebsd"
     ))
 ))]

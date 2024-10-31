@@ -1301,7 +1301,10 @@ struct CToolchainPackager {
 }
 
 #[cfg(feature = "dist-client")]
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+))]
 impl pkg::ToolchainPackager for CToolchainPackager {
     fn write_pkg(self: Box<Self>, f: fs::File) -> Result<()> {
         use std::os::unix::ffi::OsStringExt;
