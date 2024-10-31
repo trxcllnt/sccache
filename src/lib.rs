@@ -62,7 +62,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const LOGGING_ENV: &str = "SCCACHE_LOG";
 
 pub fn main() {
-    init_logging();
+    // We only care if it's `1`
+    init_logging(env::var("SCCACHE_START_SERVER").is_ok_and(|x| x == "1"));
 
     let incr_env_strs = ["CARGO_BUILD_INCREMENTAL", "CARGO_INCREMENTAL"];
     incr_env_strs
@@ -102,7 +103,24 @@ pub fn main() {
     });
 }
 
-fn init_logging() {
+fn init_logging(is_server: bool) {
+    //
+    // If starting the server, first check if SCCACHE_SERVER_LOG is set
+    //
+    // This allows users to configure server logging independently from
+    // client logs.
+    //
+    // For example, a user doesn't necessarily want to see each sccache
+    // client's logs in their `make -j` stderr output, but does want to
+    // see the server logs redirected to $SCCACHE_ERROR_LOG.
+    //
+    if is_server && env::var("SCCACHE_SERVER_LOG").is_ok() {
+        match env_logger::Builder::from_env("SCCACHE_SERVER_LOG").try_init() {
+            Ok(_) => (),
+            Err(e) => panic!("Failed to initialize logging: {:?}", e),
+        }
+    }
+    // Both client and server will use SCCACHE_LOG=
     if env::var(LOGGING_ENV).is_ok() {
         match env_logger::Builder::from_env(LOGGING_ENV).try_init() {
             Ok(_) => (),
