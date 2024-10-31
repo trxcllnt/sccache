@@ -188,9 +188,10 @@ impl OverlayBuilder {
                 entry.clone()
             } else {
                 trace!(
-                    "[prepare_overlay_dirs({})]: Creating toolchain directory for {}",
+                    "[prepare_overlay_dirs({})]: Creating toolchain directory for archive {}: {:?}",
                     job_id,
-                    tc.archive_id
+                    tc.archive_id,
+                    toolchain_dir
                 );
                 fs::create_dir(&toolchain_dir)?;
 
@@ -209,8 +210,8 @@ impl OverlayBuilder {
                     .unpack(&toolchain_dir)
                     .or_else(|e| {
                         warn!(
-                            "[prepare_overlay_dirs({})]: Failed to unpack toolchain: {:?}",
-                            job_id, e
+                            "[prepare_overlay_dirs({})]: Failed to unpack toolchain {}: {:?}",
+                            job_id, tc.archive_id, e
                         );
                         fs::remove_dir_all(&toolchain_dir)
                             .context("Failed to remove unpacked toolchain")?;
@@ -247,16 +248,19 @@ impl OverlayBuilder {
             }
         };
 
-        trace!(
-            "[prepare_overlay_dirs({})]: Creating build directory for {}-{}",
-            job_id,
-            tc.archive_id,
-            id
-        );
         let build_dir = self
             .dir
             .join("builds")
             .join(format!("{}-{}", tc.archive_id, id));
+
+        trace!(
+            "[prepare_overlay_dirs({})]: Creating build directory for {}-{}: {:?}",
+            job_id,
+            tc.archive_id,
+            id,
+            build_dir
+        );
+
         fs::create_dir(&build_dir)?;
         Ok(OverlaySpec {
             build_dir,
@@ -400,6 +404,9 @@ impl OverlayBuilder {
                     cmd.arg("--");
                     cmd.arg(executable);
                     cmd.args(arguments);
+
+                    trace!("[perform_build({})]: bubblewrap command: {:?}", job_id, cmd);
+
                     let compile_output = cmd
                         .output()
                         .context("Failed to retrieve output from compile")?;
