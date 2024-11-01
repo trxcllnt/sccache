@@ -29,7 +29,9 @@ use uuid::Uuid;
 
 trait CommandExt {
     fn check_stdout_trim(&mut self) -> Result<String>;
-    fn check_piped(&mut self, pipe: &mut dyn FnMut(&mut ChildStdin) -> Result<()>) -> Result<()>;
+    fn check_piped<F>(&mut self, pipe: &mut F) -> Result<()>
+    where
+        F: FnMut(ChildStdin) -> Result<()>;
     fn check_run(&mut self) -> Result<()>;
 }
 
@@ -42,16 +44,21 @@ impl CommandExt for Command {
         Ok(stdout.trim().to_owned())
     }
     // Should really take a FnOnce/FnBox
-    fn check_piped(&mut self, pipe: &mut dyn FnMut(&mut ChildStdin) -> Result<()>) -> Result<()> {
+    fn check_piped<F>(&mut self, pipe: &mut F) -> Result<()>
+    where
+        F: FnMut(ChildStdin) -> Result<()>,
+    {
         let mut process = self
             .stdin(Stdio::piped())
             .spawn()
             .context("Failed to start command")?;
-        let mut stdin = process
-            .stdin
-            .take()
-            .expect("Requested piped stdin but not present");
-        pipe(&mut stdin).context("Failed to pipe input to process")?;
+        pipe(
+            process
+                .stdin
+                .take()
+                .expect("Requested piped stdin but not present"),
+        )
+        .context("Failed to pipe input to process")?;
         let output = process
             .wait_with_output()
             .context("Failed to wait for process to return")?;
