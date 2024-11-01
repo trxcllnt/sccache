@@ -503,11 +503,11 @@ impl BuilderIncoming for OverlayBuilder {
     }
 }
 
-const BASE_DOCKER_IMAGE: &str = "aidanhs/busybox";
+const BASE_DOCKER_IMAGE: &str = "busybox:stable-musl";
 // Make sure sh doesn't exec the final command, since we need it to do
 // init duties (reaping zombies). Also, because we kill -9 -1, that kills
 // the sleep (it's not a builtin) so it needs to be a loop.
-const DOCKER_SHELL_INIT: &str = "while true; do /busybox sleep 365d && /busybox true; done";
+const DOCKER_SHELL_INIT: &str = "while true; do busybox sleep 365d && busybox true; done";
 
 // Check the diff and clean up the FS
 fn docker_diff(cid: &str) -> Result<String> {
@@ -652,7 +652,7 @@ impl DockerBuilder {
     fn clean_container(&self, job_id: JobId, cid: &str) -> Result<()> {
         // Clean up any running processes
         Command::new("docker")
-            .args(["exec", cid, "/busybox", "kill", "-9", "-1"])
+            .args(["exec", cid, "busybox", "kill", "-9", "-1"])
             .check_run()
             .context("Failed to run kill on all processes in container")?;
 
@@ -691,7 +691,7 @@ impl DockerBuilder {
                 }
                 lastpath = Some(changepath);
                 if let Err(e) = Command::new("docker")
-                    .args(["exec", cid, "/busybox", "rm", "-rf", changepath])
+                    .args(["exec", cid, "busybox", "rm", "-rf", changepath])
                     .check_run()
                 {
                     // We do a final check anyway, so just continue
@@ -757,7 +757,7 @@ impl DockerBuilder {
 
     fn make_image(job_id: JobId, tc: &Toolchain, tccache: &Mutex<TcCache>) -> Result<String> {
         let cid = Command::new("docker")
-            .args(["create", BASE_DOCKER_IMAGE, "/busybox", "true"])
+            .args(["create", BASE_DOCKER_IMAGE, "busybox", "true"])
             .check_stdout_trim()
             .context("Failed to create docker container")?;
 
@@ -799,15 +799,7 @@ impl DockerBuilder {
 
     fn start_container(image: &str) -> Result<String> {
         Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                image,
-                "/busybox",
-                "sh",
-                "-c",
-                DOCKER_SHELL_INIT,
-            ])
+            .args(["run", "-d", image, "busybox", "sh", "-c", DOCKER_SHELL_INIT])
             .check_stdout_trim()
             .context("Failed to run container")
     }
@@ -852,7 +844,7 @@ impl DockerBuilder {
         trace!("[perform_build({})]: creating output directories", job_id);
         assert!(!output_paths.is_empty());
         let mut cmd = Command::new("docker");
-        cmd.args(["exec", cid, "/busybox", "mkdir", "-p"]).arg(cwd);
+        cmd.args(["exec", cid, "busybox", "mkdir", "-p"]).arg(cwd);
         for path in output_paths.iter() {
             // If it doesn't have a parent, nothing needs creating
             let output_parent = if let Some(p) = Path::new(path).parent() {
@@ -883,7 +875,7 @@ impl DockerBuilder {
             cmd.arg("-e").arg(env);
         }
         let shell_cmd = "cd \"$1\" && shift && exec \"$@\"";
-        cmd.args([cid, "/busybox", "sh", "-c", shell_cmd]);
+        cmd.args([cid, "busybox", "sh", "-c", shell_cmd]);
         cmd.arg(&executable);
         cmd.arg(cwd);
         cmd.arg(executable);
@@ -901,7 +893,7 @@ impl DockerBuilder {
             let abspath = cwd.join(&path); // Resolve in case it's relative since we copy it from the root level
                                            // TODO: this isn't great, but cp gives it out as a tar
             let output = Command::new("docker")
-                .args(["exec", cid, "/busybox", "cat"])
+                .args(["exec", cid, "busybox", "cat"])
                 .arg(abspath)
                 .output()
                 .context("Failed to start command to retrieve output file")?;
