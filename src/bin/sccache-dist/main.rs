@@ -159,6 +159,10 @@ fn run(command: Command) -> Result<i32> {
             public_addr,
             client_auth,
             server_auth,
+            max_per_core_load,
+            remember_server_error_timeout,
+            unclaimed_job_pending_timeout,
+            unclaimed_job_ready_timeout,
         }) => {
             let check_client_auth: Box<dyn dist::http::ClientAuthCheck> = match client_auth {
                 scheduler_config::ClientAuth::Insecure => Box::new(token_check::EqCheck::new(
@@ -213,7 +217,12 @@ fn run(command: Command) -> Result<i32> {
             };
 
             daemonize()?;
-            let scheduler = Scheduler::new();
+            let scheduler = Scheduler::new(
+                max_per_core_load,
+                remember_server_error_timeout,
+                unclaimed_job_pending_timeout,
+                unclaimed_job_ready_timeout,
+            );
             let http_scheduler = dist::http::Scheduler::new(
                 public_addr,
                 scheduler,
@@ -232,6 +241,7 @@ fn run(command: Command) -> Result<i32> {
             scheduler_url,
             scheduler_auth,
             toolchain_cache_size,
+            num_cpus_to_ignore,
         }) => {
             let bind_addr = bind_addr.unwrap_or(public_addr);
             let builder: Box<dyn dist::BuilderIncoming> = match builder {
@@ -297,6 +307,7 @@ fn run(command: Command) -> Result<i32> {
                 bind_addr,
                 scheduler_url.to_url(),
                 scheduler_auth,
+                num_cpus_to_ignore,
                 server,
             )
             .context("Failed to create sccache HTTP server instance")?;
@@ -315,11 +326,6 @@ fn init_logging() {
     }
 }
 
-const MAX_PER_CORE_LOAD: f64 = 10f64;
-const SERVER_REMEMBER_ERROR_TIMEOUT: Duration = Duration::from_secs(300);
-const UNCLAIMED_PENDING_TIMEOUT: Duration = Duration::from_secs(300);
-const UNCLAIMED_READY_TIMEOUT: Duration = Duration::from_secs(60);
-
 #[derive(Copy, Clone)]
 struct JobDetail {
     mtime: Instant,
@@ -336,6 +342,11 @@ pub struct Scheduler {
     jobs: Mutex<BTreeMap<JobId, JobDetail>>,
 
     servers: Mutex<HashMap<ServerId, ServerDetails>>,
+
+    max_per_core_load: f64,
+    remember_server_error_timeout: Duration,
+    unclaimed_job_pending_timeout: Duration,
+    unclaimed_job_ready_timeout: Duration,
 }
 
 struct ServerDetails {
@@ -351,11 +362,20 @@ struct ServerDetails {
 }
 
 impl Scheduler {
-    pub fn new() -> Self {
+    pub fn new(
+        max_per_core_load: f64,
+        remember_server_error_timeout: u64,
+        unclaimed_job_pending_timeout: u64,
+        unclaimed_job_ready_timeout: u64,
+    ) -> Self {
         Scheduler {
             job_count: AtomicUsize::new(0),
             jobs: Mutex::new(BTreeMap::new()),
             servers: Mutex::new(HashMap::new()),
+            max_per_core_load,
+            remember_server_error_timeout: Duration::from_secs(remember_server_error_timeout),
+            unclaimed_job_pending_timeout: Duration::from_secs(unclaimed_job_pending_timeout),
+            unclaimed_job_ready_timeout: Duration::from_secs(unclaimed_job_ready_timeout),
         }
     }
 
@@ -402,7 +422,12 @@ impl Scheduler {
 
 impl Default for Scheduler {
     fn default() -> Self {
-        Self::new()
+        Self::new(
+            scheduler_config::default_max_per_core_load(),
+            scheduler_config::default_remember_server_error_timeout(),
+            scheduler_config::default_unclaimed_job_pending_timeout(),
+            scheduler_config::default_unclaimed_job_ready_timeout(),
+        )
     }
 }
 
@@ -423,9 +448,15 @@ impl SchedulerIncoming for Scheduler {
         requester: &dyn SchedulerOutgoing,
         tc: Toolchain,
     ) -> Result<AllocJobResult> {
+        let Scheduler {
+            max_per_core_load,
+            remember_server_error_timeout,
+            ..
+        } = *self;
+
         // Attempt to allocate a job to the best server. The best server is the server
         // with the fewest assigned jobs and least-recently-reported error. Servers
-        // whose load exceeds `MAX_PER_CORE_LOAD` are not considered candidates for
+        // whose load exceeds `max_per_core_load` are not considered candidates for
         // job assignment.
         //
         // If we fail to assign a job to a server, attempt to assign the job to the next
@@ -555,8 +586,8 @@ impl SchedulerIncoming for Scheduler {
                     // Forget errors that are too old to care about anymore
                     if let Some(last_error) = details.last_error {
                         // TODO: Explain why we only reset errors when load < MAX_LOAD_PER_CORE?
-                        if load < MAX_PER_CORE_LOAD
-                            && now.duration_since(last_error) > SERVER_REMEMBER_ERROR_TIMEOUT
+                        if load < max_per_core_load
+                            && now.duration_since(last_error) > remember_server_error_timeout
                         {
                             details.last_error = None;
                         }
@@ -604,12 +635,12 @@ impl SchedulerIncoming for Scheduler {
                 if let Some(details) = servers.get_mut(&server_id) {
                     details.jobs_assigned.len() as f64 / details.num_cpus as f64
                 } else {
-                    MAX_PER_CORE_LOAD
+                    max_per_core_load
                 }
             };
 
             // Never assign jobs to overloaded servers
-            if load >= MAX_PER_CORE_LOAD {
+            if load >= max_per_core_load {
                 continue;
             }
 
@@ -663,6 +694,12 @@ impl SchedulerIncoming for Scheduler {
             bail!("Invalid number of CPUs (0) specified in heartbeat")
         }
 
+        let Scheduler {
+            unclaimed_job_pending_timeout,
+            unclaimed_job_ready_timeout,
+            ..
+        } = *self;
+
         // LOCKS
         let mut jobs = self.jobs.lock().unwrap();
         let mut servers = self.servers.lock().unwrap();
@@ -676,7 +713,7 @@ impl SchedulerIncoming for Scheduler {
 
                 let mut stale_jobs = Vec::new();
                 for (&job_id, &last_seen) in details.jobs_unclaimed.iter() {
-                    if now.duration_since(last_seen) < UNCLAIMED_READY_TIMEOUT {
+                    if now.duration_since(last_seen) < unclaimed_job_ready_timeout {
                         continue;
                     }
                     if let Some(detail) = jobs.get(&job_id) {
@@ -685,7 +722,7 @@ impl SchedulerIncoming for Scheduler {
                                 stale_jobs.push(job_id);
                             }
                             JobState::Pending => {
-                                if now.duration_since(last_seen) > UNCLAIMED_PENDING_TIMEOUT {
+                                if now.duration_since(last_seen) > unclaimed_job_pending_timeout {
                                     stale_jobs.push(job_id);
                                 }
                             }
@@ -823,7 +860,7 @@ impl SchedulerIncoming for Scheduler {
             match (cur_state, job_state) {
                 (JobState::Pending, JobState::Ready) => {
                     // Update the job's `last_seen` time to ensure it isn't
-                    // pruned for taking longer than UNCLAIMED_READY_TIMEOUT
+                    // pruned for taking longer than `unclaimed_job_ready_timeout`
                     server.jobs_unclaimed.entry(job_id).and_modify(|e| *e = now);
                     job.get_mut().mtime = now;
                     job.get_mut().state = job_state;

@@ -928,6 +928,7 @@ mod server {
         jwt_key: Vec<u8>,
         // Randomly generated nonce to allow the scheduler to detect server restarts
         server_nonce: ServerNonce,
+        num_cpus_to_ignore: usize,
         handler: S,
     }
 
@@ -937,6 +938,7 @@ mod server {
             bind_addr: SocketAddr,
             scheduler_url: reqwest::Url,
             scheduler_auth: String,
+            num_cpus_to_ignore: usize,
             handler: S,
         ) -> Result<Self> {
             let (cert_digest, cert_pem, privkey_pem) =
@@ -956,6 +958,7 @@ mod server {
                 privkey_pem,
                 jwt_key,
                 server_nonce,
+                num_cpus_to_ignore,
                 handler,
             })
         }
@@ -971,10 +974,14 @@ mod server {
                 privkey_pem,
                 jwt_key,
                 server_nonce,
+                num_cpus_to_ignore,
                 handler,
             } = self;
+
+            let num_cpus = (num_cpus::get() - num_cpus_to_ignore).max(1);
+
             let heartbeat_req = HeartbeatServerHttpRequest {
-                num_cpus: num_cpus::get(),
+                num_cpus,
                 jwt_key: jwt_key.clone(),
                 server_nonce,
                 cert_digest,
@@ -1092,7 +1099,7 @@ mod server {
             // This limit is rouille's default for `start_server_with_pool`, which
             // we would use, except that interface doesn't permit any sort of
             // error handling to be done.
-            let server = server.pool_size(num_cpus::get() * 8);
+            let server = server.pool_size(num_cpus * 8);
             server.run();
 
             panic!("Rouille server terminated")

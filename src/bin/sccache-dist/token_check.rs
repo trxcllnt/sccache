@@ -276,7 +276,6 @@ impl ProxyTokenCheck {
     }
 
     fn check_token_with_forwarding(&self, token: &str) -> Result<()> {
-        trace!("Validating token by forwarding to {}", self.url);
         // If the token is cached and not cache has not expired, return it
         if let Some(ref auth_cache) = self.maybe_auth_cache {
             let mut auth_cache = auth_cache.lock().unwrap();
@@ -288,6 +287,7 @@ impl ProxyTokenCheck {
             }
             auth_cache.remove(token);
         }
+        trace!("Validating token by forwarding to {}", self.url);
         // Make a request to another API, which as a side effect should actually check the token
         let res = self
             .client

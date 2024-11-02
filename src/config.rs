@@ -1072,12 +1072,41 @@ impl CachedConfig {
 
 #[cfg(feature = "dist-server")]
 pub mod scheduler {
-    use std::net::SocketAddr;
     use std::path::Path;
+    use std::{net::SocketAddr, str::FromStr};
 
     use crate::errors::*;
 
     use serde::{Deserialize, Serialize};
+
+    pub fn default_max_per_core_load() -> f64 {
+        std::env::var("SCCACHE_DIST_MAX_PER_CORE_LOAD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            // Default to 8 to match the server's default thread pool size
+            .unwrap_or(8f64)
+    }
+
+    pub fn default_remember_server_error_timeout() -> u64 {
+        std::env::var("SCCACHE_DIST_REMEMBER_SERVER_ERROR_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300)
+    }
+
+    pub fn default_unclaimed_job_pending_timeout() -> u64 {
+        std::env::var("SCCACHE_DIST_UNCLAIMED_JOB_PENDING_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300)
+    }
+
+    pub fn default_unclaimed_job_ready_timeout() -> u64 {
+        std::env::var("SCCACHE_DIST_UNCLAIMED_JOB_READY_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60)
+    }
 
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(tag = "type")]
@@ -1115,11 +1144,30 @@ pub mod scheduler {
     }
 
     #[derive(Debug, Serialize, Deserialize)]
+    #[serde(default)]
     #[serde(deny_unknown_fields)]
     pub struct Config {
         pub public_addr: SocketAddr,
         pub client_auth: ClientAuth,
         pub server_auth: ServerAuth,
+        pub max_per_core_load: f64,
+        pub remember_server_error_timeout: u64,
+        pub unclaimed_job_pending_timeout: u64,
+        pub unclaimed_job_ready_timeout: u64,
+    }
+
+    impl Default for Config {
+        fn default() -> Self {
+            Self {
+                public_addr: SocketAddr::from_str("0.0.0.0:10500").unwrap(),
+                client_auth: ClientAuth::Insecure,
+                server_auth: ServerAuth::Insecure,
+                max_per_core_load: default_max_per_core_load(),
+                remember_server_error_timeout: default_remember_server_error_timeout(),
+                unclaimed_job_pending_timeout: default_unclaimed_job_pending_timeout(),
+                unclaimed_job_ready_timeout: default_unclaimed_job_ready_timeout(),
+            }
+        }
     }
 
     pub fn from_path(conf_path: &Path) -> Result<Option<Config>> {
@@ -1133,12 +1181,20 @@ pub mod server {
     use serde::{Deserialize, Serialize};
     use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
+    use std::str::FromStr;
 
     use crate::errors::*;
 
     const TEN_GIGS: u64 = 10 * 1024 * 1024 * 1024;
     fn default_toolchain_cache_size() -> u64 {
         TEN_GIGS
+    }
+
+    fn default_num_cpus_to_ignore() -> usize {
+        std::env::var("SCCACHE_DIST_NUM_CPUS_TO_IGNORE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
     }
 
     const DEFAULT_POT_CLONE_FROM: &str = "sccache-template";
@@ -1202,6 +1258,7 @@ pub mod server {
     }
 
     #[derive(Debug, Serialize, Deserialize)]
+    #[serde(default)]
     #[serde(deny_unknown_fields)]
     pub struct Config {
         pub builder: BuilderType,
@@ -1210,8 +1267,25 @@ pub mod server {
         pub bind_addr: Option<SocketAddr>,
         pub scheduler_url: HTTPUrl,
         pub scheduler_auth: SchedulerAuth,
-        #[serde(default = "default_toolchain_cache_size")]
         pub toolchain_cache_size: u64,
+        pub num_cpus_to_ignore: usize,
+    }
+
+    impl Default for Config {
+        fn default() -> Self {
+            Self {
+                builder: BuilderType::Docker,
+                cache_dir: Default::default(),
+                public_addr: SocketAddr::from_str("0.0.0.0:10600").unwrap(),
+                bind_addr: None,
+                scheduler_url: HTTPUrl::from_url(
+                    reqwest::Url::from_str("http://0.0.0.0:10500").unwrap(),
+                ),
+                scheduler_auth: SchedulerAuth::Insecure,
+                toolchain_cache_size: default_toolchain_cache_size(),
+                num_cpus_to_ignore: default_num_cpus_to_ignore(),
+            }
+        }
     }
 
     pub fn from_path(conf_path: &Path) -> Result<Option<Config>> {

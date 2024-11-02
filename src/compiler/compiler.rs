@@ -957,7 +957,7 @@ where
             bail!("[{}]: Job {} not found on server", out_pretty, job_id)
         }
     };
-    trace!(
+    debug!(
         "[{}]: Fetched {:?}",
         out_pretty,
         jc.outputs

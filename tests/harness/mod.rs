@@ -176,6 +176,7 @@ fn sccache_scheduler_cfg() -> sccache::config::scheduler::Config {
         server_auth: sccache::config::scheduler::ServerAuth::Token {
             token: DIST_SERVER_TOKEN.to_owned(),
         },
+        ..Default::default()
     }
 }
 
@@ -201,6 +202,7 @@ fn sccache_server_cfg(
             token: DIST_SERVER_TOKEN.to_owned(),
         },
         toolchain_cache_size: TC_CACHE_SIZE,
+        ..Default::default()
     }
 }
 
@@ -415,6 +417,7 @@ impl DistSystem {
             server_addr,
             self.scheduler_url().to_url(),
             token,
+            0,
             handler,
         )
         .unwrap();
