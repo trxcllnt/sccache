@@ -889,7 +889,7 @@ mod server {
             // This limit is rouille's default for `start_server_with_pool`, which
             // we would use, except that interface doesn't permit any sort of
             // error handling to be done.
-            let server = server.pool_size(num_cpus::get() * 2);
+            let server = server.pool_size(num_cpus::get() * 8);
             server.run();
 
             panic!("Rouille server terminated")
@@ -1099,7 +1099,7 @@ mod server {
             // This limit is rouille's default for `start_server_with_pool`, which
             // we would use, except that interface doesn't permit any sort of
             // error handling to be done.
-            let server = server.pool_size(num_cpus * 2);
+            let server = server.pool_size(num_cpus);
             server.run();
 
             panic!("Rouille server terminated")

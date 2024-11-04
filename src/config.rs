@@ -1083,8 +1083,8 @@ pub mod scheduler {
         std::env::var("SCCACHE_DIST_MAX_PER_CORE_LOAD")
             .ok()
             .and_then(|s| s.parse().ok())
-            // Default to 2 to match the server's default thread pool size
-            .unwrap_or(2f64)
+            // Default to 1 to match the server's default thread pool multiple
+            .unwrap_or(1f64)
     }
 
     pub fn default_remember_server_error_timeout() -> u64 {
