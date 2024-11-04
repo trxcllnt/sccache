@@ -106,7 +106,7 @@ zip = { version = "0.6", default-features = false }
 zstd = "0.13"
 
 # dist-server only
-memmap2 = "0.9.4"
+memmap2 = "0.9.5"
 nix = { version = "0.28.0", optional = true, features = [
   "mount",
   "user",
