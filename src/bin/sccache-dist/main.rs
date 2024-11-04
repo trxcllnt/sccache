@@ -585,7 +585,7 @@ impl SchedulerIncoming for Scheduler {
                     let load = details.jobs_assigned.len() as f64 / details.num_cpus as f64;
                     // Forget errors that are too old to care about anymore
                     if let Some(last_error) = details.last_error {
-                        // TODO: Explain why we only reset errors when load < MAX_LOAD_PER_CORE?
+                        // TODO: Explain why we only reset errors when load < max_per_core_load?
                         if load < max_per_core_load
                             && now.duration_since(last_error) > remember_server_error_timeout
                         {
