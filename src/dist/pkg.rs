@@ -66,6 +66,7 @@ mod toolchain_imp {
     use super::SimplifyPath;
     use fs_err as fs;
     use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::io::{Read, Write};
     use std::path::{Component, Path, PathBuf};
     use std::process;
@@ -97,7 +98,11 @@ mod toolchain_imp {
             self.add_dir(PathBuf::from("/tmp"))
         }
 
-        pub fn add_executable_and_deps(&mut self, executable: PathBuf) -> Result<()> {
+        pub fn add_executable_and_deps(
+            &mut self,
+            env_vars: &[(OsString, OsString)],
+            executable: PathBuf,
+        ) -> Result<()> {
             let mut remaining = vec![executable];
             while let Some(obj_path) = remaining.pop() {
                 assert!(obj_path.is_absolute());
@@ -110,10 +115,11 @@ mod toolchain_imp {
                 if self.file_set.contains_key(&tar_path) {
                     continue;
                 }
-                let ldd_libraries = find_ldd_libraries(&obj_path).with_context(|| {
+                let ldd_libraries = find_ldd_libraries(env_vars, &obj_path).with_context(|| {
                     format!("Failed to analyse {} with ldd", obj_path.display())
                 })?;
                 remaining.extend(ldd_libraries);
+                trace!("add_executable_and_deps {}", obj_path.display());
                 self.file_set.insert(tar_path, obj_path);
             }
             Ok(())
@@ -135,6 +141,7 @@ mod toolchain_imp {
             {
                 return Ok(());
             }
+            trace!("add_dir {}", dir_path.display());
             let tar_path = self.tarify_path(&dir_path)?;
             self.dir_set.insert(tar_path, dir_path);
             Ok(())
@@ -148,6 +155,7 @@ mod toolchain_imp {
                     file_path.to_string_lossy()
                 ))
             }
+            trace!("add_file {}", file_path.display());
             let tar_path = self.tarify_path(&file_path)?;
             self.file_set.insert(tar_path, file_path);
             Ok(())
@@ -252,12 +260,18 @@ mod toolchain_imp {
     // - static + non-PIE = ET_EXEC, ldd stderrs something like "\tnot a dynamic executable" or
     //   "ldd: a.out: Not a valid dynamic program" and exits with code 1
     //
-    fn find_ldd_libraries(executable: &Path) -> Result<Vec<PathBuf>> {
+    fn find_ldd_libraries(
+        env_vars: &[(OsString, OsString)],
+        executable: &Path,
+    ) -> Result<Vec<PathBuf>> {
         let process::Output {
             status,
             stdout,
             stderr,
-        } = process::Command::new("ldd").arg(executable).output()?;
+        } = process::Command::new("ldd")
+            .envs(env_vars.to_vec())
+            .arg(executable)
+            .output()?;
 
         // Not a file ldd can handle. This can be a non-executable, or a static non-PIE
         if !status.success() {

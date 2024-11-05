@@ -299,6 +299,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
     #[cfg(feature = "dist-client")]
     fn get_toolchain_packager(&self) -> Box<dyn pkg::ToolchainPackager> {
         Box::new(CToolchainPackager {
+            env_vars: vec![],
             executable: self.executable.clone(),
             kind: self.compiler.kind(),
         })
@@ -1190,6 +1191,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
             preprocessed_input,
             executable,
             compiler,
+            env_vars,
             ..
         } = *self;
         trace!("Dist inputs: {:?}", parsed_args.input);
@@ -1203,6 +1205,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
             extra_hash_files: parsed_args.extra_hash_files,
         });
         let toolchain_packager = Box::new(CToolchainPackager {
+            env_vars,
             executable,
             kind: compiler.kind(),
         });
@@ -1299,6 +1302,7 @@ impl pkg::InputsPackager for CInputsPackager {
 #[cfg(feature = "dist-client")]
 #[allow(unused)]
 struct CToolchainPackager {
+    env_vars: Vec<(OsString, OsString)>,
     executable: PathBuf,
     kind: CCompilerKind,
 }
@@ -1315,7 +1319,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
         debug!("Generating toolchain {}", self.executable.display());
         let mut package_builder = pkg::ToolchainPackageBuilder::new();
         package_builder.add_common()?;
-        package_builder.add_executable_and_deps(self.executable.clone())?;
+        package_builder.add_executable_and_deps(&self.env_vars, self.executable.clone())?;
 
         // Helper to use -print-file-name and -print-prog-name to look up
         // files by path.
@@ -1356,7 +1360,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
         let add_named_prog =
             |builder: &mut pkg::ToolchainPackageBuilder, name: &str| -> Result<()> {
                 if let Some(path) = named_file("prog", name) {
-                    builder.add_executable_and_deps(path)?;
+                    builder.add_executable_and_deps(&self.env_vars, path)?;
                 }
                 Ok(())
             };
