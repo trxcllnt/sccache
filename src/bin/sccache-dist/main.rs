@@ -13,8 +13,8 @@ use sccache::dist::{
     self, AllocJobResult, AssignJobResult, BuilderIncoming, CompileCommand, HeartbeatServerResult,
     InputsReader, JobAlloc, JobAuthorizer, JobComplete, JobId, JobState, RunJobResult,
     SchedulerIncoming, SchedulerOutgoing, SchedulerStatusResult, ServerId, ServerIncoming,
-    ServerNonce, ServerOutgoing, SubmitToolchainResult, TcCache, Toolchain, ToolchainReader,
-    UpdateJobStateResult,
+    ServerNonce, ServerOutgoing, ServerStatusResult, SubmitToolchainResult, TcCache, Toolchain,
+    ToolchainReader, UpdateJobStateResult,
 };
 use sccache::util::daemonize;
 use sccache::util::BASE64_URL_SAFE_ENGINE;
@@ -572,6 +572,13 @@ impl SchedulerIncoming for Scheduler {
             })
         };
 
+        let score_server = |load: &f64, last_err: Duration| -> f64 {
+            load + (
+                // error penalty
+                (remember_server_error_timeout.as_secs() - last_err.as_secs()) as f64
+            )
+        };
+
         let sort_servers_by_least_load_and_oldest_error = || {
             let now = Instant::now();
             // LOCKS
@@ -585,10 +592,7 @@ impl SchedulerIncoming for Scheduler {
                     let load = details.jobs_assigned.len() as f64 / details.num_cpus as f64;
                     // Forget errors that are too old to care about anymore
                     if let Some(last_error) = details.last_error {
-                        // TODO: Explain why we only reset errors when load < max_per_core_load?
-                        if load < max_per_core_load
-                            && now.duration_since(last_error) > remember_server_error_timeout
-                        {
+                        if now.duration_since(last_error) > remember_server_error_timeout {
                             details.last_error = None;
                         }
                     }
@@ -596,15 +600,20 @@ impl SchedulerIncoming for Scheduler {
                 })
                 // Sort servers by least load and oldest error
                 .sorted_by(|(_, details_a, load_a), (_, details_b, load_b)| {
-                    match (details_a.last_error, details_b.last_error) {
+                    let (penalty_a, penalty_b) = match (details_a.last_error, details_b.last_error)
+                    {
                         // If neither server has a recent error, prefer the one with lowest load
-                        (None, None) => load_a.total_cmp(load_b),
+                        (None, None) => (*load_a, *load_b),
                         // Prefer servers with no recent errors over servers with recent errors
-                        (None, Some(_)) => std::cmp::Ordering::Less,
-                        (Some(_), None) => std::cmp::Ordering::Greater,
+                        (None, Some(err_b)) => (*load_a, score_server(load_b, now - err_b)),
+                        (Some(err_a), None) => (score_server(load_a, now - err_a), *load_b),
                         // If both servers have an error, prefer the one with the oldest error
-                        (Some(err_a), Some(err_b)) => err_b.cmp(&err_a),
-                    }
+                        (Some(err_a), Some(err_b)) => (
+                            score_server(load_a, now - err_a),
+                            score_server(load_b, now - err_b),
+                        ),
+                    };
+                    penalty_a.total_cmp(&penalty_b)
                 })
                 // Collect to avoid retaining the lock on `self.servers`.
                 // Use `server_id` as the key for `self.servers` lookups later.
@@ -912,10 +921,33 @@ impl SchedulerIncoming for Scheduler {
 
         self.prune_servers(&mut servers, &mut jobs);
 
+        let mut queued_jobs = 0;
+        let mut maybe_servers = None;
+
+        if servers.len() > 0 {
+            let mut servers_result = HashMap::<std::net::SocketAddr, ServerStatusResult>::new();
+
+            for (server, details) in servers.iter() {
+                queued_jobs += details.jobs_unclaimed.len();
+                servers_result.insert(
+                    server.addr(),
+                    ServerStatusResult {
+                        active: details.jobs_assigned.len(),
+                        queued: details.jobs_unclaimed.len(),
+                        last_seen: details.last_seen.elapsed().as_secs(),
+                        last_error: details.last_error.map(|e| e.elapsed().as_secs()),
+                    },
+                );
+            }
+            maybe_servers = Some(servers_result);
+        }
+
         Ok(SchedulerStatusResult {
-            num_servers: servers.len(),
             num_cpus: servers.values().map(|v| v.num_cpus).sum(),
-            in_progress: jobs.len(),
+            num_servers: servers.len(),
+            active: jobs.len(),
+            queued: queued_jobs,
+            servers: maybe_servers,
         })
     }
 }

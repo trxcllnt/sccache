@@ -589,9 +589,20 @@ pub struct JobComplete {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchedulerStatusResult {
-    pub num_servers: usize,
     pub num_cpus: usize,
-    pub in_progress: usize,
+    pub num_servers: usize,
+    pub active: usize,
+    pub queued: usize,
+    pub servers: Option<std::collections::HashMap<SocketAddr, ServerStatusResult>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerStatusResult {
+    pub active: usize,
+    pub queued: usize,
+    pub last_seen: u64,
+    pub last_error: Option<u64>,
 }
 
 // SubmitToolchain
