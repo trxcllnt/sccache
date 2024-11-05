@@ -200,7 +200,10 @@ impl OverlayBuilder {
                     tc.archive_id,
                     toolchain_dir
                 );
-                fs::create_dir(&toolchain_dir)?;
+
+                if !toolchain_dir.exists() {
+                    fs::create_dir(&toolchain_dir)?;
+                }
 
                 let mut tccache = tccache.lock().unwrap();
                 let toolchain_rdr = match tccache.get(tc) {
@@ -229,12 +232,13 @@ impl OverlayBuilder {
                     })?;
 
                 let entry = DeflatedToolchain {
-                    path: toolchain_dir,
+                    path: toolchain_dir.clone(),
                     build_count: 1,
                     ctime: Instant::now(),
                 };
 
                 toolchain_dir_map.insert(tc.clone(), entry.clone());
+
                 if toolchain_dir_map.len() > tccache.len() {
                     let dir_map = toolchain_dir_map.clone();
                     let mut entries: Vec<_> = dir_map.iter().collect();
@@ -245,12 +249,18 @@ impl OverlayBuilder {
                     entries.sort_by(|a, b| (a.1).ctime.cmp(&(b.1).ctime));
                     entries.truncate(entries.len() / 2);
                     for (tc, _) in entries {
-                        warn!("[prepare_overlay_dirs({})]: Removing old un-compressed toolchain: {:?}", job_id, tc);
-                        assert!(toolchain_dir_map.remove(tc).is_some());
-                        fs::remove_dir_all(self.dir.join("toolchains").join(&tc.archive_id))
+                        warn!("[prepare_overlay_dirs({})]: Removing old un-compressed toolchain: {:?}", job_id, tc.archive_id);
+                        if toolchain_dir_map.remove(tc).is_none() {
+                            warn!(
+                                "[prepare_overlay_dirs({})]: Toochain {} not in toolchain_dir_map",
+                                job_id, tc.archive_id
+                            );
+                        }
+                        fs::remove_dir_all(&toolchain_dir)
                             .context("Failed to remove old toolchain directory")?;
                     }
                 }
+
                 entry
             }
         };
@@ -830,6 +840,16 @@ impl DockerBuilder {
             compile_command.arguments
         );
 
+        trace!(
+            "[perform_build({})]: Output paths: {:?}",
+            job_id,
+            output_paths
+        );
+
+        if output_paths.is_empty() {
+            bail!("output_paths is empty");
+        }
+
         trace!("[perform_build({})]: copying in inputs", job_id);
 
         Command::new("docker")
@@ -850,7 +870,6 @@ impl DockerBuilder {
         let cwd = Path::new(&cwd);
 
         trace!("[perform_build({})]: creating output directories", job_id);
-        assert!(!output_paths.is_empty());
         let mut cmd = Command::new("docker");
         cmd.args(["exec", cid, "busybox", "mkdir", "-p"]).arg(cwd);
         for path in output_paths.iter() {
