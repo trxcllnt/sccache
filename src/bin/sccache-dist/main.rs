@@ -579,7 +579,7 @@ impl SchedulerIncoming for Scheduler {
             )
         };
 
-        let sort_servers_by_least_load_and_oldest_error = || {
+        let get_best_server_by_least_load_and_oldest_error = |tried_servers: &HashSet<ServerId>| {
             let now = Instant::now();
             // LOCKS
             let mut servers = self.servers.lock().unwrap();
@@ -587,7 +587,7 @@ impl SchedulerIncoming for Scheduler {
             // Compute instantaneous load and update shared server state
             servers
                 .iter_mut()
-                .map(|(server_id, details)| {
+                .filter_map(|(server_id, details)| {
                     // Assume all jobs assigned to this server will eventually be handled.
                     let load = details.jobs_assigned.len() as f64 / details.num_cpus as f64;
                     // Forget errors that are too old to care about anymore
@@ -596,7 +596,12 @@ impl SchedulerIncoming for Scheduler {
                             details.last_error = None;
                         }
                     }
-                    (server_id, details, load)
+                    // Exclude servers at max load and servers we've already tried
+                    if load >= max_per_core_load || tried_servers.contains(server_id) {
+                        None
+                    } else {
+                        Some((server_id, details, load))
+                    }
                 })
                 // Sort servers by least load and oldest error
                 .sorted_by(|(_, details_a, load_a), (_, details_b, load_b)| {
@@ -615,70 +620,65 @@ impl SchedulerIncoming for Scheduler {
                     };
                     penalty_a.total_cmp(&penalty_b)
                 })
-                // Collect to avoid retaining the lock on `self.servers`.
-                // Use `server_id` as the key for `self.servers` lookups later.
+                .find_or_first(|_| true)
                 .map(|(server_id, _, _)| *server_id)
-                .collect::<Vec<_>>()
         };
-
-        // Create a list of server candidates sorted by least load and oldest error
-        let sorted_servers = sort_servers_by_least_load_and_oldest_error();
-        let num_servers = sorted_servers.len();
 
         let job_id = self.job_count.fetch_add(1, Ordering::SeqCst) as u64;
         let job_id = JobId(job_id);
 
+        let num_servers = { self.servers.lock().unwrap().len() };
+        let mut tried_servers = HashSet::<ServerId>::new();
         let mut result = None;
 
         // Loop through candidate servers.
         // Exit the loop once we've allocated the job.
         // Try the next candidate if we encounter an error.
-        for server_id in sorted_servers {
-            // Compute load again local to the loop.
+        loop {
+            // Get the latest best server candidate after sorting all servers by least load
+            // and oldest error, sans the servers we've already tried.
+            //
+            // This computes each server's load again local to this loop.
+            //
             // Since alloc_job in other threads can recover from errors and assign jobs to the
-            // next-best candidate, the load initially computed in `sort_servers()` can drift.
-            // Computing load again ensures we allocate accurately based on the current stats.
-            let load = {
-                // LOCKS
-                let mut servers = self.servers.lock().unwrap();
-                if let Some(details) = servers.get_mut(&server_id) {
-                    details.jobs_assigned.len() as f64 / details.num_cpus as f64
-                } else {
-                    max_per_core_load
-                }
-            };
+            // next-best candidate, the load could drift if we only compute it once outside this
+            // loop. Computing load again ensures we allocate accurately based on the current
+            // statistics.
+            let server_id = get_best_server_by_least_load_and_oldest_error(&tried_servers);
 
-            // Never assign jobs to overloaded servers
-            if load >= max_per_core_load {
-                continue;
-            }
-
-            // Generate job auth token for this server
-            let auth = match make_auth_token(job_id, server_id) {
-                Ok(auth) => auth,
-                Err(err) => {
-                    warn!("[alloc_job({})]: {}", job_id, error_chain_to_string(&err));
-                    result = Some(Err(err));
-                    continue;
-                }
-            };
-
-            // Attempt to allocate the job to this server. If alloc_job fails,
-            // store the error and attempt to allocate to the next server.
-            // If all servers error, return the last error to the client.
-            match try_alloc_job(job_id, server_id, auth, tc.clone()) {
-                Ok(res) => {
-                    // If alloc_job succeeded, return the result
-                    result = Some(Ok(res));
-                    break;
-                }
-                Err(err) => {
-                    // If alloc_job failed, try the next best server
-                    warn!("[alloc_job({})]: {}", job_id, error_chain_to_string(&err));
-                    result = Some(Err(err));
-                    continue;
+            // Take the top candidate. If we can't allocate the job to it,
+            // remove it from the candidates list and try the next server.
+            if let Some(server_id) = server_id {
+                // Generate job auth token for this server
+                let auth = match make_auth_token(job_id, server_id) {
+                    Ok(auth) => auth,
+                    Err(err) => {
+                        // If make_auth_token failed, try the next best server
+                        warn!("[alloc_job({})]: {}", job_id, error_chain_to_string(&err));
+                        tried_servers.insert(server_id);
+                        result = Some(Err(err));
+                        continue;
+                    }
+                };
+                // Attempt to allocate the job to this server. If alloc_job fails,
+                // store the error and attempt to allocate to the next server.
+                // If all servers error, return the last error to the client.
+                match try_alloc_job(job_id, server_id, auth, tc.clone()) {
+                    Ok(res) => {
+                        // If alloc_job succeeded, return the result
+                        result = Some(Ok(res));
+                        break;
+                    }
+                    Err(err) => {
+                        // If alloc_job failed, try the next best server
+                        warn!("[alloc_job({})]: {}", job_id, error_chain_to_string(&err));
+                        tried_servers.insert(server_id);
+                        result = Some(Err(err));
+                        continue;
+                    }
                 }
             }
+            break;
         }
 
         result.unwrap_or_else(|| {
