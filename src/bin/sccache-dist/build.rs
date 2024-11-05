@@ -256,8 +256,17 @@ impl OverlayBuilder {
                                 job_id, tc.archive_id
                             );
                         }
-                        fs::remove_dir_all(&toolchain_dir)
-                            .context("Failed to remove old toolchain directory")?;
+                        if toolchain_dir.exists() {
+                            match fs::remove_dir_all(&toolchain_dir) {
+                                Ok(_) => {}
+                                Err(_) => {
+                                    warn!(
+                                        "[prepare_overlay_dirs({})]: Failed to remove directory for old toolchain {}",
+                                        job_id, tc.archive_id
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
 
