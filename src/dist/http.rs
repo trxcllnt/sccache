@@ -928,6 +928,7 @@ mod server {
         jwt_key: Vec<u8>,
         // Randomly generated nonce to allow the scheduler to detect server restarts
         server_nonce: ServerNonce,
+        max_per_core_load: f64,
         num_cpus_to_ignore: usize,
         handler: S,
     }
@@ -938,6 +939,7 @@ mod server {
             bind_addr: SocketAddr,
             scheduler_url: reqwest::Url,
             scheduler_auth: String,
+            max_per_core_load: f64,
             num_cpus_to_ignore: usize,
             handler: S,
         ) -> Result<Self> {
@@ -958,6 +960,7 @@ mod server {
                 privkey_pem,
                 jwt_key,
                 server_nonce,
+                max_per_core_load,
                 num_cpus_to_ignore,
                 handler,
             })
@@ -974,6 +977,7 @@ mod server {
                 privkey_pem,
                 jwt_key,
                 server_nonce,
+                max_per_core_load,
                 num_cpus_to_ignore,
                 handler,
             } = self;
@@ -1099,7 +1103,7 @@ mod server {
             // This limit is rouille's default for `start_server_with_pool`, which
             // we would use, except that interface doesn't permit any sort of
             // error handling to be done.
-            let server = server.pool_size(num_cpus);
+            let server = server.pool_size((num_cpus as f64 * max_per_core_load).floor() as usize);
             server.run();
 
             panic!("Rouille server terminated")

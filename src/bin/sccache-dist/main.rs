@@ -241,6 +241,7 @@ fn run(command: Command) -> Result<i32> {
             scheduler_url,
             scheduler_auth,
             toolchain_cache_size,
+            max_per_core_load,
             num_cpus_to_ignore,
         }) => {
             let bind_addr = bind_addr.unwrap_or(public_addr);
@@ -307,6 +308,7 @@ fn run(command: Command) -> Result<i32> {
                 bind_addr,
                 scheduler_url.to_url(),
                 scheduler_auth,
+                max_per_core_load,
                 num_cpus_to_ignore,
                 server,
             )
@@ -605,8 +607,7 @@ impl SchedulerIncoming for Scheduler {
                 })
                 // Sort servers by least load and oldest error
                 .sorted_by(|(_, details_a, load_a), (_, details_b, load_b)| {
-                    let (penalty_a, penalty_b) = match (details_a.last_error, details_b.last_error)
-                    {
+                    let (score_a, score_b) = match (details_a.last_error, details_b.last_error) {
                         // If neither server has a recent error, prefer the one with lowest load
                         (None, None) => (*load_a, *load_b),
                         // Prefer servers with no recent errors over servers with recent errors
@@ -618,7 +619,7 @@ impl SchedulerIncoming for Scheduler {
                             score_server(load_b, now - err_b),
                         ),
                     };
-                    penalty_a.total_cmp(&penalty_b)
+                    score_a.total_cmp(&score_b)
                 })
                 .find_or_first(|_| true)
                 .map(|(server_id, _, _)| *server_id)

@@ -419,6 +419,7 @@ impl DistSystem {
             server_addr,
             self.scheduler_url().to_url(),
             token,
+            1f64,
             0,
             handler,
         )

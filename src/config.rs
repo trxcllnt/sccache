@@ -1190,6 +1190,14 @@ pub mod server {
         TEN_GIGS
     }
 
+    pub fn default_max_per_core_load() -> f64 {
+        std::env::var("SCCACHE_DIST_MAX_PER_CORE_LOAD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            // Default to 1 to match the server's default thread pool multiple
+            .unwrap_or(1f64)
+    }
+
     fn default_num_cpus_to_ignore() -> usize {
         std::env::var("SCCACHE_DIST_NUM_CPUS_TO_IGNORE")
             .ok()
@@ -1268,6 +1276,7 @@ pub mod server {
         pub scheduler_url: HTTPUrl,
         pub scheduler_auth: SchedulerAuth,
         pub toolchain_cache_size: u64,
+        pub max_per_core_load: f64,
         pub num_cpus_to_ignore: usize,
     }
 
@@ -1283,6 +1292,7 @@ pub mod server {
                 ),
                 scheduler_auth: SchedulerAuth::Insecure,
                 toolchain_cache_size: default_toolchain_cache_size(),
+                max_per_core_load: default_max_per_core_load(),
                 num_cpus_to_ignore: default_num_cpus_to_ignore(),
             }
         }
