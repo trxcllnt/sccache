@@ -499,8 +499,22 @@ impl OverlayBuilder {
         job_id: JobId,
         tc: &Toolchain,
         tccache: &Mutex<TcCache>,
-        overlay: OverlaySpec,
+        overlay: &OverlaySpec,
     ) {
+        let OverlaySpec {
+            build_dir,
+            toolchain_dir: _,
+        } = overlay;
+
+        if let Err(e) = fs::remove_dir_all(build_dir) {
+            warn!(
+                "[finish_overlay({})]: Failed to remove build directory {}: {}",
+                job_id,
+                build_dir.display(),
+                e
+            );
+        }
+
         // TODO: collect toolchain directories
 
         // Decrement the build count so its toolchain can be cleaned up later
@@ -510,23 +524,6 @@ impl OverlayBuilder {
         }
 
         self.cleanup_old_toolchains(job_id, &tccache.lock().unwrap(), &mut toolchain_dir_map);
-
-        // Drop the lock
-        drop(toolchain_dir_map);
-
-        let OverlaySpec {
-            build_dir,
-            toolchain_dir: _,
-        } = overlay;
-
-        if let Err(e) = fs::remove_dir_all(&build_dir) {
-            error!(
-                "[finish_overlay({})]: Failed to remove build directory {}: {}",
-                job_id,
-                build_dir.display(),
-                e
-            );
-        }
     }
 }
 
@@ -553,10 +550,20 @@ impl BuilderIncoming for OverlayBuilder {
             outputs,
             &overlay,
         );
-        debug!("[run_build({})]: Finishing with overlay", job_id);
-        self.finish_overlay(job_id, &tc, tccache, overlay);
-        debug!("[run_build({})]: Returning result", job_id);
-        res.context("Compilation execution failed")
+        res.context("Compilation execution failed").map_or_else(
+            |err| {
+                debug!("[run_build({})]: Finishing with overlay", job_id);
+                self.finish_overlay(job_id, &tc, tccache, &overlay);
+                debug!("[run_build({})]: Returning error {:?}", job_id, err);
+                Err(err)
+            },
+            |res| {
+                debug!("[run_build({})]: Finishing with overlay", job_id);
+                self.finish_overlay(job_id, &tc, tccache, &overlay);
+                debug!("[run_build({})]: Returning result", job_id);
+                Ok(res)
+            },
+        )
     }
 }
 
