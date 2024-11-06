@@ -24,7 +24,7 @@ use std::env;
 use std::time::Duration;
 
 /// Default timeout for connections to an sccache-dist server
-const DEFAULT_DIST_CONNECT_TIMEOUT: u64 = 30;
+const DEFAULT_DIST_CONNECT_TIMEOUT: u64 = 5;
 
 /// Timeout for connections to an sccache-dist server
 pub fn get_dist_connect_timeout() -> Duration {
