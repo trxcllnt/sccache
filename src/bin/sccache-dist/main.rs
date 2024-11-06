@@ -1006,7 +1006,7 @@ impl ServerIncoming for Server {
         &self,
         requester: &dyn ServerOutgoing,
         job_id: JobId,
-        tc_rdr: ToolchainReader,
+        mut tc_rdr: ToolchainReader,
     ) -> Result<SubmitToolchainResult> {
         requester
             .do_update_job_state(job_id, JobState::Ready)
@@ -1018,16 +1018,21 @@ impl ServerIncoming for Server {
             None => return Ok(SubmitToolchainResult::JobNotFound),
         };
         let mut cache = self.cache.lock().unwrap();
-        // TODO: this returns before reading all the data, is that valid?
         if cache.contains_toolchain(&tc) {
-            return Ok(SubmitToolchainResult::Success);
+            // Drop the lock
+            drop(cache);
+            // Consume the entire toolchain request body
+            std::io::copy(&mut tc_rdr, &mut std::io::empty()).unwrap_or_else(|err| {
+                warn!("[handle_submit_toolchain({})]: {:?}", job_id, err);
+                0
+            });
+            Ok(SubmitToolchainResult::Success)
+        } else {
+            Ok(cache
+                .insert_with(&tc, |mut file| io::copy(&mut tc_rdr, &mut file).map(|_| ()))
+                .map(|_| SubmitToolchainResult::Success)
+                .unwrap_or(SubmitToolchainResult::CannotCache))
         }
-        Ok(cache
-            .insert_with(&tc, |mut file| {
-                io::copy(&mut { tc_rdr }, &mut file).map(|_| ())
-            })
-            .map(|_| SubmitToolchainResult::Success)
-            .unwrap_or(SubmitToolchainResult::CannotCache))
     }
     fn handle_run_job(
         &self,
