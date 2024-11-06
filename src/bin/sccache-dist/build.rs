@@ -209,7 +209,7 @@ impl OverlayBuilder {
     ) -> Result<OverlaySpec> {
         let DeflatedToolchain {
             path: toolchain_dir,
-            build_count: id,
+            build_count: _,
         } = {
             let mut toolchain_dir_map = self.toolchain_dir_map.lock().unwrap();
             // Create the toolchain dir (if necessary) while we have an exclusive lock
@@ -286,13 +286,13 @@ impl OverlayBuilder {
         let build_dir = self
             .dir
             .join("builds")
-            .join(format!("{}-{}", tc.archive_id, id));
+            .join(format!("{}-{}", tc.archive_id, job_id));
 
         trace!(
             "[prepare_overlay_dirs({})]: Creating build directory for {}-{}: {:?}",
             job_id,
             tc.archive_id,
-            id,
+            job_id,
             build_dir
         );
 
