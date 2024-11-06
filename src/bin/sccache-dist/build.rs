@@ -27,7 +27,6 @@ use std::iter;
 use std::path::{self, Path, PathBuf};
 use std::process::{ChildStdin, Command, Output, Stdio};
 use std::sync::Mutex;
-use std::time::Instant;
 use version_compare::Version;
 
 trait CommandExt {
@@ -104,7 +103,6 @@ struct OverlaySpec {
 struct DeflatedToolchain {
     path: PathBuf,
     build_count: u64,
-    ctime: Instant,
 }
 
 pub struct OverlayBuilder {
@@ -157,10 +155,10 @@ impl OverlayBuilder {
             toolchain_dir_map: Mutex::new(HashMap::new()),
         };
         ret.cleanup()?;
-        fs::create_dir(&ret.dir).context("Failed to create base directory for builder")?;
-        fs::create_dir(ret.dir.join("builds"))
+        fs::create_dir_all(&ret.dir).context("Failed to create base directory for builder")?;
+        fs::create_dir_all(ret.dir.join("builds"))
             .context("Failed to create builder builds directory")?;
-        fs::create_dir(ret.dir.join("toolchains"))
+        fs::create_dir_all(ret.dir.join("toolchains"))
             .context("Failed to create builder toolchains directory")?;
         Ok(ret)
     }
@@ -172,6 +170,37 @@ impl OverlayBuilder {
         Ok(())
     }
 
+    fn cleanup_old_toolchains(
+        &self,
+        job_id: JobId,
+        tccache: &TcCache,
+        tc_dirs: &mut HashMap<Toolchain, DeflatedToolchain>,
+    ) {
+        if tc_dirs.len() >= tccache.len() {
+            let dir_map = tc_dirs.clone();
+            for (tc, entry) in dir_map.iter() {
+                // Only clean up old uncompressed toolchains that aren't currently in use
+                if !tccache.contains_toolchain(tc) && entry.build_count == 0 {
+                    warn!(
+                        "[cleanup_old_toolchains({})]: Removing old un-compressed toolchain: {:?}",
+                        job_id, tc.archive_id
+                    );
+                    if tc_dirs.remove(tc).is_none() {
+                        warn!(
+                            "[cleanup_old_toolchains({})]: Toochain {} not in toolchain_dir_map",
+                            job_id, tc.archive_id
+                        );
+                    }
+                    fs::remove_dir_all(self.dir.join("toolchains").join(&tc.archive_id))
+                        .context("Failed to remove old toolchain")
+                        .unwrap_or_else(|err| {
+                            warn!("[cleanup_old_toolchains({})]: {:?}", job_id, err)
+                        });
+                }
+            }
+        }
+    }
+
     fn prepare_overlay_dirs(
         &self,
         job_id: JobId,
@@ -181,7 +210,6 @@ impl OverlayBuilder {
         let DeflatedToolchain {
             path: toolchain_dir,
             build_count: id,
-            ctime: _,
         } = {
             let mut toolchain_dir_map = self.toolchain_dir_map.lock().unwrap();
             // Create the toolchain dir (if necessary) while we have an exclusive lock
@@ -203,65 +231,50 @@ impl OverlayBuilder {
 
                 let mut tccache = tccache.lock().unwrap();
 
-                if toolchain_dir_map.len() >= tccache.len() {
-                    let dir_map = toolchain_dir_map.clone();
-                    let mut entries: Vec<_> = dir_map.iter().collect();
-                    // In the pathological case, creation time for unpacked
-                    // toolchains could be the opposite of the least recently
-                    // recently used, so we clear out half of the accumulated
-                    // toolchains to prevent repeated sort/delete cycles.
-                    entries.sort_by(|a, b| (a.1).ctime.cmp(&(b.1).ctime));
-                    for (tc, _) in entries[entries.len() / 2..].iter() {
-                        warn!("[prepare_overlay_dirs({})]: Removing old un-compressed toolchain: {:?}", job_id, tc.archive_id);
-                        if toolchain_dir_map.remove(tc).is_none() {
-                            warn!(
-                                "[prepare_overlay_dirs({})]: Toochain {} not in toolchain_dir_map",
-                                job_id, tc.archive_id
-                            );
-                        }
-                        match fs::remove_dir_all(self.dir.join("toolchains").join(&tc.archive_id)) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                warn!(
-                                    "[prepare_overlay_dirs({})]: Failed to remove directory for old toolchain {}",
-                                    job_id, tc.archive_id
-                                );
-                            }
-                        }
-                    }
-                }
-
-                fs::create_dir(&toolchain_dir)?;
+                self.cleanup_old_toolchains(job_id, &tccache, &mut toolchain_dir_map);
 
                 let toolchain_rdr = match tccache.get(tc) {
                     Ok(rdr) => rdr,
                     Err(LruError::FileNotInCache) => {
-                        bail!("expected toolchain {}, but not available", tc.archive_id)
+                        bail!(
+                            "[prepare_overlay_dirs({})]: Expected toolchain {}, but not available",
+                            job_id,
+                            tc.archive_id
+                        )
                     }
                     Err(e) => {
-                        return Err(Error::from(e).context("failed to get toolchain from cache"))
+                        return Err(Error::from(e).context("Failed to get toolchain from cache"))
                     }
                 };
 
+                fs::create_dir_all(&toolchain_dir)
+                    .context("Failed to create toolchain dir")
+                    .unwrap_or_else(|err| warn!("[prepare_overlay_dirs({})]: {:?}", job_id, err));
+
                 tar::Archive::new(GzDecoder::new(toolchain_rdr))
                     .unpack(&toolchain_dir)
-                    .or_else(|e| {
+                    .map_err(|err| {
                         warn!(
                             "[prepare_overlay_dirs({})]: Failed to unpack toolchain {}: {:?}",
-                            job_id, tc.archive_id, e
+                            job_id, tc.archive_id, err
                         );
                         fs::remove_dir_all(&toolchain_dir)
-                            .context("Failed to remove unpacked toolchain")?;
+                            .context("Failed to remove unpacked toolchain")
+                            .unwrap_or_else(|err| {
+                                warn!("[prepare_overlay_dirs({})]: {:?}", job_id, err)
+                            });
                         tccache
                             .remove(tc)
-                            .context("Failed to remove corrupt toolchain")?;
-                        Err(Error::from(e))
+                            .context("Failed to remove corrupt toolchain")
+                            .unwrap_or_else(|err| {
+                                warn!("[prepare_overlay_dirs({})]: {:?}", job_id, err)
+                            });
+                        Error::from(err)
                     })?;
 
                 let entry = DeflatedToolchain {
                     path: toolchain_dir,
                     build_count: 1,
-                    ctime: Instant::now(),
                 };
 
                 toolchain_dir_map.insert(tc.clone(), entry.clone());
@@ -283,7 +296,10 @@ impl OverlayBuilder {
             build_dir
         );
 
-        fs::create_dir(&build_dir)?;
+        fs::create_dir_all(&build_dir)
+            .context("Failed to create build dir")
+            .unwrap_or_else(|err| warn!("[prepare_overlay_dirs({})]: {:?}", job_id, err));
+
         Ok(OverlaySpec {
             build_dir,
             toolchain_dir,
@@ -335,10 +351,11 @@ impl OverlayBuilder {
                     let work_dir = overlay.build_dir.join("work");
                     let upper_dir = overlay.build_dir.join("upper");
                     let target_dir = overlay.build_dir.join("target");
-                    fs::create_dir(&work_dir).context("Failed to create overlay work directory")?;
-                    fs::create_dir(&upper_dir)
+                    fs::create_dir_all(&work_dir)
+                        .context("Failed to create overlay work directory")?;
+                    fs::create_dir_all(&upper_dir)
                         .context("Failed to create overlay upper directory")?;
-                    fs::create_dir(&target_dir)
+                    fs::create_dir_all(&target_dir)
                         .context("Failed to create overlay target directory")?;
 
                     let () = Overlay::writable(
@@ -477,13 +494,31 @@ impl OverlayBuilder {
 
     // Failing during cleanup is pretty unexpected, but we can still return the successful compile
     // TODO: if too many of these fail, we should mark this builder as faulty
-    fn finish_overlay(&self, job_id: JobId, _tc: &Toolchain, overlay: OverlaySpec) {
+    fn finish_overlay(
+        &self,
+        job_id: JobId,
+        tc: &Toolchain,
+        tccache: &Mutex<TcCache>,
+        overlay: OverlaySpec,
+    ) {
         // TODO: collect toolchain directories
+
+        // Decrement the build count so its toolchain can be cleaned up later
+        let mut toolchain_dir_map = self.toolchain_dir_map.lock().unwrap();
+        if let Some(entry) = toolchain_dir_map.get_mut(tc) {
+            entry.build_count = std::cmp::max(0, entry.build_count - 1);
+        }
+
+        self.cleanup_old_toolchains(job_id, &tccache.lock().unwrap(), &mut toolchain_dir_map);
+
+        // Drop the lock
+        drop(toolchain_dir_map);
 
         let OverlaySpec {
             build_dir,
             toolchain_dir: _,
         } = overlay;
+
         if let Err(e) = fs::remove_dir_all(&build_dir) {
             error!(
                 "[finish_overlay({})]: Failed to remove build directory {}: {}",
@@ -519,7 +554,7 @@ impl BuilderIncoming for OverlayBuilder {
             &overlay,
         );
         debug!("[run_build({})]: Finishing with overlay", job_id);
-        self.finish_overlay(job_id, &tc, overlay);
+        self.finish_overlay(job_id, &tc, tccache, overlay);
         debug!("[run_build({})]: Returning result", job_id);
         res.context("Compilation execution failed")
     }
