@@ -201,11 +201,38 @@ impl OverlayBuilder {
                     toolchain_dir
                 );
 
-                if !toolchain_dir.exists() {
-                    fs::create_dir(&toolchain_dir)?;
+                let mut tccache = tccache.lock().unwrap();
+
+                if toolchain_dir_map.len() >= tccache.len() {
+                    let dir_map = toolchain_dir_map.clone();
+                    let mut entries: Vec<_> = dir_map.iter().collect();
+                    // In the pathological case, creation time for unpacked
+                    // toolchains could be the opposite of the least recently
+                    // recently used, so we clear out half of the accumulated
+                    // toolchains to prevent repeated sort/delete cycles.
+                    entries.sort_by(|a, b| (a.1).ctime.cmp(&(b.1).ctime));
+                    for (tc, _) in entries[entries.len() / 2..].iter() {
+                        warn!("[prepare_overlay_dirs({})]: Removing old un-compressed toolchain: {:?}", job_id, tc.archive_id);
+                        if toolchain_dir_map.remove(tc).is_none() {
+                            warn!(
+                                "[prepare_overlay_dirs({})]: Toochain {} not in toolchain_dir_map",
+                                job_id, tc.archive_id
+                            );
+                        }
+                        match fs::remove_dir_all(self.dir.join("toolchains").join(&tc.archive_id)) {
+                            Ok(_) => {}
+                            Err(_) => {
+                                warn!(
+                                    "[prepare_overlay_dirs({})]: Failed to remove directory for old toolchain {}",
+                                    job_id, tc.archive_id
+                                );
+                            }
+                        }
+                    }
                 }
 
-                let mut tccache = tccache.lock().unwrap();
+                fs::create_dir(&toolchain_dir)?;
+
                 let toolchain_rdr = match tccache.get(tc) {
                     Ok(rdr) => rdr,
                     Err(LruError::FileNotInCache) => {
@@ -232,43 +259,12 @@ impl OverlayBuilder {
                     })?;
 
                 let entry = DeflatedToolchain {
-                    path: toolchain_dir.clone(),
+                    path: toolchain_dir,
                     build_count: 1,
                     ctime: Instant::now(),
                 };
 
                 toolchain_dir_map.insert(tc.clone(), entry.clone());
-
-                if toolchain_dir_map.len() > tccache.len() {
-                    let dir_map = toolchain_dir_map.clone();
-                    let mut entries: Vec<_> = dir_map.iter().collect();
-                    // In the pathological case, creation time for unpacked
-                    // toolchains could be the opposite of the least recently
-                    // recently used, so we clear out half of the accumulated
-                    // toolchains to prevent repeated sort/delete cycles.
-                    entries.sort_by(|a, b| (a.1).ctime.cmp(&(b.1).ctime));
-                    entries.truncate(entries.len() / 2);
-                    for (tc, _) in entries {
-                        warn!("[prepare_overlay_dirs({})]: Removing old un-compressed toolchain: {:?}", job_id, tc.archive_id);
-                        if toolchain_dir_map.remove(tc).is_none() {
-                            warn!(
-                                "[prepare_overlay_dirs({})]: Toochain {} not in toolchain_dir_map",
-                                job_id, tc.archive_id
-                            );
-                        }
-                        if toolchain_dir.exists() {
-                            match fs::remove_dir_all(&toolchain_dir) {
-                                Ok(_) => {}
-                                Err(_) => {
-                                    warn!(
-                                        "[prepare_overlay_dirs({})]: Failed to remove directory for old toolchain {}",
-                                        job_id, tc.archive_id
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
 
                 entry
             }
