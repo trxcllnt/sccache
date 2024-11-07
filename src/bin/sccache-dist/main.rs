@@ -967,19 +967,18 @@ impl Server {
 impl ServerIncoming for Server {
     fn handle_assign_job(&self, job_id: JobId, tc: Toolchain) -> Result<AssignJobResult> {
         let need_toolchain = !self.cache.lock().unwrap().contains_toolchain(&tc);
-        if let Some(other_tc) = self
-            .job_toolchains
-            .lock()
-            .unwrap()
-            .insert(job_id, tc.clone())
-        {
+        let mut job_toolchains = self.job_toolchains.lock().unwrap();
+        if let Some(other_tc) = job_toolchains.insert(job_id, tc.clone()) {
+            // Remove the toolchain on error
+            job_toolchains.remove(&job_id);
             bail!(
-                "[{}]: Failed to replace toolchain {:?} with {:?}",
+                "[{}]: Duplicate toolchain assigned, not replacing toolchain {:?} with {:?}",
                 job_id,
                 other_tc,
                 tc
             );
         };
+        drop(job_toolchains);
         let state = if need_toolchain {
             JobState::Pending
         } else {
@@ -991,21 +990,38 @@ impl ServerIncoming for Server {
             need_toolchain,
         })
     }
+
     fn handle_submit_toolchain(
         &self,
         requester: &dyn ServerOutgoing,
         job_id: JobId,
         mut tc_rdr: ToolchainReader,
     ) -> Result<SubmitToolchainResult> {
-        requester
-            .do_update_job_state(job_id, JobState::Ready)
-            .context("Updating job state failed")?;
         // TODO: need to lock the toolchain until the container has started
         // TODO: can start prepping container
-        let tc = match self.job_toolchains.lock().unwrap().get(&job_id).cloned() {
+        let mut job_toolchains = self.job_toolchains.lock().unwrap();
+        let tc = match job_toolchains.get(&job_id).cloned() {
             Some(tc) => tc,
             None => return Ok(SubmitToolchainResult::JobNotFound),
         };
+
+        if let Err(err) = requester
+            .do_update_job_state(job_id, JobState::Ready)
+            .context("Failed to update job state")
+        {
+            // Remove the toolchain on error
+            job_toolchains.remove(&job_id);
+            warn!(
+                "[handle_submit_toolchain({})]: {:?} ({} -> {})",
+                job_id,
+                err,
+                JobState::Pending,
+                JobState::Ready
+            );
+            return Err(err);
+        }
+        drop(job_toolchains);
+
         let mut cache = self.cache.lock().unwrap();
         if cache.contains_toolchain(&tc) {
             // Drop the lock
@@ -1023,6 +1039,7 @@ impl ServerIncoming for Server {
                 .unwrap_or(SubmitToolchainResult::CannotCache))
         }
     }
+
     fn handle_run_job(
         &self,
         requester: &dyn ServerOutgoing,
@@ -1031,28 +1048,56 @@ impl ServerIncoming for Server {
         outputs: Vec<String>,
         inputs_rdr: InputsReader,
     ) -> Result<RunJobResult> {
-        requester
-            .do_update_job_state(job_id, JobState::Started)
-            .context("Updating job state failed")?;
-        let tc = self.job_toolchains.lock().unwrap().remove(&job_id);
-        let res = match tc {
-            None => Ok(RunJobResult::JobNotFound),
-            Some(tc) => {
-                match self
-                    .builder
-                    .run_build(job_id, tc, command, outputs, inputs_rdr, &self.cache)
-                {
-                    Err(e) => Err(e.context("run build failed")),
-                    Ok(res) => Ok(RunJobResult::Complete(JobComplete {
-                        output: res.output,
-                        outputs: res.outputs,
-                    })),
-                }
-            }
+        // Remove the job toolchain as early as possible.
+        let tc = match self.job_toolchains.lock().unwrap().remove(&job_id) {
+            Some(tc) => tc,
+            None => return Ok(RunJobResult::JobNotFound),
         };
-        requester
+
+        // Notify the scheduler the job has started.
+        // Don't return an error, because this request is between the client and this server.
+        // The client is expecting the server to perform this work, regardless of whether the
+        // scheduler has pruned this job due to missing the pending timeout.
+        if let Err(err) = requester
+            .do_update_job_state(job_id, JobState::Started)
+            .context("Failed to update job state")
+        {
+            warn!(
+                "[handle_run_job({})]: {:?} ({} -> {})",
+                job_id,
+                err,
+                JobState::Ready,
+                JobState::Started
+            );
+        }
+
+        let res = self
+            .builder
+            .run_build(job_id, tc, command, outputs, inputs_rdr, &self.cache);
+
+        // Notify the scheduler the job is complete.
+        // Don't return an error, because this request is between the client and this server.
+        // The client is expecting the server to perform this work, regardless of whether the
+        // scheduler has pruned this job due to missing the pending timeout.
+        if let Err(err) = requester
             .do_update_job_state(job_id, JobState::Complete)
-            .context("Updating job state failed")?;
-        res
+            .context("Failed to update job state")
+        {
+            warn!(
+                "[handle_run_job({})]: {:?} ({} -> {})",
+                job_id,
+                err,
+                JobState::Started,
+                JobState::Complete
+            );
+        }
+
+        match res {
+            Err(e) => Err(e.context("run_job build failed")),
+            Ok(res) => Ok(RunJobResult::Complete(JobComplete {
+                output: res.output,
+                outputs: res.outputs,
+            })),
+        }
     }
 }

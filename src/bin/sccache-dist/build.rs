@@ -550,20 +550,10 @@ impl BuilderIncoming for OverlayBuilder {
             outputs,
             &overlay,
         );
-        res.context("Compilation execution failed").map_or_else(
-            |err| {
-                debug!("[run_build({})]: Finishing with overlay", job_id);
-                self.finish_overlay(job_id, &tc, tccache, &overlay);
-                debug!("[run_build({})]: Returning error {:?}", job_id, err);
-                Err(err)
-            },
-            |res| {
-                debug!("[run_build({})]: Finishing with overlay", job_id);
-                self.finish_overlay(job_id, &tc, tccache, &overlay);
-                debug!("[run_build({})]: Returning result", job_id);
-                Ok(res)
-            },
-        )
+        debug!("[run_build({})]: Finishing with overlay", job_id);
+        self.finish_overlay(job_id, &tc, tccache, &overlay);
+        debug!("[run_build({})]: Returning result", job_id);
+        res.context("Failed to perform build")
     }
 }
 
@@ -1011,11 +1001,10 @@ impl BuilderIncoming for DockerBuilder {
             "[run_build({})]: Performing build with container {}",
             job_id, cid
         );
-        let res = Self::perform_build(job_id, command, inputs_rdr, outputs, &cid)
-            .context("Failed to perform build")?;
+        let res = Self::perform_build(job_id, command, inputs_rdr, outputs, &cid);
         debug!("[run_build({})]: Finishing with container {}", job_id, cid);
         self.finish_container(job_id, &tc, cid);
         debug!("[run_build({})]: Returning result", job_id);
-        Ok(res)
+        res.context("Failed to perform build")
     }
 }
