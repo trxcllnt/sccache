@@ -1094,20 +1094,6 @@ pub mod scheduler {
             .unwrap_or(300)
     }
 
-    pub fn default_unclaimed_job_pending_timeout() -> u64 {
-        std::env::var("SCCACHE_DIST_UNCLAIMED_JOB_PENDING_TIMEOUT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(300)
-    }
-
-    pub fn default_unclaimed_job_ready_timeout() -> u64 {
-        std::env::var("SCCACHE_DIST_UNCLAIMED_JOB_READY_TIMEOUT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(60)
-    }
-
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(tag = "type")]
     #[serde(deny_unknown_fields)]
@@ -1152,8 +1138,6 @@ pub mod scheduler {
         pub server_auth: ServerAuth,
         pub max_per_core_load: f64,
         pub remember_server_error_timeout: u64,
-        pub unclaimed_job_pending_timeout: u64,
-        pub unclaimed_job_ready_timeout: u64,
     }
 
     impl Default for Config {
@@ -1164,8 +1148,6 @@ pub mod scheduler {
                 server_auth: ServerAuth::Insecure,
                 max_per_core_load: default_max_per_core_load(),
                 remember_server_error_timeout: default_remember_server_error_timeout(),
-                unclaimed_job_pending_timeout: default_unclaimed_job_pending_timeout(),
-                unclaimed_job_ready_timeout: default_unclaimed_job_ready_timeout(),
             }
         }
     }

@@ -24,7 +24,7 @@ use std::env;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 #[cfg_attr(target_os = "freebsd", path = "build_freebsd.rs")]
@@ -161,8 +161,6 @@ fn run(command: Command) -> Result<i32> {
             server_auth,
             max_per_core_load,
             remember_server_error_timeout,
-            unclaimed_job_pending_timeout,
-            unclaimed_job_ready_timeout,
         }) => {
             let check_client_auth: Box<dyn dist::http::ClientAuthCheck> = match client_auth {
                 scheduler_config::ClientAuth::Insecure => Box::new(token_check::EqCheck::new(
@@ -217,12 +215,7 @@ fn run(command: Command) -> Result<i32> {
             };
 
             daemonize()?;
-            let scheduler = Scheduler::new(
-                max_per_core_load,
-                remember_server_error_timeout,
-                unclaimed_job_pending_timeout,
-                unclaimed_job_ready_timeout,
-            );
+            let scheduler = Scheduler::new(max_per_core_load, remember_server_error_timeout);
             let http_scheduler = dist::http::Scheduler::new(
                 public_addr,
                 scheduler,
@@ -310,6 +303,8 @@ fn run(command: Command) -> Result<i32> {
                 scheduler_auth,
                 max_per_core_load,
                 num_cpus_to_ignore,
+                server.jobs_queued.clone(),
+                server.jobs_active.clone(),
                 server,
             )
             .context("Failed to create sccache HTTP server instance")?;
@@ -347,37 +342,28 @@ pub struct Scheduler {
 
     max_per_core_load: f64,
     remember_server_error_timeout: Duration,
-    unclaimed_job_pending_timeout: Duration,
-    unclaimed_job_ready_timeout: Duration,
 }
 
 struct ServerDetails {
     jobs_assigned: HashSet<JobId>,
-    // Jobs assigned that haven't seen a state change. Can only be pending
-    // or ready.
-    jobs_unclaimed: HashMap<JobId, Instant>,
     last_seen: Instant,
     last_error: Option<Instant>,
     num_cpus: usize,
     server_nonce: ServerNonce,
     job_authorizer: Box<dyn JobAuthorizer>,
+    num_queued_jobs: usize,
+    num_active_jobs: usize,
+    num_pending_jobs: usize,
 }
 
 impl Scheduler {
-    pub fn new(
-        max_per_core_load: f64,
-        remember_server_error_timeout: u64,
-        unclaimed_job_pending_timeout: u64,
-        unclaimed_job_ready_timeout: u64,
-    ) -> Self {
+    pub fn new(max_per_core_load: f64, remember_server_error_timeout: u64) -> Self {
         Scheduler {
             job_count: AtomicUsize::new(0),
             jobs: Mutex::new(BTreeMap::new()),
             servers: Mutex::new(HashMap::new()),
             max_per_core_load,
             remember_server_error_timeout: Duration::from_secs(remember_server_error_timeout),
-            unclaimed_job_pending_timeout: Duration::from_secs(unclaimed_job_pending_timeout),
-            unclaimed_job_ready_timeout: Duration::from_secs(unclaimed_job_ready_timeout),
         }
     }
 
@@ -427,8 +413,6 @@ impl Default for Scheduler {
         Self::new(
             scheduler_config::default_max_per_core_load(),
             scheduler_config::default_remember_server_error_timeout(),
-            scheduler_config::default_unclaimed_job_pending_timeout(),
-            scheduler_config::default_unclaimed_job_ready_timeout(),
         )
     }
 }
@@ -489,14 +473,12 @@ impl SchedulerIncoming for Scheduler {
                 //
 
                 // Throw an error if a job with the same ID has already been assigned to this server.
-                if details.jobs_assigned.contains(&job_id)
-                    || details.jobs_unclaimed.contains_key(&job_id)
-                {
+                if details.jobs_assigned.contains(&job_id) {
                     bail!("Failed to assign job to server {}", server_id.addr());
                 }
 
+                details.num_pending_jobs += 1;
                 details.jobs_assigned.insert(job_id);
-                details.jobs_unclaimed.insert(job_id, Instant::now());
 
                 Ok(auth)
             } else {
@@ -508,15 +490,27 @@ impl SchedulerIncoming for Scheduler {
             let AssignJobResult {
                 state,
                 need_toolchain,
+                ..
             } = match requester.do_assign_job(server_id, job_id, tc, auth.clone()) {
-                Ok(res) => res,
+                Ok(res) => {
+                    // LOCKS
+                    let mut servers = self.servers.lock().unwrap();
+                    // Assigned the job, so update server stats
+                    if let Some(details) = servers.get_mut(&server_id) {
+                        details.num_pending_jobs -= 1;
+                        details.last_seen = Instant::now();
+                        details.num_queued_jobs = res.num_queued_jobs;
+                        details.num_active_jobs = res.num_active_jobs;
+                    }
+                    res
+                }
                 Err(err) => {
                     // LOCKS
                     let mut servers = self.servers.lock().unwrap();
                     // Couldn't assign the job, so undo the eager assignment above
                     if let Some(details) = servers.get_mut(&server_id) {
+                        details.num_pending_jobs -= 1;
                         details.jobs_assigned.remove(&job_id);
-                        details.jobs_unclaimed.remove(&job_id);
                         details.last_error = Some(Instant::now());
                     }
                     return Err(err);
@@ -541,6 +535,8 @@ impl SchedulerIncoming for Scheduler {
                     mtime: Instant::now(),
                 },
             );
+
+            drop(jobs);
 
             if log_enabled!(log::Level::Trace) {
                 // LOCKS
@@ -584,10 +580,17 @@ impl SchedulerIncoming for Scheduler {
                 .iter_mut()
                 .filter_map(|(server_id, details)| {
                     // Assume all jobs assigned to this server will eventually be handled.
-                    let load = details.jobs_assigned.len() as f64 / details.num_cpus as f64;
+                    let num_assigned_jobs =
+                        // number of jobs this scheduler has assigned to the server but have not yet been accepted
+                        details.num_pending_jobs
+                        // number of jobs this server has accepted and is waiting on the client to start
+                        + details.num_queued_jobs
+                        // number of jobs this server has accepted and are running
+                        + details.num_active_jobs;
+                    let load = num_assigned_jobs as f64 / details.num_cpus as f64;
                     // Forget errors that are too old to care about anymore
                     if let Some(last_error) = details.last_error {
-                        if now.duration_since(last_error) > remember_server_error_timeout {
+                        if now.duration_since(last_error) >= remember_server_error_timeout {
                             details.last_error = None;
                         }
                     }
@@ -688,16 +691,12 @@ impl SchedulerIncoming for Scheduler {
         server_nonce: ServerNonce,
         num_cpus: usize,
         job_authorizer: Box<dyn JobAuthorizer>,
+        num_queued_jobs: usize,
+        num_active_jobs: usize,
     ) -> Result<HeartbeatServerResult> {
         if num_cpus == 0 {
             bail!("Invalid number of CPUs (0) specified in heartbeat")
         }
-
-        let Scheduler {
-            unclaimed_job_pending_timeout,
-            unclaimed_job_ready_timeout,
-            ..
-        } = *self;
 
         // LOCKS
         let mut jobs = self.jobs.lock().unwrap();
@@ -709,31 +708,10 @@ impl SchedulerIncoming for Scheduler {
             Some(ref mut details) if details.server_nonce == server_nonce => {
                 let now = Instant::now();
                 details.last_seen = now;
+                details.num_queued_jobs = num_queued_jobs;
+                details.num_active_jobs = num_active_jobs;
 
                 let mut stale_jobs = Vec::new();
-                for (&job_id, &last_seen) in details.jobs_unclaimed.iter() {
-                    if now.duration_since(last_seen) < unclaimed_job_ready_timeout {
-                        continue;
-                    }
-                    if let Some(detail) = jobs.get(&job_id) {
-                        match detail.state {
-                            JobState::Ready => {
-                                stale_jobs.push(job_id);
-                            }
-                            JobState::Pending => {
-                                if now.duration_since(last_seen) > unclaimed_job_pending_timeout {
-                                    stale_jobs.push(job_id);
-                                }
-                            }
-                            state => {
-                                warn!("Invalid unclaimed job state for {}: {}", job_id, state);
-                            }
-                        }
-                    } else {
-                        warn!("Unknown stale job {}", job_id);
-                        stale_jobs.push(job_id);
-                    }
-                }
 
                 // If the server has jobs assigned that have taken longer than `SCCACHE_DIST_REQUEST_TIMEOUT` seconds,
                 // either the client retried the compilation (due to a server error), or the client abandoned the job
@@ -749,8 +727,6 @@ impl SchedulerIncoming for Scheduler {
                 for &job_id in details.jobs_assigned.iter() {
                     if let Some(detail) = jobs.get(&job_id) {
                         if now.duration_since(detail.mtime) >= get_dist_request_timeout() {
-                            // insert into jobs_unclaimed to avoid the warning below
-                            details.jobs_unclaimed.insert(job_id, detail.mtime);
                             stale_jobs.push(job_id);
                         }
                     }
@@ -766,13 +742,6 @@ impl SchedulerIncoming for Scheduler {
                         if !details.jobs_assigned.remove(&job_id) {
                             warn!(
                                 "Stale job for server {} not assigned: {}",
-                                server_id.addr(),
-                                job_id
-                            );
-                        }
-                        if details.jobs_unclaimed.remove(&job_id).is_none() {
-                            warn!(
-                                "Unknown stale job for server {}: {}",
                                 server_id.addr(),
                                 job_id
                             );
@@ -809,10 +778,12 @@ impl SchedulerIncoming for Scheduler {
                 last_seen: Instant::now(),
                 last_error: None,
                 jobs_assigned: HashSet::new(),
-                jobs_unclaimed: HashMap::new(),
                 num_cpus,
                 server_nonce,
                 job_authorizer,
+                num_queued_jobs: 0,
+                num_active_jobs: 0,
+                num_pending_jobs: 0,
             },
         );
         Ok(HeartbeatServerResult { is_new: true })
@@ -823,6 +794,8 @@ impl SchedulerIncoming for Scheduler {
         job_id: JobId,
         server_id: ServerId,
         job_state: JobState,
+        num_queued_jobs: usize,
+        num_active_jobs: usize,
     ) -> Result<UpdateJobStateResult> {
         // LOCKS
         let mut jobs = self.jobs.lock().unwrap();
@@ -845,6 +818,8 @@ impl SchedulerIncoming for Scheduler {
             let server = match servers.get_mut(&server_id) {
                 Some(server) => {
                     server.last_seen = now;
+                    server.num_queued_jobs = num_queued_jobs;
+                    server.num_active_jobs = num_active_jobs;
                     server
                 }
                 None => {
@@ -858,14 +833,10 @@ impl SchedulerIncoming for Scheduler {
 
             match (cur_state, job_state) {
                 (JobState::Pending, JobState::Ready) => {
-                    // Update the job's `last_seen` time to ensure it isn't
-                    // pruned for taking longer than `unclaimed_job_ready_timeout`
-                    server.jobs_unclaimed.entry(job_id).and_modify(|e| *e = now);
                     job.get_mut().mtime = now;
                     job.get_mut().state = job_state;
                 }
                 (JobState::Ready, JobState::Started) => {
-                    server.jobs_unclaimed.remove(&job_id);
                     job.get_mut().mtime = now;
                     job.get_mut().state = job_state;
                 }
@@ -878,13 +849,17 @@ impl SchedulerIncoming for Scheduler {
                         )
                     }
                 }
-                (from, to) => bail!(
-                    "[update_job_state({}, {})]: Invalid job state transition from {:?} to {:?}",
-                    job_id,
-                    server_id.addr(),
-                    from,
-                    to,
-                ),
+                (from, to) => {
+                    let (job_id, _) = job.remove_entry();
+                    server.jobs_assigned.remove(&job_id);
+                    bail!(
+                        "[update_job_state({}, {})]: Invalid job state transition from {:?} to {:?}",
+                        job_id,
+                        server_id.addr(),
+                        from,
+                        to,
+                    )
+                }
             }
             info!(
                 "[update_job_state({}, {})]: Job state updated from {:?} to {:?}",
@@ -911,31 +886,36 @@ impl SchedulerIncoming for Scheduler {
 
         self.prune_servers(&mut servers, &mut jobs);
 
+        drop(jobs);
+
+        let mut active_jobs = 0;
         let mut queued_jobs = 0;
         let mut maybe_servers = None;
 
         if servers.len() > 0 {
             let mut servers_result = HashMap::<std::net::SocketAddr, ServerStatusResult>::new();
 
-            for (server, details) in servers.iter() {
-                queued_jobs += details.jobs_unclaimed.len();
+            for (server_id, details) in servers.iter() {
+                active_jobs += details.num_active_jobs;
+                queued_jobs += details.num_queued_jobs + details.num_pending_jobs;
                 servers_result.insert(
-                    server.addr(),
+                    server_id.addr(),
                     ServerStatusResult {
-                        active: details.jobs_assigned.len(),
-                        queued: details.jobs_unclaimed.len(),
+                        active: details.num_active_jobs,
+                        queued: details.num_queued_jobs + details.num_pending_jobs,
                         last_seen: details.last_seen.elapsed().as_secs(),
                         last_error: details.last_error.map(|e| e.elapsed().as_secs()),
                     },
                 );
             }
+
             maybe_servers = Some(servers_result);
         }
 
         Ok(SchedulerStatusResult {
             num_cpus: servers.values().map(|v| v.num_cpus).sum(),
             num_servers: servers.len(),
-            active: jobs.len(),
+            active: active_jobs,
             queued: queued_jobs,
             servers: maybe_servers,
         })
@@ -946,6 +926,8 @@ pub struct Server {
     builder: Box<dyn BuilderIncoming>,
     cache: Mutex<TcCache>,
     job_toolchains: Mutex<HashMap<JobId, Toolchain>>,
+    pub jobs_queued: Arc<AtomicUsize>,
+    pub jobs_active: Arc<AtomicUsize>,
 }
 
 impl Server {
@@ -960,6 +942,8 @@ impl Server {
             builder,
             cache: Mutex::new(cache),
             job_toolchains: Mutex::new(HashMap::new()),
+            jobs_active: Arc::new(AtomicUsize::new(0)),
+            jobs_queued: Arc::new(AtomicUsize::new(0)),
         })
     }
 }
@@ -968,6 +952,7 @@ impl ServerIncoming for Server {
     fn handle_assign_job(&self, job_id: JobId, tc: Toolchain) -> Result<AssignJobResult> {
         let need_toolchain = !self.cache.lock().unwrap().contains_toolchain(&tc);
         let mut job_toolchains = self.job_toolchains.lock().unwrap();
+
         if let Some(other_tc) = job_toolchains.insert(job_id, tc.clone()) {
             // Remove the toolchain on error
             job_toolchains.remove(&job_id);
@@ -978,16 +963,25 @@ impl ServerIncoming for Server {
                 tc
             );
         };
+
+        // Drop lock
         drop(job_toolchains);
+
+        let num_active_jobs = self.jobs_active.load(Ordering::SeqCst);
+        let num_queued_jobs = self.jobs_queued.fetch_add(1, Ordering::SeqCst) + 1;
+
         let state = if need_toolchain {
             JobState::Pending
         } else {
             // TODO: can start prepping the build environment now
             JobState::Ready
         };
+
         Ok(AssignJobResult {
             state,
             need_toolchain,
+            num_queued_jobs,
+            num_active_jobs,
         })
     }
 
@@ -999,18 +993,24 @@ impl ServerIncoming for Server {
     ) -> Result<SubmitToolchainResult> {
         // TODO: need to lock the toolchain until the container has started
         // TODO: can start prepping container
-        let mut job_toolchains = self.job_toolchains.lock().unwrap();
-        let tc = match job_toolchains.get(&job_id).cloned() {
+        let tc = match self.job_toolchains.lock().unwrap().get(&job_id).cloned() {
             Some(tc) => tc,
             None => return Ok(SubmitToolchainResult::JobNotFound),
         };
 
         if let Err(err) = requester
-            .do_update_job_state(job_id, JobState::Ready)
+            .do_update_job_state(
+                job_id,
+                JobState::Ready,
+                self.jobs_queued.load(Ordering::SeqCst),
+                self.jobs_active.load(Ordering::SeqCst),
+            )
             .context("Failed to update job state")
         {
-            // Remove the toolchain on error
-            job_toolchains.remove(&job_id);
+            // Remove the job on error
+            self.jobs_queued.fetch_sub(1, Ordering::SeqCst);
+            self.job_toolchains.lock().unwrap().remove(&job_id);
+
             warn!(
                 "[handle_submit_toolchain({})]: {:?} ({} -> {})",
                 job_id,
@@ -1020,7 +1020,6 @@ impl ServerIncoming for Server {
             );
             return Err(err);
         }
-        drop(job_toolchains);
 
         let mut cache = self.cache.lock().unwrap();
         if cache.contains_toolchain(&tc) {
@@ -1054,12 +1053,16 @@ impl ServerIncoming for Server {
             None => return Ok(RunJobResult::JobNotFound),
         };
 
+        // Move job from queued to active
+        let num_queued_jobs = self.jobs_queued.fetch_sub(1, Ordering::SeqCst) - 1;
+        let num_active_jobs = self.jobs_active.fetch_add(1, Ordering::SeqCst) + 1;
+
         // Notify the scheduler the job has started.
         // Don't return an error, because this request is between the client and this server.
         // The client is expecting the server to perform this work, regardless of whether the
         // scheduler has pruned this job due to missing the pending timeout.
         if let Err(err) = requester
-            .do_update_job_state(job_id, JobState::Started)
+            .do_update_job_state(job_id, JobState::Started, num_queued_jobs, num_active_jobs)
             .context("Failed to update job state")
         {
             warn!(
@@ -1071,16 +1074,21 @@ impl ServerIncoming for Server {
             );
         }
 
+        // Do the build
         let res = self
             .builder
             .run_build(job_id, tc, command, outputs, inputs_rdr, &self.cache);
+
+        // Move job from active to done
+        let num_queued_jobs = self.jobs_queued.load(Ordering::SeqCst);
+        let num_active_jobs = self.jobs_active.fetch_sub(1, Ordering::SeqCst) - 1;
 
         // Notify the scheduler the job is complete.
         // Don't return an error, because this request is between the client and this server.
         // The client is expecting the server to perform this work, regardless of whether the
         // scheduler has pruned this job due to missing the pending timeout.
         if let Err(err) = requester
-            .do_update_job_state(job_id, JobState::Complete)
+            .do_update_job_state(job_id, JobState::Complete, num_queued_jobs, num_active_jobs)
             .context("Failed to update job state")
         {
             warn!(

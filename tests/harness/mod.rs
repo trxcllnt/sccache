@@ -9,6 +9,8 @@ use std::net::{self, IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::str::{self, FromStr};
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -414,6 +416,8 @@ impl DistSystem {
             listener.local_addr().unwrap()
         };
         let token = create_server_token(ServerId::new(server_addr), DIST_SERVER_TOKEN);
+        let jobs_queued = Arc::new(AtomicUsize::new(0));
+        let jobs_active = Arc::new(AtomicUsize::new(0));
         let server = dist::http::Server::new(
             server_addr,
             server_addr,
@@ -421,6 +425,8 @@ impl DistSystem {
             token,
             1f64,
             0,
+            jobs_queued,
+            jobs_active,
             handler,
         )
         .unwrap();

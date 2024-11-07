@@ -189,6 +189,8 @@ mod common {
         pub server_nonce: dist::ServerNonce,
         pub cert_digest: Vec<u8>,
         pub cert_pem: Vec<u8>,
+        pub num_queued_jobs: usize,
+        pub num_active_jobs: usize,
     }
     // cert_pem is quite long so elide it (you can retrieve it by hitting the server url anyway)
     impl fmt::Debug for HeartbeatServerHttpRequest {
@@ -199,9 +201,18 @@ mod common {
                 server_nonce,
                 cert_digest,
                 cert_pem,
+                num_queued_jobs,
+                num_active_jobs,
             } = self;
-            write!(f, "HeartbeatServerHttpRequest {{ jwt_key: {:?}, num_cpus: {:?}, server_nonce: {:?}, cert_digest: {:?}, cert_pem: [...{} bytes...] }}", jwt_key, num_cpus, server_nonce, cert_digest, cert_pem.len())
+            write!(f, "HeartbeatServerHttpRequest {{ jwt_key: {:?}, num_cpus: {:?}, server_nonce: {:?}, cert_digest: {:?}, cert_pem: [...{} bytes...], jobs: {{ queued: {:?}, active: {:?} }} }}", jwt_key, num_cpus, server_nonce, cert_digest, cert_pem.len(), num_queued_jobs, num_active_jobs)
         }
+    }
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct UpdateJobStateHttpRequest {
+        pub state: dist::JobState,
+        pub num_queued_jobs: usize,
+        pub num_active_jobs: usize,
     }
     #[derive(Clone, Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -287,10 +298,11 @@ mod server {
     use std::net::SocketAddr;
     use std::result::Result as StdResult;
     use std::sync::atomic;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
 
+    use super::common::UpdateJobStateHttpRequest;
     use super::common::{
         AllocJobHttpResponse, HeartbeatServerHttpRequest, JobJwt, ReqwestRequestBuilderExt,
         RunJobHttpRequest, ServerCertificateHttpResponse,
@@ -838,7 +850,15 @@ mod server {
                         let heartbeat_server = try_or_400_log!(req_id, bincode_input(request));
                         trace!("Req {}: heartbeat_server: {:?}", req_id, heartbeat_server);
 
-                        let HeartbeatServerHttpRequest { num_cpus, jwt_key, server_nonce, cert_digest, cert_pem } = heartbeat_server;
+                        let HeartbeatServerHttpRequest {
+                            num_cpus,
+                            jwt_key,
+                            server_nonce,
+                            cert_digest,
+                            cert_pem,
+                            num_queued_jobs,
+                            num_active_jobs,
+                        } = heartbeat_server;
                         try_or_500_log!(req_id, maybe_update_certs(
                             &mut requester.client.lock().unwrap(),
                             &mut server_certificates.lock().unwrap(),
@@ -846,19 +866,30 @@ mod server {
                         ));
                         let job_authorizer = JWTJobAuthorizer::new(jwt_key);
                         let res: HeartbeatServerResult = try_or_500_log!(req_id, handler.handle_heartbeat_server(
-                            server_id, server_nonce,
+                            server_id,
+                            server_nonce,
                             num_cpus,
-                            job_authorizer
+                            job_authorizer,
+                            num_queued_jobs,
+                            num_active_jobs,
                         ));
                         prepare_response(request, &res)
                     },
                     (POST) (/api/v1/scheduler/job_state/{job_id: JobId}) => {
                         let server_id = check_server_auth_or_err!(request);
-                        let job_state = try_or_400_log!(req_id, bincode_input(request));
-                        trace!("Req {}: job state: {:?}", req_id, job_state);
+                        let UpdateJobStateHttpRequest {
+                            state,
+                            num_queued_jobs,
+                            num_active_jobs,
+                        } = try_or_400_log!(req_id, bincode_input(request));
+                        trace!("Req {}: job state: {:?}", req_id, state);
 
                         let res: UpdateJobStateResult = try_or_500_log!(req_id, handler.handle_update_job_state(
-                            job_id, server_id, job_state
+                            job_id,
+                            server_id,
+                            state,
+                            num_queued_jobs,
+                            num_active_jobs,
                         ));
                         prepare_response(request, &res)
                     },
@@ -911,7 +942,7 @@ mod server {
             let url = urls::server_assign_job(server_id, job_id);
             let req = self.client.lock().unwrap().post(url);
             bincode_req(req.bearer_auth(auth).bincode(&tc)?)
-                .context("POST to scheduler assign_job failed")
+                .context("POST to server assign_job failed")
         }
     }
 
@@ -930,10 +961,13 @@ mod server {
         server_nonce: ServerNonce,
         max_per_core_load: f64,
         num_cpus_to_ignore: usize,
+        jobs_queued: Arc<atomic::AtomicUsize>,
+        jobs_active: Arc<atomic::AtomicUsize>,
         handler: S,
     }
 
     impl<S: dist::ServerIncoming + 'static> Server<S> {
+        #[allow(clippy::too_many_arguments)]
         pub fn new(
             public_addr: SocketAddr,
             bind_addr: SocketAddr,
@@ -941,6 +975,8 @@ mod server {
             scheduler_auth: String,
             max_per_core_load: f64,
             num_cpus_to_ignore: usize,
+            jobs_queued: Arc<atomic::AtomicUsize>,
+            jobs_active: Arc<atomic::AtomicUsize>,
             handler: S,
         ) -> Result<Self> {
             let (cert_digest, cert_pem, privkey_pem) =
@@ -962,6 +998,8 @@ mod server {
                 server_nonce,
                 max_per_core_load,
                 num_cpus_to_ignore,
+                jobs_queued,
+                jobs_active,
                 handler,
             })
         }
@@ -979,17 +1017,21 @@ mod server {
                 server_nonce,
                 max_per_core_load,
                 num_cpus_to_ignore,
+                jobs_queued,
+                jobs_active,
                 handler,
             } = self;
 
             let num_cpus = (num_cpus::get() - num_cpus_to_ignore).max(1);
 
-            let heartbeat_req = HeartbeatServerHttpRequest {
+            let mut heartbeat_req = HeartbeatServerHttpRequest {
                 num_cpus,
                 jwt_key: jwt_key.clone(),
                 server_nonce,
                 cert_digest,
                 cert_pem: cert_pem.clone(),
+                num_queued_jobs: 0,
+                num_active_jobs: 0,
             };
             let job_authorizer = JWTJobAuthorizer::new(jwt_key);
             let heartbeat_url = urls::scheduler_heartbeat_server(&scheduler_url);
@@ -1003,6 +1045,8 @@ mod server {
             thread::spawn(move || {
                 let client = new_reqwest_blocking_client(Some(public_addr));
                 loop {
+                    heartbeat_req.num_queued_jobs = jobs_queued.load(atomic::Ordering::SeqCst);
+                    heartbeat_req.num_active_jobs = jobs_active.load(atomic::Ordering::SeqCst);
                     trace!("Performing heartbeat");
                     match bincode_req(
                         client
@@ -1121,13 +1165,20 @@ mod server {
             &self,
             job_id: JobId,
             state: JobState,
+            num_queued_jobs: usize,
+            num_active_jobs: usize,
         ) -> Result<UpdateJobStateResult> {
             let url = urls::scheduler_job_state(&self.scheduler_url, job_id);
+            let req = UpdateJobStateHttpRequest {
+                state,
+                num_queued_jobs,
+                num_active_jobs,
+            };
             bincode_req(
                 self.client
                     .post(url)
                     .bearer_auth(self.scheduler_auth.clone())
-                    .bincode(&state)?,
+                    .bincode(&req)?,
             )
             .context("POST to scheduler job_state failed")
         }

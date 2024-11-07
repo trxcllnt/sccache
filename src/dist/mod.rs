@@ -550,6 +550,8 @@ pub enum AllocJobResult {
 pub struct AssignJobResult {
     pub state: JobState,
     pub need_toolchain: bool,
+    pub num_queued_jobs: usize,
+    pub num_active_jobs: usize,
 }
 
 // JobState
@@ -663,7 +665,13 @@ pub trait SchedulerOutgoing {
 #[cfg(feature = "dist-server")]
 pub trait ServerOutgoing {
     // To Scheduler
-    fn do_update_job_state(&self, job_id: JobId, state: JobState) -> Result<UpdateJobStateResult>;
+    fn do_update_job_state(
+        &self,
+        job_id: JobId,
+        state: JobState,
+        num_queued_jobs: usize,
+        num_active_jobs: usize,
+    ) -> Result<UpdateJobStateResult>;
 }
 
 // Trait to handle the creation and verification of job authorization tokens
@@ -688,6 +696,8 @@ pub trait SchedulerIncoming: Send + Sync {
         server_nonce: ServerNonce,
         num_cpus: usize,
         job_authorizer: Box<dyn JobAuthorizer>,
+        num_queued_jobs: usize,
+        num_active_jobs: usize,
     ) -> ExtResult<HeartbeatServerResult, Error>;
     // From Server
     fn handle_update_job_state(
@@ -695,6 +705,8 @@ pub trait SchedulerIncoming: Send + Sync {
         job_id: JobId,
         server_id: ServerId,
         job_state: JobState,
+        num_queued_jobs: usize,
+        num_active_jobs: usize,
     ) -> ExtResult<UpdateJobStateResult, Error>;
     // From anyone
     fn handle_status(&self) -> ExtResult<SchedulerStatusResult, Error>;

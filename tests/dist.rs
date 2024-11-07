@@ -167,6 +167,8 @@ impl ServerIncoming for FailingServer {
         Ok(AssignJobResult {
             need_toolchain,
             state,
+            num_queued_jobs: 1,
+            num_active_jobs: 0,
         })
     }
     fn handle_submit_toolchain(
@@ -186,7 +188,7 @@ impl ServerIncoming for FailingServer {
         _inputs_rdr: InputsReader,
     ) -> Result<RunJobResult> {
         requester
-            .do_update_job_state(job_id, JobState::Started)
+            .do_update_job_state(job_id, JobState::Started, 0, 1)
             .context("Updating job state failed")?;
         bail!("internal build failure")
     }
