@@ -574,13 +574,6 @@ impl SchedulerIncoming for Scheduler {
             })
         };
 
-        let score_server = |load: &f64, last_err: Duration| -> f64 {
-            load + (
-                // error penalty
-                (remember_server_error_timeout.as_secs() - last_err.as_secs()) as f64
-            )
-        };
-
         let get_best_server_by_least_load_and_oldest_error = |tried_servers: &HashSet<ServerId>| {
             let now = Instant::now();
             // LOCKS
@@ -607,19 +600,15 @@ impl SchedulerIncoming for Scheduler {
                 })
                 // Sort servers by least load and oldest error
                 .sorted_by(|(_, details_a, load_a), (_, details_b, load_b)| {
-                    let (score_a, score_b) = match (details_a.last_error, details_b.last_error) {
+                    match (details_a.last_error, details_b.last_error) {
                         // If neither server has a recent error, prefer the one with lowest load
-                        (None, None) => (*load_a, *load_b),
+                        (None, None) => load_a.total_cmp(load_b),
                         // Prefer servers with no recent errors over servers with recent errors
-                        (None, Some(err_b)) => (*load_a, score_server(load_b, now - err_b)),
-                        (Some(err_a), None) => (score_server(load_a, now - err_a), *load_b),
+                        (None, Some(_)) => std::cmp::Ordering::Less,
+                        (Some(_), None) => std::cmp::Ordering::Greater,
                         // If both servers have an error, prefer the one with the oldest error
-                        (Some(err_a), Some(err_b)) => (
-                            score_server(load_a, now - err_a),
-                            score_server(load_b, now - err_b),
-                        ),
-                    };
-                    score_a.total_cmp(&score_b)
+                        (Some(err_a), Some(err_b)) => err_b.cmp(&err_a),
+                    }
                 })
                 .find_or_first(|_| true)
                 .map(|(server_id, _, _)| *server_id)
