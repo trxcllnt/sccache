@@ -961,7 +961,8 @@ mod server {
         server_nonce: ServerNonce,
         max_per_core_load: f64,
         num_cpus_to_ignore: usize,
-        jobs_queued: Arc<atomic::AtomicUsize>,
+        job_toolchains: Arc<Mutex<HashMap<JobId, Toolchain>>>,
+        jobs_queued: Arc<Mutex<HashMap<JobId, std::time::Instant>>>,
         jobs_active: Arc<atomic::AtomicUsize>,
         handler: S,
     }
@@ -975,7 +976,8 @@ mod server {
             scheduler_auth: String,
             max_per_core_load: f64,
             num_cpus_to_ignore: usize,
-            jobs_queued: Arc<atomic::AtomicUsize>,
+            job_toolchains: Arc<Mutex<HashMap<JobId, Toolchain>>>,
+            jobs_queued: Arc<Mutex<HashMap<JobId, std::time::Instant>>>,
             jobs_active: Arc<atomic::AtomicUsize>,
             handler: S,
         ) -> Result<Self> {
@@ -998,6 +1000,7 @@ mod server {
                 server_nonce,
                 max_per_core_load,
                 num_cpus_to_ignore,
+                job_toolchains,
                 jobs_queued,
                 jobs_active,
                 handler,
@@ -1017,6 +1020,7 @@ mod server {
                 server_nonce,
                 max_per_core_load,
                 num_cpus_to_ignore,
+                job_toolchains,
                 jobs_queued,
                 jobs_active,
                 handler,
@@ -1044,9 +1048,28 @@ mod server {
             // TODO: detect if this panics
             thread::spawn(move || {
                 let client = new_reqwest_blocking_client(Some(public_addr));
+                let unstarted_job_timeout = std::time::Duration::from_secs(60);
                 loop {
-                    heartbeat_req.num_queued_jobs = jobs_queued.load(atomic::Ordering::SeqCst);
-                    heartbeat_req.num_active_jobs = jobs_active.load(atomic::Ordering::SeqCst);
+                    let now = std::time::Instant::now();
+                    let mut queued_jobs = jobs_queued.lock().unwrap();
+                    let mut toolchains = job_toolchains.lock().unwrap();
+                    let num_active_jobs = jobs_active.load(atomic::Ordering::SeqCst);
+                    let mut num_queued_jobs = queued_jobs.len();
+
+                    for (&job_id, &ctime) in queued_jobs.clone().iter() {
+                        if now.duration_since(ctime) >= unstarted_job_timeout {
+                            num_queued_jobs -= 1;
+                            toolchains.remove(&job_id);
+                            queued_jobs.remove(&job_id);
+                        }
+                    }
+
+                    drop(toolchains);
+                    drop(queued_jobs);
+
+                    heartbeat_req.num_queued_jobs = num_queued_jobs;
+                    heartbeat_req.num_active_jobs = num_active_jobs;
+
                     trace!("Performing heartbeat");
                     match bincode_req(
                         client

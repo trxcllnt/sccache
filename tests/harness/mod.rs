@@ -3,6 +3,7 @@ use fs_err as fs;
 use sccache::config::HTTPUrl;
 use sccache::dist::{self, SchedulerStatusResult, ServerId};
 use sccache::server::ServerInfo;
+use std::collections::HashMap;
 use std::env;
 use std::io::Write;
 use std::net::{self, IpAddr, SocketAddr};
@@ -10,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::str::{self, FromStr};
 use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -416,7 +417,8 @@ impl DistSystem {
             listener.local_addr().unwrap()
         };
         let token = create_server_token(ServerId::new(server_addr), DIST_SERVER_TOKEN);
-        let jobs_queued = Arc::new(AtomicUsize::new(0));
+        let job_toolchains = Arc::new(Mutex::new(HashMap::new()));
+        let jobs_queued = Arc::new(Mutex::new(HashMap::new()));
         let jobs_active = Arc::new(AtomicUsize::new(0));
         let server = dist::http::Server::new(
             server_addr,
@@ -425,6 +427,7 @@ impl DistSystem {
             token,
             1f64,
             0,
+            job_toolchains,
             jobs_queued,
             jobs_active,
             handler,

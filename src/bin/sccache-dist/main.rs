@@ -303,6 +303,7 @@ fn run(command: Command) -> Result<i32> {
                 scheduler_auth,
                 max_per_core_load,
                 num_cpus_to_ignore,
+                server.job_toolchains.clone(),
                 server.jobs_queued.clone(),
                 server.jobs_active.clone(),
                 server,
@@ -553,7 +554,7 @@ impl SchedulerIncoming for Scheduler {
                 }
             }
 
-            info!(
+            debug!(
                 "[alloc_job({})]: Job created and assigned to server {:?} with state {:?}",
                 job_id,
                 server_id.addr(),
@@ -861,7 +862,7 @@ impl SchedulerIncoming for Scheduler {
                     )
                 }
             }
-            info!(
+            debug!(
                 "[update_job_state({}, {})]: Job state updated from {:?} to {:?}",
                 job_id,
                 server_id.addr(),
@@ -925,8 +926,8 @@ impl SchedulerIncoming for Scheduler {
 pub struct Server {
     builder: Box<dyn BuilderIncoming>,
     cache: Mutex<TcCache>,
-    job_toolchains: Mutex<HashMap<JobId, Toolchain>>,
-    pub jobs_queued: Arc<AtomicUsize>,
+    pub job_toolchains: Arc<Mutex<HashMap<JobId, Toolchain>>>,
+    pub jobs_queued: Arc<Mutex<HashMap<JobId, Instant>>>,
     pub jobs_active: Arc<AtomicUsize>,
 }
 
@@ -941,9 +942,9 @@ impl Server {
         Ok(Server {
             builder,
             cache: Mutex::new(cache),
-            job_toolchains: Mutex::new(HashMap::new()),
+            job_toolchains: Arc::new(Mutex::new(HashMap::new())),
+            jobs_queued: Arc::new(Mutex::new(HashMap::new())),
             jobs_active: Arc::new(AtomicUsize::new(0)),
-            jobs_queued: Arc::new(AtomicUsize::new(0)),
         })
     }
 }
@@ -968,7 +969,12 @@ impl ServerIncoming for Server {
         drop(job_toolchains);
 
         let num_active_jobs = self.jobs_active.load(Ordering::SeqCst);
-        let num_queued_jobs = self.jobs_queued.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut jobs_queued = self.jobs_queued.lock().unwrap();
+        jobs_queued.insert(job_id, Instant::now());
+        let num_queued_jobs = jobs_queued.len();
+
+        // Drop lock
+        drop(jobs_queued);
 
         let state = if need_toolchain {
             JobState::Pending
@@ -995,20 +1001,24 @@ impl ServerIncoming for Server {
         // TODO: can start prepping container
         let tc = match self.job_toolchains.lock().unwrap().get(&job_id).cloned() {
             Some(tc) => tc,
-            None => return Ok(SubmitToolchainResult::JobNotFound),
+            None => {
+                // Remove the job on error
+                self.jobs_queued.lock().unwrap().remove(&job_id);
+                return Ok(SubmitToolchainResult::JobNotFound);
+            }
         };
 
         if let Err(err) = requester
             .do_update_job_state(
                 job_id,
                 JobState::Ready,
-                self.jobs_queued.load(Ordering::SeqCst),
+                self.jobs_queued.lock().unwrap().len(),
                 self.jobs_active.load(Ordering::SeqCst),
             )
             .context("Failed to update job state")
         {
             // Remove the job on error
-            self.jobs_queued.fetch_sub(1, Ordering::SeqCst);
+            self.jobs_queued.lock().unwrap().remove(&job_id);
             self.job_toolchains.lock().unwrap().remove(&job_id);
 
             warn!(
@@ -1050,12 +1060,21 @@ impl ServerIncoming for Server {
         // Remove the job toolchain as early as possible.
         let tc = match self.job_toolchains.lock().unwrap().remove(&job_id) {
             Some(tc) => tc,
-            None => return Ok(RunJobResult::JobNotFound),
+            None => {
+                // Remove the job on error
+                self.jobs_queued.lock().unwrap().remove(&job_id);
+                return Ok(RunJobResult::JobNotFound);
+            }
         };
 
         // Move job from queued to active
-        let num_queued_jobs = self.jobs_queued.fetch_sub(1, Ordering::SeqCst) - 1;
         let num_active_jobs = self.jobs_active.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut jobs_queued = self.jobs_queued.lock().unwrap();
+        jobs_queued.remove(&job_id);
+        let num_queued_jobs = jobs_queued.len();
+
+        // Drop lock
+        drop(jobs_queued);
 
         // Notify the scheduler the job has started.
         // Don't return an error, because this request is between the client and this server.
@@ -1080,7 +1099,7 @@ impl ServerIncoming for Server {
             .run_build(job_id, tc, command, outputs, inputs_rdr, &self.cache);
 
         // Move job from active to done
-        let num_queued_jobs = self.jobs_queued.load(Ordering::SeqCst);
+        let num_queued_jobs = self.jobs_queued.lock().unwrap().len();
         let num_active_jobs = self.jobs_active.fetch_sub(1, Ordering::SeqCst) - 1;
 
         // Notify the scheduler the job is complete.
