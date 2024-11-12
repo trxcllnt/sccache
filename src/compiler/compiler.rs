@@ -882,14 +882,17 @@ where
             need_toolchain: true,
         } => {
             debug!(
-                "[{}]: Successfully allocated job {} on server {}",
+                "[{}, {}, {}]: Successfully allocated job",
                 out_pretty,
                 job_alloc.job_id,
                 job_alloc.server_id.addr()
             );
             debug!(
-                "[{}]: Sending toolchain {} for job {}",
-                out_pretty, dist_toolchain.archive_id, job_alloc.job_id
+                "[{}, {}, {}]: Sending toolchain {}",
+                out_pretty,
+                job_alloc.job_id,
+                job_alloc.server_id.addr(),
+                dist_toolchain.archive_id
             );
 
             let archive_id = dist_toolchain.archive_id.clone();
@@ -901,24 +904,27 @@ where
             {
                 dist::SubmitToolchainResult::Success => {
                     trace!(
-                        "[{}]: Successfully sent toolchain {} for job {}",
+                        "[{}, {}, {}]: Successfully sent toolchain {}",
                         out_pretty,
+                        job_alloc.job_id,
+                        job_alloc.server_id.addr(),
                         archive_id,
-                        job_alloc.job_id
                     );
                     Ok(job_alloc)
                 }
                 dist::SubmitToolchainResult::JobNotFound => {
                     bail!(
-                        "[{}]: Job {} not found on server",
+                        "[{}, {}, {}]: Failed to submit toolchain, job not found on server",
                         out_pretty,
-                        job_alloc.job_id
+                        job_alloc.job_id,
+                        job_alloc.server_id.addr()
                     )
                 }
                 dist::SubmitToolchainResult::CannotCache => bail!(
-                    "[{}]: Toolchain for job {} could not be cached by server",
+                    "[{}, {}, {}]: Toolchain for job could not be cached by server",
                     out_pretty,
-                    job_alloc.job_id
+                    job_alloc.job_id,
+                    job_alloc.server_id.addr()
                 ),
             }
         }
@@ -927,7 +933,7 @@ where
             need_toolchain: false,
         } => {
             debug!(
-                "[{}]: Successfully allocated job {} on server {}",
+                "[{}, {}, {}]: Successfully allocated job on server",
                 out_pretty,
                 job_alloc.job_id,
                 job_alloc.server_id.addr()
@@ -939,7 +945,7 @@ where
     let job_id = job_alloc.job_id;
     let server_id = job_alloc.server_id;
     debug!(
-        "[{}]: Running job {} on server {:?}",
+        "[{}, {}, {}]: Running job on server",
         out_pretty,
         job_id,
         server_id.addr()
@@ -963,12 +969,19 @@ where
     let jc = match jres {
         dist::RunJobResult::Complete(jc) => jc,
         dist::RunJobResult::JobNotFound => {
-            bail!("[{}]: Job {} not found on server", out_pretty, job_id)
+            bail!(
+                "[{}, {}, {}]: Failed to run job, job not found on server",
+                out_pretty,
+                job_id,
+                server_id.addr()
+            )
         }
     };
     debug!(
-        "[{}]: Fetched {:?}",
+        "[{}, {}, {}]: Fetched {:?}",
         out_pretty,
+        job_id,
+        server_id.addr(),
         jc.outputs
             .iter()
             .map(|(p, bs)| (p, bs.lens().to_string()))
@@ -985,7 +998,14 @@ where
                     for local_path in output_paths.iter() {
                         if let Err(e) = fs::remove_file(local_path) {
                             if e.kind() != io::ErrorKind::NotFound {
-                                warn!("[{}]: {} while attempting to clear up {}", out_pretty, e, local_path.display())
+                                warn!(
+                                    "[{}, {}, {}]: {} while attempting to clear up {}",
+                                    out_pretty,
+                                    job_id,
+                                    server_id.addr(),
+                                    e,
+                                    local_path.display()
+                                )
                             }
                         }
                     }
