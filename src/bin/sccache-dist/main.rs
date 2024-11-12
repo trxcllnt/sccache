@@ -496,10 +496,11 @@ impl SchedulerIncoming for Scheduler {
                     let mut servers = self.servers.lock().unwrap();
                     // Assigned the job, so update server stats
                     if let Some(details) = servers.get_mut(&server_id) {
-                        details.num_pending_jobs -= 1;
                         details.last_seen = Instant::now();
                         details.num_queued_jobs = res.num_queued_jobs;
                         details.num_active_jobs = res.num_active_jobs;
+                        details.num_pending_jobs =
+                            (details.num_pending_jobs as i64 - 1).max(0) as usize;
                     }
                     res
                 }
@@ -508,9 +509,10 @@ impl SchedulerIncoming for Scheduler {
                     let mut servers = self.servers.lock().unwrap();
                     // Couldn't assign the job, so undo the eager assignment above
                     if let Some(details) = servers.get_mut(&server_id) {
-                        details.num_pending_jobs -= 1;
                         details.jobs_assigned.remove(&job_id);
                         details.last_error = Some(Instant::now());
+                        details.num_pending_jobs =
+                            (details.num_pending_jobs as i64 - 1).max(0) as usize;
                     }
                     return Err(err);
                 }
