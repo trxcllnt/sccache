@@ -8,7 +8,7 @@ use rand::{rngs::OsRng, RngCore};
 use sccache::config::{
     scheduler as scheduler_config, server as server_config, INSECURE_DIST_CLIENT_TOKEN,
 };
-use sccache::dist::http::get_dist_request_timeout;
+use sccache::dist::http::{get_dist_request_timeout, HEARTBEAT_ERROR_INTERVAL, HEARTBEAT_INTERVAL};
 use sccache::dist::{
     self, AllocJobResult, AssignJobResult, BuilderIncoming, CompileCommand, HeartbeatServerResult,
     InputsReader, JobAlloc, JobAuthorizer, JobComplete, JobId, JobState, RunJobResult,
@@ -25,6 +25,7 @@ use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg_attr(target_os = "freebsd", path = "build_freebsd.rs")]
@@ -303,9 +304,6 @@ fn run(command: Command) -> Result<i32> {
                 scheduler_auth,
                 max_per_core_load,
                 num_cpus_to_ignore,
-                server.job_toolchains.clone(),
-                server.jobs_queued.clone(),
-                server.jobs_active.clone(),
                 server,
             )
             .context("Failed to create sccache HTTP server instance")?;
@@ -923,12 +921,16 @@ impl SchedulerIncoming for Scheduler {
     }
 }
 
+struct ServerState {
+    toolchains: HashMap<JobId, Toolchain>,
+    jobs_queued: HashMap<JobId, Instant>,
+    jobs_active: usize,
+}
+
 pub struct Server {
     builder: Box<dyn BuilderIncoming>,
     cache: Mutex<TcCache>,
-    pub job_toolchains: Arc<Mutex<HashMap<JobId, Toolchain>>>,
-    pub jobs_queued: Arc<Mutex<HashMap<JobId, Instant>>>,
-    pub jobs_active: Arc<AtomicUsize>,
+    state: Arc<Mutex<ServerState>>,
 }
 
 impl Server {
@@ -942,21 +944,59 @@ impl Server {
         Ok(Server {
             builder,
             cache: Mutex::new(cache),
-            job_toolchains: Arc::new(Mutex::new(HashMap::new())),
-            jobs_queued: Arc::new(Mutex::new(HashMap::new())),
-            jobs_active: Arc::new(AtomicUsize::new(0)),
+            state: Arc::new(Mutex::new(ServerState {
+                toolchains: HashMap::new(),
+                jobs_queued: HashMap::new(),
+                jobs_active: 0,
+            })),
         })
     }
 }
 
 impl ServerIncoming for Server {
-    fn handle_assign_job(&self, job_id: JobId, tc: Toolchain) -> Result<AssignJobResult> {
-        let need_toolchain = !self.cache.lock().unwrap().contains_toolchain(&tc);
-        let mut job_toolchains = self.job_toolchains.lock().unwrap();
+    fn start_heartbeat(&self, requester: std::sync::Arc<dyn ServerOutgoing>) {
+        let state = self.state.clone();
+        // TODO: detect if this panics
+        thread::spawn(move || {
+            let unstarted_job_timeout = std::time::Duration::from_secs(60);
+            loop {
+                let mut state = state.lock().unwrap();
+                let now = std::time::Instant::now();
 
-        if let Some(other_tc) = job_toolchains.insert(job_id, tc.clone()) {
+                for (&job_id, &ctime) in state.jobs_queued.clone().iter() {
+                    if now.duration_since(ctime) >= unstarted_job_timeout {
+                        state.toolchains.remove(&job_id);
+                        state.jobs_queued.remove(&job_id);
+                    }
+                }
+
+                let num_queued_jobs = state.jobs_queued.len();
+                let num_active_jobs = state.jobs_active;
+
+                drop(state);
+
+                trace!("Performing heartbeat");
+
+                match requester.do_heartbeat(num_queued_jobs, num_active_jobs) {
+                    Ok(HeartbeatServerResult { is_new }) => {
+                        trace!("Heartbeat success is_new={}", is_new);
+                        // TODO: if is_new, terminate all running jobs
+                        thread::sleep(HEARTBEAT_INTERVAL)
+                    }
+                    Err(e) => {
+                        error!("Failed to send heartbeat to server: {}", e);
+                        thread::sleep(HEARTBEAT_ERROR_INTERVAL)
+                    }
+                }
+            }
+        });
+    }
+
+    fn handle_assign_job(&self, job_id: JobId, tc: Toolchain) -> Result<AssignJobResult> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(other_tc) = state.toolchains.insert(job_id, tc.clone()) {
             // Remove the toolchain on error
-            job_toolchains.remove(&job_id);
+            state.toolchains.remove(&job_id);
             bail!(
                 "[{}]: Duplicate toolchain assigned, not replacing toolchain {:?} with {:?}",
                 job_id,
@@ -965,16 +1005,14 @@ impl ServerIncoming for Server {
             );
         };
 
-        // Drop lock
-        drop(job_toolchains);
-
-        let num_active_jobs = self.jobs_active.load(Ordering::SeqCst);
-        let mut jobs_queued = self.jobs_queued.lock().unwrap();
-        jobs_queued.insert(job_id, Instant::now());
-        let num_queued_jobs = jobs_queued.len();
+        state.jobs_queued.insert(job_id, Instant::now());
+        let num_queued_jobs = state.jobs_queued.len();
+        let num_active_jobs = state.jobs_active;
 
         // Drop lock
-        drop(jobs_queued);
+        drop(state);
+
+        let need_toolchain = !self.cache.lock().unwrap().contains_toolchain(&tc);
 
         let state = if need_toolchain {
             JobState::Pending
@@ -999,27 +1037,30 @@ impl ServerIncoming for Server {
     ) -> Result<SubmitToolchainResult> {
         // TODO: need to lock the toolchain until the container has started
         // TODO: can start prepping container
-        let tc = match self.job_toolchains.lock().unwrap().get(&job_id).cloned() {
+        let mut state = self.state.lock().unwrap();
+
+        let tc = match state.toolchains.get(&job_id).cloned() {
             Some(tc) => tc,
             None => {
                 // Remove the job on error
-                self.jobs_queued.lock().unwrap().remove(&job_id);
+                state.jobs_queued.remove(&job_id);
                 return Ok(SubmitToolchainResult::JobNotFound);
             }
         };
 
+        let num_queued_jobs = state.jobs_queued.len();
+        let num_active_jobs = state.jobs_active;
+
+        drop(state);
+
         if let Err(err) = requester
-            .do_update_job_state(
-                job_id,
-                JobState::Ready,
-                self.jobs_queued.lock().unwrap().len(),
-                self.jobs_active.load(Ordering::SeqCst),
-            )
+            .do_update_job_state(job_id, JobState::Ready, num_queued_jobs, num_active_jobs)
             .context("Failed to update job state")
         {
             // Remove the job on error
-            self.jobs_queued.lock().unwrap().remove(&job_id);
-            self.job_toolchains.lock().unwrap().remove(&job_id);
+            let mut state = self.state.lock().unwrap();
+            state.toolchains.remove(&job_id);
+            state.jobs_queued.remove(&job_id);
 
             warn!(
                 "[handle_submit_toolchain({})]: {:?} ({} -> {})",
@@ -1058,23 +1099,24 @@ impl ServerIncoming for Server {
         inputs_rdr: InputsReader,
     ) -> Result<RunJobResult> {
         // Remove the job toolchain as early as possible.
-        let tc = match self.job_toolchains.lock().unwrap().remove(&job_id) {
+        let mut state = self.state.lock().unwrap();
+        let tc = match state.toolchains.remove(&job_id) {
             Some(tc) => tc,
             None => {
                 // Remove the job on error
-                self.jobs_queued.lock().unwrap().remove(&job_id);
+                state.jobs_queued.remove(&job_id);
                 return Ok(RunJobResult::JobNotFound);
             }
         };
 
         // Move job from queued to active
-        let num_active_jobs = self.jobs_active.fetch_add(1, Ordering::SeqCst) + 1;
-        let mut jobs_queued = self.jobs_queued.lock().unwrap();
-        jobs_queued.remove(&job_id);
-        let num_queued_jobs = jobs_queued.len();
+        state.jobs_active += 1;
+        state.jobs_queued.remove(&job_id);
+        let num_queued_jobs = state.jobs_queued.len();
+        let num_active_jobs = state.jobs_active;
 
         // Drop lock
-        drop(jobs_queued);
+        drop(state);
 
         // Notify the scheduler the job has started.
         // Don't return an error, because this request is between the client and this server.
@@ -1099,8 +1141,13 @@ impl ServerIncoming for Server {
             .run_build(job_id, tc, command, outputs, inputs_rdr, &self.cache);
 
         // Move job from active to done
-        let num_queued_jobs = self.jobs_queued.lock().unwrap().len();
-        let num_active_jobs = self.jobs_active.fetch_sub(1, Ordering::SeqCst) - 1;
+        let mut state = self.state.lock().unwrap();
+        state.jobs_active -= 1;
+        let num_queued_jobs = state.jobs_queued.len();
+        let num_active_jobs = state.jobs_active;
+
+        // Drop lock
+        drop(state);
 
         // Notify the scheduler the job is complete.
         // Don't return an error, because this request is between the client and this server.

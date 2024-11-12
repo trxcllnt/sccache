@@ -663,7 +663,13 @@ pub trait SchedulerOutgoing {
 }
 
 #[cfg(feature = "dist-server")]
-pub trait ServerOutgoing {
+pub trait ServerOutgoing: Send + Sync {
+    // To Scheduler
+    fn do_heartbeat(
+        &self,
+        num_queued_jobs: usize,
+        num_active_jobs: usize,
+    ) -> Result<HeartbeatServerResult>;
     // To Scheduler
     fn do_update_job_state(
         &self,
@@ -714,6 +720,8 @@ pub trait SchedulerIncoming: Send + Sync {
 
 #[cfg(feature = "dist-server")]
 pub trait ServerIncoming: Send + Sync {
+    // To scheduler
+    fn start_heartbeat(&self, requester: std::sync::Arc<dyn ServerOutgoing>);
     // From Scheduler
     fn handle_assign_job(&self, job_id: JobId, tc: Toolchain) -> ExtResult<AssignJobResult, Error>;
     // From Client

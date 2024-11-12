@@ -17,7 +17,8 @@ pub use self::client::Client;
 pub use self::server::Server;
 #[cfg(feature = "dist-server")]
 pub use self::server::{
-    ClientAuthCheck, ClientVisibleMsg, Scheduler, ServerAuthCheck, HEARTBEAT_TIMEOUT,
+    ClientAuthCheck, ClientVisibleMsg, Scheduler, ServerAuthCheck, HEARTBEAT_ERROR_INTERVAL,
+    HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT,
 };
 
 use std::env;
@@ -299,7 +300,6 @@ mod server {
     use std::result::Result as StdResult;
     use std::sync::atomic;
     use std::sync::{Arc, Mutex};
-    use std::thread;
     use std::time::Duration;
 
     use super::common::UpdateJobStateHttpRequest;
@@ -315,8 +315,8 @@ mod server {
     };
     use crate::errors::*;
 
-    const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
-    const HEARTBEAT_ERROR_INTERVAL: Duration = Duration::from_secs(10);
+    pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+    pub const HEARTBEAT_ERROR_INTERVAL: Duration = Duration::from_secs(10);
     pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(90);
 
     pub fn bincode_req<T: serde::de::DeserializeOwned + 'static>(
@@ -961,9 +961,6 @@ mod server {
         server_nonce: ServerNonce,
         max_per_core_load: f64,
         num_cpus_to_ignore: usize,
-        job_toolchains: Arc<Mutex<HashMap<JobId, Toolchain>>>,
-        jobs_queued: Arc<Mutex<HashMap<JobId, std::time::Instant>>>,
-        jobs_active: Arc<atomic::AtomicUsize>,
         handler: S,
     }
 
@@ -976,9 +973,6 @@ mod server {
             scheduler_auth: String,
             max_per_core_load: f64,
             num_cpus_to_ignore: usize,
-            job_toolchains: Arc<Mutex<HashMap<JobId, Toolchain>>>,
-            jobs_queued: Arc<Mutex<HashMap<JobId, std::time::Instant>>>,
-            jobs_active: Arc<atomic::AtomicUsize>,
             handler: S,
         ) -> Result<Self> {
             let (cert_digest, cert_pem, privkey_pem) =
@@ -1000,9 +994,6 @@ mod server {
                 server_nonce,
                 max_per_core_load,
                 num_cpus_to_ignore,
-                job_toolchains,
-                jobs_queued,
-                jobs_active,
                 handler,
             })
         }
@@ -1020,76 +1011,29 @@ mod server {
                 server_nonce,
                 max_per_core_load,
                 num_cpus_to_ignore,
-                job_toolchains,
-                jobs_queued,
-                jobs_active,
                 handler,
             } = self;
 
             let num_cpus = (num_cpus::get() - num_cpus_to_ignore).max(1);
 
-            let mut heartbeat_req = HeartbeatServerHttpRequest {
-                num_cpus,
-                jwt_key: jwt_key.clone(),
-                server_nonce,
-                cert_digest,
-                cert_pem: cert_pem.clone(),
-                num_queued_jobs: 0,
-                num_active_jobs: 0,
-            };
-            let job_authorizer = JWTJobAuthorizer::new(jwt_key);
-            let heartbeat_url = urls::scheduler_heartbeat_server(&scheduler_url);
-            let requester = ServerRequester {
+            let job_authorizer = JWTJobAuthorizer::new(jwt_key.clone());
+            let requester = Arc::new(ServerRequester {
                 client: new_reqwest_blocking_client(Some(public_addr)),
-                scheduler_url,
+                scheduler_url: scheduler_url.clone(),
                 scheduler_auth: scheduler_auth.clone(),
-            };
-
-            // TODO: detect if this panics
-            thread::spawn(move || {
-                let client = new_reqwest_blocking_client(Some(public_addr));
-                let unstarted_job_timeout = std::time::Duration::from_secs(60);
-                loop {
-                    let now = std::time::Instant::now();
-                    let mut queued_jobs = jobs_queued.lock().unwrap();
-                    let mut toolchains = job_toolchains.lock().unwrap();
-                    let num_active_jobs = jobs_active.load(atomic::Ordering::SeqCst);
-                    let mut num_queued_jobs = queued_jobs.len();
-
-                    for (&job_id, &ctime) in queued_jobs.clone().iter() {
-                        if now.duration_since(ctime) >= unstarted_job_timeout {
-                            num_queued_jobs -= 1;
-                            toolchains.remove(&job_id);
-                            queued_jobs.remove(&job_id);
-                        }
-                    }
-
-                    drop(toolchains);
-                    drop(queued_jobs);
-
-                    heartbeat_req.num_queued_jobs = num_queued_jobs;
-                    heartbeat_req.num_active_jobs = num_active_jobs;
-
-                    trace!("Performing heartbeat");
-                    match bincode_req(
-                        client
-                            .post(heartbeat_url.clone())
-                            .bearer_auth(scheduler_auth.clone())
-                            .bincode(&heartbeat_req)
-                            .expect("failed to serialize heartbeat"),
-                    ) {
-                        Ok(HeartbeatServerResult { is_new }) => {
-                            trace!("Heartbeat success is_new={}", is_new);
-                            // TODO: if is_new, terminate all running jobs
-                            thread::sleep(HEARTBEAT_INTERVAL)
-                        }
-                        Err(e) => {
-                            error!("Failed to send heartbeat to server: {}", e);
-                            thread::sleep(HEARTBEAT_ERROR_INTERVAL)
-                        }
-                    }
-                }
+                heartbeat_url: urls::scheduler_heartbeat_server(&scheduler_url),
+                heartbeat_req: HeartbeatServerHttpRequest {
+                    num_cpus,
+                    jwt_key: jwt_key.clone(),
+                    server_nonce,
+                    cert_digest,
+                    cert_pem: cert_pem.clone(),
+                    num_queued_jobs: 0,
+                    num_active_jobs: 0,
+                },
             });
+
+            handler.start_heartbeat(requester.clone());
 
             info!(
                 "Server listening for clients on {}, public_addr is: {}",
@@ -1115,7 +1059,7 @@ mod server {
 
                         let body = request.data().expect("body was already read in submit_toolchain");
                         let toolchain_rdr = ToolchainReader(Box::new(body));
-                        let res: SubmitToolchainResult = try_or_500_log!(req_id, handler.handle_submit_toolchain(&requester, job_id, toolchain_rdr));
+                        let res: SubmitToolchainResult = try_or_500_log!(req_id, handler.handle_submit_toolchain(requester.as_ref(), job_id, toolchain_rdr));
                         prepare_response(request, &res)
                     },
                     (POST) (/api/v1/distserver/run_job/{job_id: JobId}) => {
@@ -1155,7 +1099,7 @@ mod server {
                         let inputs_rdr = InputsReader(Box::new(ZlibReadDecoder::new(body)));
                         let outputs = outputs.into_iter().collect();
 
-                        let res: RunJobResult = try_or_500_log!(req_id, handler.handle_run_job(&requester, job_id, command, outputs, inputs_rdr));
+                        let res: RunJobResult = try_or_500_log!(req_id, handler.handle_run_job(requester.as_ref(), job_id, command, outputs, inputs_rdr));
                         prepare_response(request, &res)
                     },
                     _ => {
@@ -1179,11 +1123,29 @@ mod server {
 
     struct ServerRequester {
         client: reqwest::blocking::Client,
+        heartbeat_url: reqwest::Url,
+        heartbeat_req: HeartbeatServerHttpRequest,
         scheduler_url: reqwest::Url,
         scheduler_auth: String,
     }
 
     impl dist::ServerOutgoing for ServerRequester {
+        fn do_heartbeat(
+            &self,
+            num_queued_jobs: usize,
+            num_active_jobs: usize,
+        ) -> Result<HeartbeatServerResult> {
+            let mut heartbeat_req = self.heartbeat_req.clone();
+            heartbeat_req.num_queued_jobs = num_queued_jobs;
+            heartbeat_req.num_active_jobs = num_active_jobs;
+            bincode_req(
+                self.client
+                    .post(self.heartbeat_url.clone())
+                    .bearer_auth(self.scheduler_auth.clone())
+                    .bincode(&self.heartbeat_req)
+                    .expect("failed to serialize heartbeat"),
+            )
+        }
         fn do_update_job_state(
             &self,
             job_id: JobId,

@@ -161,6 +161,18 @@ fn test_dist_nobuilder() {
 
 struct FailingServer;
 impl ServerIncoming for FailingServer {
+    fn start_heartbeat(&self, requester: std::sync::Arc<dyn ServerOutgoing>) {
+        trace!("Performing heartbeat");
+        match requester.do_heartbeat(0, 0) {
+            Ok(sccache::dist::HeartbeatServerResult { is_new }) => {
+                trace!("Heartbeat success is_new={}", is_new);
+            }
+            Err(e) => {
+                error!("Failed to send heartbeat to server: {}", e);
+            }
+        };
+    }
+
     fn handle_assign_job(&self, _job_id: JobId, _tc: Toolchain) -> Result<AssignJobResult> {
         let need_toolchain = false;
         let state = JobState::Ready;
