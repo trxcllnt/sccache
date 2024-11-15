@@ -187,10 +187,11 @@ mod common {
     pub struct HeartbeatServerHttpRequest {
         pub jwt_key: Vec<u8>,
         pub num_cpus: usize,
+        pub max_per_core_load: f64,
         pub server_nonce: dist::ServerNonce,
         pub cert_digest: Vec<u8>,
         pub cert_pem: Vec<u8>,
-        pub num_queued_jobs: usize,
+        pub num_assigned_jobs: usize,
         pub num_active_jobs: usize,
     }
     // cert_pem is quite long so elide it (you can retrieve it by hitting the server url anyway)
@@ -199,21 +200,17 @@ mod common {
             let HeartbeatServerHttpRequest {
                 jwt_key,
                 num_cpus,
+                max_per_core_load,
                 server_nonce,
                 cert_digest,
                 cert_pem,
-                num_queued_jobs,
-                num_active_jobs,
+                num_assigned_jobs: assigned,
+                num_active_jobs: active,
             } = self;
-            write!(f, "HeartbeatServerHttpRequest {{ jwt_key: {:?}, num_cpus: {:?}, server_nonce: {:?}, cert_digest: {:?}, cert_pem: [...{} bytes...], jobs: {{ queued: {:?}, active: {:?} }} }}", jwt_key, num_cpus, server_nonce, cert_digest, cert_pem.len(), num_queued_jobs, num_active_jobs)
+            write!(f,
+                "HeartbeatServerHttpRequest {{ jwt_key: {:?}, num_cpus: {:?}, max_per_core_load: {:?}, server_nonce: {:?}, cert_digest: {:?}, cert_pem: [...{} bytes...], jobs: {{ assigned: {:?}, active: {:?} }} }}",
+                                               jwt_key,       num_cpus,       max_per_core_load,       server_nonce,       cert_digest,       cert_pem.len(),                      assigned,       active)
         }
-    }
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub struct UpdateJobStateHttpRequest {
-        pub state: dist::JobState,
-        pub num_queued_jobs: usize,
-        pub num_active_jobs: usize,
     }
     #[derive(Clone, Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -247,17 +244,16 @@ pub mod urls {
             .join("/api/v1/scheduler/heartbeat_server")
             .expect("failed to create heartbeat url")
     }
-    pub fn scheduler_job_state(scheduler_url: &reqwest::Url, job_id: JobId) -> reqwest::Url {
-        scheduler_url
-            .join(&format!("/api/v1/scheduler/job_state/{}", job_id))
-            .expect("failed to create job state url")
-    }
     pub fn scheduler_status(scheduler_url: &reqwest::Url) -> reqwest::Url {
         scheduler_url
             .join("/api/v1/scheduler/status")
             .expect("failed to create alloc job url")
     }
 
+    pub fn server_reserve_job(server_id: ServerId) -> reqwest::Url {
+        let url = format!("https://{}/api/v1/distserver/reserve_job", server_id.addr());
+        reqwest::Url::parse(&url).expect("failed to create reserve job url")
+    }
     pub fn server_assign_job(server_id: ServerId, job_id: JobId) -> reqwest::Url {
         let url = format!(
             "https://{}/api/v1/distserver/assign_job/{}",
@@ -302,7 +298,6 @@ mod server {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use super::common::UpdateJobStateHttpRequest;
     use super::common::{
         AllocJobHttpResponse, HeartbeatServerHttpRequest, JobJwt, ReqwestRequestBuilderExt,
         RunJobHttpRequest, ServerCertificateHttpResponse,
@@ -310,12 +305,12 @@ mod server {
     use super::{get_dist_connect_timeout, get_dist_request_timeout, urls};
     use crate::dist::{
         self, AllocJobResult, AssignJobResult, HeartbeatServerResult, InputsReader, JobAuthorizer,
-        JobId, JobState, RunJobResult, SchedulerStatusResult, ServerId, ServerNonce,
-        SubmitToolchainResult, Toolchain, ToolchainReader, UpdateJobStateResult,
+        JobId, ReserveJobResult, RunJobResult, SchedulerStatusResult, ServerId, ServerNonce,
+        SubmitToolchainResult, Toolchain, ToolchainReader,
     };
     use crate::errors::*;
 
-    pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+    pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
     pub const HEARTBEAT_ERROR_INTERVAL: Duration = Duration::from_secs(10);
     pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -852,11 +847,12 @@ mod server {
 
                         let HeartbeatServerHttpRequest {
                             num_cpus,
+                            max_per_core_load,
                             jwt_key,
                             server_nonce,
                             cert_digest,
                             cert_pem,
-                            num_queued_jobs,
+                            num_assigned_jobs,
                             num_active_jobs,
                         } = heartbeat_server;
                         try_or_500_log!(req_id, maybe_update_certs(
@@ -869,26 +865,9 @@ mod server {
                             server_id,
                             server_nonce,
                             num_cpus,
+                            max_per_core_load,
                             job_authorizer,
-                            num_queued_jobs,
-                            num_active_jobs,
-                        ));
-                        prepare_response(request, &res)
-                    },
-                    (POST) (/api/v1/scheduler/job_state/{job_id: JobId}) => {
-                        let server_id = check_server_auth_or_err!(request);
-                        let UpdateJobStateHttpRequest {
-                            state,
-                            num_queued_jobs,
-                            num_active_jobs,
-                        } = try_or_400_log!(req_id, bincode_input(request));
-                        trace!("Req {}: job state: {:?}", req_id, state);
-
-                        let res: UpdateJobStateResult = try_or_500_log!(req_id, handler.handle_update_job_state(
-                            job_id,
-                            server_id,
-                            state,
-                            num_queued_jobs,
+                            num_assigned_jobs,
                             num_active_jobs,
                         ));
                         prepare_response(request, &res)
@@ -932,6 +911,11 @@ mod server {
     }
 
     impl dist::SchedulerOutgoing for SchedulerRequester {
+        fn do_reserve_job(&self, server_id: ServerId, auth: String) -> Result<ReserveJobResult> {
+            let url = urls::server_reserve_job(server_id);
+            let req = self.client.lock().unwrap().post(url);
+            bincode_req(req.bearer_auth(auth)).context("POST to server reserve_job failed")
+        }
         fn do_assign_job(
             &self,
             server_id: ServerId,
@@ -992,7 +976,7 @@ mod server {
                 privkey_pem,
                 jwt_key,
                 server_nonce,
-                max_per_core_load,
+                max_per_core_load: max_per_core_load.max(1f64),
                 num_cpus_to_ignore,
                 handler,
             })
@@ -1015,20 +999,21 @@ mod server {
             } = self;
 
             let num_cpus = (num_cpus::get() - num_cpus_to_ignore).max(1);
+            let reserve_job_token = JobId(server_nonce.as_u64());
 
             let job_authorizer = JWTJobAuthorizer::new(jwt_key.clone());
             let requester = Arc::new(ServerRequester {
                 client: new_reqwest_blocking_client(Some(public_addr)),
-                scheduler_url: scheduler_url.clone(),
                 scheduler_auth: scheduler_auth.clone(),
                 heartbeat_url: urls::scheduler_heartbeat_server(&scheduler_url),
                 heartbeat_req: HeartbeatServerHttpRequest {
                     num_cpus,
+                    max_per_core_load,
                     jwt_key: jwt_key.clone(),
                     server_nonce,
                     cert_digest,
                     cert_pem: cert_pem.clone(),
-                    num_queued_jobs: 0,
+                    num_assigned_jobs: 0,
                     num_active_jobs: 0,
                 },
             });
@@ -1045,6 +1030,11 @@ mod server {
                 let req_id = request_count.fetch_add(1, atomic::Ordering::SeqCst);
                 trace!("Req {} ({}): {:?}", req_id, request.remote_addr(), request);
                 let response = (|| router!(request,
+                    (POST) (/api/v1/distserver/reserve_job) => {
+                        job_auth_or_401!(request, &job_authorizer, reserve_job_token);
+                        let res: ReserveJobResult = try_or_500_log!(req_id, handler.handle_reserve_job());
+                        prepare_response(request, &res)
+                    },
                     (POST) (/api/v1/distserver/assign_job/{job_id: JobId}) => {
                         job_auth_or_401!(request, &job_authorizer, job_id);
                         let toolchain = try_or_400_log!(req_id, bincode_input(request));
@@ -1059,7 +1049,7 @@ mod server {
 
                         let body = request.data().expect("body was already read in submit_toolchain");
                         let toolchain_rdr = ToolchainReader(Box::new(body));
-                        let res: SubmitToolchainResult = try_or_500_log!(req_id, handler.handle_submit_toolchain(requester.as_ref(), job_id, toolchain_rdr));
+                        let res: SubmitToolchainResult = try_or_500_log!(req_id, handler.handle_submit_toolchain(job_id, toolchain_rdr));
                         prepare_response(request, &res)
                     },
                     (POST) (/api/v1/distserver/run_job/{job_id: JobId}) => {
@@ -1099,7 +1089,7 @@ mod server {
                         let inputs_rdr = InputsReader(Box::new(ZlibReadDecoder::new(body)));
                         let outputs = outputs.into_iter().collect();
 
-                        let res: RunJobResult = try_or_500_log!(req_id, handler.handle_run_job(requester.as_ref(), job_id, command, outputs, inputs_rdr));
+                        let res: RunJobResult = try_or_500_log!(req_id, handler.handle_run_job(job_id, command, outputs, inputs_rdr));
                         prepare_response(request, &res)
                     },
                     _ => {
@@ -1114,7 +1104,7 @@ mod server {
             // This limit is rouille's default for `start_server_with_pool`, which
             // we would use, except that interface doesn't permit any sort of
             // error handling to be done.
-            let server = server.pool_size((num_cpus as f64 * max_per_core_load).floor() as usize);
+            let server = server.pool_size(num_cpus::get() * 8);
             server.run();
 
             panic!("Rouille server terminated")
@@ -1125,18 +1115,17 @@ mod server {
         client: reqwest::blocking::Client,
         heartbeat_url: reqwest::Url,
         heartbeat_req: HeartbeatServerHttpRequest,
-        scheduler_url: reqwest::Url,
         scheduler_auth: String,
     }
 
     impl dist::ServerOutgoing for ServerRequester {
         fn do_heartbeat(
             &self,
-            num_queued_jobs: usize,
+            num_assigned_jobs: usize,
             num_active_jobs: usize,
         ) -> Result<HeartbeatServerResult> {
             let mut heartbeat_req = self.heartbeat_req.clone();
-            heartbeat_req.num_queued_jobs = num_queued_jobs;
+            heartbeat_req.num_assigned_jobs = num_assigned_jobs;
             heartbeat_req.num_active_jobs = num_active_jobs;
             bincode_req(
                 self.client
@@ -1145,27 +1134,6 @@ mod server {
                     .bincode(&self.heartbeat_req)
                     .expect("failed to serialize heartbeat"),
             )
-        }
-        fn do_update_job_state(
-            &self,
-            job_id: JobId,
-            state: JobState,
-            num_queued_jobs: usize,
-            num_active_jobs: usize,
-        ) -> Result<UpdateJobStateResult> {
-            let url = urls::scheduler_job_state(&self.scheduler_url, job_id);
-            let req = UpdateJobStateHttpRequest {
-                state,
-                num_queued_jobs,
-                num_active_jobs,
-            };
-            bincode_req(
-                self.client
-                    .post(url)
-                    .bearer_auth(self.scheduler_auth.clone())
-                    .bincode(&req)?,
-            )
-            .context("POST to scheduler job_state failed")
         }
     }
 }

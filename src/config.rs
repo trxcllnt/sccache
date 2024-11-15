@@ -1079,14 +1079,6 @@ pub mod scheduler {
 
     use serde::{Deserialize, Serialize};
 
-    pub fn default_max_per_core_load() -> f64 {
-        std::env::var("SCCACHE_DIST_MAX_PER_CORE_LOAD")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            // Default to 1 to match the server's default thread pool multiple
-            .unwrap_or(1f64)
-    }
-
     pub fn default_remember_server_error_timeout() -> u64 {
         std::env::var("SCCACHE_DIST_REMEMBER_SERVER_ERROR_TIMEOUT")
             .ok()
@@ -1136,7 +1128,6 @@ pub mod scheduler {
         pub public_addr: SocketAddr,
         pub client_auth: ClientAuth,
         pub server_auth: ServerAuth,
-        pub max_per_core_load: f64,
         pub remember_server_error_timeout: u64,
     }
 
@@ -1146,7 +1137,6 @@ pub mod scheduler {
                 public_addr: SocketAddr::from_str("0.0.0.0:10500").unwrap(),
                 client_auth: ClientAuth::Insecure,
                 server_auth: ServerAuth::Insecure,
-                max_per_core_load: default_max_per_core_load(),
                 remember_server_error_timeout: default_remember_server_error_timeout(),
             }
         }
@@ -1176,8 +1166,8 @@ pub mod server {
         std::env::var("SCCACHE_DIST_MAX_PER_CORE_LOAD")
             .ok()
             .and_then(|s| s.parse().ok())
-            // Default to 1 to match the server's default thread pool multiple
-            .unwrap_or(1f64)
+            // Default to 8 to match the server's thread pool multiple
+            .unwrap_or(8f64)
     }
 
     fn default_num_cpus_to_ignore() -> usize {

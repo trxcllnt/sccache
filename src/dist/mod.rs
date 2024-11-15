@@ -388,26 +388,8 @@ impl ServerNonce {
     pub fn new() -> Self {
         ServerNonce(OsRng.next_u64())
     }
-}
-
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub enum JobState {
-    Pending,
-    Ready,
-    Started,
-    Complete,
-}
-impl fmt::Display for JobState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use self::JobState::*;
-        match *self {
-            Pending => "pending",
-            Ready => "ready",
-            Started => "started",
-            Complete => "complete",
-        }
-        .fmt(f)
+    pub fn as_u64(&self) -> u64 {
+        self.0
     }
 }
 
@@ -543,24 +525,24 @@ pub enum AllocJobResult {
     },
 }
 
+// ReserveJob
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReserveJobResult {
+    pub id: JobId,
+    pub num_assigned_jobs: usize,
+    pub num_active_jobs: usize,
+}
+
 // AssignJob
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssignJobResult {
-    pub state: JobState,
+    // pub state: JobState,
     pub need_toolchain: bool,
-    pub num_queued_jobs: usize,
+    pub num_assigned_jobs: usize,
     pub num_active_jobs: usize,
-}
-
-// JobState
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub enum UpdateJobStateResult {
-    Success,
-    Fail { msg: String },
 }
 
 // HeartbeatServer
@@ -593,16 +575,20 @@ pub struct JobComplete {
 pub struct SchedulerStatusResult {
     pub num_cpus: usize,
     pub num_servers: usize,
+    pub pending: usize,
+    pub assigned: usize,
     pub active: usize,
-    pub queued: usize,
-    pub servers: Option<std::collections::HashMap<SocketAddr, ServerStatusResult>>,
+    pub servers: std::collections::HashMap<SocketAddr, ServerStatusResult>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerStatusResult {
     pub active: usize,
-    pub queued: usize,
+    pub assigned: usize,
+    pub max_per_core_load: f64,
+    pub num_cpus: usize,
+    pub pending: usize,
     pub last_seen: u64,
     pub last_error: Option<u64>,
 }
@@ -653,6 +639,8 @@ type ExtResult<T, E> = ::std::result::Result<T, E>;
 #[cfg(feature = "dist-server")]
 pub trait SchedulerOutgoing {
     // To Server
+    fn do_reserve_job(&self, server_id: ServerId, auth: String) -> Result<ReserveJobResult>;
+    // To Server
     fn do_assign_job(
         &self,
         server_id: ServerId,
@@ -667,17 +655,9 @@ pub trait ServerOutgoing: Send + Sync {
     // To Scheduler
     fn do_heartbeat(
         &self,
-        num_queued_jobs: usize,
+        num_assigned_jobs: usize,
         num_active_jobs: usize,
     ) -> Result<HeartbeatServerResult>;
-    // To Scheduler
-    fn do_update_job_state(
-        &self,
-        job_id: JobId,
-        state: JobState,
-        num_queued_jobs: usize,
-        num_active_jobs: usize,
-    ) -> Result<UpdateJobStateResult>;
 }
 
 // Trait to handle the creation and verification of job authorization tokens
@@ -696,24 +676,17 @@ pub trait SchedulerIncoming: Send + Sync {
         tc: Toolchain,
     ) -> ExtResult<AllocJobResult, Error>;
     // From Server
+    #[allow(clippy::too_many_arguments)]
     fn handle_heartbeat_server(
         &self,
         server_id: ServerId,
         server_nonce: ServerNonce,
         num_cpus: usize,
+        max_per_core_load: f64,
         job_authorizer: Box<dyn JobAuthorizer>,
-        num_queued_jobs: usize,
+        num_assigned_jobs: usize,
         num_active_jobs: usize,
     ) -> ExtResult<HeartbeatServerResult, Error>;
-    // From Server
-    fn handle_update_job_state(
-        &self,
-        job_id: JobId,
-        server_id: ServerId,
-        job_state: JobState,
-        num_queued_jobs: usize,
-        num_active_jobs: usize,
-    ) -> ExtResult<UpdateJobStateResult, Error>;
     // From anyone
     fn handle_status(&self) -> ExtResult<SchedulerStatusResult, Error>;
 }
@@ -723,18 +696,18 @@ pub trait ServerIncoming: Send + Sync {
     // To scheduler
     fn start_heartbeat(&self, requester: std::sync::Arc<dyn ServerOutgoing>);
     // From Scheduler
+    fn handle_reserve_job(&self) -> ExtResult<ReserveJobResult, Error>;
+    // From Scheduler
     fn handle_assign_job(&self, job_id: JobId, tc: Toolchain) -> ExtResult<AssignJobResult, Error>;
     // From Client
     fn handle_submit_toolchain(
         &self,
-        requester: &dyn ServerOutgoing,
         job_id: JobId,
         tc_rdr: ToolchainReader<'_>,
     ) -> ExtResult<SubmitToolchainResult, Error>;
     // From Client
     fn handle_run_job(
         &self,
-        requester: &dyn ServerOutgoing,
         job_id: JobId,
         command: CompileCommand,
         outputs: Vec<String>,

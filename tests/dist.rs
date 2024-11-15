@@ -12,8 +12,8 @@ use crate::harness::{
 use assert_cmd::prelude::*;
 use sccache::config::HTTPUrl;
 use sccache::dist::{
-    AssignJobResult, CompileCommand, InputsReader, JobId, JobState, RunJobResult, ServerIncoming,
-    ServerOutgoing, SubmitToolchainResult, Toolchain, ToolchainReader,
+    AssignJobResult, CompileCommand, InputsReader, JobId, ReserveJobResult, RunJobResult,
+    ServerIncoming, ServerOutgoing, SubmitToolchainResult, Toolchain, ToolchainReader,
 };
 use std::ffi::OsStr;
 use std::path::Path;
@@ -173,19 +173,24 @@ impl ServerIncoming for FailingServer {
         };
     }
 
+    fn handle_reserve_job(&self) -> Result<ReserveJobResult> {
+        Ok(ReserveJobResult {
+            id: JobId(0),
+            num_active_jobs: 0,
+            num_assigned_jobs: 0,
+        })
+    }
+
     fn handle_assign_job(&self, _job_id: JobId, _tc: Toolchain) -> Result<AssignJobResult> {
         let need_toolchain = false;
-        let state = JobState::Ready;
         Ok(AssignJobResult {
             need_toolchain,
-            state,
-            num_queued_jobs: 1,
             num_active_jobs: 0,
+            num_assigned_jobs: 1,
         })
     }
     fn handle_submit_toolchain(
         &self,
-        _requester: &dyn ServerOutgoing,
         _job_id: JobId,
         _tc_rdr: ToolchainReader,
     ) -> Result<SubmitToolchainResult> {
@@ -193,15 +198,11 @@ impl ServerIncoming for FailingServer {
     }
     fn handle_run_job(
         &self,
-        requester: &dyn ServerOutgoing,
-        job_id: JobId,
+        _job_id: JobId,
         _command: CompileCommand,
         _outputs: Vec<String>,
         _inputs_rdr: InputsReader,
     ) -> Result<RunJobResult> {
-        requester
-            .do_update_job_state(job_id, JobState::Started, 0, 1)
-            .context("Updating job state failed")?;
         bail!("internal build failure")
     }
 }

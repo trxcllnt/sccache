@@ -45,13 +45,14 @@ The HTTP implementation of sccache has the following API, where all HTTP body co
       - Returns a digest and PEM for the temporary server HTTPS certificate.
    - `POST /api/v1/scheduler/heartbeat_server`
       - Called (repeatedly) by servers to register as available for jobs.
-   - `POST /api/v1/scheduler/job_state`
-      - Called by servers to inform the scheduler of the state of the job.
    - `GET /api/v1/scheduler/status`
       - Returns information about the scheduler.
  - `server`
+   - `POST /api/v1/distserver/reserve_job`
+      - Called by the scheduler to reserve a new job on this server.
+      - Returns a server-specific job id, the number of jobs assigned to this server (but not yet running), and the number of jobs this server is actively running.
    - `POST /api/v1/distserver/assign_job`
-      - Called by the scheduler to inform of a new job being assigned to this server.
+      - Called by the scheduler assign a reserved job to this server.
       - Returns whether the toolchain is already on the server or needs submitting.
    - `POST /api/v1/distserver/submit_toolchain`
       - Called by the client to submit a toolchain.

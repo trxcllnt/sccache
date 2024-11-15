@@ -325,7 +325,8 @@ impl DistSystem {
                         num_servers: 0,
                         num_cpus: _,
                         active: 0,
-                        queued: 0,
+                        assigned: 0,
+                        pending: 0,
                         servers: _
                     }
                 ) {
@@ -477,7 +478,8 @@ impl DistSystem {
                         num_servers: 1,
                         num_cpus: _,
                         active: 0,
-                        queued: 0,
+                        assigned: 0,
+                        pending: 0,
                         servers: _
                     }
                 ) {
