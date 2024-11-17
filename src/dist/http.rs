@@ -310,8 +310,8 @@ mod server {
     };
     use crate::errors::*;
 
-    pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
-    pub const HEARTBEAT_ERROR_INTERVAL: Duration = Duration::from_secs(10);
+    pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+    pub const HEARTBEAT_ERROR_INTERVAL: Duration = Duration::from_secs(5);
     pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(90);
 
     pub fn bincode_req<T: serde::de::DeserializeOwned + 'static>(

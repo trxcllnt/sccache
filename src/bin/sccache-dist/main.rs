@@ -719,6 +719,11 @@ impl SchedulerIncoming for Scheduler {
     }
 
     fn handle_status(&self) -> Result<SchedulerStatusResult> {
+        let Scheduler {
+            remember_server_error_timeout,
+            ..
+        } = *self;
+
         // LOCKS
         let mut servers = self.servers.lock().unwrap();
 
@@ -743,7 +748,9 @@ impl SchedulerIncoming for Scheduler {
                     num_cpus: server.num_cpus,
                     max_per_core_load: server.max_per_core_load,
                     last_seen: server.last_seen.elapsed().as_secs(),
-                    last_error: server.last_error.map(|e| e.elapsed().as_secs()),
+                    last_error: server
+                        .last_error
+                        .map(|e| (remember_server_error_timeout - e.elapsed()).as_secs()),
                 },
             );
         }
@@ -798,7 +805,7 @@ impl ServerIncoming for Server {
         let state = self.state.clone();
         // TODO: detect if this panics
         thread::spawn(move || {
-            let unstarted_job_timeout = std::time::Duration::from_secs(60);
+            let unstarted_job_timeout = std::time::Duration::from_secs(90);
             loop {
                 let mut state = state.lock().unwrap();
                 let now = std::time::Instant::now();
