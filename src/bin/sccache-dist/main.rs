@@ -2,7 +2,9 @@
 extern crate log;
 
 use anyhow::{bail, Context, Error, Result};
+use async_trait::async_trait;
 use base64::Engine;
+use futures::lock::Mutex;
 use itertools::Itertools;
 use rand::{rngs::OsRng, RngCore};
 use sccache::config::{
@@ -11,20 +13,20 @@ use sccache::config::{
 use sccache::dist::http::{HEARTBEAT_ERROR_INTERVAL, HEARTBEAT_INTERVAL};
 use sccache::dist::{
     self, AllocJobResult, AssignJobResult, BuilderIncoming, CompileCommand, HeartbeatServerResult,
-    InputsReader, JobAlloc, JobAuthorizer, JobComplete, JobId, ReserveJobResult, RunJobResult,
-    SchedulerIncoming, SchedulerOutgoing, SchedulerStatusResult, ServerId, ServerIncoming,
-    ServerNonce, ServerOutgoing, ServerStatusResult, SubmitToolchainResult, TcCache, Toolchain,
-    ToolchainReader,
+    JobAlloc, JobAuthorizer, JobComplete, JobId, RunJobResult, SchedulerIncoming,
+    SchedulerOutgoing, SchedulerStatusResult, ServerId, ServerIncoming, ServerNonce,
+    ServerOutgoing, ServerStatusResult, SubmitToolchainResult, TcCache, Toolchain,
+    UpdateJobStateResult,
 };
+use sccache::mock_command::CommandCreatorSync;
 use sccache::util::daemonize;
 use sccache::util::BASE64_URL_SAFE_ENGINE;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::io;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg_attr(target_os = "freebsd", path = "build_freebsd.rs")]
@@ -214,14 +216,28 @@ fn run(command: Command) -> Result<i32> {
             };
 
             daemonize()?;
+
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2 * num_cpus::get())
+                .build()?;
+
             let scheduler = Scheduler::new(remember_server_error_timeout);
+
             let http_scheduler = dist::http::Scheduler::new(
                 public_addr,
                 scheduler,
                 check_client_auth,
                 check_server_auth,
             );
-            http_scheduler.start()?;
+
+            runtime.block_on(async move {
+                match http_scheduler.start().await {
+                    Ok(_) => {}
+                    Err(err) => panic!("Err: {err}"),
+                }
+            });
+
             unreachable!();
         }
 
@@ -237,75 +253,109 @@ fn run(command: Command) -> Result<i32> {
             num_cpus_to_ignore,
         }) => {
             let bind_addr = bind_addr.unwrap_or(public_addr);
-            let builder: Box<dyn dist::BuilderIncoming> = match builder {
-                #[cfg(not(target_os = "freebsd"))]
-                server_config::BuilderType::Docker => {
-                    Box::new(build::DockerBuilder::new().context("Docker builder failed to start")?)
-                }
-                #[cfg(not(target_os = "freebsd"))]
-                server_config::BuilderType::Overlay {
-                    bwrap_path,
-                    build_dir,
-                } => Box::new(
-                    build::OverlayBuilder::new(bwrap_path, build_dir)
-                        .context("Overlay builder failed to start")?,
-                ),
-                #[cfg(target_os = "freebsd")]
-                server_config::BuilderType::Pot {
-                    pot_fs_root,
-                    clone_from,
-                    pot_cmd,
-                    pot_clone_args,
-                } => Box::new(
-                    build::PotBuilder::new(pot_fs_root, clone_from, pot_cmd, pot_clone_args)
-                        .context("Pot builder failed to start")?,
-                ),
-                _ => bail!(
-                    "Builder type `{}` not supported on this platform",
-                    format!("{:?}", builder)
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("")
-                ),
-            };
+            let num_cpus = (num_cpus::get() - num_cpus_to_ignore).max(1);
 
-            let server_id = ServerId::new(public_addr);
-            let scheduler_auth = match scheduler_auth {
-                server_config::SchedulerAuth::Insecure => {
-                    warn!("Server starting with DANGEROUSLY_INSECURE scheduler authentication");
-                    create_server_token(server_id, INSECURE_DIST_SERVER_TOKEN)
-                }
-                server_config::SchedulerAuth::Token { token } => {
-                    create_server_token(server_id, &token)
-                }
-                server_config::SchedulerAuth::JwtToken { token } => {
-                    let token_server_id: ServerId =
-                        dangerous_insecure_extract_jwt_server_token(&token)
-                            .context("Could not decode scheduler auth jwt")?;
-                    if token_server_id != server_id {
-                        bail!(
-                            "JWT server id ({:?}) did not match configured server id ({:?})",
-                            token_server_id,
-                            server_id
+            trace!("Server num_cpus={num_cpus}");
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2 * num_cpus::get())
+                .build()?;
+
+            let pool = runtime.handle().clone();
+
+            runtime.block_on(async move {
+                let builder: Box<dyn dist::BuilderIncoming> = match builder {
+                    #[cfg(not(target_os = "freebsd"))]
+                    server_config::BuilderType::Docker => Box::new(
+                        build::DockerBuilder::new(CommandCreatorSync::new(
+                            &sccache::jobserver::Client::new_num(num_cpus),
+                        ))
+                        .await
+                        .context("Docker builder failed to start")?,
+                    ),
+                    #[cfg(not(target_os = "freebsd"))]
+                    server_config::BuilderType::Overlay {
+                        bwrap_path,
+                        build_dir,
+                    } => Box::new(
+                        build::OverlayBuilder::new(
+                            bwrap_path,
+                            build_dir,
+                            CommandCreatorSync::new(&sccache::jobserver::Client::new_num(num_cpus)),
                         )
-                    }
-                    token
-                }
-            };
+                        .await
+                        .context("Overlay builder failed to start")?,
+                    ),
+                    #[cfg(target_os = "freebsd")]
+                    server_config::BuilderType::Pot {
+                        pot_fs_root,
+                        clone_from,
+                        pot_cmd,
+                        pot_clone_args,
+                    } => Box::new(
+                        build::PotBuilder::new(
+                            pot_fs_root,
+                            clone_from,
+                            pot_cmd,
+                            pot_clone_args,
+                            CommandCreatorSync::new(&sccache::jobserver::Client::new_num(num_cpus)),
+                        )
+                        .await
+                        .context("Pot builder failed to start")?,
+                    ),
+                    _ => bail!(
+                        "Builder type `{}` not supported on this platform",
+                        format!("{:?}", builder)
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                    ),
+                };
 
-            let server = Server::new(builder, &cache_dir, toolchain_cache_size)
-                .context("Failed to create sccache server instance")?;
-            let http_server = dist::http::Server::new(
-                public_addr,
-                bind_addr,
-                scheduler_url.to_url(),
-                scheduler_auth,
-                max_per_core_load,
-                num_cpus_to_ignore,
-                server,
-            )
-            .context("Failed to create sccache HTTP server instance")?;
-            http_server.start()?;
+                let server_id = ServerId::new(public_addr);
+                let scheduler_auth = match scheduler_auth {
+                    server_config::SchedulerAuth::Insecure => {
+                        warn!("Server starting with DANGEROUSLY_INSECURE scheduler authentication");
+                        create_server_token(server_id, INSECURE_DIST_SERVER_TOKEN)
+                    }
+                    server_config::SchedulerAuth::Token { token } => {
+                        create_server_token(server_id, &token)
+                    }
+                    server_config::SchedulerAuth::JwtToken { token } => {
+                        let token_server_id: ServerId =
+                            dangerous_insecure_extract_jwt_server_token(&token)
+                                .context("Could not decode scheduler auth jwt")?;
+                        if token_server_id != server_id {
+                            bail!(
+                                "JWT server id ({:?}) did not match configured server id ({:?})",
+                                token_server_id,
+                                server_id
+                            )
+                        }
+                        token
+                    }
+                };
+
+                let server = Server::new(builder, &cache_dir, toolchain_cache_size)
+                    .context("Failed to create sccache server instance")?;
+
+                let http_server = dist::http::Server::new(
+                    public_addr,
+                    bind_addr,
+                    scheduler_url.to_url(),
+                    scheduler_auth,
+                    max_per_core_load,
+                    num_cpus,
+                    server,
+                )
+                .context("Failed to create sccache HTTP server instance")?;
+
+                match http_server.start(pool).await {
+                    Ok(_) => Ok(()),
+                    Err(err) => panic!("Err: {err}"),
+                }
+            })?;
+
             unreachable!();
         }
     }
@@ -347,7 +397,7 @@ impl Scheduler {
         }
     }
 
-    fn prune_servers(&self, servers: &mut MutexGuard<HashMap<ServerId, ServerDetails>>) {
+    fn prune_servers(&self, servers: &mut HashMap<ServerId, ServerDetails>) {
         let now = Instant::now();
 
         let mut dead_servers = Vec::new();
@@ -385,8 +435,9 @@ fn error_chain_to_string(err: &Error) -> String {
     err_msg
 }
 
+#[async_trait]
 impl SchedulerIncoming for Scheduler {
-    fn handle_alloc_job(
+    async fn handle_alloc_job(
         &self,
         requester: &dyn SchedulerOutgoing,
         tc: Toolchain,
@@ -411,111 +462,82 @@ impl SchedulerIncoming for Scheduler {
         // Do not assert!() anywhere, as that permanently corrupts the scheduler.
         // All error conditions must fail gracefully.
 
-        let try_reserve_job = |server_id: ServerId| {
+        let try_assign_job = |server_id: ServerId, tc: Toolchain| async move {
             // LOCKS
-            let mut servers = self.servers.lock().unwrap();
+            let mut servers = self.servers.lock().await;
             let server = match servers.get_mut(&server_id) {
                 Some(server) => server,
-                _ => bail!("Failed to reserve job on unknown server"),
+                _ => bail!("Failed to assign job on unknown server"),
             };
 
-            let reserve_auth = server
+            let assign_auth = server
                 .job_authorizer
                 .generate_token(JobId(server.server_nonce.as_u64()))
                 .map_err(Error::from)
-                .context("Could not create auth token")?;
+                .context("Could not create assign_auth token")?;
 
             server.num_pending_jobs += 1;
 
-            // Drop lock
             drop(servers);
 
-            let ReserveJobResult {
-                id,
-                num_active_jobs,
-                num_assigned_jobs,
-            } = match requester.do_reserve_job(server_id, reserve_auth) {
-                Ok(res) => res,
-                Err(err) => {
-                    // LOCKS
-                    let mut servers = self.servers.lock().unwrap();
-                    // Couldn't reserve the job, track the error time and bail
-                    if let Some(server) = servers.get_mut(&server_id) {
-                        server.last_error = Some(Instant::now());
-                        server.num_pending_jobs =
-                            (server.num_pending_jobs as i64 - 1).max(0) as usize;
+            let (job_id, need_toolchain) =
+                match requester.do_assign_job(server_id, tc, assign_auth).await {
+                    Ok(AssignJobResult {
+                        job_id,
+                        need_toolchain,
+                        num_assigned_jobs,
+                        num_active_jobs,
+                    }) => {
+                        // LOCKS
+                        let mut servers = self.servers.lock().await;
+                        // Assigned the job, so update server stats
+                        if let Some(server) = servers.get_mut(&server_id) {
+                            server.last_seen = Instant::now();
+                            server.num_assigned_jobs = num_assigned_jobs;
+                            server.num_active_jobs = num_active_jobs;
+                            server.num_pending_jobs =
+                                (server.num_pending_jobs as i64 - 1).max(0) as usize;
+                        }
+                        (job_id, need_toolchain)
                     }
-                    return Err(err);
-                }
-            };
+                    Err(err) => {
+                        // LOCKS
+                        let mut servers = self.servers.lock().await;
+                        // Couldn't assign the job, so undo the eager assignment above
+                        if let Some(server) = servers.get_mut(&server_id) {
+                            server.last_error = Some(Instant::now());
+                            server.num_pending_jobs =
+                                (server.num_pending_jobs as i64 - 1).max(0) as usize;
+                        }
+                        return Err(err);
+                    }
+                };
 
             // LOCKS
-            let mut servers = self.servers.lock().unwrap();
+            let mut servers = self.servers.lock().await;
             let server = match servers.get_mut(&server_id) {
                 Some(server) => server,
                 _ => bail!("Failed to reserve job on unknown server"),
             };
 
-            // Assigned the job, so update server stats
-            server.last_seen = Instant::now();
-            server.num_assigned_jobs = num_assigned_jobs;
-            server.num_active_jobs = num_active_jobs;
-
-            server
+            let job_auth = server
                 .job_authorizer
-                .generate_token(id)
+                .generate_token(job_id)
                 .map_err(Error::from)
-                .context("Could not create auth token")
-                .map(|auth| (id, auth))
-        };
-
-        let try_assign_job = |job_id: JobId, server_id: ServerId, auth: String, tc: Toolchain| {
-            let need_toolchain = match requester.do_assign_job(server_id, job_id, tc, auth.clone())
-            {
-                Ok(AssignJobResult {
-                    need_toolchain,
-                    num_assigned_jobs,
-                    num_active_jobs,
-                }) => {
-                    // LOCKS
-                    let mut servers = self.servers.lock().unwrap();
-                    // Assigned the job, so update server stats
-                    if let Some(server) = servers.get_mut(&server_id) {
-                        server.last_seen = Instant::now();
-                        server.num_assigned_jobs = num_assigned_jobs;
-                        server.num_active_jobs = num_active_jobs;
-                        server.num_pending_jobs =
-                            (server.num_pending_jobs as i64 - 1).max(0) as usize;
-                    }
-                    need_toolchain
-                }
-                Err(err) => {
-                    // LOCKS
-                    let mut servers = self.servers.lock().unwrap();
-                    // Couldn't assign the job, so undo the eager assignment above
-                    if let Some(server) = servers.get_mut(&server_id) {
-                        server.last_error = Some(Instant::now());
-                        server.num_pending_jobs =
-                            (server.num_pending_jobs as i64 - 1).max(0) as usize;
-                    }
-                    return Err(err);
-                }
-            };
+                .context("Could not create job auth token")?;
 
             if log_enabled!(log::Level::Trace) {
-                // LOCKS
-                let mut servers = self.servers.lock().unwrap();
-                if let Some(server) = servers.get_mut(&server_id) {
-                    if let Some(last_error) = server.last_error {
-                        trace!(
-                            "[alloc_job({}, {})]: Assigned job to server whose most recent error was {:?} ago",
-                            server_id.addr(),
-                            job_id,
-                            Instant::now() - last_error
-                        );
-                    }
+                if let Some(last_error) = server.last_error {
+                    trace!(
+                        "[alloc_job({}, {})]: Assigned job to server whose most recent error was {:?} ago",
+                        server_id.addr(),
+                        job_id,
+                        Instant::now() - last_error
+                    );
                 }
             }
+
+            drop(servers);
 
             debug!(
                 "[alloc_job({}, {})]: Job created and assigned to server",
@@ -525,7 +547,7 @@ impl SchedulerIncoming for Scheduler {
 
             Ok(AllocJobResult::Success {
                 job_alloc: JobAlloc {
-                    auth,
+                    auth: job_auth,
                     job_id,
                     server_id,
                 },
@@ -533,29 +555,28 @@ impl SchedulerIncoming for Scheduler {
             })
         };
 
-        let get_best_server_by_least_load_and_oldest_error = |tried_servers: &HashSet<ServerId>| {
-            let now = Instant::now();
-            // LOCKS
-            let mut servers = self.servers.lock().unwrap();
+        let get_best_server_by_least_load_and_oldest_error =
+            |servers: &mut HashMap<ServerId, ServerDetails>, tried_servers: &HashSet<ServerId>| {
+                let now = Instant::now();
 
-            // Compute instantaneous load and update shared server state
-            servers
-                .iter_mut()
-                .filter_map(|(server_id, server)| {
-                    // Forget errors that are too old to care about anymore
-                    if let Some(last_error) = server.last_error {
-                        if now.duration_since(last_error) >= remember_server_error_timeout {
-                            server.last_error = None;
+                // Compute instantaneous load and update shared server state
+                servers
+                    .iter_mut()
+                    .filter_map(|(server_id, server)| {
+                        // Forget errors that are too old to care about anymore
+                        if let Some(last_error) = server.last_error {
+                            if now.duration_since(last_error) >= remember_server_error_timeout {
+                                server.last_error = None;
+                            }
                         }
-                    }
 
-                    // Each server defines its own `max_per_core_load` multiple
-                    let num_vcpus = (server.num_cpus as f64 * server.max_per_core_load)
-                        .floor()
-                        .max(1.0);
+                        // Each server defines its own `max_per_core_load` multiple
+                        let num_vcpus = (server.num_cpus as f64 * server.max_per_core_load)
+                            .floor()
+                            .max(1.0);
 
-                    // Assume all pending and assigned jobs will eventually be handled
-                    let num_assigned_jobs =
+                        // Assume all pending and assigned jobs will eventually be handled
+                        let num_assigned_jobs =
                         // number of jobs this scheduler has reserved on the server but have not yet been assigned
                         server.num_pending_jobs
                         // number of jobs assigned to this server and are waiting on the client to start
@@ -563,30 +584,30 @@ impl SchedulerIncoming for Scheduler {
                         // number of jobs assigned to this server and are running
                         + server.num_active_jobs;
 
-                    let load = num_assigned_jobs as f64 / num_vcpus;
+                        let load = num_assigned_jobs as f64 / num_vcpus;
 
-                    // Exclude servers at max load and servers we've already tried
-                    if load >= 1.0 || tried_servers.contains(server_id) {
-                        None
-                    } else {
-                        Some((server_id, server, load))
-                    }
-                })
-                // Sort servers by least load and oldest error
-                .sorted_by(|(_, server_a, load_a), (_, server_b, load_b)| {
-                    match (server_a.last_error, server_b.last_error) {
-                        // If neither server has a recent error, prefer the one with lowest load
-                        (None, None) => load_a.total_cmp(load_b),
-                        // Prefer servers with no recent errors over servers with recent errors
-                        (None, Some(_)) => std::cmp::Ordering::Less,
-                        (Some(_), None) => std::cmp::Ordering::Greater,
-                        // If both servers have an error, prefer the one with the oldest error
-                        (Some(err_a), Some(err_b)) => err_b.cmp(&err_a),
-                    }
-                })
-                .find_or_first(|_| true)
-                .map(|(server_id, _, _)| *server_id)
-        };
+                        // Exclude servers at max load and servers we've already tried
+                        if load >= 1.0 || tried_servers.contains(server_id) {
+                            None
+                        } else {
+                            Some((server_id, server, load))
+                        }
+                    })
+                    // Sort servers by least load and oldest error
+                    .sorted_by(|(_, server_a, load_a), (_, server_b, load_b)| {
+                        match (server_a.last_error, server_b.last_error) {
+                            // If neither server has a recent error, prefer the one with lowest load
+                            (None, None) => load_a.total_cmp(load_b),
+                            // Prefer servers with no recent errors over servers with recent errors
+                            (None, Some(_)) => std::cmp::Ordering::Less,
+                            (Some(_), None) => std::cmp::Ordering::Greater,
+                            // If both servers have an error, prefer the one with the oldest error
+                            (Some(err_a), Some(err_b)) => err_b.cmp(&err_a),
+                        }
+                    })
+                    .find_or_first(|_| true)
+                    .map(|(server_id, _, _)| *server_id)
+            };
 
         let mut tried_servers = HashSet::<ServerId>::new();
         let mut result = None;
@@ -604,30 +625,20 @@ impl SchedulerIncoming for Scheduler {
             // next-best candidate, the load could drift if we only compute it once outside this
             // loop. Computing load again ensures we allocate accurately based on the current
             // statistics.
-            let server_id = get_best_server_by_least_load_and_oldest_error(&tried_servers);
+            // LOCKS
+            let server_id = {
+                // LOCKS
+                let mut servers = self.servers.lock().await;
+                get_best_server_by_least_load_and_oldest_error(&mut servers, &tried_servers)
+            };
 
             // Take the top candidate. If we can't allocate the job to it,
             // remove it from the candidates list and try the next server.
             if let Some(server_id) = server_id {
-                // Generate job auth token for this server
-                let (job_id, auth) = match try_reserve_job(server_id) {
-                    Ok(res) => res,
-                    Err(err) => {
-                        // If try_reserve_job failed, try the next best server
-                        warn!(
-                            "[alloc_job({})]: {}",
-                            server_id.addr(),
-                            error_chain_to_string(&err)
-                        );
-                        tried_servers.insert(server_id);
-                        result = Some(Err(err));
-                        continue;
-                    }
-                };
                 // Attempt to assign the job to this server. If assign_job fails,
                 // store the error and attempt to assign to the next server.
                 // If all servers error, return the last error to the client.
-                match try_assign_job(job_id, server_id, auth, tc.clone()) {
+                match try_assign_job(server_id, tc.clone()).await {
                     Ok(res) => {
                         // If assign_job succeeded, return the result
                         result = Some(Ok(res));
@@ -636,9 +647,8 @@ impl SchedulerIncoming for Scheduler {
                     Err(err) => {
                         // If alloc_job failed, try the next best server
                         warn!(
-                            "[alloc_job({}, {})]: {}",
+                            "[alloc_job({})]: {}",
                             server_id.addr(),
-                            job_id,
                             error_chain_to_string(&err)
                         );
                         tried_servers.insert(server_id);
@@ -661,7 +671,7 @@ impl SchedulerIncoming for Scheduler {
         })
     }
 
-    fn handle_heartbeat_server(
+    async fn handle_heartbeat_server(
         &self,
         server_id: ServerId,
         server_nonce: ServerNonce,
@@ -676,7 +686,7 @@ impl SchedulerIncoming for Scheduler {
         }
 
         // LOCKS
-        let mut servers = self.servers.lock().unwrap();
+        let mut servers = self.servers.lock().await;
 
         match servers.get_mut(&server_id) {
             Some(ref mut server) if server.server_nonce == server_nonce => {
@@ -718,14 +728,33 @@ impl SchedulerIncoming for Scheduler {
         Ok(HeartbeatServerResult { is_new: true })
     }
 
-    fn handle_status(&self) -> Result<SchedulerStatusResult> {
+    async fn handle_update_job_state(
+        &self,
+        server_id: ServerId,
+        num_assigned_jobs: usize,
+        num_active_jobs: usize,
+    ) -> Result<UpdateJobStateResult> {
+        let mut servers = self.servers.lock().await;
+        let server = match servers.get_mut(&server_id) {
+            Some(server) => server,
+            _ => bail!("Failed to reserve job on unknown server"),
+        };
+
+        server.last_seen = Instant::now();
+        server.num_assigned_jobs = num_assigned_jobs;
+        server.num_active_jobs = num_active_jobs;
+
+        Ok(UpdateJobStateResult::Success)
+    }
+
+    async fn handle_status(&self) -> Result<SchedulerStatusResult> {
         let Scheduler {
             remember_server_error_timeout,
             ..
         } = *self;
 
         // LOCKS
-        let mut servers = self.servers.lock().unwrap();
+        let mut servers = self.servers.lock().await;
 
         // Prune servers before reporting the scheduler status
         self.prune_servers(&mut servers);
@@ -766,17 +795,17 @@ impl SchedulerIncoming for Scheduler {
     }
 }
 
-struct ServerState {
-    toolchains: HashMap<JobId, Toolchain>,
-    jobs_queued: HashMap<JobId, Instant>,
-    jobs_active: usize,
-    job_count: usize,
+struct JobInfo {
+    ctime: Instant,
+    toolchain: Toolchain,
 }
 
 pub struct Server {
     builder: Box<dyn BuilderIncoming>,
     cache: Mutex<TcCache>,
-    state: Arc<Mutex<ServerState>>,
+    job_count: AtomicUsize,
+    jobs_active: Arc<AtomicUsize>,
+    jobs_assigned: Arc<Mutex<HashMap<JobId, JobInfo>>>,
 }
 
 impl Server {
@@ -790,184 +819,222 @@ impl Server {
         Ok(Server {
             builder,
             cache: Mutex::new(cache),
-            state: Arc::new(Mutex::new(ServerState {
-                toolchains: HashMap::new(),
-                jobs_queued: HashMap::new(),
-                jobs_active: 0,
-                job_count: 0,
-            })),
+            job_count: AtomicUsize::new(0),
+            jobs_active: Arc::new(AtomicUsize::new(0)),
+            jobs_assigned: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 }
 
+#[async_trait]
 impl ServerIncoming for Server {
-    fn start_heartbeat(&self, requester: std::sync::Arc<dyn ServerOutgoing>) {
-        let state = self.state.clone();
+    fn start_heartbeat(
+        &self,
+        runtime: tokio::runtime::Handle,
+        requester: std::sync::Arc<dyn ServerOutgoing>,
+    ) {
+        let jobs_active = self.jobs_active.clone();
+        let jobs_assigned = self.jobs_assigned.clone();
+
         // TODO: detect if this panics
-        thread::spawn(move || {
+        runtime.spawn(async move {
             let unstarted_job_timeout = std::time::Duration::from_secs(90);
             loop {
-                let mut state = state.lock().unwrap();
-                let now = std::time::Instant::now();
-
-                for (&job_id, &ctime) in state.jobs_queued.clone().iter() {
-                    if now.duration_since(ctime) >= unstarted_job_timeout {
-                        state.toolchains.remove(&job_id);
-                        state.jobs_queued.remove(&job_id);
+                let stale_jobs = {
+                    let jobs_assigned = jobs_assigned.lock().await;
+                    let now = std::time::Instant::now();
+                    let mut stale_jobs = vec![];
+                    for (&job_id, job_info) in jobs_assigned.iter() {
+                        if now.duration_since(job_info.ctime) >= unstarted_job_timeout {
+                            stale_jobs.push(job_id);
+                        }
                     }
-                }
+                    stale_jobs
+                };
 
-                let num_assigned_jobs = state.jobs_queued.len();
-                let num_active_jobs = state.jobs_active;
+                let num_assigned_jobs = {
+                    let mut jobs_assigned = jobs_assigned.lock().await;
+                    for job_id in stale_jobs {
+                        jobs_assigned.remove(&job_id);
+                    }
+                    jobs_assigned.len()
+                };
 
-                drop(state);
+                let num_active_jobs = jobs_active.load(std::sync::atomic::Ordering::SeqCst);
 
                 trace!("Performing heartbeat");
 
-                match requester.do_heartbeat(num_assigned_jobs, num_active_jobs) {
+                match requester
+                    .do_heartbeat(num_assigned_jobs, num_active_jobs)
+                    .await
+                {
                     Ok(HeartbeatServerResult { is_new }) => {
                         trace!("Heartbeat success is_new={}", is_new);
-                        thread::sleep(HEARTBEAT_INTERVAL)
+                        tokio::time::sleep(HEARTBEAT_INTERVAL).await;
                     }
                     Err(e) => {
                         error!("Failed to send heartbeat to server: {}", e);
-                        thread::sleep(HEARTBEAT_ERROR_INTERVAL)
+                        tokio::time::sleep(HEARTBEAT_ERROR_INTERVAL).await;
                     }
                 }
             }
         });
     }
 
-    fn handle_reserve_job(&self) -> Result<ReserveJobResult> {
-        let mut state = self.state.lock().unwrap();
-        let num_assigned_jobs = state.jobs_queued.len();
-        let num_active_jobs = state.jobs_active;
-        let id = JobId(state.job_count as u64);
-
-        state.job_count += 1;
-        // Drop lock
-        drop(state);
-
-        Ok(ReserveJobResult {
-            id,
-            num_assigned_jobs,
-            num_active_jobs,
-        })
-    }
-
-    fn handle_assign_job(&self, job_id: JobId, tc: Toolchain) -> Result<AssignJobResult> {
-        let need_toolchain = !self.cache.lock().unwrap().contains_toolchain(&tc);
-
-        let mut state = self.state.lock().unwrap();
-        if let Some(other_tc) = state.toolchains.insert(job_id, tc.clone()) {
-            // Remove the toolchain on error
-            state.toolchains.remove(&job_id);
-            bail!(
-                "[{}]: Duplicate toolchain assigned, not replacing toolchain {:?} with {:?}",
+    async fn handle_assign_job(&self, tc: Toolchain) -> Result<AssignJobResult> {
+        let need_toolchain = !self.cache.lock().await.contains_toolchain(&tc);
+        let job_id = JobId(
+            self.job_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst) as u64,
+        );
+        let num_assigned_jobs = {
+            let mut jobs_assigned = self.jobs_assigned.lock().await;
+            jobs_assigned.insert(
                 job_id,
-                other_tc,
-                tc
+                JobInfo {
+                    ctime: Instant::now(),
+                    toolchain: tc,
+                },
             );
+            jobs_assigned.len()
         };
-
-        state.jobs_queued.insert(job_id, Instant::now());
-        let num_assigned_jobs = state.jobs_queued.len();
-        let num_active_jobs = state.jobs_active;
+        let num_active_jobs = self.jobs_active.load(std::sync::atomic::Ordering::Relaxed);
 
         Ok(AssignJobResult {
+            job_id,
             need_toolchain,
             num_assigned_jobs,
             num_active_jobs,
         })
     }
 
-    fn handle_submit_toolchain(
+    async fn handle_submit_toolchain(
         &self,
         job_id: JobId,
-        mut tc_rdr: ToolchainReader,
+        mut tc_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
     ) -> Result<SubmitToolchainResult> {
         // TODO: need to lock the toolchain until the container has started
         // TODO: can start prepping container
-        let mut state = self.state.lock().unwrap();
-        let tc = match state.toolchains.get(&job_id).cloned() {
+
+        let tc = match self
+            .jobs_assigned
+            .lock()
+            .await
+            .get(&job_id)
+            .map(|j| j.toolchain.clone())
+        {
             Some(tc) => tc,
             None => {
                 // Remove the job on error
-                state.jobs_queued.remove(&job_id);
+                self.jobs_assigned.lock().await.remove(&job_id);
                 return Ok(SubmitToolchainResult::JobNotFound);
             }
         };
 
-        // Drop lock
-        drop(state);
-
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().await;
 
         let res = if cache.contains_toolchain(&tc) {
             // Drop the lock
             drop(cache);
-            // Ignore the toolchain request body
-            // TODO: Investigate if this causes early hangup warnings in
-            // the load balancer. If so, use the implementation below.
-            Ok(())
-            // // Consume the entire toolchain request body
-            // std::io::copy(&mut tc_rdr, &mut std::io::empty())
-            //     .map(|_| ())
-            //     .or_else(|err| {
-            //         warn!("[handle_submit_toolchain({})]: {:?}", job_id, err);
-            //         // Ignore errors reading the request body
-            //         Ok(())
-            //     })
+
+            // // Ignore the toolchain request body
+            // // TODO: Investigate if this causes early hangup warnings in
+            // // the load balancer. If so, use the implementation below.
+            // Ok(())
+
+            // Consume the entire toolchain request body
+            tokio::io::copy(&mut tc_rdr, &mut tokio::io::empty())
+                .await
+                .map(|_| ())
+                .or_else(|err| {
+                    warn!("[handle_submit_toolchain({})]: {:?}", job_id, err);
+                    // Ignore errors reading the request body
+                    Ok(())
+                })
         } else {
-            cache.insert_with(&tc, |mut file| io::copy(&mut tc_rdr, &mut file).map(|_| ()))
+            cache
+                .insert_with(&tc, |mut file| async move {
+                    tokio::io::copy(&mut tc_rdr, &mut file).await
+                })
+                .await
         };
 
-        Ok(res
-            .map(|_| SubmitToolchainResult::Success)
-            .unwrap_or_else(|err| {
+        match res {
+            Ok(_) => Ok(SubmitToolchainResult::Success),
+            Err(err) => {
                 warn!("[handle_submit_toolchain({})]: {:?}", job_id, err);
                 // Remove the job on error
-                let mut state = self.state.lock().unwrap();
-                state.jobs_queued.remove(&job_id);
-                state.toolchains.remove(&job_id);
-                SubmitToolchainResult::CannotCache
-            }))
+                self.jobs_assigned.lock().await.remove(&job_id);
+                Ok(SubmitToolchainResult::CannotCache)
+            }
+        }
     }
 
-    fn handle_run_job(
+    async fn handle_run_job(
         &self,
+        requester: &dyn ServerOutgoing,
         job_id: JobId,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs_rdr: InputsReader,
+        inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
     ) -> Result<RunJobResult> {
-        let mut state = self.state.lock().unwrap();
-        let tc = match state.toolchains.remove(&job_id) {
-            Some(tc) => tc,
-            None => {
-                // Remove the job on error
-                state.jobs_queued.remove(&job_id);
-                return Ok(RunJobResult::JobNotFound);
+        // Remove the job from assigned map
+        let (tc, num_assigned_jobs) = {
+            let mut jobs_assigned = self.jobs_assigned.lock().await;
+            match jobs_assigned.remove(&job_id).map(|j| j.toolchain.clone()) {
+                Some(tc) => (tc, jobs_assigned.len()),
+                None => return Ok(RunJobResult::JobNotFound),
             }
         };
 
-        // Move job from queued to active
-        state.jobs_queued.remove(&job_id);
-        state.jobs_active += 1;
+        // Count the job as active
+        let num_active_jobs = self
+            .jobs_active
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
 
-        // Drop lock
-        drop(state);
+        // Notify the scheduler the job has started.
+        // Don't return an error, because this request is between the client and this server.
+        // The client is expecting the server to perform this work, regardless of whether the
+        // scheduler has pruned this job due to missing the pending timeout.
+        if let Err(err) = requester
+            .do_update_job_state(num_assigned_jobs, num_active_jobs)
+            .await
+            .context("Failed to update job state")
+        {
+            warn!(
+                "[handle_run_job({})]: {:?} ({} -> {})",
+                job_id, err, "Ready", "Started"
+            );
+        }
 
         // Do the build
         let res = self
             .builder
-            .run_build(job_id, tc, command, outputs, inputs_rdr, &self.cache);
+            .run_build(job_id, tc, command, outputs, inputs_rdr, &self.cache)
+            .await;
 
         // Move job from active to done
-        let mut state = self.state.lock().unwrap();
-        state.jobs_active -= 1;
-        // Drop lock
-        drop(state);
+        let num_assigned_jobs = self.jobs_assigned.lock().await.len();
+        let num_active_jobs = self
+            .jobs_active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+            - 1;
+
+        // Notify the scheduler the job is complete.
+        // Don't return an error, because this request is between the client and this server.
+        // The client is expecting the server to perform this work, regardless of whether the
+        // scheduler has pruned this job due to missing the pending timeout.
+        if let Err(err) = requester
+            .do_update_job_state(num_assigned_jobs, num_active_jobs)
+            .await
+            .context("Failed to update job state")
+        {
+            warn!(
+                "[handle_run_job({})]: {:?} ({} -> {})",
+                job_id, err, "Started", "Complete"
+            );
+        }
 
         match res {
             Err(e) => Err(e.context("run_job build failed")),

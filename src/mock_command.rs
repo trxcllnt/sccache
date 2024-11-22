@@ -113,6 +113,14 @@ pub trait RunCommand: fmt::Debug + Send {
     fn stderr(&mut self, cfg: Stdio) -> &mut Self;
     /// Execute the process and return a process object.
     async fn spawn(&mut self) -> Result<Self::C>;
+    /// Executes the command as a child process, waiting for it to finish and
+    /// collecting all of its output.
+    ///
+    /// By default, stdout and stderr are captured (and used to provide the
+    /// resulting output). Stdin is not inherited from the parent and any
+    /// attempt by the child process to read from the stdin stream will result
+    /// in the stream immediately closing.
+    async fn output(&mut self) -> Result<std::process::Output>;
 }
 
 /// A trait that provides a means to create objects implementing `RunCommand`.
@@ -248,6 +256,17 @@ impl RunCommand for AsyncCommand {
         self.inner().stderr(cfg);
         self
     }
+    async fn output(&mut self) -> Result<std::process::Output> {
+        let child = self
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .await?;
+        child
+            .wait_with_output()
+            .await
+            .context("failed to wait for child")
+    }
     async fn spawn(&mut self) -> Result<Child> {
         let mut inner = self.inner.take().unwrap();
         inner.env_remove("MAKEFLAGS");
@@ -277,7 +296,7 @@ impl fmt::Debug for AsyncCommand {
 /// Struct to use `RunCommand` with `std::process::Command`.
 #[derive(Clone)]
 pub struct ProcessCommandCreator {
-    jobserver: Client,
+    pub jobserver: Client,
 }
 
 /// Trivial implementation of `CommandCreator` for `ProcessCommandCreator`.
@@ -474,6 +493,13 @@ impl RunCommand for MockCommand {
             ChildOrCall::Child(c) => c,
             ChildOrCall::Call(f) => f(&self.args),
         }
+    }
+    async fn output(&mut self) -> Result<std::process::Output> {
+        self.spawn()
+            .await?
+            .wait_with_output()
+            .await
+            .context("failed to wait for child")
     }
 }
 

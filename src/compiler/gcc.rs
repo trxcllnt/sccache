@@ -889,6 +889,7 @@ where
         arguments.join(OsStr::new(" ")).to_string_lossy()
     );
 
+    #[cfg(feature = "dist-client")]
     let has_verbose_flag = arguments.contains(&OsString::from("-v"))
         || arguments.contains(&OsString::from("--verbose"));
 

@@ -107,6 +107,9 @@ zip = { version = "0.6", default-features = false }
 zstd = "0.13"
 
 # dist-server only
+async-compression = { version = "0.4", features = ["tokio", "zlib"] }
+axum = { version = "0.7", features = ["macros"] }
+axum-extra = { version = "0.9.6", features = ["typed-header"] }
 memmap2 = "0.9.4"
 nix = { version = "0.28.0", optional = true, features = [
   "mount",
@@ -121,6 +124,7 @@ rouille = { version = "3.6", optional = true, default-features = false, features
 ] }
 shlex = "1.3.0"
 syslog = { version = "6", optional = true }
+tokio-openssl = { version = "0.6.5", optional = true }
 version-compare = { version = "0.1.1", optional = true }
 
 [dev-dependencies]
@@ -182,8 +186,8 @@ unstable = []
 # Enables distributed support in the sccache client
 dist-client = [
   "flate2",
-  "hyper",
   "http-body-util",
+  "hyper",
   "hyper-util",
   "reqwest",
   "url",
@@ -193,12 +197,15 @@ dist-client = [
 dist-server = [
   "jwt",
   "flate2",
+  "hyper",
+  "hyper-util",
   "libmount",
   "nix",
   "openssl",
   "reqwest",
   "rouille",
   "syslog",
+  "tokio-openssl",
   "version-compare",
 ]
 # Enables dist tests with external requirements

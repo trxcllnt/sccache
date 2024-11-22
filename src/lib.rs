@@ -22,9 +22,6 @@
 
 #[macro_use]
 extern crate log;
-#[cfg(feature = "rouille")]
-#[macro_use(router)]
-extern crate rouille;
 // To get macros in scope, this has to be first.
 #[cfg(test)]
 #[macro_use]
@@ -40,9 +37,9 @@ mod commands;
 mod compiler;
 pub mod config;
 pub mod dist;
-mod jobserver;
+pub mod jobserver;
 pub mod lru_disk_cache;
-mod mock_command;
+pub mod mock_command;
 mod net;
 mod protocol;
 pub mod server;

@@ -14,6 +14,8 @@
 
 use crate::compiler;
 use async_trait::async_trait;
+#[cfg(feature = "dist-server")]
+use futures::lock::Mutex;
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -23,8 +25,6 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::str::FromStr;
-#[cfg(feature = "dist-server")]
-use std::sync::Mutex;
 
 use crate::errors::*;
 
@@ -525,24 +525,24 @@ pub enum AllocJobResult {
     },
 }
 
-// ReserveJob
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReserveJobResult {
-    pub id: JobId,
-    pub num_assigned_jobs: usize,
-    pub num_active_jobs: usize,
-}
-
 // AssignJob
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssignJobResult {
-    // pub state: JobState,
+    pub job_id: JobId,
     pub need_toolchain: bool,
     pub num_assigned_jobs: usize,
     pub num_active_jobs: usize,
+}
+
+// JobState
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum UpdateJobStateResult {
+    Success,
+    Fail { msg: String },
 }
 
 // HeartbeatServer
@@ -619,65 +619,58 @@ pub struct BuildResult {
 // http implementation) they need to be public, which has knock-on effects for private
 // structs
 
-pub struct ToolchainReader<'a>(Box<dyn Read + 'a>);
-impl<'a> Read for ToolchainReader<'a> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.read(buf)
-    }
-}
-
-pub struct InputsReader<'a>(Box<dyn Read + Send + 'a>);
-impl<'a> Read for InputsReader<'a> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.read(buf)
-    }
-}
-
 #[cfg(feature = "dist-server")]
 type ExtResult<T, E> = ::std::result::Result<T, E>;
 
 #[cfg(feature = "dist-server")]
-pub trait SchedulerOutgoing {
+#[async_trait]
+pub trait SchedulerOutgoing: Send + Sync {
     // To Server
-    fn do_reserve_job(&self, server_id: ServerId, auth: String) -> Result<ReserveJobResult>;
-    // To Server
-    fn do_assign_job(
+    async fn do_assign_job(
         &self,
         server_id: ServerId,
-        job_id: JobId,
         tc: Toolchain,
         auth: String,
     ) -> Result<AssignJobResult>;
 }
 
 #[cfg(feature = "dist-server")]
+#[async_trait]
 pub trait ServerOutgoing: Send + Sync {
     // To Scheduler
-    fn do_heartbeat(
+    async fn do_heartbeat(
         &self,
         num_assigned_jobs: usize,
         num_active_jobs: usize,
     ) -> Result<HeartbeatServerResult>;
+    // To Scheduler
+    async fn do_update_job_state(
+        &self,
+        num_assigned_jobs: usize,
+        num_active_jobs: usize,
+    ) -> Result<UpdateJobStateResult>;
 }
 
 // Trait to handle the creation and verification of job authorization tokens
 #[cfg(feature = "dist-server")]
-pub trait JobAuthorizer: Send {
+pub trait JobAuthorizer: Send + Sync {
     fn generate_token(&self, job_id: JobId) -> Result<String>;
     fn verify_token(&self, job_id: JobId, token: &str) -> Result<()>;
 }
 
 #[cfg(feature = "dist-server")]
+#[async_trait]
 pub trait SchedulerIncoming: Send + Sync {
     // From Client
-    fn handle_alloc_job(
+    async fn handle_alloc_job(
         &self,
         requester: &dyn SchedulerOutgoing,
         tc: Toolchain,
     ) -> ExtResult<AllocJobResult, Error>;
+    // // From Client
     // From Server
     #[allow(clippy::too_many_arguments)]
-    fn handle_heartbeat_server(
+    async fn handle_heartbeat_server(
         &self,
         server_id: ServerId,
         server_nonce: ServerNonce,
@@ -687,44 +680,56 @@ pub trait SchedulerIncoming: Send + Sync {
         num_assigned_jobs: usize,
         num_active_jobs: usize,
     ) -> ExtResult<HeartbeatServerResult, Error>;
+    // From Server
+    async fn handle_update_job_state(
+        &self,
+        server_id: ServerId,
+        num_assigned_jobs: usize,
+        num_active_jobs: usize,
+    ) -> ExtResult<UpdateJobStateResult, Error>;
     // From anyone
-    fn handle_status(&self) -> ExtResult<SchedulerStatusResult, Error>;
+    async fn handle_status(&self) -> ExtResult<SchedulerStatusResult, Error>;
 }
 
 #[cfg(feature = "dist-server")]
+#[async_trait]
 pub trait ServerIncoming: Send + Sync {
     // To scheduler
-    fn start_heartbeat(&self, requester: std::sync::Arc<dyn ServerOutgoing>);
+    fn start_heartbeat(
+        &self,
+        runtime: tokio::runtime::Handle,
+        requester: std::sync::Arc<dyn ServerOutgoing>,
+    );
     // From Scheduler
-    fn handle_reserve_job(&self) -> ExtResult<ReserveJobResult, Error>;
-    // From Scheduler
-    fn handle_assign_job(&self, job_id: JobId, tc: Toolchain) -> ExtResult<AssignJobResult, Error>;
+    async fn handle_assign_job(&self, tc: Toolchain) -> ExtResult<AssignJobResult, Error>;
     // From Client
-    fn handle_submit_toolchain(
+    async fn handle_submit_toolchain(
         &self,
         job_id: JobId,
-        tc_rdr: ToolchainReader<'_>,
+        tc_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
     ) -> ExtResult<SubmitToolchainResult, Error>;
     // From Client
-    fn handle_run_job(
+    async fn handle_run_job(
         &self,
+        requester: &dyn ServerOutgoing,
         job_id: JobId,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs_rdr: InputsReader<'_>,
+        inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
     ) -> ExtResult<RunJobResult, Error>;
 }
 
 #[cfg(feature = "dist-server")]
+#[async_trait]
 pub trait BuilderIncoming: Send + Sync {
     // From Server
-    fn run_build(
+    async fn run_build(
         &self,
         job_id: JobId,
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs_rdr: InputsReader<'_>,
+        inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         cache: &Mutex<TcCache>,
     ) -> ExtResult<BuildResult, Error>;
 }

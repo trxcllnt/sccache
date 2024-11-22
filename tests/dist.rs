@@ -6,14 +6,16 @@ extern crate log;
 extern crate sccache;
 extern crate serde_json;
 
+use async_trait::async_trait;
+
 use crate::harness::{
     get_stats, sccache_command, start_local_daemon, stop_local_daemon, write_json_cfg, write_source,
 };
 use assert_cmd::prelude::*;
 use sccache::config::HTTPUrl;
 use sccache::dist::{
-    AssignJobResult, CompileCommand, InputsReader, JobId, ReserveJobResult, RunJobResult,
-    ServerIncoming, ServerOutgoing, SubmitToolchainResult, Toolchain, ToolchainReader,
+    AssignJobResult, CompileCommand, JobId, RunJobResult, ServerIncoming, ServerOutgoing,
+    SubmitToolchainResult, Toolchain,
 };
 use std::ffi::OsStr;
 use std::path::Path;
@@ -25,7 +27,7 @@ mod harness;
 fn basic_compile(tmpdir: &Path, sccache_cfg_path: &Path, sccache_cached_cfg_path: &Path) {
     let envs: Vec<(_, &OsStr)> = vec![
         ("RUST_BACKTRACE", "1".as_ref()),
-        ("SCCACHE_LOG", "debug".as_ref()),
+        ("SCCACHE_LOG", "trace".as_ref()),
         ("SCCACHE_CONF", sccache_cfg_path.as_ref()),
         ("SCCACHE_CACHED_CONF", sccache_cached_cfg_path.as_ref()),
     ];
@@ -160,48 +162,50 @@ fn test_dist_nobuilder() {
 }
 
 struct FailingServer;
+
+#[async_trait]
 impl ServerIncoming for FailingServer {
-    fn start_heartbeat(&self, requester: std::sync::Arc<dyn ServerOutgoing>) {
-        trace!("Performing heartbeat");
-        match requester.do_heartbeat(0, 0) {
-            Ok(sccache::dist::HeartbeatServerResult { is_new }) => {
-                trace!("Heartbeat success is_new={}", is_new);
+    fn start_heartbeat(
+        &self,
+        runtime: tokio::runtime::Handle,
+        requester: std::sync::Arc<dyn ServerOutgoing>,
+    ) {
+        runtime.spawn(async move {
+            trace!("Performing heartbeat");
+            match requester.do_heartbeat(0, 0).await {
+                Ok(sccache::dist::HeartbeatServerResult { is_new }) => {
+                    trace!("Heartbeat success is_new={}", is_new);
+                }
+                Err(e) => {
+                    error!("Failed to send heartbeat to server: {}", e);
+                }
             }
-            Err(e) => {
-                error!("Failed to send heartbeat to server: {}", e);
-            }
-        };
+        });
     }
 
-    fn handle_reserve_job(&self) -> Result<ReserveJobResult> {
-        Ok(ReserveJobResult {
-            id: JobId(0),
-            num_active_jobs: 0,
-            num_assigned_jobs: 0,
-        })
-    }
-
-    fn handle_assign_job(&self, _job_id: JobId, _tc: Toolchain) -> Result<AssignJobResult> {
+    async fn handle_assign_job(&self, _tc: Toolchain) -> Result<AssignJobResult> {
         let need_toolchain = false;
         Ok(AssignJobResult {
+            job_id: JobId(0),
             need_toolchain,
-            num_active_jobs: 0,
             num_assigned_jobs: 1,
+            num_active_jobs: 0,
         })
     }
-    fn handle_submit_toolchain(
+    async fn handle_submit_toolchain(
         &self,
         _job_id: JobId,
-        _tc_rdr: ToolchainReader,
+        _tc_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
     ) -> Result<SubmitToolchainResult> {
         panic!("should not have submitted toolchain")
     }
-    fn handle_run_job(
+    async fn handle_run_job(
         &self,
+        _requester: &dyn ServerOutgoing,
         _job_id: JobId,
         _command: CompileCommand,
         _outputs: Vec<String>,
-        _inputs_rdr: InputsReader,
+        _inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
     ) -> Result<RunJobResult> {
         bail!("internal build failure")
     }

@@ -275,12 +275,29 @@ impl LruDiskCache {
     }
 
     /// Add a file by calling `with` with the open `File` corresponding to the cache at path `key`.
-    pub fn insert_with<K: AsRef<OsStr>, F: FnOnce(File) -> io::Result<()>>(
-        &mut self,
-        key: K,
-        with: F,
-    ) -> Result<()> {
-        self.insert_by(key, None, |path| with(File::create(path)?))
+    pub async fn insert_with<K, F, Fut>(&mut self, key: K, with: F) -> Result<()>
+    where
+        K: AsRef<OsStr>,
+        F: FnOnce(tokio::fs::File) -> Fut,
+        Fut: std::future::Future<Output = io::Result<u64>>,
+    {
+        let rel_path = key.as_ref();
+        let path = self.rel_to_abs_path(rel_path);
+        fs::create_dir_all(path.parent().expect("Bad path?"))?;
+        let file = tokio::fs::File::create(&path).await?;
+        with(file).await?;
+        let size = fs::metadata(path)?.len();
+        self.add_file(AddFile::RelPath(rel_path), size)
+            .map_err(|e| {
+                error!(
+                    "Failed to insert file `{}`: {}",
+                    rel_path.to_string_lossy(),
+                    e
+                );
+                fs::remove_file(self.rel_to_abs_path(rel_path))
+                    .expect("Failed to remove file we just created!");
+                e
+            })
     }
 
     /// Add a file with `bytes` as its contents to the cache at path `key`.
@@ -374,12 +391,36 @@ impl LruDiskCache {
             })
     }
 
+    /// Get an opened `File` for `key`, if one exists and can be opened. Updates the LRU state
+    /// of the file if present. Avoid using this method if at all possible, prefer `.get`.
+    /// Entries created by `LruDiskCache::prepare_add` but not yet committed return
+    /// `Err(Error::FileNotInCache)`.
+    pub async fn get_file_async<K: AsRef<OsStr>>(&mut self, key: K) -> Result<tokio::fs::File> {
+        let rel_path = key.as_ref();
+        let path = self.rel_to_abs_path(rel_path);
+        let _ = self.lru.get(rel_path).ok_or(Error::FileNotInCache)?;
+        let t = FileTime::now();
+        set_file_times(&path, t, t)?;
+        tokio::fs::File::open(path).await.map_err(Into::into)
+    }
+
     /// Get an opened readable and seekable handle to the file at `key`, if one exists and can
     /// be opened. Updates the LRU state of the file if present.
     /// Entries created by `LruDiskCache::prepare_add` but not yet committed return
     /// `Err(Error::FileNotInCache)`.
     pub fn get<K: AsRef<OsStr>>(&mut self, key: K) -> Result<Box<dyn ReadSeek>> {
         self.get_file(key).map(|f| Box::new(f) as Box<dyn ReadSeek>)
+    }
+
+    /// Get an opened readable and seekable handle to the file at `key`, if one exists and can
+    /// be opened. Updates the LRU state of the file if present.
+    /// Entries created by `LruDiskCache::prepare_add` but not yet committed return
+    /// `Err(Error::FileNotInCache)`.
+    pub async fn get_async<K: AsRef<OsStr>>(
+        &mut self,
+        key: K,
+    ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        Ok(Box::new(self.get_file_async(key).await?))
     }
 
     /// Remove the given key from the cache.

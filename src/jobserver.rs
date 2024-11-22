@@ -21,6 +21,7 @@ pub struct Acquired {
 
 impl Client {
     // unsafe because `from_env` is unsafe (can use the wrong fds)
+    #[allow(clippy::missing_safety_doc)]
     pub unsafe fn new() -> Client {
         match jobserver::Client::from_env() {
             Some(c) => Client::_new(c, true),

@@ -46,11 +46,11 @@ pub fn start_local_daemon(cfg_path: &Path, cached_cfg_path: &Path) {
     if !sccache_command()
         .arg("--start-server")
         // Uncomment following lines to debug locally.
-        // .env("SCCACHE_LOG", "debug")
-        // .env(
-        //     "SCCACHE_ERROR_LOG",
-        //     env::temp_dir().join("sccache_local_daemon.txt"),
-        // )
+        .env("SCCACHE_LOG", "trace")
+        .env(
+            "SCCACHE_ERROR_LOG",
+            env::temp_dir().join("sccache_local_daemon.txt"),
+        )
         .env("SCCACHE_CONF", cfg_path)
         .env("SCCACHE_CACHED_CONF", cached_cfg_path)
         .status()
@@ -283,7 +283,7 @@ impl DistSystem {
                 "-e",
                 "SCCACHE_NO_DAEMON=1",
                 "-e",
-                "SCCACHE_LOG=debug",
+                "SCCACHE_LOG=trace",
                 "-e",
                 "RUST_BACKTRACE=1",
                 "--network",
@@ -354,7 +354,7 @@ impl DistSystem {
                 "--name",
                 &server_name,
                 "-e",
-                "SCCACHE_LOG=debug",
+                "SCCACHE_LOG=trace",
                 "-e",
                 "RUST_BACKTRACE=1",
                 "--network",
@@ -414,6 +414,13 @@ impl DistSystem {
             let listener = net::TcpListener::bind(SocketAddr::from((ip, 0))).unwrap();
             listener.local_addr().unwrap()
         };
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let pool = runtime.handle().clone();
         let token = create_server_token(ServerId::new(server_addr), DIST_SERVER_TOKEN);
         let server = dist::http::Server::new(
             server_addr,
@@ -421,7 +428,7 @@ impl DistSystem {
             self.scheduler_url().to_url(),
             token,
             1f64,
-            0,
+            1,
             handler,
         )
         .unwrap();
@@ -433,7 +440,14 @@ impl DistSystem {
             ForkResult::Child => {
                 env::set_var("SCCACHE_LOG", "sccache=trace");
                 env_logger::try_init().unwrap();
-                server.start().unwrap();
+
+                runtime.block_on(async move {
+                    match server.start(pool).await {
+                        Ok(_) => {}
+                        Err(err) => panic!("Err: {err}"),
+                    }
+                });
+
                 unreachable!();
             }
         };

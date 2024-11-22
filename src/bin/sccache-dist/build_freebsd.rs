@@ -13,59 +13,73 @@
 // limitations under the License.
 
 use anyhow::{bail, Context, Error, Result};
+use async_trait::async_trait;
+use bytes::Buf;
 use flate2::read::GzDecoder;
+use futures::lock::Mutex;
 use sccache::dist::{
-    BuildResult, BuilderIncoming, CompileCommand, InputsReader, JobId, OutputData, ProcessOutput,
-    TcCache, Toolchain,
+    BuildResult, BuilderIncoming, CompileCommand, JobId, OutputData, ProcessOutput, TcCache,
+    Toolchain,
 };
 use sccache::lru_disk_cache::Error as LruError;
+use sccache::mock_command::{
+    AsyncCommand, CommandChild, CommandCreatorSync, ProcessCommandCreator, RunCommand,
+};
 use std::collections::{hash_map, HashMap};
+use std::hint;
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::{hint, thread};
+use std::sync::Arc;
+use tokio::io::AsyncReadExt;
+use tokio::process::ChildStdin;
 use uuid::Uuid;
 
-trait CommandExt {
-    fn check_stdout_trim(&mut self) -> Result<String>;
-    fn check_piped<F>(&mut self, pipe: &mut F) -> Result<()>
+#[async_trait]
+trait AsyncCommandExt {
+    async fn check_stdout_trim(&mut self) -> Result<String>;
+    async fn check_piped<F, Fut>(&mut self, pipe: F) -> Result<()>
     where
-        F: FnMut(ChildStdin) -> Result<()>;
-    fn check_run(&mut self) -> Result<()>;
+        F: FnOnce(ChildStdin) -> Fut + std::marker::Send,
+        Fut: std::future::Future<Output = Result<()>> + std::marker::Send;
+    async fn check_run(&mut self) -> Result<()>;
 }
 
-impl CommandExt for Command {
-    fn check_stdout_trim(&mut self) -> Result<String> {
-        let output = self.output().context("Failed to start command")?;
+#[async_trait]
+impl AsyncCommandExt for AsyncCommand {
+    async fn check_stdout_trim(&mut self) -> Result<String> {
+        let output = self.output().await.context("Failed to start command")?;
         check_output(&output)?;
         let stdout =
             String::from_utf8(output.stdout).context("Output from listing containers not UTF8")?;
         Ok(stdout.trim().to_owned())
     }
     // Should really take a FnOnce/FnBox
-    fn check_piped<F>(&mut self, pipe: &mut F) -> Result<()>
+    async fn check_piped<F, Fut>(&mut self, pipe: F) -> Result<()>
     where
-        F: FnMut(ChildStdin) -> Result<()>,
+        F: FnOnce(ChildStdin) -> Fut + std::marker::Send,
+        Fut: std::future::Future<Output = Result<()>> + std::marker::Send,
     {
         let mut process = self
             .stdin(Stdio::piped())
             .spawn()
+            .await
             .context("Failed to start command")?;
         pipe(
             process
-                .stdin
-                .take()
+                .take_stdin()
                 .expect("Requested piped stdin but not present"),
         )
+        .await
         .context("Failed to pipe input to process")?;
         let output = process
             .wait_with_output()
+            .await
             .context("Failed to wait for process to return")?;
         check_output(&output)
     }
-    fn check_run(&mut self) -> Result<()> {
-        let output = self.output().context("Failed to start command")?;
+    async fn check_run(&mut self) -> Result<()> {
+        let output = self.output().await.context("Failed to start command")?;
         check_output(&output)
     }
 }
@@ -83,15 +97,17 @@ fn check_output(output: &Output) -> Result<()> {
 }
 
 // Force remove the container
-fn pot_rm(cid: &str, pot_cmd: &PathBuf) -> Result<()> {
-    Command::new(pot_cmd)
-        .args(&["destroy", "-F", "-p", cid])
+async fn pot_rm(creator: &ProcessCommandCreator, cid: &str, pot_cmd: &Path) -> Result<()> {
+    let mut cmd = creator.clone().new_command_sync(pot_cmd);
+    cmd.args(&["destroy", "-F", "-p", cid])
         .check_run()
+        .await
         .context("Failed to force delete container")
 }
 
 #[derive(Clone)]
 pub struct PotBuilder {
+    creator: ProcessCommandCreator,
     pot_fs_root: PathBuf,
     clone_from: String,
     pot_cmd: PathBuf,
@@ -106,15 +122,17 @@ impl PotBuilder {
     // TODO: this should accept a unique string, e.g. inode of the tccache directory
     // having locked a pidfile, or at minimum should loudly detect other running
     // instances - pidfile in /tmp
-    pub fn new(
+    pub async fn new(
         pot_fs_root: PathBuf,
         clone_from: String,
         pot_cmd: PathBuf,
         pot_clone_args: Vec<String>,
+        creator: ProcessCommandCreator,
     ) -> Result<Self> {
         info!("Creating pot builder");
 
         let ret = Self {
+            creator,
             pot_fs_root,
             clone_from,
             pot_cmd,
@@ -124,16 +142,18 @@ impl PotBuilder {
             cleanup_thread_count: Arc::new(AtomicUsize::new(0)),
             max_cleanup_thread_count: num_cpus::get() * 3,
         };
-        ret.cleanup()?;
+        ret.cleanup().await?;
         Ok(ret)
     }
 
     // This removes all leftover pots from previous runs
-    fn cleanup(&self) -> Result<()> {
+    async fn cleanup(&self) -> Result<()> {
         info!("Performing initial pot cleanup");
-        let mut to_remove = Command::new(&self.pot_cmd)
+        let mut cmd = self.creator.clone().new_command_sync(&self.pot_cmd);
+        let mut to_remove = cmd
             .args(&["ls", "-q"])
             .check_stdout_trim()
+            .await
             .context("Failed to force delete container")?
             .split('\n')
             .filter(|a| a.starts_with("sccache-builder-") || a.starts_with("sccache-image-"))
@@ -142,7 +162,7 @@ impl PotBuilder {
         to_remove.sort();
         for cid in to_remove {
             trace!("Removing pot {}", cid);
-            if let Err(e) = pot_rm(&cid, &self.pot_cmd) {
+            if let Err(e) = pot_rm(&self.creator, &cid, &self.pot_cmd).await {
                 warn!("Failed to remove container {}: {}", cid, e);
             }
         }
@@ -153,14 +173,14 @@ impl PotBuilder {
     // If we have a spare running container, claim it and remove it from the available list,
     // otherwise try and create a new container (possibly creating the Pot image along
     // the way)
-    fn get_container(
+    async fn get_container(
         &self,
         job_id: JobId,
         tc: &Toolchain,
         tccache: &Mutex<TcCache>,
     ) -> Result<String> {
         let container = {
-            let mut map = self.container_lists.lock().unwrap();
+            let mut map = self.container_lists.lock().await;
             map.entry(tc.clone()).or_insert_with(Vec::new).pop()
         };
         match container {
@@ -169,12 +189,13 @@ impl PotBuilder {
                 // TODO: can improve parallelism (of creating multiple images at a time) by using another
                 // (more fine-grained) mutex around the entry value and checking if its empty a second time
                 let image = {
-                    let mut map = self.image_map.lock().unwrap();
+                    let mut map = self.image_map.lock().await;
                     match map.entry(tc.clone()) {
                         hash_map::Entry::Occupied(e) => e.get().clone(),
                         hash_map::Entry::Vacant(e) => {
                             info!("[get_container({})]: Creating pot image for {:?} (may block requests)", job_id, tc);
                             let image = Self::make_image(
+                                &self.creator,
                                 job_id,
                                 tc,
                                 tccache,
@@ -182,50 +203,56 @@ impl PotBuilder {
                                 &self.clone_from,
                                 &self.pot_cmd,
                                 &self.pot_clone_args,
-                            )?;
+                            )
+                            .await?;
                             e.insert(image.clone());
                             image
                         }
                     }
                 };
-                Self::start_container(&image, &self.pot_cmd, &self.pot_clone_args)
+                Self::start_container(&self.creator, &image, &self.pot_cmd, &self.pot_clone_args)
+                    .await
             }
         }
     }
 
-    fn clean_container(cid: &str) -> Result<()> {
-        Command::new("pot")
-            .args(&["stop", "-p", cid])
+    async fn clean_container(creator: &ProcessCommandCreator, cid: &str) -> Result<()> {
+        let mut cmd = creator.clone().new_command_sync("pot");
+        cmd.args(&["stop", "-p", cid])
             .check_run()
+            .await
             .context("Failed to stop container")?;
 
-        Command::new("pot")
-            .args(&["revert", "-p", cid])
+        let mut cmd = creator.clone().new_command_sync("pot");
+        cmd.args(&["revert", "-p", cid])
             .check_run()
+            .await
             .context("Failed to revert container")?;
 
-        Command::new("pot")
-            .args(&["start", "-p", cid])
+        let mut cmd = creator.clone().new_command_sync("pot");
+        cmd.args(&["start", "-p", cid])
             .check_run()
+            .await
             .context("Failed to (re)start container")?;
         Ok(())
     }
 
     // Failing during cleanup is pretty unexpected, but we can still return the successful compile
     // TODO: if too many of these fail, we should mark this builder as faulty
-    fn finish_container(
+    async fn finish_container(
+        creator: &ProcessCommandCreator,
         job_id: JobId,
         container_lists: Arc<Mutex<HashMap<Toolchain, Vec<String>>>>,
         tc: Toolchain,
         cid: String,
         pot_cmd: &PathBuf,
     ) {
-        if let Err(e) = Self::clean_container(&cid) {
+        if let Err(e) = Self::clean_container(creator, &cid).await {
             info!(
                 "[finish_container({})]: Failed to clean container {}: {}",
                 job_id, cid, e
             );
-            if let Err(e) = pot_rm(&cid, pot_cmd) {
+            if let Err(e) = pot_rm(creator, &cid, pot_cmd).await {
                 warn!(
                     "[finish_container({})]: Failed to remove container {} after failed clean: {}",
                     job_id, cid, e
@@ -235,7 +262,7 @@ impl PotBuilder {
         }
 
         // Good as new, add it back to the container list
-        if let Some(entry) = container_lists.lock().unwrap().get_mut(&tc) {
+        if let Some(entry) = container_lists.lock().await.get_mut(&tc) {
             debug!(
                 "[finish_container({})]: Reclaimed container {}",
                 job_id, cid
@@ -246,7 +273,7 @@ impl PotBuilder {
                 "[finish_container({})]: Was ready to reclaim container {} but toolchain went missing",
                 job_id, cid
             );
-            if let Err(e) = pot_rm(&cid, pot_cmd) {
+            if let Err(e) = pot_rm(creator, &cid, pot_cmd).await {
                 warn!(
                     "[finish_container({})]: Failed to remove container {}: {}",
                     job_id, cid, e
@@ -255,7 +282,8 @@ impl PotBuilder {
         }
     }
 
-    fn make_image(
+    async fn make_image(
+        creator: &ProcessCommandCreator,
         job_id: JobId,
         tc: &Toolchain,
         tccache: &Mutex<TcCache>,
@@ -272,12 +300,13 @@ impl PotBuilder {
         );
         let mut clone_args: Vec<&str> = ["clone", "-p", &imagename, "-P", clone_from].to_vec();
         clone_args.append(&mut pot_clone_args.iter().map(|s| s as &str).collect());
-        Command::new(pot_cmd)
-            .args(clone_args)
+        let mut cmd = creator.clone().new_command_sync(pot_cmd);
+        cmd.args(&clone_args)
             .check_run()
+            .await
             .context("Failed to create pot container")?;
 
-        let mut tccache = tccache.lock().unwrap();
+        let mut tccache = tccache.lock().await;
         let toolchain_rdr = match tccache.get(tc) {
             Ok(rdr) => rdr,
             Err(LruError::FileNotInCache) => {
@@ -300,15 +329,17 @@ impl PotBuilder {
                 Err(Error::from(e))
             })?;
 
-        Command::new(pot_cmd)
-            .args(&["snapshot", "-p", &imagename])
+        let mut cmd = creator.clone().new_command_sync(pot_cmd);
+        cmd.args(&["snapshot", "-p", &imagename])
             .check_run()
+            .await
             .context("Failed to snapshot container after build")?;
 
         Ok(imagename)
     }
 
-    fn start_container(
+    async fn start_container(
+        creator: &ProcessCommandCreator,
         image: &str,
         pot_cmd: &PathBuf,
         pot_clone_args: &[String],
@@ -316,27 +347,32 @@ impl PotBuilder {
         let cid = format!("sccache-builder-{}", Uuid::new_v4());
         let mut clone_args: Vec<&str> = ["clone", "-p", &cid, "-P", image].to_vec();
         clone_args.append(&mut pot_clone_args.iter().map(|s| s as &str).collect());
-        Command::new(pot_cmd)
-            .args(&clone_args)
+        let mut cmd = creator.clone().new_command_sync(pot_cmd);
+        cmd.args(&clone_args)
             .check_run()
+            .await
             .context("Failed to create pot container")?;
 
-        Command::new(pot_cmd)
-            .args(&["snapshot", "-p", &cid])
+        let mut cmd = creator.clone().new_command_sync(pot_cmd);
+        cmd.args(&["snapshot", "-p", &cid])
             .check_run()
+            .await
             .context("Failed to snapshotpot container")?;
 
-        Command::new(pot_cmd)
-            .args(&["start", "-p", &cid])
+        let mut cmd = creator.clone().new_command_sync(pot_cmd);
+        cmd.args(&["start", "-p", &cid])
             .check_run()
+            .await
             .context("Failed to start container")?;
+
         Ok(cid.to_string())
     }
 
-    fn perform_build(
+    async fn perform_build(
+        creator: &ProcessCommandCreator,
         job_id: JobId,
         compile_command: CompileCommand,
-        inputs_rdr: InputsReader,
+        mut inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         output_paths: Vec<String>,
         cid: &str,
         pot_fs_root: &Path,
@@ -355,7 +391,10 @@ impl PotBuilder {
 
         trace!("[perform_build({})]: copying in inputs", job_id);
         // not elegant
-        tar::Archive::new(inputs_rdr)
+        // Read into memory because we can't use asyncio in the thread below.
+        let mut inputs_buf = vec![];
+        inputs_rdr.read_to_end(&mut inputs_buf).await?;
+        tar::Archive::new(inputs_buf.reader())
             .unpack(pot_fs_root.join("jails").join(cid).join("m"))
             .context("Failed to unpack inputs to pot")?;
 
@@ -369,7 +408,7 @@ impl PotBuilder {
 
         trace!("[perform_build({})]: creating output directories", job_id);
         assert!(!output_paths.is_empty());
-        let mut cmd = Command::new("jexec");
+        let mut cmd = creator.clone().new_command_sync("jexec");
         cmd.args(&[cid, "mkdir", "-p"]).arg(cwd);
         for path in output_paths.iter() {
             // If it doesn't have a parent, nothing needs creating
@@ -381,11 +420,12 @@ impl PotBuilder {
             cmd.arg(cwd.join(output_parent));
         }
         cmd.check_run()
+            .await
             .context("Failed to create directories required for compile in container")?;
 
         trace!("[perform_build({})]: performing compile", job_id);
         // TODO: likely shouldn't perform the compile as root in the container
-        let mut cmd = Command::new("jexec");
+        let mut cmd = creator.clone().new_command_sync("jexec");
         cmd.arg(cid);
         cmd.arg("env");
         for (k, v) in env_vars {
@@ -406,8 +446,11 @@ impl PotBuilder {
         cmd.arg(&executable);
         cmd.arg(cwd);
         cmd.arg(executable);
-        cmd.args(arguments);
-        let compile_output = cmd.output().context("Failed to start executing compile")?;
+        cmd.args(&arguments);
+        let compile_output = cmd
+            .output()
+            .await
+            .context("Failed to start executing compile")?;
         trace!(
             "[perform_build({})]: compile_output: {:?}",
             job_id,
@@ -445,26 +488,29 @@ impl PotBuilder {
     }
 }
 
+#[async_trait]
 impl BuilderIncoming for PotBuilder {
     // From Server
-    fn run_build(
+    async fn run_build(
         &self,
         job_id: JobId,
         tc: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs_rdr: InputsReader,
+        inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         tccache: &Mutex<TcCache>,
     ) -> Result<BuildResult> {
         debug!("[run_build({})]: Finding container", job_id);
         let cid = self
             .get_container(job_id, &tc, tccache)
+            .await
             .context("Failed to get a container for build")?;
         debug!(
             "[run_build({})]: Performing build with container {}",
             job_id, cid
         );
         let res = Self::perform_build(
+            &self.creator,
             job_id,
             command,
             inputs_rdr,
@@ -472,6 +518,7 @@ impl BuilderIncoming for PotBuilder {
             &cid,
             &self.pot_fs_root,
         )
+        .await
         .context("Failed to perform build")?;
         debug!("[run_build({})]: Finishing with container {}", job_id, cid);
         let cloned = self.clone();
@@ -482,8 +529,23 @@ impl BuilderIncoming for PotBuilder {
             cloned.cleanup_thread_count.fetch_sub(1, Ordering::SeqCst);
             hint::spin_loop();
         }
-        thread::spawn(move || {
-            Self::finish_container(job_id, cloned.container_lists, tc, cid, &cloned.pot_cmd);
+        let runtime = tokio::runtime::Handle::current();
+        //
+        // Don't await the spawn future so cleanup happens in the background.
+        //
+        // TODO: This seems like many background cleanup threads could occupy
+        //       many of the threads in tokio's threadpool. Maybe this should
+        //       be awaited? How expensive is `Self::finish_container()`?
+        runtime.spawn(async move {
+            Self::finish_container(
+                &cloned.creator,
+                job_id,
+                cloned.container_lists,
+                tc,
+                cid,
+                &cloned.pot_cmd,
+            )
+            .await;
             cloned.cleanup_thread_count.fetch_sub(1, Ordering::SeqCst);
         });
         debug!("[run_build({})]: Returning result", job_id);

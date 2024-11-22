@@ -13,61 +13,75 @@
 // limitations under the License.
 
 use anyhow::{anyhow, bail, Context, Error, Result};
+use async_trait::async_trait;
+use bytes::Buf;
 use flate2::read::GzDecoder;
 use fs_err as fs;
+use futures::lock::Mutex;
 use libmount::Overlay;
 use sccache::dist::{
-    BuildResult, BuilderIncoming, CompileCommand, InputsReader, JobId, OutputData, ProcessOutput,
-    TcCache, Toolchain,
+    BuildResult, BuilderIncoming, CompileCommand, JobId, OutputData, ProcessOutput, TcCache,
+    Toolchain,
 };
 use sccache::lru_disk_cache::Error as LruError;
+use sccache::mock_command::{
+    AsyncCommand, CommandChild, CommandCreatorSync, ProcessCommandCreator, RunCommand,
+};
+use std::borrow::Borrow;
 use std::collections::{hash_map, HashMap};
 use std::io;
 use std::iter;
 use std::path::{self, Path, PathBuf};
-use std::process::{ChildStdin, Command, Output, Stdio};
-use std::sync::Mutex;
+use std::process::{Command, Output, Stdio};
+use tokio::io::AsyncReadExt;
+use tokio::process::ChildStdin;
 use version_compare::Version;
 
-trait CommandExt {
-    fn check_stdout_trim(&mut self) -> Result<String>;
-    fn check_piped<F>(&mut self, pipe: &mut F) -> Result<()>
+#[async_trait]
+trait AsyncCommandExt {
+    async fn check_stdout_trim(&mut self) -> Result<String>;
+    async fn check_piped<F, Fut>(&mut self, pipe: F) -> Result<()>
     where
-        F: FnMut(ChildStdin) -> Result<()>;
-    fn check_run(&mut self) -> Result<()>;
+        F: FnOnce(ChildStdin) -> Fut + std::marker::Send,
+        Fut: std::future::Future<Output = Result<()>> + std::marker::Send;
+    async fn check_run(&mut self) -> Result<()>;
 }
 
-impl CommandExt for Command {
-    fn check_stdout_trim(&mut self) -> Result<String> {
-        let output = self.output().context("Failed to start command")?;
+#[async_trait]
+impl AsyncCommandExt for AsyncCommand {
+    async fn check_stdout_trim(&mut self) -> Result<String> {
+        let output = self.output().await.context("Failed to start command")?;
         check_output(&output)?;
         let stdout =
             String::from_utf8(output.stdout).context("Output from listing containers not UTF8")?;
         Ok(stdout.trim().to_owned())
     }
     // Should really take a FnOnce/FnBox
-    fn check_piped<F>(&mut self, pipe: &mut F) -> Result<()>
+    async fn check_piped<F, Fut>(&mut self, pipe: F) -> Result<()>
     where
-        F: FnMut(ChildStdin) -> Result<()>,
+        F: FnOnce(ChildStdin) -> Fut + std::marker::Send,
+        Fut: std::future::Future<Output = Result<()>> + std::marker::Send,
     {
         let mut process = self
             .stdin(Stdio::piped())
             .spawn()
+            .await
             .context("Failed to start command")?;
         pipe(
             process
-                .stdin
-                .take()
+                .take_stdin()
                 .expect("Requested piped stdin but not present"),
         )
+        .await
         .context("Failed to pipe input to process")?;
         let output = process
             .wait_with_output()
+            .await
             .context("Failed to wait for process to return")?;
         check_output(&output)
     }
-    fn check_run(&mut self) -> Result<()> {
-        let output = self.output().context("Failed to start command")?;
+    async fn check_run(&mut self) -> Result<()> {
+        let output = self.output().await.context("Failed to start command")?;
         check_output(&output)
     }
 }
@@ -107,12 +121,17 @@ struct DeflatedToolchain {
 
 pub struct OverlayBuilder {
     bubblewrap: PathBuf,
+    creator: ProcessCommandCreator,
     dir: PathBuf,
     toolchain_dir_map: Mutex<HashMap<Toolchain, DeflatedToolchain>>,
 }
 
 impl OverlayBuilder {
-    pub fn new(bubblewrap: PathBuf, dir: PathBuf) -> Result<Self> {
+    pub async fn new(
+        bubblewrap: PathBuf,
+        dir: PathBuf,
+        creator: ProcessCommandCreator,
+    ) -> Result<Self> {
         info!("Creating overlay builder");
 
         if !nix::unistd::getuid().is_root() || !nix::unistd::geteuid().is_root() {
@@ -120,9 +139,11 @@ impl OverlayBuilder {
             bail!("not running as root")
         }
 
-        let out = Command::new(&bubblewrap)
+        let mut cmd = creator.clone().new_command_sync(&bubblewrap);
+        let out = cmd
             .arg("--version")
             .check_stdout_trim()
+            .await
             .context("Failed to execute bwrap for version check")?;
         if let Some(s) = out.split_whitespace().nth(1) {
             match (Version::from("0.3.0"), Version::from(s)) {
@@ -151,10 +172,11 @@ impl OverlayBuilder {
         // TODO: pidfile
         let ret = Self {
             bubblewrap,
+            creator,
             dir,
             toolchain_dir_map: Mutex::new(HashMap::new()),
         };
-        ret.cleanup()?;
+        ret.cleanup().await?;
         fs::create_dir_all(&ret.dir).context("Failed to create base directory for builder")?;
         fs::create_dir_all(ret.dir.join("builds"))
             .context("Failed to create builder builds directory")?;
@@ -163,14 +185,14 @@ impl OverlayBuilder {
         Ok(ret)
     }
 
-    fn cleanup(&self) -> Result<()> {
+    async fn cleanup(&self) -> Result<()> {
         if self.dir.exists() {
             fs::remove_dir_all(&self.dir).context("Failed to clean up builder directory")?
         }
         Ok(())
     }
 
-    fn cleanup_old_toolchains(
+    async fn cleanup_old_toolchains(
         &self,
         job_id: JobId,
         tccache: &TcCache,
@@ -201,7 +223,7 @@ impl OverlayBuilder {
         }
     }
 
-    fn prepare_overlay_dirs(
+    async fn prepare_overlay_dirs(
         &self,
         job_id: JobId,
         tc: &Toolchain,
@@ -211,7 +233,7 @@ impl OverlayBuilder {
             path: toolchain_dir,
             build_count: _,
         } = {
-            let mut toolchain_dir_map = self.toolchain_dir_map.lock().unwrap();
+            let mut toolchain_dir_map = self.toolchain_dir_map.lock().await;
             // Create the toolchain dir (if necessary) while we have an exclusive lock
             let toolchain_dir = self.dir.join("toolchains").join(&tc.archive_id);
             if toolchain_dir_map.contains_key(tc) && toolchain_dir.exists() {
@@ -229,9 +251,10 @@ impl OverlayBuilder {
                     toolchain_dir
                 );
 
-                let mut tccache = tccache.lock().unwrap();
+                let mut tccache = tccache.lock().await;
 
-                self.cleanup_old_toolchains(job_id, &tccache, &mut toolchain_dir_map);
+                self.cleanup_old_toolchains(job_id, &tccache, &mut toolchain_dir_map)
+                    .await;
 
                 let toolchain_rdr = match tccache.get(tc) {
                     Ok(rdr) => rdr,
@@ -306,11 +329,11 @@ impl OverlayBuilder {
         })
     }
 
-    fn perform_build(
+    async fn perform_build(
         job_id: JobId,
         bubblewrap: &Path,
         compile_command: CompileCommand,
-        inputs_rdr: InputsReader,
+        mut inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         output_paths: Vec<String>,
         overlay: &OverlaySpec,
     ) -> Result<BuildResult> {
@@ -325,6 +348,10 @@ impl OverlayBuilder {
             compile_command.executable,
             compile_command.arguments
         );
+
+        // Read into memory because we can't use asyncio in the thread below.
+        let mut inputs_buf = vec![];
+        inputs_rdr.read_to_end(&mut inputs_buf).await?;
 
         std::thread::scope(|scope| {
             scope
@@ -371,7 +398,7 @@ impl OverlayBuilder {
                     trace!("[perform_build({})]: copying in inputs", job_id);
                     // Note that we don't unpack directly into the upperdir since there overlayfs has some
                     // special marker files that we don't want to create by accident (or malicious intent)
-                    tar::Archive::new(inputs_rdr)
+                    tar::Archive::new(inputs_buf.reader())
                         .unpack(&target_dir)
                         .context("Failed to unpack inputs to overlay")?;
 
@@ -442,7 +469,7 @@ impl OverlayBuilder {
                     }
                     cmd.arg("--");
                     cmd.arg(executable);
-                    cmd.args(arguments);
+                    cmd.args(&arguments);
 
                     trace!("[perform_build({})]: bubblewrap command: {:?}", job_id, cmd);
 
@@ -494,7 +521,7 @@ impl OverlayBuilder {
 
     // Failing during cleanup is pretty unexpected, but we can still return the successful compile
     // TODO: if too many of these fail, we should mark this builder as faulty
-    fn finish_overlay(
+    async fn finish_overlay(
         &self,
         job_id: JobId,
         tc: &Toolchain,
@@ -518,30 +545,39 @@ impl OverlayBuilder {
         // TODO: collect toolchain directories
 
         // Decrement the build count so its toolchain can be cleaned up later
-        let mut toolchain_dir_map = self.toolchain_dir_map.lock().unwrap();
+        let mut toolchain_dir_map = self.toolchain_dir_map.lock().await;
         if let Some(entry) = toolchain_dir_map.get_mut(tc) {
             entry.build_count = std::cmp::max(0, entry.build_count - 1);
         }
 
-        self.cleanup_old_toolchains(job_id, &tccache.lock().unwrap(), &mut toolchain_dir_map);
+        self.cleanup_old_toolchains(
+            job_id,
+            tccache.lock().await.borrow(),
+            &mut toolchain_dir_map,
+        )
+        .await;
     }
 }
 
+#[async_trait]
 impl BuilderIncoming for OverlayBuilder {
-    fn run_build(
+    async fn run_build(
         &self,
         job_id: JobId,
         tc: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs_rdr: InputsReader,
+        inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         tccache: &Mutex<TcCache>,
     ) -> Result<BuildResult> {
         debug!("[run_build({})]: Preparing overlay", job_id);
         let overlay = self
             .prepare_overlay_dirs(job_id, &tc, tccache)
+            .await
             .context("failed to prepare overlay dirs")?;
         debug!("[run_build({})]: Performing build in {:?}", job_id, overlay);
+        // Guard invoking perform_build until we get a token from the jobserver
+        let token = self.creator.jobserver.acquire().await?;
         let res = Self::perform_build(
             job_id,
             &self.bubblewrap,
@@ -549,9 +585,12 @@ impl BuilderIncoming for OverlayBuilder {
             inputs_rdr,
             outputs,
             &overlay,
-        );
+        )
+        .await;
+        // Drop the jobserver token
+        drop(token);
         debug!("[run_build({})]: Finishing with overlay", job_id);
-        self.finish_overlay(job_id, &tc, tccache, &overlay);
+        self.finish_overlay(job_id, &tc, tccache, &overlay).await;
         debug!("[run_build({})]: Returning result", job_id);
         res.context("Failed to perform build")
     }
@@ -564,22 +603,25 @@ const BASE_DOCKER_IMAGE: &str = "busybox:stable-musl";
 const DOCKER_SHELL_INIT: &str = "while true; do busybox sleep 365d && busybox true; done";
 
 // Check the diff and clean up the FS
-fn docker_diff(cid: &str) -> Result<String> {
-    Command::new("docker")
-        .args(["diff", cid])
+async fn docker_diff(creator: &ProcessCommandCreator, cid: &str) -> Result<String> {
+    let mut cmd = creator.clone().new_command_sync("docker");
+    cmd.args(&["diff", cid])
         .check_stdout_trim()
+        .await
         .context("Failed to Docker diff container")
 }
 
 // Force remove the container
-fn docker_rm(cid: &str) -> Result<()> {
-    Command::new("docker")
-        .args(["rm", "-f", cid])
+async fn docker_rm(creator: &ProcessCommandCreator, cid: &str) -> Result<()> {
+    let mut cmd = creator.clone().new_command_sync("docker");
+    cmd.args(&["rm", "-f", cid])
         .check_run()
+        .await
         .context("Failed to force delete container")
 }
 
 pub struct DockerBuilder {
+    creator: ProcessCommandCreator,
     image_map: Mutex<HashMap<Toolchain, String>>,
     container_lists: Mutex<HashMap<Toolchain, Vec<String>>>,
 }
@@ -588,25 +630,28 @@ impl DockerBuilder {
     // TODO: this should accept a unique string, e.g. inode of the tccache directory
     // having locked a pidfile, or at minimum should loudly detect other running
     // instances - pidfile in /tmp
-    pub fn new() -> Result<Self> {
+    pub async fn new(creator: ProcessCommandCreator) -> Result<Self> {
         info!("Creating docker builder");
 
         let ret = Self {
+            creator,
             image_map: Mutex::new(HashMap::new()),
             container_lists: Mutex::new(HashMap::new()),
         };
-        ret.cleanup()?;
+        ret.cleanup().await?;
         Ok(ret)
     }
 
     // TODO: this should really reclaim, and should check in the image map and container lists, so
     // that when things are removed from there it becomes a form of GC
-    fn cleanup(&self) -> Result<()> {
+    async fn cleanup(&self) -> Result<()> {
         info!("Performing initial Docker cleanup");
 
-        let containers = Command::new("docker")
-            .args(["ps", "-a", "--format", "{{.ID}} {{.Image}}"])
+        let mut cmd = self.creator.clone().new_command_sync("docker");
+        let containers = cmd
+            .args(&["ps", "-a", "--format", "{{.ID}} {{.Image}}"])
             .check_stdout_trim()
+            .await
             .context("Unable to list all Docker containers")?;
         if !containers.is_empty() {
             let mut containers_to_rm = vec![];
@@ -626,17 +671,20 @@ impl DockerBuilder {
                 }
             }
             if !containers_to_rm.is_empty() {
-                Command::new("docker")
-                    .args(["rm", "-f"])
-                    .args(containers_to_rm)
+                let mut cmd = self.creator.clone().new_command_sync("docker");
+                cmd.args(&["rm", "-f"])
+                    .args(&containers_to_rm)
                     .check_run()
+                    .await
                     .context("Failed to start command to remove old containers")?;
             }
         }
 
-        let images = Command::new("docker")
-            .args(["images", "--format", "{{.ID}} {{.Repository}}"])
+        let mut cmd = self.creator.clone().new_command_sync("docker");
+        let images = cmd
+            .args(&["images", "--format", "{{.ID}} {{.Repository}}"])
             .check_stdout_trim()
+            .await
             .context("Failed to list all docker images")?;
         if !images.is_empty() {
             let mut images_to_rm = vec![];
@@ -656,10 +704,11 @@ impl DockerBuilder {
                 }
             }
             if !images_to_rm.is_empty() {
-                Command::new("docker")
-                    .args(["rmi"])
-                    .args(images_to_rm)
+                let mut cmd = self.creator.clone().new_command_sync("docker");
+                cmd.args(&["rmi"])
+                    .args(&images_to_rm)
                     .check_run()
+                    .await
                     .context("Failed to remove image")?
             }
         }
@@ -671,14 +720,14 @@ impl DockerBuilder {
     // If we have a spare running container, claim it and remove it from the available list,
     // otherwise try and create a new container (possibly creating the Docker image along
     // the way)
-    fn get_container(
+    async fn get_container(
         &self,
         job_id: JobId,
         tc: &Toolchain,
         tccache: &Mutex<TcCache>,
     ) -> Result<String> {
         let container = {
-            let mut map = self.container_lists.lock().unwrap();
+            let mut map = self.container_lists.lock().await;
             map.entry(tc.clone()).or_default().pop()
         };
         match container {
@@ -687,30 +736,32 @@ impl DockerBuilder {
                 // TODO: can improve parallelism (of creating multiple images at a time) by using another
                 // (more fine-grained) mutex around the entry value and checking if its empty a second time
                 let image = {
-                    let mut map = self.image_map.lock().unwrap();
+                    let mut map = self.image_map.lock().await;
                     match map.entry(tc.clone()) {
                         hash_map::Entry::Occupied(e) => e.get().clone(),
                         hash_map::Entry::Vacant(e) => {
                             info!("[get_container({})]: Creating Docker image for {:?} (may block requests)", job_id, tc);
-                            let image = Self::make_image(job_id, tc, tccache)?;
+                            let image =
+                                Self::make_image(&self.creator, job_id, tc, tccache).await?;
                             e.insert(image.clone());
                             image
                         }
                     }
                 };
-                Self::start_container(&image)
+                Self::start_container(&self.creator, &image).await
             }
         }
     }
 
-    fn clean_container(&self, job_id: JobId, cid: &str) -> Result<()> {
+    async fn clean_container(&self, job_id: JobId, cid: &str) -> Result<()> {
         // Clean up any running processes
-        Command::new("docker")
-            .args(["exec", cid, "busybox", "kill", "-9", "-1"])
+        let mut cmd = self.creator.clone().new_command_sync("docker");
+        cmd.args(&["exec", cid, "busybox", "kill", "-9", "-1"])
             .check_run()
+            .await
             .context("Failed to run kill on all processes in container")?;
 
-        let diff = docker_diff(cid)?;
+        let diff = docker_diff(&self.creator, cid).await?;
         if !diff.is_empty() {
             let mut lastpath = None;
             for line in diff.split(|c| c == '\n') {
@@ -744,9 +795,11 @@ impl DockerBuilder {
                     }
                 }
                 lastpath = Some(changepath);
-                if let Err(e) = Command::new("docker")
-                    .args(["exec", cid, "busybox", "rm", "-rf", changepath])
+                let mut cmd = self.creator.clone().new_command_sync("docker");
+                if let Err(e) = cmd
+                    .args(&["exec", cid, "busybox", "rm", "-rf", changepath])
                     .check_run()
+                    .await
                 {
                     // We do a final check anyway, so just continue
                     warn!(
@@ -756,7 +809,7 @@ impl DockerBuilder {
                 }
             }
 
-            let newdiff = docker_diff(cid)?;
+            let newdiff = docker_diff(&self.creator, cid).await?;
             // See note about changepath == "/tmp" above
             if !newdiff.is_empty() && newdiff != "C /tmp" {
                 bail!(
@@ -771,15 +824,15 @@ impl DockerBuilder {
 
     // Failing during cleanup is pretty unexpected, but we can still return the successful compile
     // TODO: if too many of these fail, we should mark this builder as faulty
-    fn finish_container(&self, job_id: JobId, tc: &Toolchain, cid: String) {
+    async fn finish_container(&self, job_id: JobId, tc: &Toolchain, cid: String) {
         // TODO: collect images
 
-        if let Err(e) = self.clean_container(job_id, &cid) {
+        if let Err(e) = self.clean_container(job_id, &cid).await {
             info!(
                 "[finish_container({})]: Failed to clean container {}: {}",
                 job_id, cid, e
             );
-            if let Err(e) = docker_rm(&cid) {
+            if let Err(e) = docker_rm(&self.creator, &cid).await {
                 warn!(
                     "[finish_container({})]: Failed to remove container {} after failed clean: {}",
                     job_id, cid, e
@@ -789,7 +842,7 @@ impl DockerBuilder {
         }
 
         // Good as new, add it back to the container list
-        if let Some(entry) = self.container_lists.lock().unwrap().get_mut(tc) {
+        if let Some(entry) = self.container_lists.lock().await.get_mut(tc) {
             debug!(
                 "[finish_container({})]: Reclaimed container {}",
                 job_id, cid
@@ -800,7 +853,7 @@ impl DockerBuilder {
                 "[finish_container({})]: Was ready to reclaim container {} but toolchain went missing",
                 job_id, cid
             );
-            if let Err(e) = docker_rm(&cid) {
+            if let Err(e) = docker_rm(&self.creator, &cid).await {
                 warn!(
                     "[finish_container({})]: Failed to remove container {}: {}",
                     job_id, cid, e
@@ -809,14 +862,21 @@ impl DockerBuilder {
         }
     }
 
-    fn make_image(job_id: JobId, tc: &Toolchain, tccache: &Mutex<TcCache>) -> Result<String> {
-        let cid = Command::new("docker")
-            .args(["create", BASE_DOCKER_IMAGE, "busybox", "true"])
+    async fn make_image(
+        creator: &ProcessCommandCreator,
+        job_id: JobId,
+        tc: &Toolchain,
+        tccache: &Mutex<TcCache>,
+    ) -> Result<String> {
+        let mut cmd = creator.clone().new_command_sync("docker");
+        let cid = cmd
+            .args(&["create", BASE_DOCKER_IMAGE, "busybox", "true"])
             .check_stdout_trim()
+            .await
             .context("Failed to create docker container")?;
 
-        let mut tccache = tccache.lock().unwrap();
-        let mut toolchain_rdr = match tccache.get(tc) {
+        let mut tccache = tccache.lock().await;
+        let mut toolchain_rdr = match tccache.get_async(tc).await {
             Ok(rdr) => rdr,
             Err(LruError::FileNotInCache) => bail!(
                 "Expected to find toolchain {}, but not available",
@@ -828,40 +888,44 @@ impl DockerBuilder {
         };
 
         trace!("[make_image({})]: Copying in toolchain", job_id);
-        Command::new("docker")
-            .args(["cp", "-", &format!("{}:/", cid)])
-            .check_piped(&mut |mut stdin| {
-                io::copy(&mut toolchain_rdr, &mut stdin)?;
+        let mut cmd = creator.clone().new_command_sync("docker");
+        cmd.args(&["cp", "-", &format!("{}:/", cid)])
+            .check_piped(|mut stdin| async move {
+                tokio::io::copy(&mut toolchain_rdr, &mut stdin).await?;
                 Ok(())
             })
+            .await
             .context("Failed to copy toolchain tar into container")?;
-        drop(toolchain_rdr);
 
         let imagename = format!("sccache-builder-{}", &tc.archive_id);
-        Command::new("docker")
-            .args(["commit", &cid, &imagename])
+        let mut cmd = creator.clone().new_command_sync("docker");
+        cmd.args(&["commit", &cid, &imagename])
             .check_run()
+            .await
             .context("Failed to commit container after build")?;
 
-        Command::new("docker")
-            .args(["rm", "-f", &cid])
+        let mut cmd = creator.clone().new_command_sync("docker");
+        cmd.args(&["rm", "-f", &cid])
             .check_run()
+            .await
             .context("Failed to remove temporary build container")?;
 
         Ok(imagename)
     }
 
-    fn start_container(image: &str) -> Result<String> {
-        Command::new("docker")
-            .args(["run", "-d", image, "busybox", "sh", "-c", DOCKER_SHELL_INIT])
+    async fn start_container(creator: &ProcessCommandCreator, image: &str) -> Result<String> {
+        let mut cmd = creator.clone().new_command_sync("docker");
+        cmd.args(&["run", "-d", image, "busybox", "sh", "-c", DOCKER_SHELL_INIT])
             .check_stdout_trim()
+            .await
             .context("Failed to run container")
     }
 
-    fn perform_build(
+    async fn perform_build(
+        creator: &ProcessCommandCreator,
         job_id: JobId,
         compile_command: CompileCommand,
-        mut inputs_rdr: InputsReader,
+        mut inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         output_paths: Vec<String>,
         cid: &str,
     ) -> Result<BuildResult> {
@@ -889,14 +953,14 @@ impl DockerBuilder {
 
         trace!("[perform_build({})]: copying in inputs", job_id);
 
-        Command::new("docker")
-            .args(["cp", "-", &format!("{}:/", cid)])
-            .check_piped(&mut |mut stdin| {
-                io::copy(&mut inputs_rdr, &mut stdin)?;
+        let mut cmd = creator.clone().new_command_sync("docker");
+        cmd.args(&["cp", "-", &format!("{}:/", cid)])
+            .check_piped(|mut stdin| async move {
+                tokio::io::copy(&mut inputs_rdr, &mut stdin).await?;
                 Ok(())
             })
+            .await
             .context("Failed to copy inputs tar into container")?;
-        drop(inputs_rdr);
 
         let CompileCommand {
             executable,
@@ -907,8 +971,8 @@ impl DockerBuilder {
         let cwd = Path::new(&cwd);
 
         trace!("[perform_build({})]: creating output directories", job_id);
-        let mut cmd = Command::new("docker");
-        cmd.args(["exec", cid, "busybox", "mkdir", "-p"]).arg(cwd);
+        let mut cmd = creator.clone().new_command_sync("docker");
+        cmd.args(&["exec", cid, "busybox", "mkdir", "-p"]).arg(cwd);
         for path in output_paths.iter() {
             // If it doesn't have a parent, nothing needs creating
             let output_parent = if let Some(p) = Path::new(path).parent() {
@@ -919,11 +983,12 @@ impl DockerBuilder {
             cmd.arg(cwd.join(output_parent));
         }
         cmd.check_run()
+            .await
             .context("Failed to create directories required for compile in container")?;
 
         trace!("[perform_build({})]: performing compile", job_id);
         // TODO: likely shouldn't perform the compile as root in the container
-        let mut cmd = Command::new("docker");
+        let mut cmd = creator.clone().new_command_sync("docker");
         cmd.arg("exec");
         for (k, v) in env_vars {
             if k.contains('=') {
@@ -939,12 +1004,15 @@ impl DockerBuilder {
             cmd.arg("-e").arg(env);
         }
         let shell_cmd = "cd \"$1\" && shift && exec \"$@\"";
-        cmd.args([cid, "busybox", "sh", "-c", shell_cmd]);
+        cmd.args(&[cid, "busybox", "sh", "-c", shell_cmd]);
         cmd.arg(&executable);
         cmd.arg(cwd);
         cmd.arg(executable);
-        cmd.args(arguments);
-        let compile_output = cmd.output().context("Failed to start executing compile")?;
+        cmd.args(&arguments);
+        let compile_output = cmd
+            .output()
+            .await
+            .context("Failed to start executing compile")?;
         trace!(
             "[perform_build({})]: compile_output: {:?}",
             job_id,
@@ -956,10 +1024,12 @@ impl DockerBuilder {
         for path in output_paths {
             let abspath = cwd.join(&path); // Resolve in case it's relative since we copy it from the root level
                                            // TODO: this isn't great, but cp gives it out as a tar
-            let output = Command::new("docker")
-                .args(["exec", cid, "busybox", "cat"])
+            let mut cmd = creator.clone().new_command_sync("docker");
+            let output = cmd
+                .args(&["exec", cid, "busybox", "cat"])
                 .arg(abspath)
                 .output()
+                .await
                 .context("Failed to start command to retrieve output file")?;
             if output.status.success() {
                 let output = OutputData::try_from_reader(&*output.stdout)
@@ -982,28 +1052,35 @@ impl DockerBuilder {
     }
 }
 
+#[async_trait]
 impl BuilderIncoming for DockerBuilder {
     // From Server
-    fn run_build(
+    async fn run_build(
         &self,
         job_id: JobId,
         tc: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs_rdr: InputsReader,
+        inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         tccache: &Mutex<TcCache>,
     ) -> Result<BuildResult> {
         debug!("[run_build({})]: Finding container", job_id);
         let cid = self
             .get_container(job_id, &tc, tccache)
+            .await
             .context("Failed to get a container for build")?;
         debug!(
             "[run_build({})]: Performing build with container {}",
             job_id, cid
         );
-        let res = Self::perform_build(job_id, command, inputs_rdr, outputs, &cid);
+        // Guard invoking perform_build until we get a token from the jobserver
+        let token = self.creator.jobserver.acquire().await?;
+        let res =
+            Self::perform_build(&self.creator, job_id, command, inputs_rdr, outputs, &cid).await;
+        // Drop the jobserver token
+        drop(token);
         debug!("[run_build({})]: Finishing with container {}", job_id, cid);
-        self.finish_container(job_id, &tc, cid);
+        self.finish_container(job_id, &tc, cid).await;
         debug!("[run_build({})]: Returning result", job_id);
         res.context("Failed to perform build")
     }

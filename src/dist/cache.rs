@@ -474,13 +474,14 @@ impl TcCache {
         self.inner.contains_key(make_lru_key_path(&tc.archive_id))
     }
 
-    pub fn insert_with<F: FnOnce(fs::File) -> io::Result<()>>(
-        &mut self,
-        tc: &Toolchain,
-        with: F,
-    ) -> Result<()> {
+    pub async fn insert_with<F, Fut>(&mut self, tc: &Toolchain, with: F) -> Result<()>
+    where
+        F: FnOnce(tokio::fs::File) -> Fut,
+        Fut: std::future::Future<Output = io::Result<u64>>,
+    {
         self.inner
-            .insert_with(make_lru_key_path(&tc.archive_id), with)?;
+            .insert_with(make_lru_key_path(&tc.archive_id), with)
+            .await?;
         let verified_archive_id = file_key(self.get(tc)?)?;
         // TODO: remove created toolchain?
         if verified_archive_id == tc.archive_id {
@@ -496,6 +497,15 @@ impl TcCache {
 
     pub fn get(&mut self, tc: &Toolchain) -> LruResult<Box<dyn ReadSeek>> {
         self.inner.get(make_lru_key_path(&tc.archive_id))
+    }
+
+    pub async fn get_async(
+        &mut self,
+        tc: &Toolchain,
+    ) -> LruResult<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        self.inner
+            .get_async(make_lru_key_path(&tc.archive_id))
+            .await
     }
 
     pub fn len(&self) -> usize {
