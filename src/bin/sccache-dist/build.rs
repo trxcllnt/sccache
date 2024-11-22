@@ -88,7 +88,7 @@ impl AsyncCommandExt for AsyncCommand {
 
 fn check_output(output: &Output) -> Result<()> {
     if !output.status.success() {
-        warn!(
+        tracing::warn!(
             "===========\n{}\n==========\n\n\n\n=========\n{}\n===============\n\n\n",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -132,7 +132,7 @@ impl OverlayBuilder {
         dir: PathBuf,
         creator: ProcessCommandCreator,
     ) -> Result<Self> {
-        info!("Creating overlay builder");
+        tracing::info!("Creating overlay builder");
 
         if !nix::unistd::getuid().is_root() || !nix::unistd::geteuid().is_root() {
             // Not root, or a setuid binary - haven't put enough thought into supporting this, bail
@@ -203,20 +203,22 @@ impl OverlayBuilder {
             for (tc, entry) in dir_map.iter() {
                 // Only clean up old uncompressed toolchains that aren't currently in use
                 if !tccache.contains_toolchain(tc) && entry.build_count == 0 {
-                    warn!(
+                    tracing::warn!(
                         "[cleanup_old_toolchains({})]: Removing old un-compressed toolchain: {:?}",
-                        job_id, tc.archive_id
+                        job_id,
+                        tc.archive_id
                     );
                     if tc_dirs.remove(tc).is_none() {
-                        warn!(
+                        tracing::warn!(
                             "[cleanup_old_toolchains({})]: Toochain {} not in toolchain_dir_map",
-                            job_id, tc.archive_id
+                            job_id,
+                            tc.archive_id
                         );
                     }
                     fs::remove_dir_all(self.dir.join("toolchains").join(&tc.archive_id))
                         .context("Failed to remove old toolchain")
                         .unwrap_or_else(|err| {
-                            warn!("[cleanup_old_toolchains({})]: {:?}", job_id, err)
+                            tracing::warn!("[cleanup_old_toolchains({})]: {:?}", job_id, err)
                         });
                 }
             }
@@ -244,7 +246,7 @@ impl OverlayBuilder {
                 entry.build_count += 1;
                 entry.clone()
             } else {
-                trace!(
+                tracing::trace!(
                     "[prepare_overlay_dirs({})]: Creating toolchain directory for archive {}: {:?}",
                     job_id,
                     tc.archive_id,
@@ -272,25 +274,29 @@ impl OverlayBuilder {
 
                 fs::create_dir_all(&toolchain_dir)
                     .context("Failed to create toolchain dir")
-                    .unwrap_or_else(|err| warn!("[prepare_overlay_dirs({})]: {:?}", job_id, err));
+                    .unwrap_or_else(|err| {
+                        tracing::warn!("[prepare_overlay_dirs({})]: {:?}", job_id, err)
+                    });
 
                 tar::Archive::new(GzDecoder::new(toolchain_rdr))
                     .unpack(&toolchain_dir)
                     .map_err(|err| {
-                        warn!(
+                        tracing::warn!(
                             "[prepare_overlay_dirs({})]: Failed to unpack toolchain {}: {:?}",
-                            job_id, tc.archive_id, err
+                            job_id,
+                            tc.archive_id,
+                            err
                         );
                         fs::remove_dir_all(&toolchain_dir)
                             .context("Failed to remove unpacked toolchain")
                             .unwrap_or_else(|err| {
-                                warn!("[prepare_overlay_dirs({})]: {:?}", job_id, err)
+                                tracing::warn!("[prepare_overlay_dirs({})]: {:?}", job_id, err)
                             });
                         tccache
                             .remove(tc)
                             .context("Failed to remove corrupt toolchain")
                             .unwrap_or_else(|err| {
-                                warn!("[prepare_overlay_dirs({})]: {:?}", job_id, err)
+                                tracing::warn!("[prepare_overlay_dirs({})]: {:?}", job_id, err)
                             });
                         Error::from(err)
                     })?;
@@ -311,7 +317,7 @@ impl OverlayBuilder {
             .join("builds")
             .join(format!("{}-{}", tc.archive_id, job_id));
 
-        trace!(
+        tracing::trace!(
             "[prepare_overlay_dirs({})]: Creating build directory for {}-{}: {:?}",
             job_id,
             tc.archive_id,
@@ -321,7 +327,7 @@ impl OverlayBuilder {
 
         fs::create_dir_all(&build_dir)
             .context("Failed to create build dir")
-            .unwrap_or_else(|err| warn!("[prepare_overlay_dirs({})]: {:?}", job_id, err));
+            .unwrap_or_else(|err| tracing::warn!("[prepare_overlay_dirs({})]: {:?}", job_id, err));
 
         Ok(OverlaySpec {
             build_dir,
@@ -337,12 +343,12 @@ impl OverlayBuilder {
         output_paths: Vec<String>,
         overlay: &OverlaySpec,
     ) -> Result<BuildResult> {
-        trace!(
+        tracing::trace!(
             "[perform_build({})]: Compile environment: {:?}",
             job_id,
             compile_command.env_vars
         );
-        trace!(
+        tracing::trace!(
             "[perform_build({})]: Compile command: {:?} {:?}",
             job_id,
             compile_command.executable,
@@ -395,7 +401,7 @@ impl OverlayBuilder {
                     .mount()
                     .map_err(|e| anyhow!("Failed to mount overlay FS: {}", e.to_string()))?;
 
-                    trace!("[perform_build({})]: copying in inputs", job_id);
+                    tracing::trace!("[perform_build({})]: copying in inputs", job_id);
                     // Note that we don't unpack directly into the upperdir since there overlayfs has some
                     // special marker files that we don't want to create by accident (or malicious intent)
                     tar::Archive::new(inputs_buf.reader())
@@ -410,7 +416,7 @@ impl OverlayBuilder {
                     } = compile_command;
                     let cwd = Path::new(&cwd);
 
-                    trace!("[perform_build({})]: creating output directories", job_id);
+                    tracing::trace!("[perform_build({})]: creating output directories", job_id);
                     fs::create_dir_all(join_suffix(&target_dir, cwd))
                         .context("Failed to create cwd")?;
                     for path in output_paths.iter() {
@@ -424,7 +430,7 @@ impl OverlayBuilder {
                             .context("Failed to create an output directory")?;
                     }
 
-                    trace!("[perform_build({})]: performing compile", job_id);
+                    tracing::trace!("[perform_build({})]: performing compile", job_id);
                     // Bubblewrap notes:
                     // - We're running as uid 0 (to do the mounts above), and so bubblewrap is run as uid 0
                     // - There's special handling in bubblewrap to compare uid and euid - of interest to us,
@@ -459,9 +465,10 @@ impl OverlayBuilder {
 
                     for (k, v) in env_vars {
                         if k.contains('=') {
-                            warn!(
+                            tracing::warn!(
                                 "[perform_build({})]: Skipping environment variable: {:?}",
-                                job_id, k
+                                job_id,
+                                k
                             );
                             continue;
                         }
@@ -471,19 +478,19 @@ impl OverlayBuilder {
                     cmd.arg(executable);
                     cmd.args(&arguments);
 
-                    trace!("[perform_build({})]: bubblewrap command: {:?}", job_id, cmd);
+                    tracing::trace!("[perform_build({})]: bubblewrap command: {:?}", job_id, cmd);
 
                     let compile_output = cmd
                         .output()
                         .context("Failed to retrieve output from compile")?;
-                    trace!(
+                    tracing::trace!(
                         "[perform_build({})]: compile_output: {:?}",
                         job_id,
                         compile_output
                     );
 
                     let mut outputs = vec![];
-                    trace!("[perform_build({})]: retrieving {:?}", job_id, output_paths);
+                    tracing::trace!("[perform_build({})]: retrieving {:?}", job_id, output_paths);
                     for path in output_paths {
                         let abspath = join_suffix(&target_dir, cwd.join(&path)); // Resolve in case it's relative since we copy it from the root level
                         match fs::File::open(abspath) {
@@ -494,9 +501,10 @@ impl OverlayBuilder {
                             }
                             Err(e) => {
                                 if e.kind() == io::ErrorKind::NotFound {
-                                    debug!(
+                                    tracing::debug!(
                                         "[perform_build({})]: Missing output path {:?}",
-                                        job_id, path
+                                        job_id,
+                                        path
                                     )
                                 } else {
                                     return Err(
@@ -534,7 +542,7 @@ impl OverlayBuilder {
         } = overlay;
 
         if let Err(e) = fs::remove_dir_all(build_dir) {
-            warn!(
+            tracing::warn!(
                 "[finish_overlay({})]: Failed to remove build directory {}: {}",
                 job_id,
                 build_dir.display(),
@@ -570,12 +578,12 @@ impl BuilderIncoming for OverlayBuilder {
         inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         tccache: &Mutex<TcCache>,
     ) -> Result<BuildResult> {
-        debug!("[run_build({})]: Preparing overlay", job_id);
+        tracing::debug!("[run_build({})]: Preparing overlay", job_id);
         let overlay = self
             .prepare_overlay_dirs(job_id, &tc, tccache)
             .await
             .context("failed to prepare overlay dirs")?;
-        debug!("[run_build({})]: Performing build in {:?}", job_id, overlay);
+        tracing::debug!("[run_build({})]: Performing build in {:?}", job_id, overlay);
         // Guard invoking perform_build until we get a token from the jobserver
         let token = self.creator.jobserver.acquire().await?;
         let res = Self::perform_build(
@@ -589,9 +597,9 @@ impl BuilderIncoming for OverlayBuilder {
         .await;
         // Drop the jobserver token
         drop(token);
-        debug!("[run_build({})]: Finishing with overlay", job_id);
+        tracing::debug!("[run_build({})]: Finishing with overlay", job_id);
         self.finish_overlay(job_id, &tc, tccache, &overlay).await;
-        debug!("[run_build({})]: Returning result", job_id);
+        tracing::debug!("[run_build({})]: Returning result", job_id);
         res.context("Failed to perform build")
     }
 }
@@ -631,7 +639,7 @@ impl DockerBuilder {
     // having locked a pidfile, or at minimum should loudly detect other running
     // instances - pidfile in /tmp
     pub async fn new(creator: ProcessCommandCreator) -> Result<Self> {
-        info!("Creating docker builder");
+        tracing::info!("Creating docker builder");
 
         let ret = Self {
             creator,
@@ -645,7 +653,7 @@ impl DockerBuilder {
     // TODO: this should really reclaim, and should check in the image map and container lists, so
     // that when things are removed from there it becomes a form of GC
     async fn cleanup(&self) -> Result<()> {
-        info!("Performing initial Docker cleanup");
+        tracing::info!("Performing initial Docker cleanup");
 
         let mut cmd = self.creator.clone().new_command_sync("docker");
         let containers = cmd
@@ -713,7 +721,7 @@ impl DockerBuilder {
             }
         }
 
-        info!("Completed initial Docker cleanup");
+        tracing::info!("Completed initial Docker cleanup");
         Ok(())
     }
 
@@ -740,7 +748,7 @@ impl DockerBuilder {
                     match map.entry(tc.clone()) {
                         hash_map::Entry::Occupied(e) => e.get().clone(),
                         hash_map::Entry::Vacant(e) => {
-                            info!("[get_container({})]: Creating Docker image for {:?} (may block requests)", job_id, tc);
+                            tracing::info!("[get_container({})]: Creating Docker image for {:?} (may block requests)", job_id, tc);
                             let image =
                                 Self::make_image(&self.creator, job_id, tc, tccache).await?;
                             e.insert(image.clone());
@@ -802,9 +810,10 @@ impl DockerBuilder {
                     .await
                 {
                     // We do a final check anyway, so just continue
-                    warn!(
+                    tracing::warn!(
                         "[clean_container({})]: Failed to remove added path in a container: {}",
-                        job_id, e
+                        job_id,
+                        e
                     )
                 }
             }
@@ -828,14 +837,18 @@ impl DockerBuilder {
         // TODO: collect images
 
         if let Err(e) = self.clean_container(job_id, &cid).await {
-            info!(
+            tracing::info!(
                 "[finish_container({})]: Failed to clean container {}: {}",
-                job_id, cid, e
+                job_id,
+                cid,
+                e
             );
             if let Err(e) = docker_rm(&self.creator, &cid).await {
-                warn!(
+                tracing::warn!(
                     "[finish_container({})]: Failed to remove container {} after failed clean: {}",
-                    job_id, cid, e
+                    job_id,
+                    cid,
+                    e
                 );
             }
             return;
@@ -843,20 +856,23 @@ impl DockerBuilder {
 
         // Good as new, add it back to the container list
         if let Some(entry) = self.container_lists.lock().await.get_mut(tc) {
-            debug!(
+            tracing::debug!(
                 "[finish_container({})]: Reclaimed container {}",
-                job_id, cid
+                job_id,
+                cid
             );
             entry.push(cid)
         } else {
-            warn!(
+            tracing::warn!(
                 "[finish_container({})]: Was ready to reclaim container {} but toolchain went missing",
                 job_id, cid
             );
             if let Err(e) = docker_rm(&self.creator, &cid).await {
-                warn!(
+                tracing::warn!(
                     "[finish_container({})]: Failed to remove container {}: {}",
-                    job_id, cid, e
+                    job_id,
+                    cid,
+                    e
                 );
             }
         }
@@ -887,7 +903,7 @@ impl DockerBuilder {
             }
         };
 
-        trace!("[make_image({})]: Copying in toolchain", job_id);
+        tracing::trace!("[make_image({})]: Copying in toolchain", job_id);
         let mut cmd = creator.clone().new_command_sync("docker");
         cmd.args(&["cp", "-", &format!("{}:/", cid)])
             .check_piped(|mut stdin| async move {
@@ -929,19 +945,19 @@ impl DockerBuilder {
         output_paths: Vec<String>,
         cid: &str,
     ) -> Result<BuildResult> {
-        trace!(
+        tracing::trace!(
             "[perform_build({})]: Compile environment: {:?}",
             job_id,
             compile_command.env_vars
         );
-        trace!(
+        tracing::trace!(
             "[perform_build({})]: Compile command: {:?} {:?}",
             job_id,
             compile_command.executable,
             compile_command.arguments
         );
 
-        trace!(
+        tracing::trace!(
             "[perform_build({})]: Output paths: {:?}",
             job_id,
             output_paths
@@ -951,7 +967,7 @@ impl DockerBuilder {
             bail!("output_paths is empty");
         }
 
-        trace!("[perform_build({})]: copying in inputs", job_id);
+        tracing::trace!("[perform_build({})]: copying in inputs", job_id);
 
         let mut cmd = creator.clone().new_command_sync("docker");
         cmd.args(&["cp", "-", &format!("{}:/", cid)])
@@ -970,7 +986,7 @@ impl DockerBuilder {
         } = compile_command;
         let cwd = Path::new(&cwd);
 
-        trace!("[perform_build({})]: creating output directories", job_id);
+        tracing::trace!("[perform_build({})]: creating output directories", job_id);
         let mut cmd = creator.clone().new_command_sync("docker");
         cmd.args(&["exec", cid, "busybox", "mkdir", "-p"]).arg(cwd);
         for path in output_paths.iter() {
@@ -986,15 +1002,16 @@ impl DockerBuilder {
             .await
             .context("Failed to create directories required for compile in container")?;
 
-        trace!("[perform_build({})]: performing compile", job_id);
+        tracing::trace!("[perform_build({})]: performing compile", job_id);
         // TODO: likely shouldn't perform the compile as root in the container
         let mut cmd = creator.clone().new_command_sync("docker");
         cmd.arg("exec");
         for (k, v) in env_vars {
             if k.contains('=') {
-                warn!(
+                tracing::warn!(
                     "[perform_build({})]: Skipping environment variable: {:?}",
-                    job_id, k
+                    job_id,
+                    k
                 );
                 continue;
             }
@@ -1013,14 +1030,14 @@ impl DockerBuilder {
             .output()
             .await
             .context("Failed to start executing compile")?;
-        trace!(
+        tracing::trace!(
             "[perform_build({})]: compile_output: {:?}",
             job_id,
             compile_output
         );
 
         let mut outputs = vec![];
-        trace!("[perform_build({})]: retrieving {:?}", job_id, output_paths);
+        tracing::trace!("[perform_build({})]: retrieving {:?}", job_id, output_paths);
         for path in output_paths {
             let abspath = cwd.join(&path); // Resolve in case it's relative since we copy it from the root level
                                            // TODO: this isn't great, but cp gives it out as a tar
@@ -1036,9 +1053,10 @@ impl DockerBuilder {
                     .expect("Failed to read compress output stdout");
                 outputs.push((path, output))
             } else {
-                debug!(
+                tracing::debug!(
                     "[perform_build({})]: Missing output path {:?}",
-                    job_id, path
+                    job_id,
+                    path
                 )
             }
         }
@@ -1064,14 +1082,15 @@ impl BuilderIncoming for DockerBuilder {
         inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         tccache: &Mutex<TcCache>,
     ) -> Result<BuildResult> {
-        debug!("[run_build({})]: Finding container", job_id);
+        tracing::debug!("[run_build({})]: Finding container", job_id);
         let cid = self
             .get_container(job_id, &tc, tccache)
             .await
             .context("Failed to get a container for build")?;
-        debug!(
+        tracing::debug!(
             "[run_build({})]: Performing build with container {}",
-            job_id, cid
+            job_id,
+            cid
         );
         // Guard invoking perform_build until we get a token from the jobserver
         let token = self.creator.jobserver.acquire().await?;
@@ -1079,9 +1098,9 @@ impl BuilderIncoming for DockerBuilder {
             Self::perform_build(&self.creator, job_id, command, inputs_rdr, outputs, &cid).await;
         // Drop the jobserver token
         drop(token);
-        debug!("[run_build({})]: Finishing with container {}", job_id, cid);
+        tracing::debug!("[run_build({})]: Finishing with container {}", job_id, cid);
         self.finish_container(job_id, &tc, cid).await;
-        debug!("[run_build({})]: Returning result", job_id);
+        tracing::debug!("[run_build({})]: Returning result", job_id);
         res.context("Failed to perform build")
     }
 }

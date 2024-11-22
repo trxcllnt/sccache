@@ -59,7 +59,7 @@ impl ClientAuthCheck for EqCheck {
         if self.s == token {
             Ok(())
         } else {
-            warn!("User token {} != expected token {}", token, self.s);
+            tracing::warn!("User token {} != expected token {}", token, self.s);
             Err(ClientVisibleMsg::from_nonsensitive(
                 "Fixed token mismatch".to_owned(),
             ))
@@ -88,7 +88,7 @@ pub struct MozillaCheck {
 impl ClientAuthCheck for MozillaCheck {
     fn check(&self, token: &str) -> StdResult<(), ClientVisibleMsg> {
         self.check_mozilla(token).map_err(|e| {
-            warn!("Mozilla token validation failed: {}", e);
+            tracing::warn!("Mozilla token validation failed: {}", e);
             ClientVisibleMsg::from_nonsensitive(
                 "Failed to validate Mozilla OAuth token, run sccache --dist-auth".to_owned(),
             )
@@ -133,7 +133,7 @@ impl MozillaCheck {
         let insecure_token = jwt::decode::<MozillaToken>(token, &dummy_key, &validation)
             .context("Unable to decode jwt")?;
         let user = insecure_token.claims.sub;
-        trace!("Validating token for user {} with mozilla", user);
+        tracing::trace!("Validating token for user {} with mozilla", user);
         if UNIX_EPOCH + Duration::from_secs(insecure_token.claims.exp) < SystemTime::now() {
             bail!("JWT expired")
         }
@@ -147,7 +147,7 @@ impl MozillaCheck {
         }
         auth_cache.remove(token);
 
-        debug!("User {} not in cache, validating via auth0 endpoint", user);
+        tracing::debug!("User {} not in cache, validating via auth0 endpoint", user);
         // Retrieve the groups from the auth0 /userinfo endpoint, which Mozilla rules populate with groups
         // https://github.com/mozilla-iam/auth0-deploy/blob/6889f1dde12b84af50bb4b2e2f00d5e80d5be33f/rules/CIS-Claims-fixups.js#L158-L168
         let url = reqwest::Url::parse(MOZ_USERINFO_ENDPOINT)
@@ -172,7 +172,7 @@ impl MozillaCheck {
             .with_context(|| format!("Validation of the user profile failed for {}", user))?;
 
         // Validation success, cache the token
-        debug!("Validation for user {} succeeded, caching", user);
+        tracing::debug!("Validation for user {} succeeded, caching", user);
         auth_cache.insert(token.to_owned(), Instant::now());
         Ok(())
     }
@@ -255,7 +255,7 @@ impl ClientAuthCheck for ProxyTokenCheck {
         match self.check_token_with_forwarding(token) {
             Ok(()) => Ok(()),
             Err(e) => {
-                warn!("Proxying token validation failed: {}", e);
+                tracing::warn!("Proxying token validation failed: {}", e);
                 Err(ClientVisibleMsg::from_nonsensitive(
                     "Validation with token forwarding failed".to_owned(),
                 ))
@@ -287,7 +287,7 @@ impl ProxyTokenCheck {
             }
             auth_cache.remove(token);
         }
-        trace!("Validating token by forwarding to {}", self.url);
+        tracing::trace!("Validating token by forwarding to {}", self.url);
         // Make a request to another API, which as a side effect should actually check the token
         let res = self
             .client
@@ -320,7 +320,7 @@ impl ClientAuthCheck for ValidJWTCheck {
         match self.check_jwt_validity(token) {
             Ok(()) => Ok(()),
             Err(e) => {
-                warn!("JWT validation failed: {}", e);
+                tracing::warn!("JWT validation failed: {}", e);
                 Err(ClientVisibleMsg::from_nonsensitive(
                     "JWT could not be validated".to_owned(),
                 ))
@@ -351,7 +351,7 @@ impl ValidJWTCheck {
 
     fn check_jwt_validity(&self, token: &str) -> Result<()> {
         let header = jwt::decode_header(token).context("Could not decode jwt header")?;
-        trace!("Validating JWT in scheduler");
+        tracing::trace!("Validating JWT in scheduler");
         // Prepare validation
         let kid = header.kid.context("No kid found")?;
         let pkcs1 = jwt::DecodingKey::from_rsa_der(

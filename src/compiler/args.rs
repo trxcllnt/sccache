@@ -671,12 +671,14 @@ macro_rules! take_arg {
         ArgInfo::TakeArg(
             $s,
             |arg: OsString| $vtype::process(arg).map($variant),
+            #[allow(clippy::char_lit_as_u8)]
             ArgDisposition::$d(Some($x as u8)),
         )
     };
 }
 
 #[cfg(test)]
+#[allow(clippy::char_lit_as_u8)]
 mod tests {
     use super::*;
     use itertools::{diff_with, Diff};

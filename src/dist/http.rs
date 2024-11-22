@@ -323,34 +323,36 @@ mod server {
     use bytes::Buf;
 
     use async_compression::tokio::bufread::ZlibDecoder as ZlibReadDecoder;
-    use futures::lock::Mutex;
-    use futures::TryStreamExt;
+    use futures::{lock::Mutex, TryStreamExt};
 
-    use hyper::body::Incoming;
     use hyper_util::rt::{TokioExecutor, TokioIo};
-    use hyper_util::server;
 
     use once_cell::sync::Lazy;
     use openssl::ssl::{Ssl, SslAcceptor, SslMethod};
 
+    use rand::{rngs::OsRng, RngCore};
+
     use serde_json::json;
 
-    use std::result::Result as StdResult;
-    use std::sync::Arc;
-    use std::time::Duration;
     use std::{
         borrow::{Borrow, BorrowMut},
         collections::HashMap,
+        io,
+        net::SocketAddr,
+        result::Result as StdResult,
+        sync::Arc,
+        time::Duration,
     };
-    use std::{io, net::SocketAddr};
 
-    use rand::{rngs::OsRng, RngCore};
-
-    use tokio::io::AsyncReadExt;
-    use tokio::net::TcpListener;
+    use tokio::{io::AsyncReadExt, net::TcpListener};
     use tokio_openssl::SslStream;
     use tokio_util::io::StreamReader;
-    use tower::{Service, ServiceExt};
+    use tower::{Service, ServiceBuilder, ServiceExt};
+    use tower_http::{
+        request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+        sensitive_headers::{SetSensitiveRequestHeadersLayer, SetSensitiveResponseHeadersLayer},
+        trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+    };
 
     use super::common::{
         bincode_req_fut, AllocJobHttpResponse, HeartbeatServerHttpRequest, JobJwt,
@@ -368,8 +370,8 @@ mod server {
 
     use crate::errors::*;
 
-    pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
-    pub const HEARTBEAT_ERROR_INTERVAL: Duration = Duration::from_secs(5);
+    pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+    pub const HEARTBEAT_ERROR_INTERVAL: Duration = Duration::from_secs(10);
     pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(90);
 
     fn create_https_cert_and_privkey(addr: SocketAddr) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
@@ -476,6 +478,32 @@ mod server {
         validation
     });
 
+    fn with_request_tracing(app: Router) -> Router {
+        // Mark these headers as sensitive so they don't show in logs
+        let headers_to_redact: Arc<[_]> = Arc::new([
+            http::header::AUTHORIZATION,
+            http::header::PROXY_AUTHORIZATION,
+            http::header::COOKIE,
+            http::header::SET_COOKIE,
+        ]);
+        app.layer(
+            ServiceBuilder::new()
+                .layer(SetSensitiveRequestHeadersLayer::from_shared(Arc::clone(
+                    &headers_to_redact,
+                )))
+                .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+                .layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(DefaultMakeSpan::new().include_headers(true))
+                        .on_response(DefaultOnResponse::new().include_headers(true)),
+                )
+                .layer(PropagateRequestIdLayer::x_request_id())
+                .layer(SetSensitiveResponseHeadersLayer::from_shared(
+                    headers_to_redact,
+                )),
+        )
+    }
+
     fn get_header_value<'a>(headers: &'a HeaderMap, name: &'a str) -> Option<&'a str> {
         if let Some(header) = headers.get(name) {
             if let Ok(header) = header.to_str() {
@@ -530,11 +558,11 @@ mod server {
         err: anyhow::Error,
     ) -> (StatusCode, Vec<u8>) {
         let msg = format!("sccache: `{method} {uri}` failed with {err}");
-        error!("{}", msg);
+        tracing::error!("{}", msg);
         (StatusCode::INTERNAL_SERVER_ERROR, msg.into_bytes())
     }
 
-    fn unwrap_infallible<T>(result: std::result::Result<T, std::convert::Infallible>) -> T {
+    fn unwrap_infallible<T>(result: StdResult<T, std::convert::Infallible>) -> T {
         match result {
             Ok(value) => value,
             Err(err) => match err {},
@@ -552,10 +580,7 @@ mod server {
     {
         type Rejection = Response;
 
-        async fn from_request(
-            req: Request,
-            state: &S,
-        ) -> std::result::Result<Self, Self::Rejection> {
+        async fn from_request(req: Request, state: &S) -> StdResult<Self, Self::Rejection> {
             let data = match get_header_value(req.headers(), "Content-Type") {
                 Some("application/octet-stream") => Bytes::from_request(req, state)
                     .await
@@ -695,7 +720,7 @@ mod server {
                 async fn from_request_parts(
                     parts: &mut Parts,
                     _state: &S,
-                ) -> std::result::Result<Self, Self::Rejection> {
+                ) -> StdResult<Self, Self::Rejection> {
                     let TypedHeader(Authorization(bearer)) = parts
                         .extract::<TypedHeader<Authorization<Bearer>>>()
                         .await
@@ -710,7 +735,10 @@ mod server {
                         .check(bearer.token())
                         .map(|_| AuthenticatedClient)
                         .map_err(|err| {
-                            warn!("[AuthenticatedClient()]: invalid client auth: {}", err.0);
+                            tracing::warn!(
+                                "[AuthenticatedClient()]: invalid client auth: {}",
+                                err.0
+                            );
                             StatusCode::UNAUTHORIZED
                         })
                 }
@@ -729,7 +757,7 @@ mod server {
                 async fn from_request_parts(
                     parts: &mut Parts,
                     _state: &S,
-                ) -> std::result::Result<Self, Self::Rejection> {
+                ) -> StdResult<Self, Self::Rejection> {
                     let Extension(this) = parts
                         .extract::<Extension<Arc<SchedulerState>>>()
                         .await
@@ -746,19 +774,22 @@ mod server {
                         .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
                     let server_id = (this.server_auth)(bearer.token()).ok_or_else(|| {
-                        warn!("[AuthenticatedServerId({remote_addr})]: invalid server auth token");
+                        tracing::warn!(
+                            "[AuthenticatedServerId({remote_addr})]: invalid server auth token"
+                        );
                         StatusCode::UNAUTHORIZED
                     })?;
 
                     let origin_ip =
                         if let Some(header) = get_header_value(&parts.headers, "X-Real-IP") {
-                            trace!("X-Real-IP: {:?}", header);
+                            tracing::trace!("X-Real-IP: {:?}", header);
                             match header.parse() {
                                 Ok(ip) => ip,
                                 Err(err) => {
-                                    warn!(
+                                    tracing::warn!(
                                         "X-Real-IP value {:?} could not be parsed: {:?}",
-                                        header, err
+                                        header,
+                                        err
                                     );
                                     return Err(StatusCode::UNAUTHORIZED);
                                 }
@@ -768,8 +799,8 @@ mod server {
                         };
 
                     if server_id.addr().ip() != origin_ip {
-                        trace!("server ip: {:?}", server_id.addr().ip());
-                        trace!("request ip: {:?}", remote_addr.ip());
+                        tracing::trace!("server ip: {:?}", server_id.addr().ip());
+                        tracing::trace!("request ip: {:?}", remote_addr.ip());
                         Err(StatusCode::UNAUTHORIZED)
                     } else {
                         Ok(AuthenticatedServerId(server_id))
@@ -789,7 +820,7 @@ mod server {
                         return Ok(());
                     }
                 }
-                info!(
+                tracing::info!(
                     "Adding new certificate for {} to scheduler",
                     server_id.addr()
                 );
@@ -956,6 +987,7 @@ mod server {
                         }
                     }),
                 )
+                .fallback(|| async move { (StatusCode::NOT_FOUND, "404") })
                 .layer(Extension(Arc::new(SchedulerState {
                     client_auth: check_client_auth,
                     server_auth: check_server_auth,
@@ -963,14 +995,15 @@ mod server {
                     requester: SchedulerRequester {
                         client: Mutex::new(new_reqwest_client(None)),
                     },
-                })))
-                .fallback(|| async move { (StatusCode::NOT_FOUND, "404") });
+                })));
+
+            let app = with_request_tracing(app);
 
             let mut make_service = app.into_make_service_with_connect_info::<SocketAddr>();
 
             let listener = TcpListener::bind(self.public_addr).await.unwrap();
 
-            info!("Scheduler listening for clients on {}", self.public_addr);
+            tracing::info!("Scheduler listening for clients on {}", self.public_addr);
 
             loop {
                 let (tcp_stream, remote_addr) = listener.accept().await.unwrap();
@@ -981,18 +1014,20 @@ mod server {
                     // `TokioIo` converts between them.
                     let tok_stream = TokioIo::new(tcp_stream);
 
-                    let hyper_service =
-                        hyper::service::service_fn(move |request: Request<Incoming>| {
+                    let hyper_service = hyper::service::service_fn(
+                        move |request: Request<hyper::body::Incoming>| {
                             // Clone `tower_service` because hyper's `Service` uses `&self` whereas
                             // tower's `Service` requires `&mut self`.
                             tower_service.clone().oneshot(request)
-                        });
+                        },
+                    );
 
-                    if let Err(err) = server::conn::auto::Builder::new(TokioExecutor::new())
-                        .serve_connection(tok_stream, hyper_service)
-                        .await
+                    if let Err(err) =
+                        hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                            .serve_connection(tok_stream, hyper_service)
+                            .await
                     {
-                        debug!("sccache: failed to serve connection: {err:#}");
+                        tracing::debug!("sccache: failed to serve connection: {err:#}");
                     }
                 });
             }
@@ -1123,7 +1158,7 @@ mod server {
                 async fn from_request_parts(
                     parts: &mut Parts,
                     _state: &S,
-                ) -> std::result::Result<Self, Self::Rejection> {
+                ) -> StdResult<Self, Self::Rejection> {
                     let Extension(this) = parts
                         .extract::<Extension<Arc<ServerState>>>()
                         .await
@@ -1159,7 +1194,7 @@ mod server {
                 async fn from_request_parts(
                     parts: &mut Parts,
                     _state: &S,
-                ) -> std::result::Result<Self, Self::Rejection> {
+                ) -> StdResult<Self, Self::Rejection> {
                     let Extension(this) = parts
                         .extract::<Extension<Arc<ServerState>>>()
                         .await
@@ -1312,7 +1347,7 @@ mod server {
 
                             futures::pin_mut!(inputs_reader);
 
-                            trace!("[run_job({})]: {:?}", job_id, run_job);
+                            tracing::trace!("[run_job({})]: {:?}", job_id, run_job);
                             let RunJobHttpRequest { command, outputs } = run_job;
 
                             match handler
@@ -1331,14 +1366,31 @@ mod server {
                         }
                     }),
                 )
+                .fallback(|| async move { (StatusCode::NOT_FOUND, "404") })
                 // 1GiB should be enough for toolchains and compile inputs, right?
                 .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
+                // .layer(
+                //     TraceLayer::new_for_http()
+                //         // Create our own span for the request and include the matched path. The matched
+                //         // path is useful for figuring out which handler the request was routed to.
+                //         .make_span_with(|req: &Request| {
+                //             let method = req.method();
+                //             let uri = req.uri();
+                //             // axum automatically adds this extension.
+                //             let matched_path = req
+                //                 .extensions()
+                //                 .get::<MatchedPath>()
+                //                 .map(|matched_path| matched_path.as_str());
+                //             tracing::debug_span!("request", %method, %uri, matched_path)
+                //         }),
+                // )
                 .layer(Extension(Arc::new(ServerState {
                     auth: JWTJobAuthorizer::new(jwt_key.clone()),
                     server_nonce: server_nonce.clone(),
                     requester,
-                })))
-                .fallback(|| async move { (StatusCode::NOT_FOUND, "404") });
+                })));
+
+            let app = with_request_tracing(app);
 
             let tls_acceptor = {
                 let cert = openssl::x509::X509::from_pem(&cert_pem).unwrap();
@@ -1353,9 +1405,10 @@ mod server {
 
             let listener = TcpListener::bind(bind_addr).await.unwrap();
 
-            info!(
+            tracing::info!(
                 "Server listening for clients on {}, public_addr is: {}",
-                bind_addr, public_addr
+                bind_addr,
+                public_addr
             );
 
             loop {
@@ -1368,9 +1421,10 @@ mod server {
                     let ssl = Ssl::new(tls_acceptor.context()).unwrap();
                     let mut tls_stream = SslStream::new(ssl, tcp_stream).unwrap();
                     if let Err(err) = SslStream::accept(std::pin::Pin::new(&mut tls_stream)).await {
-                        debug!(
+                        tracing::debug!(
                             "error during tls handshake connection from {}: {}",
-                            remote_addr, err
+                            remote_addr,
+                            err
                         );
                         return;
                     }
@@ -1379,18 +1433,20 @@ mod server {
                     // `TokioIo` converts between them.
                     let tok_stream = TokioIo::new(tls_stream);
 
-                    let hyper_service =
-                        hyper::service::service_fn(move |request: Request<Incoming>| {
+                    let hyper_service = hyper::service::service_fn(
+                        move |request: Request<hyper::body::Incoming>| {
                             // Clone `tower_service` because hyper's `Service` uses `&self` whereas
                             // tower's `Service` requires `&mut self`.
                             tower_service.clone().oneshot(request)
-                        });
+                        },
+                    );
 
-                    if let Err(err) = server::conn::auto::Builder::new(TokioExecutor::new())
-                        .serve_connection(tok_stream, hyper_service)
-                        .await
+                    if let Err(err) =
+                        hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                            .serve_connection(tok_stream, hyper_service)
+                            .await
                     {
-                        debug!("sccache: failed to serve connection: {err:#}");
+                        tracing::debug!("sccache: failed to serve connection: {err:#}");
                     }
                 });
             }

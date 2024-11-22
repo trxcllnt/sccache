@@ -29,6 +29,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
 #[cfg_attr(target_os = "freebsd", path = "build_freebsd.rs")]
 mod build;
 
@@ -188,7 +190,9 @@ fn run(command: Command) -> Result<i32> {
 
             let check_server_auth: dist::http::ServerAuthCheck = match server_auth {
                 scheduler_config::ServerAuth::Insecure => {
-                    warn!("Scheduler starting with DANGEROUSLY_INSECURE server authentication");
+                    tracing::warn!(
+                        "Scheduler starting with DANGEROUSLY_INSECURE server authentication"
+                    );
                     let token = INSECURE_DIST_SERVER_TOKEN;
                     Box::new(move |server_token| check_server_token(server_token, token))
                 }
@@ -255,7 +259,7 @@ fn run(command: Command) -> Result<i32> {
             let bind_addr = bind_addr.unwrap_or(public_addr);
             let num_cpus = (num_cpus::get() - num_cpus_to_ignore).max(1);
 
-            trace!("Server num_cpus={num_cpus}");
+            tracing::trace!("Server num_cpus={num_cpus}");
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .worker_threads(2 * num_cpus::get())
@@ -315,7 +319,9 @@ fn run(command: Command) -> Result<i32> {
                 let server_id = ServerId::new(public_addr);
                 let scheduler_auth = match scheduler_auth {
                     server_config::SchedulerAuth::Insecure => {
-                        warn!("Server starting with DANGEROUSLY_INSECURE scheduler authentication");
+                        tracing::warn!(
+                            "Server starting with DANGEROUSLY_INSECURE scheduler authentication"
+                        );
                         create_server_token(server_id, INSECURE_DIST_SERVER_TOKEN)
                     }
                     server_config::SchedulerAuth::Token { token } => {
@@ -363,7 +369,23 @@ fn run(command: Command) -> Result<i32> {
 
 fn init_logging() {
     if env::var(sccache::LOGGING_ENV).is_ok() {
-        match env_logger::Builder::from_env(sccache::LOGGING_ENV).try_init() {
+        match tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_env(sccache::LOGGING_ENV).unwrap_or_else(
+                    |_| {
+                        // axum logs rejections from built-in extractors with the `axum::rejection`
+                        // target, at `TRACE` level. `axum::rejection=trace` enables showing those events
+                        format!(
+                            "{}=debug,tower_http=debug,axum::rejection=trace",
+                            env!("CARGO_CRATE_NAME")
+                        )
+                        .into()
+                    },
+                ),
+            )
+            .with(tracing_subscriber::fmt::layer())
+            .try_init()
+        {
             Ok(_) => (),
             Err(e) => panic!("Failed to initialize logging: {:?}", e),
         }
@@ -409,7 +431,7 @@ impl Scheduler {
         }
 
         for server_id in dead_servers {
-            warn!(
+            tracing::warn!(
                 "[prune_servers({})]: Server appears to be dead, pruning it in the scheduler",
                 server_id.addr()
             );
@@ -528,7 +550,7 @@ impl SchedulerIncoming for Scheduler {
 
             if log_enabled!(log::Level::Trace) {
                 if let Some(last_error) = server.last_error {
-                    trace!(
+                    tracing::trace!(
                         "[alloc_job({}, {})]: Assigned job to server whose most recent error was {:?} ago",
                         server_id.addr(),
                         job_id,
@@ -539,7 +561,7 @@ impl SchedulerIncoming for Scheduler {
 
             drop(servers);
 
-            debug!(
+            tracing::debug!(
                 "[alloc_job({}, {})]: Job created and assigned to server",
                 server_id.addr(),
                 job_id,
@@ -646,7 +668,7 @@ impl SchedulerIncoming for Scheduler {
                     }
                     Err(err) => {
                         // If alloc_job failed, try the next best server
-                        warn!(
+                        tracing::warn!(
                             "[alloc_job({})]: {}",
                             server_id.addr(),
                             error_chain_to_string(&err)
@@ -708,7 +730,7 @@ impl SchedulerIncoming for Scheduler {
 
         self.prune_servers(&mut servers);
 
-        info!("Registered new server {:?}", server_id);
+        tracing::info!("Registered new server {:?}", server_id);
 
         servers.insert(
             server_id,
@@ -862,18 +884,18 @@ impl ServerIncoming for Server {
 
                 let num_active_jobs = jobs_active.load(std::sync::atomic::Ordering::SeqCst);
 
-                trace!("Performing heartbeat");
+                tracing::trace!("Performing heartbeat");
 
                 match requester
                     .do_heartbeat(num_assigned_jobs, num_active_jobs)
                     .await
                 {
                     Ok(HeartbeatServerResult { is_new }) => {
-                        trace!("Heartbeat success is_new={}", is_new);
+                        tracing::trace!("Heartbeat success is_new={}", is_new);
                         tokio::time::sleep(HEARTBEAT_INTERVAL).await;
                     }
                     Err(e) => {
-                        error!("Failed to send heartbeat to server: {}", e);
+                        tracing::error!("Failed to send heartbeat to server: {}", e);
                         tokio::time::sleep(HEARTBEAT_ERROR_INTERVAL).await;
                     }
                 }
@@ -947,7 +969,7 @@ impl ServerIncoming for Server {
                 .await
                 .map(|_| ())
                 .or_else(|err| {
-                    warn!("[handle_submit_toolchain({})]: {:?}", job_id, err);
+                    tracing::warn!("[handle_submit_toolchain({})]: {:?}", job_id, err);
                     // Ignore errors reading the request body
                     Ok(())
                 })
@@ -962,7 +984,7 @@ impl ServerIncoming for Server {
         match res {
             Ok(_) => Ok(SubmitToolchainResult::Success),
             Err(err) => {
-                warn!("[handle_submit_toolchain({})]: {:?}", job_id, err);
+                tracing::warn!("[handle_submit_toolchain({})]: {:?}", job_id, err);
                 // Remove the job on error
                 self.jobs_assigned.lock().await.remove(&job_id);
                 Ok(SubmitToolchainResult::CannotCache)
@@ -1002,9 +1024,12 @@ impl ServerIncoming for Server {
             .await
             .context("Failed to update job state")
         {
-            warn!(
+            tracing::warn!(
                 "[handle_run_job({})]: {:?} ({} -> {})",
-                job_id, err, "Ready", "Started"
+                job_id,
+                err,
+                "Ready",
+                "Started"
             );
         }
 
@@ -1030,9 +1055,12 @@ impl ServerIncoming for Server {
             .await
             .context("Failed to update job state")
         {
-            warn!(
+            tracing::warn!(
                 "[handle_run_job({})]: {:?} ({} -> {})",
-                job_id, err, "Started", "Complete"
+                job_id,
+                err,
+                "Started",
+                "Complete"
             );
         }
 
