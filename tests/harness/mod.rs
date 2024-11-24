@@ -420,7 +420,7 @@ impl DistSystem {
             .worker_threads(1)
             .build()
             .unwrap();
-        let pool = runtime.handle().clone();
+
         let token = create_server_token(ServerId::new(server_addr), DIST_SERVER_TOKEN);
         let server = dist::http::Server::new(
             server_addr,
@@ -432,6 +432,7 @@ impl DistSystem {
             handler,
         )
         .unwrap();
+
         let pid = match unsafe { nix::unistd::fork() }.unwrap() {
             ForkResult::Parent { child } => {
                 self.server_pids.push(child);
@@ -442,7 +443,7 @@ impl DistSystem {
                 env_logger::try_init().unwrap();
 
                 runtime.block_on(async move {
-                    match server.start(pool).await {
+                    match server.start().await {
                         Ok(_) => {}
                         Err(err) => panic!("Err: {err}"),
                     }

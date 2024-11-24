@@ -695,11 +695,7 @@ pub trait SchedulerIncoming: Send + Sync {
 #[async_trait]
 pub trait ServerIncoming: Send + Sync {
     // To scheduler
-    fn start_heartbeat(
-        &self,
-        runtime: tokio::runtime::Handle,
-        requester: std::sync::Arc<dyn ServerOutgoing>,
-    );
+    fn start_heartbeat(&self, requester: std::sync::Arc<dyn ServerOutgoing>);
     // From Scheduler
     async fn handle_assign_job(&self, tc: Toolchain) -> ExtResult<AssignJobResult, Error>;
     // From Client

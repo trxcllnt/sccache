@@ -1086,10 +1086,7 @@ mod server {
             })
         }
 
-        pub async fn start(
-            self,
-            runtime: tokio::runtime::Handle,
-        ) -> Result<std::convert::Infallible> {
+        pub async fn start(self) -> Result<std::convert::Infallible> {
             #[derive(Clone)]
             pub struct ServerRequester {
                 client: reqwest::Client,
@@ -1248,7 +1245,7 @@ mod server {
             // so create a clone and move it into each route handling closure.
             let handler = Arc::new(handler);
 
-            handler.start_heartbeat(runtime.clone(), requester.clone());
+            handler.start_heartbeat(requester.clone());
 
             let app = Router::new()
                 .route(

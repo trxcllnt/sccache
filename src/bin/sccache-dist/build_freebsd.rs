@@ -22,13 +22,10 @@ use sccache::dist::{
     Toolchain,
 };
 use sccache::lru_disk_cache::Error as LruError;
-use sccache::mock_command::{
-    AsyncCommand, CommandChild, CommandCreatorSync, ProcessCommandCreator, RunCommand,
-};
 use std::collections::{hash_map, HashMap};
 use std::hint;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
@@ -46,7 +43,7 @@ trait AsyncCommandExt {
 }
 
 #[async_trait]
-impl AsyncCommandExt for AsyncCommand {
+impl AsyncCommandExt for tokio::process::Command {
     async fn check_stdout_trim(&mut self) -> Result<String> {
         let output = self.output().await.context("Failed to start command")?;
         check_output(&output)?;
@@ -63,11 +60,11 @@ impl AsyncCommandExt for AsyncCommand {
         let mut process = self
             .stdin(Stdio::piped())
             .spawn()
-            .await
             .context("Failed to start command")?;
         pipe(
             process
-                .take_stdin()
+                .stdin
+                .take()
                 .expect("Requested piped stdin but not present"),
         )
         .await
@@ -97,8 +94,8 @@ fn check_output(output: &Output) -> Result<()> {
 }
 
 // Force remove the container
-async fn pot_rm(creator: &ProcessCommandCreator, cid: &str, pot_cmd: &Path) -> Result<()> {
-    let mut cmd = creator.clone().new_command_sync(pot_cmd);
+async fn pot_rm(cid: &str, pot_cmd: &Path) -> Result<()> {
+    let mut cmd = tokio::process::Command::new(pot_cmd);
     cmd.args(&["destroy", "-F", "-p", cid])
         .check_run()
         .await
@@ -107,7 +104,6 @@ async fn pot_rm(creator: &ProcessCommandCreator, cid: &str, pot_cmd: &Path) -> R
 
 #[derive(Clone)]
 pub struct PotBuilder {
-    creator: ProcessCommandCreator,
     pot_fs_root: PathBuf,
     clone_from: String,
     pot_cmd: PathBuf,
@@ -116,6 +112,7 @@ pub struct PotBuilder {
     container_lists: Arc<Mutex<HashMap<Toolchain, Vec<String>>>>,
     cleanup_thread_count: Arc<AtomicUsize>,
     max_cleanup_thread_count: usize,
+    jobserver: sccache::jobserver::Client,
 }
 
 impl PotBuilder {
@@ -127,12 +124,12 @@ impl PotBuilder {
         clone_from: String,
         pot_cmd: PathBuf,
         pot_clone_args: Vec<String>,
-        creator: ProcessCommandCreator,
+        jobserver: sccache::jobserver::Client,
     ) -> Result<Self> {
         tracing::info!("Creating pot builder");
 
         let ret = Self {
-            creator,
+            jobserver,
             pot_fs_root,
             clone_from,
             pot_cmd,
@@ -149,7 +146,7 @@ impl PotBuilder {
     // This removes all leftover pots from previous runs
     async fn cleanup(&self) -> Result<()> {
         tracing::info!("Performing initial pot cleanup");
-        let mut cmd = self.creator.clone().new_command_sync(&self.pot_cmd);
+        let mut cmd = tokio::process::Command::new(&self.pot_cmd);
         let mut to_remove = cmd
             .args(&["ls", "-q"])
             .check_stdout_trim()
@@ -162,7 +159,7 @@ impl PotBuilder {
         to_remove.sort();
         for cid in to_remove {
             tracing::trace!("Removing pot {}", cid);
-            if let Err(e) = pot_rm(&self.creator, &cid, &self.pot_cmd).await {
+            if let Err(e) = pot_rm(&cid, &self.pot_cmd).await {
                 tracing::warn!("Failed to remove container {}: {}", cid, e);
             }
         }
@@ -195,7 +192,6 @@ impl PotBuilder {
                         hash_map::Entry::Vacant(e) => {
                             tracing::info!("[get_container({})]: Creating pot image for {:?} (may block requests)", job_id, tc);
                             let image = Self::make_image(
-                                &self.creator,
                                 job_id,
                                 tc,
                                 tccache,
@@ -210,26 +206,25 @@ impl PotBuilder {
                         }
                     }
                 };
-                Self::start_container(&self.creator, &image, &self.pot_cmd, &self.pot_clone_args)
-                    .await
+                Self::start_container(&image, &self.pot_cmd, &self.pot_clone_args).await
             }
         }
     }
 
-    async fn clean_container(creator: &ProcessCommandCreator, cid: &str) -> Result<()> {
-        let mut cmd = creator.clone().new_command_sync("pot");
+    async fn clean_container(cid: &str) -> Result<()> {
+        let mut cmd = tokio::process::Command::new("pot");
         cmd.args(&["stop", "-p", cid])
             .check_run()
             .await
             .context("Failed to stop container")?;
 
-        let mut cmd = creator.clone().new_command_sync("pot");
+        let mut cmd = tokio::process::Command::new("pot");
         cmd.args(&["revert", "-p", cid])
             .check_run()
             .await
             .context("Failed to revert container")?;
 
-        let mut cmd = creator.clone().new_command_sync("pot");
+        let mut cmd = tokio::process::Command::new("pot");
         cmd.args(&["start", "-p", cid])
             .check_run()
             .await
@@ -240,21 +235,20 @@ impl PotBuilder {
     // Failing during cleanup is pretty unexpected, but we can still return the successful compile
     // TODO: if too many of these fail, we should mark this builder as faulty
     async fn finish_container(
-        creator: &ProcessCommandCreator,
         job_id: JobId,
         container_lists: Arc<Mutex<HashMap<Toolchain, Vec<String>>>>,
         tc: Toolchain,
         cid: String,
         pot_cmd: &PathBuf,
     ) {
-        if let Err(e) = Self::clean_container(creator, &cid).await {
+        if let Err(e) = Self::clean_container(&cid).await {
             tracing::info!(
                 "[finish_container({})]: Failed to clean container {}: {}",
                 job_id,
                 cid,
                 e
             );
-            if let Err(e) = pot_rm(creator, &cid, pot_cmd).await {
+            if let Err(e) = pot_rm(&cid, pot_cmd).await {
                 tracing::warn!(
                     "[finish_container({})]: Failed to remove container {} after failed clean: {}",
                     job_id,
@@ -278,7 +272,7 @@ impl PotBuilder {
                 "[finish_container({})]: Was ready to reclaim container {} but toolchain went missing",
                 job_id, cid
             );
-            if let Err(e) = pot_rm(creator, &cid, pot_cmd).await {
+            if let Err(e) = pot_rm(&cid, pot_cmd).await {
                 tracing::warn!(
                     "[finish_container({})]: Failed to remove container {}: {}",
                     job_id,
@@ -290,7 +284,6 @@ impl PotBuilder {
     }
 
     async fn make_image(
-        creator: &ProcessCommandCreator,
         job_id: JobId,
         tc: &Toolchain,
         tccache: &Mutex<TcCache>,
@@ -307,7 +300,7 @@ impl PotBuilder {
         );
         let mut clone_args: Vec<&str> = ["clone", "-p", &imagename, "-P", clone_from].to_vec();
         clone_args.append(&mut pot_clone_args.iter().map(|s| s as &str).collect());
-        let mut cmd = creator.clone().new_command_sync(pot_cmd);
+        let mut cmd = tokio::process::Command::new(pot_cmd);
         cmd.args(&clone_args)
             .check_run()
             .await
@@ -337,7 +330,7 @@ impl PotBuilder {
                 Err(Error::from(e))
             })?;
 
-        let mut cmd = creator.clone().new_command_sync(pot_cmd);
+        let mut cmd = tokio::process::Command::new(pot_cmd);
         cmd.args(&["snapshot", "-p", &imagename])
             .check_run()
             .await
@@ -347,7 +340,6 @@ impl PotBuilder {
     }
 
     async fn start_container(
-        creator: &ProcessCommandCreator,
         image: &str,
         pot_cmd: &PathBuf,
         pot_clone_args: &[String],
@@ -355,19 +347,19 @@ impl PotBuilder {
         let cid = format!("sccache-builder-{}", Uuid::new_v4());
         let mut clone_args: Vec<&str> = ["clone", "-p", &cid, "-P", image].to_vec();
         clone_args.append(&mut pot_clone_args.iter().map(|s| s as &str).collect());
-        let mut cmd = creator.clone().new_command_sync(pot_cmd);
+        let mut cmd = tokio::process::Command::new(pot_cmd);
         cmd.args(&clone_args)
             .check_run()
             .await
             .context("Failed to create pot container")?;
 
-        let mut cmd = creator.clone().new_command_sync(pot_cmd);
+        let mut cmd = tokio::process::Command::new(pot_cmd);
         cmd.args(&["snapshot", "-p", &cid])
             .check_run()
             .await
             .context("Failed to snapshotpot container")?;
 
-        let mut cmd = creator.clone().new_command_sync(pot_cmd);
+        let mut cmd = tokio::process::Command::new(pot_cmd);
         cmd.args(&["start", "-p", &cid])
             .check_run()
             .await
@@ -377,7 +369,6 @@ impl PotBuilder {
     }
 
     async fn perform_build(
-        creator: &ProcessCommandCreator,
         job_id: JobId,
         compile_command: CompileCommand,
         mut inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
@@ -416,7 +407,7 @@ impl PotBuilder {
 
         tracing::trace!("[perform_build({})]: creating output directories", job_id);
         assert!(!output_paths.is_empty());
-        let mut cmd = creator.clone().new_command_sync("jexec");
+        let mut cmd = tokio::process::Command::new("jexec");
         cmd.args(&[cid, "mkdir", "-p"]).arg(cwd);
         for path in output_paths.iter() {
             // If it doesn't have a parent, nothing needs creating
@@ -433,7 +424,7 @@ impl PotBuilder {
 
         tracing::trace!("[perform_build({})]: performing compile", job_id);
         // TODO: likely shouldn't perform the compile as root in the container
-        let mut cmd = creator.clone().new_command_sync("jexec");
+        let mut cmd = tokio::process::Command::new("jexec");
         cmd.arg(cid);
         cmd.arg("env");
         for (k, v) in env_vars {
@@ -471,10 +462,11 @@ impl PotBuilder {
         for path in output_paths {
             let abspath = cwd.join(&path); // Resolve in case it's relative since we copy it from the root level
                                            // TODO: this isn't great, but cp gives it out as a tar
-            let output = Command::new("jexec")
+            let output = tokio::process::Command::new("jexec")
                 .args(&[cid, "cat"])
                 .arg(abspath)
                 .output()
+                .await
                 .context("Failed to start command to retrieve output file")?;
             if output.status.success() {
                 let output = OutputData::try_from_reader(&*output.stdout)
@@ -515,13 +507,14 @@ impl BuilderIncoming for PotBuilder {
             .get_container(job_id, &tc, tccache)
             .await
             .context("Failed to get a container for build")?;
+        // Guard invoking perform_build until we get a token from the jobserver
+        let token = self.jobserver.acquire().await?;
         tracing::debug!(
             "[run_build({})]: Performing build with container {}",
             job_id,
             cid
         );
         let res = Self::perform_build(
-            &self.creator,
             job_id,
             command,
             inputs_rdr,
@@ -529,8 +522,11 @@ impl BuilderIncoming for PotBuilder {
             &cid,
             &self.pot_fs_root,
         )
-        .await
-        .context("Failed to perform build")?;
+        .await;
+        // Drop the jobserver token
+        drop(token);
+        // Unwrap the result
+        let res = res.context("Failed to perform build")?;
         tracing::debug!("[run_build({})]: Finishing with container {}", job_id, cid);
         let cloned = self.clone();
         let tc = tc;
@@ -548,15 +544,7 @@ impl BuilderIncoming for PotBuilder {
         //       many of the threads in tokio's threadpool. Maybe this should
         //       be awaited? How expensive is `Self::finish_container()`?
         runtime.spawn(async move {
-            Self::finish_container(
-                &cloned.creator,
-                job_id,
-                cloned.container_lists,
-                tc,
-                cid,
-                &cloned.pot_cmd,
-            )
-            .await;
+            Self::finish_container(job_id, cloned.container_lists, tc, cid, &cloned.pot_cmd).await;
             cloned.cleanup_thread_count.fetch_sub(1, Ordering::SeqCst);
         });
         tracing::debug!("[run_build({})]: Returning result", job_id);

@@ -296,7 +296,7 @@ impl fmt::Debug for AsyncCommand {
 /// Struct to use `RunCommand` with `std::process::Command`.
 #[derive(Clone)]
 pub struct ProcessCommandCreator {
-    pub jobserver: Client,
+    jobserver: Client,
 }
 
 /// Trivial implementation of `CommandCreator` for `ProcessCommandCreator`.

@@ -1,6 +1,3 @@
-#[macro_use]
-extern crate log;
-
 use anyhow::{bail, Context, Error, Result};
 use async_trait::async_trait;
 use base64::Engine;
@@ -18,7 +15,6 @@ use sccache::dist::{
     ServerOutgoing, ServerStatusResult, SubmitToolchainResult, TcCache, Toolchain,
     UpdateJobStateResult,
 };
-use sccache::mock_command::CommandCreatorSync;
 use sccache::util::daemonize;
 use sccache::util::BASE64_URL_SAFE_ENGINE;
 use serde::{Deserialize, Serialize};
@@ -223,7 +219,6 @@ fn run(command: Command) -> Result<i32> {
 
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(2 * num_cpus::get())
                 .build()?;
 
             let scheduler = Scheduler::new(remember_server_error_timeout);
@@ -260,22 +255,21 @@ fn run(command: Command) -> Result<i32> {
             let num_cpus = (num_cpus::get() - num_cpus_to_ignore).max(1);
 
             tracing::trace!("Server num_cpus={num_cpus}");
+
+            // Because builds block the tokio thread, use `nproc` for tokio, plus `num_cpus` for builds.
+            // This helps ensure we continue to respond to requests even when `num_cpus` builds are active.
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(2 * num_cpus::get())
+                .worker_threads(num_cpus::get() + num_cpus)
                 .build()?;
-
-            let pool = runtime.handle().clone();
 
             runtime.block_on(async move {
                 let builder: Box<dyn dist::BuilderIncoming> = match builder {
                     #[cfg(not(target_os = "freebsd"))]
                     server_config::BuilderType::Docker => Box::new(
-                        build::DockerBuilder::new(CommandCreatorSync::new(
-                            &sccache::jobserver::Client::new_num(num_cpus),
-                        ))
-                        .await
-                        .context("Docker builder failed to start")?,
+                        build::DockerBuilder::new(sccache::jobserver::Client::new_num(num_cpus))
+                            .await
+                            .context("Docker builder failed to start")?,
                     ),
                     #[cfg(not(target_os = "freebsd"))]
                     server_config::BuilderType::Overlay {
@@ -285,7 +279,7 @@ fn run(command: Command) -> Result<i32> {
                         build::OverlayBuilder::new(
                             bwrap_path,
                             build_dir,
-                            CommandCreatorSync::new(&sccache::jobserver::Client::new_num(num_cpus)),
+                            sccache::jobserver::Client::new_num(num_cpus),
                         )
                         .await
                         .context("Overlay builder failed to start")?,
@@ -302,7 +296,7 @@ fn run(command: Command) -> Result<i32> {
                             clone_from,
                             pot_cmd,
                             pot_clone_args,
-                            CommandCreatorSync::new(&sccache::jobserver::Client::new_num(num_cpus)),
+                            sccache::jobserver::Client::new_num(num_cpus),
                         )
                         .await
                         .context("Pot builder failed to start")?,
@@ -356,7 +350,7 @@ fn run(command: Command) -> Result<i32> {
                 )
                 .context("Failed to create sccache HTTP server instance")?;
 
-                match http_server.start(pool).await {
+                match http_server.start().await {
                     Ok(_) => Ok(()),
                     Err(err) => panic!("Err: {err}"),
                 }
@@ -498,42 +492,33 @@ impl SchedulerIncoming for Scheduler {
                 .map_err(Error::from)
                 .context("Could not create assign_auth token")?;
 
+            // Count the number of in-flight `assign_job` requests to this server
             server.num_pending_jobs += 1;
 
             drop(servers);
 
-            let (job_id, need_toolchain) =
-                match requester.do_assign_job(server_id, tc, assign_auth).await {
-                    Ok(AssignJobResult {
-                        job_id,
-                        need_toolchain,
-                        num_assigned_jobs,
-                        num_active_jobs,
-                    }) => {
-                        // LOCKS
-                        let mut servers = self.servers.lock().await;
-                        // Assigned the job, so update server stats
-                        if let Some(server) = servers.get_mut(&server_id) {
-                            server.last_seen = Instant::now();
-                            server.num_assigned_jobs = num_assigned_jobs;
-                            server.num_active_jobs = num_active_jobs;
-                            server.num_pending_jobs =
-                                (server.num_pending_jobs as i64 - 1).max(0) as usize;
+            let AssignJobResult {
+                job_id,
+                need_toolchain,
+                num_assigned_jobs,
+                num_active_jobs,
+            } = match requester.do_assign_job(server_id, tc, assign_auth).await {
+                Ok(res) => res,
+                Err(err) => {
+                    // LOCKS
+                    let mut servers = self.servers.lock().await;
+                    // Couldn't assign the job, so store the last_error and decrement num_pending_jobs
+                    if let Some(server) = servers.get_mut(&server_id) {
+                        server.last_error = Some(Instant::now());
+                        if server.num_pending_jobs > 0 {
+                            server.num_pending_jobs -= 1;
                         }
-                        (job_id, need_toolchain)
                     }
-                    Err(err) => {
-                        // LOCKS
-                        let mut servers = self.servers.lock().await;
-                        // Couldn't assign the job, so undo the eager assignment above
-                        if let Some(server) = servers.get_mut(&server_id) {
-                            server.last_error = Some(Instant::now());
-                            server.num_pending_jobs =
-                                (server.num_pending_jobs as i64 - 1).max(0) as usize;
-                        }
-                        return Err(err);
-                    }
-                };
+                    // Prune servers
+                    self.prune_servers(&mut servers);
+                    return Err(err);
+                }
+            };
 
             // LOCKS
             let mut servers = self.servers.lock().await;
@@ -542,30 +527,37 @@ impl SchedulerIncoming for Scheduler {
                 _ => bail!("Failed to reserve job on unknown server"),
             };
 
+            // Assigned the job, so update server stats
+            server.last_seen = Instant::now();
+            server.num_assigned_jobs = num_assigned_jobs;
+            server.num_active_jobs = num_active_jobs;
+            if server.num_pending_jobs > 0 {
+                server.num_pending_jobs -= 1;
+            }
+
             let job_auth = server
                 .job_authorizer
                 .generate_token(job_id)
                 .map_err(Error::from)
                 .context("Could not create job auth token")?;
 
-            if log_enabled!(log::Level::Trace) {
-                if let Some(last_error) = server.last_error {
-                    tracing::trace!(
-                        "[alloc_job({}, {})]: Assigned job to server whose most recent error was {:?} ago",
-                        server_id.addr(),
-                        job_id,
-                        Instant::now() - last_error
-                    );
-                }
+            if let Some(last_error) = server.last_error {
+                tracing::debug!(
+                    "[alloc_job({}, {})]: Assigned job to server whose most recent error was {:?} ago",
+                    server_id.addr(),
+                    job_id,
+                    Instant::now() - last_error
+                );
+            } else {
+                tracing::debug!(
+                    "[alloc_job({}, {})]: Job created and assigned to server",
+                    server_id.addr(),
+                    job_id,
+                );
             }
 
-            drop(servers);
-
-            tracing::debug!(
-                "[alloc_job({}, {})]: Job created and assigned to server",
-                server_id.addr(),
-                job_id,
-            );
+            // Prune servers only after updating this server's last_seen time.
+            self.prune_servers(&mut servers);
 
             Ok(AllocJobResult::Success {
                 job_alloc: JobAlloc {
@@ -599,11 +591,11 @@ impl SchedulerIncoming for Scheduler {
 
                         // Assume all pending and assigned jobs will eventually be handled
                         let num_assigned_jobs =
-                        // number of jobs this scheduler has reserved on the server but have not yet been assigned
-                        server.num_pending_jobs
-                        // number of jobs assigned to this server and are waiting on the client to start
-                        + server.num_assigned_jobs
-                        // number of jobs assigned to this server and are running
+                        // Number of in-flight `assign_job` requests to the server that have not completed
+                        (server.num_pending_jobs * 3) // Penalize in-flight `assign_job` requests 3x
+                        // Number of jobs assigned to this server and are waiting on the client to start
+                        + (server.num_assigned_jobs * 2) // Penalize un-started jobs 2x
+                        // Number of jobs assigned to this server and are running
                         + server.num_active_jobs;
 
                         let load = num_assigned_jobs as f64 / num_vcpus;
@@ -766,6 +758,9 @@ impl SchedulerIncoming for Scheduler {
         server.num_assigned_jobs = num_assigned_jobs;
         server.num_active_jobs = num_active_jobs;
 
+        // Prune servers only after updating this server's last_seen time.
+        self.prune_servers(&mut servers);
+
         Ok(UpdateJobStateResult::Success)
     }
 
@@ -781,15 +776,15 @@ impl SchedulerIncoming for Scheduler {
         // Prune servers before reporting the scheduler status
         self.prune_servers(&mut servers);
 
-        let mut active_jobs = 0;
-        let mut accepted_jobs = 0;
         let mut pending_jobs = 0;
+        let mut assigned_jobs = 0;
+        let mut active_jobs = 0;
 
         let mut servers_map = HashMap::<std::net::SocketAddr, ServerStatusResult>::new();
         for (server_id, server) in servers.iter() {
-            active_jobs += server.num_active_jobs;
-            accepted_jobs += server.num_assigned_jobs;
             pending_jobs += server.num_pending_jobs;
+            assigned_jobs += server.num_assigned_jobs;
+            active_jobs += server.num_active_jobs;
             servers_map.insert(
                 server_id.addr(),
                 ServerStatusResult {
@@ -810,7 +805,7 @@ impl SchedulerIncoming for Scheduler {
             num_cpus: servers.values().map(|v| v.num_cpus).sum(),
             num_servers: servers.len(),
             pending: pending_jobs,
-            assigned: accepted_jobs,
+            assigned: assigned_jobs,
             active: active_jobs,
             servers: servers_map,
         })
@@ -828,6 +823,8 @@ pub struct Server {
     job_count: AtomicUsize,
     jobs_active: Arc<AtomicUsize>,
     jobs_assigned: Arc<Mutex<HashMap<JobId, JobInfo>>>,
+    scheduler_comm_times_tx: tokio::sync::watch::Sender<std::time::Instant>,
+    scheduler_comm_times_rx: tokio::sync::watch::Receiver<std::time::Instant>,
 }
 
 impl Server {
@@ -838,30 +835,41 @@ impl Server {
     ) -> Result<Server> {
         let cache = TcCache::new(&cache_dir.join("tc"), toolchain_cache_size)
             .context("Failed to create toolchain cache")?;
+        let (scheduler_comm_times_tx, scheduler_comm_times_rx) =
+            tokio::sync::watch::channel(std::time::Instant::now());
         Ok(Server {
             builder,
             cache: Mutex::new(cache),
             job_count: AtomicUsize::new(0),
             jobs_active: Arc::new(AtomicUsize::new(0)),
             jobs_assigned: Arc::new(Mutex::new(HashMap::new())),
+            scheduler_comm_times_tx,
+            scheduler_comm_times_rx,
         })
     }
 }
 
 #[async_trait]
 impl ServerIncoming for Server {
-    fn start_heartbeat(
-        &self,
-        runtime: tokio::runtime::Handle,
-        requester: std::sync::Arc<dyn ServerOutgoing>,
-    ) {
+    fn start_heartbeat(&self, requester: Arc<dyn ServerOutgoing>) {
         let jobs_active = self.jobs_active.clone();
         let jobs_assigned = self.jobs_assigned.clone();
+        // Wait up to 90s for a client to start a job.
+        // Remove jobs the client hasn't started within this interval.
+        let unstarted_job_timeout = std::time::Duration::from_secs(90);
+        let scheduler_comm_times = self.scheduler_comm_times_rx.clone();
 
         // TODO: detect if this panics
-        runtime.spawn(async move {
-            let unstarted_job_timeout = std::time::Duration::from_secs(90);
-            loop {
+        tokio::spawn(async move {
+            let jobs_active = jobs_active.clone();
+            let jobs_assigned = jobs_assigned.clone();
+
+            async fn do_heartbeat(
+                requester: Arc<dyn ServerOutgoing>,
+                jobs_active: &AtomicUsize,
+                jobs_assigned: &Mutex<HashMap<JobId, JobInfo>>,
+                unstarted_job_timeout: Duration,
+            ) -> Result<HeartbeatServerResult> {
                 let stale_jobs = {
                     let jobs_assigned = jobs_assigned.lock().await;
                     let now = std::time::Instant::now();
@@ -884,19 +892,47 @@ impl ServerIncoming for Server {
 
                 let num_active_jobs = jobs_active.load(std::sync::atomic::Ordering::SeqCst);
 
-                tracing::trace!("Performing heartbeat");
-
-                match requester
+                requester
                     .do_heartbeat(num_assigned_jobs, num_active_jobs)
                     .await
-                {
-                    Ok(HeartbeatServerResult { is_new }) => {
-                        tracing::trace!("Heartbeat success is_new={}", is_new);
-                        tokio::time::sleep(HEARTBEAT_INTERVAL).await;
+            }
+
+            let mut time = Instant::now();
+            let mut due_time = HEARTBEAT_INTERVAL;
+            let mut scheduler_comm_times = scheduler_comm_times.clone();
+
+            // Always send the first heartbeat immediately
+            let sleep = tokio::time::sleep_until(time.into());
+            tokio::pin!(sleep);
+
+            loop {
+                tokio::select! {
+                    _ = scheduler_comm_times.changed() => {
+                        time = *scheduler_comm_times.borrow_and_update();
+                        // The server just communicated with the scheduler.
+                        // Sleep for `due_time` more seconds before doing a manual heartbeat.
+                        sleep.as_mut().reset((time + due_time).into());
                     }
-                    Err(e) => {
-                        tracing::error!("Failed to send heartbeat to server: {}", e);
-                        tokio::time::sleep(HEARTBEAT_ERROR_INTERVAL).await;
+                    _ = &mut sleep => {
+                        // Haven't communicated with the scheduler recently.
+                        // Send server heartbeat and restart the sleep timer.
+                        time = Instant::now();
+                        due_time = match do_heartbeat(
+                            requester.clone(),
+                            &jobs_active,
+                            &jobs_assigned,
+                            unstarted_job_timeout
+                        ).await {
+                            Ok(HeartbeatServerResult { is_new }) => {
+                                tracing::trace!("Heartbeat success is_new={}", is_new);
+                                HEARTBEAT_INTERVAL
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to send heartbeat to server: {}", e);
+                                HEARTBEAT_ERROR_INTERVAL
+                            }
+                        };
+                        sleep.set(tokio::time::sleep_until((time + due_time).into()));
                     }
                 }
             }
@@ -921,6 +957,9 @@ impl ServerIncoming for Server {
             jobs_assigned.len()
         };
         let num_active_jobs = self.jobs_active.load(std::sync::atomic::Ordering::Relaxed);
+
+        self.scheduler_comm_times_tx
+            .send_replace(std::time::Instant::now());
 
         Ok(AssignJobResult {
             job_id,
@@ -1031,6 +1070,9 @@ impl ServerIncoming for Server {
                 "Ready",
                 "Started"
             );
+        } else {
+            self.scheduler_comm_times_tx
+                .send_replace(std::time::Instant::now());
         }
 
         // Do the build
@@ -1062,6 +1104,9 @@ impl ServerIncoming for Server {
                 "Started",
                 "Complete"
             );
+        } else {
+            self.scheduler_comm_times_tx
+                .send_replace(std::time::Instant::now());
         }
 
         match res {

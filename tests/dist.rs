@@ -165,12 +165,8 @@ struct FailingServer;
 
 #[async_trait]
 impl ServerIncoming for FailingServer {
-    fn start_heartbeat(
-        &self,
-        runtime: tokio::runtime::Handle,
-        requester: std::sync::Arc<dyn ServerOutgoing>,
-    ) {
-        runtime.spawn(async move {
+    fn start_heartbeat(&self, requester: std::sync::Arc<dyn ServerOutgoing>) {
+        tokio::spawn(async move {
             trace!("Performing heartbeat");
             match requester.do_heartbeat(0, 0).await {
                 Ok(sccache::dist::HeartbeatServerResult { is_new }) => {
