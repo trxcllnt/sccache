@@ -399,7 +399,6 @@ struct ServerDetails {
     job_authorizer: Box<dyn JobAuthorizer>,
     num_assigned_jobs: usize,
     num_active_jobs: usize,
-    num_pending_jobs: usize,
 }
 
 impl Scheduler {
@@ -483,18 +482,11 @@ impl SchedulerIncoming for Scheduler {
                 _ => bail!("Failed to assign job to unknown server"),
             };
 
-            if server.num_pending_jobs >= server.num_cpus {
-                bail!("Not assigning job to server with more pending jobs than CPUs")
-            }
-
             let assign_auth = server
                 .job_authorizer
                 .generate_token(JobId(server.server_nonce.as_u64()))
                 .map_err(Error::from)
                 .context("Could not create assign_auth token")?;
-
-            // Count the number of in-flight `assign_job` requests to this server
-            server.num_pending_jobs += 1;
 
             drop(servers);
 
@@ -508,12 +500,9 @@ impl SchedulerIncoming for Scheduler {
                 Err(err) => {
                     // LOCKS
                     let mut servers = self.servers.lock().await;
-                    // Couldn't assign the job, so store the last_error and decrement num_pending_jobs
+                    // Couldn't assign the job, so store the last_error
                     if let Some(server) = servers.get_mut(&server_id) {
                         server.last_error = Some(Instant::now());
-                        if server.num_pending_jobs > 0 {
-                            server.num_pending_jobs -= 1;
-                        }
                     }
                     // Prune servers
                     self.prune_servers(&mut servers);
@@ -532,9 +521,6 @@ impl SchedulerIncoming for Scheduler {
             server.last_seen = Instant::now();
             server.num_assigned_jobs = num_assigned_jobs;
             server.num_active_jobs = num_active_jobs;
-            if server.num_pending_jobs > 0 {
-                server.num_pending_jobs -= 1;
-            }
 
             let job_auth = server
                 .job_authorizer
@@ -592,10 +578,8 @@ impl SchedulerIncoming for Scheduler {
 
                         // Assume all pending and assigned jobs will eventually be handled
                         let num_assigned_jobs =
-                        // Number of in-flight `assign_job` requests to the server that have not completed
-                        (server.num_pending_jobs * 3) // Penalize in-flight `assign_job` requests 3x
                         // Number of jobs assigned to this server and are waiting on the client to start
-                        + (server.num_assigned_jobs * 2) // Penalize un-started jobs 2x
+                        (server.num_assigned_jobs * 2) // Penalize un-started jobs 2x
                         // Number of jobs assigned to this server and are running
                         + server.num_active_jobs;
 
@@ -736,7 +720,6 @@ impl SchedulerIncoming for Scheduler {
                 job_authorizer,
                 num_assigned_jobs,
                 num_active_jobs,
-                num_pending_jobs: 0,
             },
         );
 
@@ -777,19 +760,16 @@ impl SchedulerIncoming for Scheduler {
         // Prune servers before reporting the scheduler status
         self.prune_servers(&mut servers);
 
-        let mut pending_jobs = 0;
         let mut assigned_jobs = 0;
         let mut active_jobs = 0;
 
         let mut servers_map = HashMap::<std::net::SocketAddr, ServerStatusResult>::new();
         for (server_id, server) in servers.iter() {
-            pending_jobs += server.num_pending_jobs;
             assigned_jobs += server.num_assigned_jobs;
             active_jobs += server.num_active_jobs;
             servers_map.insert(
                 server_id.addr(),
                 ServerStatusResult {
-                    pending: server.num_pending_jobs,
                     assigned: server.num_assigned_jobs,
                     active: server.num_active_jobs,
                     num_cpus: server.num_cpus,
@@ -805,7 +785,6 @@ impl SchedulerIncoming for Scheduler {
         Ok(SchedulerStatusResult {
             num_cpus: servers.values().map(|v| v.num_cpus).sum(),
             num_servers: servers.len(),
-            pending: pending_jobs,
             assigned: assigned_jobs,
             active: active_jobs,
             servers: servers_map,
@@ -824,8 +803,6 @@ pub struct Server {
     job_count: AtomicUsize,
     jobs_active: Arc<AtomicUsize>,
     jobs_assigned: Arc<Mutex<HashMap<JobId, JobInfo>>>,
-    scheduler_comm_times_tx: tokio::sync::watch::Sender<std::time::Instant>,
-    scheduler_comm_times_rx: tokio::sync::watch::Receiver<std::time::Instant>,
 }
 
 impl Server {
@@ -836,16 +813,12 @@ impl Server {
     ) -> Result<Server> {
         let cache = TcCache::new(&cache_dir.join("tc"), toolchain_cache_size)
             .context("Failed to create toolchain cache")?;
-        let (scheduler_comm_times_tx, scheduler_comm_times_rx) =
-            tokio::sync::watch::channel(std::time::Instant::now());
         Ok(Server {
             builder,
             cache: Mutex::new(cache),
             job_count: AtomicUsize::new(0),
             jobs_active: Arc::new(AtomicUsize::new(0)),
             jobs_assigned: Arc::new(Mutex::new(HashMap::new())),
-            scheduler_comm_times_tx,
-            scheduler_comm_times_rx,
         })
     }
 }
@@ -858,19 +831,10 @@ impl ServerIncoming for Server {
         // Wait up to 90s for a client to start a job.
         // Remove jobs the client hasn't started within this interval.
         let unstarted_job_timeout = std::time::Duration::from_secs(90);
-        let scheduler_comm_times = self.scheduler_comm_times_rx.clone();
 
         // TODO: detect if this panics
         tokio::spawn(async move {
-            let jobs_active = jobs_active.clone();
-            let jobs_assigned = jobs_assigned.clone();
-
-            async fn do_heartbeat(
-                requester: Arc<dyn ServerOutgoing>,
-                jobs_active: &AtomicUsize,
-                jobs_assigned: &Mutex<HashMap<JobId, JobInfo>>,
-                unstarted_job_timeout: Duration,
-            ) -> Result<HeartbeatServerResult> {
+            loop {
                 let stale_jobs = {
                     let jobs_assigned = jobs_assigned.lock().await;
                     let now = std::time::Instant::now();
@@ -893,49 +857,21 @@ impl ServerIncoming for Server {
 
                 let num_active_jobs = jobs_active.load(std::sync::atomic::Ordering::SeqCst);
 
-                requester
+                let due_time = match requester
                     .do_heartbeat(num_assigned_jobs, num_active_jobs)
                     .await
-            }
-
-            let mut time = Instant::now();
-            let mut due_time = HEARTBEAT_INTERVAL;
-            let mut scheduler_comm_times = scheduler_comm_times.clone();
-
-            // Always send the first heartbeat immediately
-            let sleep = tokio::time::sleep_until(time.into());
-            tokio::pin!(sleep);
-
-            loop {
-                tokio::select! {
-                    _ = scheduler_comm_times.changed() => {
-                        time = *scheduler_comm_times.borrow_and_update();
-                        // The server just communicated with the scheduler.
-                        // Sleep for `due_time` more seconds before doing a manual heartbeat.
-                        sleep.as_mut().reset((time + due_time).into());
+                {
+                    Ok(HeartbeatServerResult { is_new }) => {
+                        tracing::trace!("Heartbeat success is_new={}", is_new);
+                        HEARTBEAT_INTERVAL
                     }
-                    _ = &mut sleep => {
-                        // Haven't communicated with the scheduler recently.
-                        // Send server heartbeat and restart the sleep timer.
-                        time = Instant::now();
-                        due_time = match do_heartbeat(
-                            requester.clone(),
-                            &jobs_active,
-                            &jobs_assigned,
-                            unstarted_job_timeout
-                        ).await {
-                            Ok(HeartbeatServerResult { is_new }) => {
-                                tracing::trace!("Heartbeat success is_new={}", is_new);
-                                HEARTBEAT_INTERVAL
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to send heartbeat to server: {}", e);
-                                HEARTBEAT_ERROR_INTERVAL
-                            }
-                        };
-                        sleep.set(tokio::time::sleep_until((time + due_time).into()));
+                    Err(e) => {
+                        tracing::error!("Failed to send heartbeat to server: {}", e);
+                        HEARTBEAT_ERROR_INTERVAL
                     }
-                }
+                };
+
+                tokio::time::sleep(due_time).await;
             }
         });
     }
@@ -958,9 +894,6 @@ impl ServerIncoming for Server {
             jobs_assigned.len()
         };
         let num_active_jobs = self.jobs_active.load(std::sync::atomic::Ordering::Relaxed);
-
-        self.scheduler_comm_times_tx
-            .send_replace(std::time::Instant::now());
 
         Ok(AssignJobResult {
             job_id,
@@ -1071,9 +1004,6 @@ impl ServerIncoming for Server {
                 "Ready",
                 "Started"
             );
-        } else {
-            self.scheduler_comm_times_tx
-                .send_replace(std::time::Instant::now());
         }
 
         // Do the build
@@ -1105,9 +1035,6 @@ impl ServerIncoming for Server {
                 "Started",
                 "Complete"
             );
-        } else {
-            self.scheduler_comm_times_tx
-                .send_replace(std::time::Instant::now());
         }
 
         match res {

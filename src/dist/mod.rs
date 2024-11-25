@@ -575,7 +575,6 @@ pub struct JobComplete {
 pub struct SchedulerStatusResult {
     pub num_cpus: usize,
     pub num_servers: usize,
-    pub pending: usize,
     pub assigned: usize,
     pub active: usize,
     pub servers: std::collections::HashMap<SocketAddr, ServerStatusResult>,
@@ -588,7 +587,6 @@ pub struct ServerStatusResult {
     pub assigned: usize,
     pub max_per_core_load: f64,
     pub num_cpus: usize,
-    pub pending: usize,
     pub last_seen: u64,
     pub last_error: Option<u64>,
 }
