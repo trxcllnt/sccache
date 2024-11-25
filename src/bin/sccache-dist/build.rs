@@ -104,7 +104,7 @@ fn join_suffix<P: AsRef<Path>>(path: &Path, suffix: P) -> PathBuf {
     path.join(components)
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct OverlaySpec {
     build_dir: PathBuf,
     toolchain_dir: PathBuf,
@@ -334,11 +334,11 @@ impl OverlayBuilder {
 
     async fn perform_build(
         job_id: JobId,
-        bubblewrap: &Path,
+        bubblewrap: PathBuf,
         compile_command: CompileCommand,
         mut inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         output_paths: Vec<String>,
-        overlay: &OverlaySpec,
+        overlay: OverlaySpec,
     ) -> Result<BuildResult> {
         tracing::trace!(
             "[perform_build({})]: Compile environment: {:?}",
@@ -356,172 +356,169 @@ impl OverlayBuilder {
         let mut inputs_buf = vec![];
         inputs_rdr.read_to_end(&mut inputs_buf).await?;
 
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    // Now mounted filesystems will be automatically unmounted when this thread dies
-                    // (and tmpfs filesystems will be completely destroyed)
-                    nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS)
-                        .context("Failed to enter a new Linux namespace")?;
-                    // Make sure that all future mount changes are private to this namespace
-                    // TODO: shouldn't need to add these annotations
-                    let source: Option<&str> = None;
-                    let fstype: Option<&str> = None;
-                    let data: Option<&str> = None;
-                    // Turn / into a 'slave', so it receives mounts from real root, but doesn't propagate back
-                    nix::mount::mount(
-                        source,
-                        "/",
-                        fstype,
-                        nix::mount::MsFlags::MS_REC | nix::mount::MsFlags::MS_PRIVATE,
-                        data,
-                    )
-                    .context("Failed to turn / into a slave")?;
+        let handle = tokio::runtime::Handle::current();
 
-                    let work_dir = overlay.build_dir.join("work");
-                    let upper_dir = overlay.build_dir.join("upper");
-                    let target_dir = overlay.build_dir.join("target");
-                    fs::create_dir_all(&work_dir)
-                        .context("Failed to create overlay work directory")?;
-                    fs::create_dir_all(&upper_dir)
-                        .context("Failed to create overlay upper directory")?;
-                    fs::create_dir_all(&target_dir)
-                        .context("Failed to create overlay target directory")?;
+        handle
+            .spawn_blocking(move || {
+                // Now mounted filesystems will be automatically unmounted when this thread dies
+                // (and tmpfs filesystems will be completely destroyed)
+                nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS)
+                    .context("Failed to enter a new Linux namespace")?;
+                // Make sure that all future mount changes are private to this namespace
+                // TODO: shouldn't need to add these annotations
+                let source: Option<&str> = None;
+                let fstype: Option<&str> = None;
+                let data: Option<&str> = None;
+                // Turn / into a 'slave', so it receives mounts from real root, but doesn't propagate back
+                nix::mount::mount(
+                    source,
+                    "/",
+                    fstype,
+                    nix::mount::MsFlags::MS_REC | nix::mount::MsFlags::MS_PRIVATE,
+                    data,
+                )
+                .context("Failed to turn / into a slave")?;
 
-                    let () = Overlay::writable(
-                        iter::once(overlay.toolchain_dir.as_path()),
-                        upper_dir,
-                        work_dir,
-                        &target_dir,
-                        // This error is unfortunately not Send+Sync
-                    )
-                    .mount()
-                    .map_err(|e| anyhow!("Failed to mount overlay FS: {}", e.to_string()))?;
+                let work_dir = overlay.build_dir.join("work");
+                let upper_dir = overlay.build_dir.join("upper");
+                let target_dir = overlay.build_dir.join("target");
+                fs::create_dir_all(&work_dir).context("Failed to create overlay work directory")?;
+                fs::create_dir_all(&upper_dir)
+                    .context("Failed to create overlay upper directory")?;
+                fs::create_dir_all(&target_dir)
+                    .context("Failed to create overlay target directory")?;
 
-                    tracing::trace!("[perform_build({})]: copying in inputs", job_id);
-                    // Note that we don't unpack directly into the upperdir since there overlayfs has some
-                    // special marker files that we don't want to create by accident (or malicious intent)
-                    tar::Archive::new(inputs_buf.reader())
-                        .unpack(&target_dir)
-                        .context("Failed to unpack inputs to overlay")?;
+                let () = Overlay::writable(
+                    iter::once(overlay.toolchain_dir.as_path()),
+                    upper_dir,
+                    work_dir,
+                    &target_dir,
+                    // This error is unfortunately not Send+Sync
+                )
+                .mount()
+                .map_err(|e| anyhow!("Failed to mount overlay FS: {}", e.to_string()))?;
 
-                    let CompileCommand {
-                        executable,
-                        arguments,
-                        env_vars,
-                        cwd,
-                    } = compile_command;
-                    let cwd = Path::new(&cwd);
+                tracing::trace!("[perform_build({})]: copying in inputs", job_id);
+                // Note that we don't unpack directly into the upperdir since there overlayfs has some
+                // special marker files that we don't want to create by accident (or malicious intent)
+                tar::Archive::new(inputs_buf.reader())
+                    .unpack(&target_dir)
+                    .context("Failed to unpack inputs to overlay")?;
 
-                    tracing::trace!("[perform_build({})]: creating output directories", job_id);
-                    fs::create_dir_all(join_suffix(&target_dir, cwd))
-                        .context("Failed to create cwd")?;
-                    for path in output_paths.iter() {
-                        // If it doesn't have a parent, nothing needs creating
-                        let output_parent = if let Some(p) = Path::new(path).parent() {
-                            p
-                        } else {
-                            continue;
-                        };
-                        fs::create_dir_all(join_suffix(&target_dir, cwd.join(output_parent)))
-                            .context("Failed to create an output directory")?;
+                let CompileCommand {
+                    executable,
+                    arguments,
+                    env_vars,
+                    cwd,
+                } = compile_command;
+                let cwd = Path::new(&cwd);
+
+                tracing::trace!("[perform_build({})]: creating output directories", job_id);
+                fs::create_dir_all(join_suffix(&target_dir, cwd))
+                    .context("Failed to create cwd")?;
+                for path in output_paths.iter() {
+                    // If it doesn't have a parent, nothing needs creating
+                    let output_parent = if let Some(p) = Path::new(path).parent() {
+                        p
+                    } else {
+                        continue;
+                    };
+                    fs::create_dir_all(join_suffix(&target_dir, cwd.join(output_parent)))
+                        .context("Failed to create an output directory")?;
+                }
+
+                tracing::trace!("[perform_build({})]: performing compile", job_id);
+                // Bubblewrap notes:
+                // - We're running as uid 0 (to do the mounts above), and so bubblewrap is run as uid 0
+                // - There's special handling in bubblewrap to compare uid and euid - of interest to us,
+                //   if uid == euid == 0, bubblewrap preserves capabilities (not good!) so we explicitly
+                //   drop all capabilities
+                // - By entering a new user namespace means any set of capabilities do not apply to any
+                //   other user namespace, i.e. you lose privileges. This is not strictly necessary because
+                //   we're dropping caps anyway so it's irrelevant which namespace we're in, but it doesn't
+                //   hurt.
+                // - --unshare-all is not ideal as it happily continues if it fails to unshare either
+                //   the user or cgroups namespace, so we list everything explicitly
+                // - The order of bind vs proc + dev is important - the new root must be put in place
+                //   first, otherwise proc and dev get hidden
+                let mut cmd = std::process::Command::new(bubblewrap);
+                cmd.arg("--die-with-parent")
+                    .args(["--cap-drop", "ALL"])
+                    .args([
+                        "--unshare-user",
+                        "--unshare-cgroup",
+                        "--unshare-ipc",
+                        "--unshare-pid",
+                        "--unshare-net",
+                        "--unshare-uts",
+                    ])
+                    .arg("--bind")
+                    .arg(&target_dir)
+                    .arg("/")
+                    .args(["--proc", "/proc"])
+                    .args(["--dev", "/dev"])
+                    .arg("--chdir")
+                    .arg(cwd);
+
+                for (k, v) in env_vars {
+                    if k.contains('=') {
+                        tracing::warn!(
+                            "[perform_build({})]: Skipping environment variable: {:?}",
+                            job_id,
+                            k
+                        );
+                        continue;
                     }
+                    cmd.arg("--setenv").arg(k).arg(v);
+                }
+                cmd.arg("--");
+                cmd.arg(executable);
+                cmd.args(arguments);
 
-                    tracing::trace!("[perform_build({})]: performing compile", job_id);
-                    // Bubblewrap notes:
-                    // - We're running as uid 0 (to do the mounts above), and so bubblewrap is run as uid 0
-                    // - There's special handling in bubblewrap to compare uid and euid - of interest to us,
-                    //   if uid == euid == 0, bubblewrap preserves capabilities (not good!) so we explicitly
-                    //   drop all capabilities
-                    // - By entering a new user namespace means any set of capabilities do not apply to any
-                    //   other user namespace, i.e. you lose privileges. This is not strictly necessary because
-                    //   we're dropping caps anyway so it's irrelevant which namespace we're in, but it doesn't
-                    //   hurt.
-                    // - --unshare-all is not ideal as it happily continues if it fails to unshare either
-                    //   the user or cgroups namespace, so we list everything explicitly
-                    // - The order of bind vs proc + dev is important - the new root must be put in place
-                    //   first, otherwise proc and dev get hidden
-                    let mut cmd = std::process::Command::new(bubblewrap);
-                    cmd.arg("--die-with-parent")
-                        .args(["--cap-drop", "ALL"])
-                        .args([
-                            "--unshare-user",
-                            "--unshare-cgroup",
-                            "--unshare-ipc",
-                            "--unshare-pid",
-                            "--unshare-net",
-                            "--unshare-uts",
-                        ])
-                        .arg("--bind")
-                        .arg(&target_dir)
-                        .arg("/")
-                        .args(["--proc", "/proc"])
-                        .args(["--dev", "/dev"])
-                        .arg("--chdir")
-                        .arg(cwd);
+                tracing::trace!("[perform_build({})]: bubblewrap command: {:?}", job_id, cmd);
 
-                    for (k, v) in env_vars {
-                        if k.contains('=') {
-                            tracing::warn!(
-                                "[perform_build({})]: Skipping environment variable: {:?}",
-                                job_id,
-                                k
-                            );
-                            continue;
+                let compile_output = cmd
+                    .output()
+                    .context("Failed to retrieve output from compile")?;
+                tracing::trace!(
+                    "[perform_build({})]: compile_output: {:?}",
+                    job_id,
+                    compile_output
+                );
+
+                let mut outputs = vec![];
+                tracing::trace!("[perform_build({})]: retrieving {:?}", job_id, output_paths);
+                for path in output_paths {
+                    let abspath = join_suffix(&target_dir, cwd.join(&path)); // Resolve in case it's relative since we copy it from the root level
+                    match fs::File::open(abspath) {
+                        Ok(file) => {
+                            let output = OutputData::try_from_reader(file)
+                                .context("Failed to read output file")?;
+                            outputs.push((path, output))
                         }
-                        cmd.arg("--setenv").arg(k).arg(v);
-                    }
-                    cmd.arg("--");
-                    cmd.arg(executable);
-                    cmd.args(arguments);
-
-                    tracing::trace!("[perform_build({})]: bubblewrap command: {:?}", job_id, cmd);
-
-                    let compile_output = cmd
-                        .output()
-                        .context("Failed to retrieve output from compile")?;
-                    tracing::trace!(
-                        "[perform_build({})]: compile_output: {:?}",
-                        job_id,
-                        compile_output
-                    );
-
-                    let mut outputs = vec![];
-                    tracing::trace!("[perform_build({})]: retrieving {:?}", job_id, output_paths);
-                    for path in output_paths {
-                        let abspath = join_suffix(&target_dir, cwd.join(&path)); // Resolve in case it's relative since we copy it from the root level
-                        match fs::File::open(abspath) {
-                            Ok(file) => {
-                                let output = OutputData::try_from_reader(file)
-                                    .context("Failed to read output file")?;
-                                outputs.push((path, output))
-                            }
-                            Err(e) => {
-                                if e.kind() == io::ErrorKind::NotFound {
-                                    tracing::debug!(
-                                        "[perform_build({})]: Missing output path {:?}",
-                                        job_id,
-                                        path
-                                    )
-                                } else {
-                                    return Err(
-                                        Error::from(e).context("Failed to open output file")
-                                    );
-                                }
+                        Err(e) => {
+                            if e.kind() == io::ErrorKind::NotFound {
+                                tracing::debug!(
+                                    "[perform_build({})]: Missing output path {:?}",
+                                    job_id,
+                                    path
+                                )
+                            } else {
+                                return Err(Error::from(e).context("Failed to open output file"));
                             }
                         }
                     }
-                    let compile_output = ProcessOutput::try_from(compile_output)
-                        .context("Failed to convert compilation exit status")?;
-                    Ok(BuildResult {
-                        output: compile_output,
-                        outputs,
-                    })
-                    // Bizarrely there's no way to actually get any information from a thread::Result::Err
+                }
+                let compile_output = ProcessOutput::try_from(compile_output)
+                    .context("Failed to convert compilation exit status")?;
+                Ok(BuildResult {
+                    output: compile_output,
+                    outputs,
                 })
-                .join()
-                .unwrap_or_else(|_e| Err(anyhow!("Build thread exited unsuccessfully")))
-        })
+                // Bizarrely there's no way to actually get any information from a thread::Result::Err
+            })
+            .await
+            .unwrap_or_else(|_e| Err(anyhow!("Build thread exited unsuccessfully")))
     }
 
     // Failing during cleanup is pretty unexpected, but we can still return the successful compile
@@ -585,11 +582,11 @@ impl BuilderIncoming for OverlayBuilder {
         tracing::debug!("[run_build({})]: Performing build in {:?}", job_id, overlay);
         let res = Self::perform_build(
             job_id,
-            &self.bubblewrap,
+            self.bubblewrap.clone(),
             command,
             inputs_rdr,
             outputs,
-            &overlay,
+            overlay.clone(),
         )
         .await;
         // Drop the jobserver token

@@ -256,11 +256,8 @@ fn run(command: Command) -> Result<i32> {
 
             tracing::trace!("Server num_cpus={num_cpus}");
 
-            // Because builds block the tokio thread, use `nproc` for tokio, plus `num_cpus` for builds.
-            // This helps ensure we continue to respond to requests even when `num_cpus` builds are active.
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(num_cpus::get() + num_cpus)
                 .build()?;
 
             runtime.block_on(async move {
@@ -483,8 +480,12 @@ impl SchedulerIncoming for Scheduler {
             let mut servers = self.servers.lock().await;
             let server = match servers.get_mut(&server_id) {
                 Some(server) => server,
-                _ => bail!("Failed to assign job on unknown server"),
+                _ => bail!("Failed to assign job to unknown server"),
             };
+
+            if server.num_pending_jobs >= server.num_cpus {
+                bail!("Not assigning job to server with more pending jobs than CPUs")
+            }
 
             let assign_auth = server
                 .job_authorizer
@@ -524,7 +525,7 @@ impl SchedulerIncoming for Scheduler {
             let mut servers = self.servers.lock().await;
             let server = match servers.get_mut(&server_id) {
                 Some(server) => server,
-                _ => bail!("Failed to reserve job on unknown server"),
+                _ => bail!("Failed to assign job to unknown server"),
             };
 
             // Assigned the job, so update server stats
