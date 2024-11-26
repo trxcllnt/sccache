@@ -1094,16 +1094,10 @@ fn remap_generated_filenames(
             // auto-incrementing stable name
             let maybe_extension = (!arg.starts_with('-'))
                 .then(|| {
-                    [
-                        ".cpp1.ii",
-                        ".cpp4.ii",
-                        ".cudafe1.c",
-                        ".cudafe1.cpp",
-                        ".cudafe1.stub.c",
-                    ]
-                    .iter()
-                    .find(|ext| arg.ends_with(*ext))
-                    .copied()
+                    [".cpp1.ii", ".cpp4.ii", ".cudafe1.stub.c"]
+                        .iter()
+                        .find(|ext| arg.ends_with(*ext))
+                        .copied()
                 })
                 .unwrap_or(None);
 
