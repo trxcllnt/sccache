@@ -180,6 +180,7 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         &self,
         arguments: &[OsString],
         cwd: &Path,
+        env_vars: &[(OsString, OsString)],
     ) -> CompilerArguments<ParsedArguments>;
     /// Run the C preprocessor with the specified set of arguments.
     #[allow(clippy::too_many_arguments)]
@@ -310,7 +311,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
     ) -> CompilerArguments<Box<dyn CompilerHasher<T> + 'static>> {
-        match self.compiler.parse_arguments(arguments, cwd) {
+        match self.compiler.parse_arguments(arguments, cwd, env_vars) {
             CompilerArguments::Ok(mut args) => {
                 // Handle SCCACHE_EXTRAFILES
                 for (k, v) in env_vars.iter() {
