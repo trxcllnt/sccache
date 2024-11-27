@@ -968,14 +968,14 @@ impl ServerIncoming for Server {
 
     async fn handle_run_job(
         &self,
-        requester: &dyn ServerOutgoing,
+        _requester: &dyn ServerOutgoing,
         job_id: JobId,
         command: CompileCommand,
         outputs: Vec<String>,
         inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
     ) -> Result<RunJobResult> {
         // Remove the job from assigned map
-        let (tc, num_assigned_jobs) = {
+        let (tc, _num_assigned_jobs) = {
             let mut jobs_assigned = self.jobs_assigned.lock().await;
             match jobs_assigned.remove(&job_id).map(|j| j.toolchain.clone()) {
                 Some(tc) => (tc, jobs_assigned.len()),
@@ -984,28 +984,28 @@ impl ServerIncoming for Server {
         };
 
         // Count the job as active
-        let num_active_jobs = self
+        let _num_active_jobs = self
             .jobs_active
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
 
-        // Notify the scheduler the job has started.
-        // Don't return an error, because this request is between the client and this server.
-        // The client is expecting the server to perform this work, regardless of whether the
-        // scheduler has pruned this job due to missing the pending timeout.
-        if let Err(err) = requester
-            .do_update_job_state(num_assigned_jobs, num_active_jobs)
-            .await
-            .context("Failed to update job state")
-        {
-            tracing::warn!(
-                "[handle_run_job({})]: {:?} ({} -> {})",
-                job_id,
-                err,
-                "Ready",
-                "Started"
-            );
-        }
+        // // Notify the scheduler the job has started.
+        // // Don't return an error, because this request is between the client and this server.
+        // // The client is expecting the server to perform this work, regardless of whether the
+        // // scheduler has pruned this job due to missing the pending timeout.
+        // if let Err(err) = requester
+        //     .do_update_job_state(num_assigned_jobs, num_active_jobs)
+        //     .await
+        //     .context("Failed to update job state")
+        // {
+        //     tracing::warn!(
+        //         "[handle_run_job({})]: {:?} ({} -> {})",
+        //         job_id,
+        //         err,
+        //         "Ready",
+        //         "Started"
+        //     );
+        // }
 
         // Do the build
         let res = self
@@ -1014,29 +1014,29 @@ impl ServerIncoming for Server {
             .await;
 
         // Move job from active to done
-        let num_assigned_jobs = self.jobs_assigned.lock().await.len();
-        let num_active_jobs = self
+        // let num_assigned_jobs = self.jobs_assigned.lock().await.len();
+        let _num_active_jobs = self
             .jobs_active
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
             - 1;
 
-        // Notify the scheduler the job is complete.
-        // Don't return an error, because this request is between the client and this server.
-        // The client is expecting the server to perform this work, regardless of whether the
-        // scheduler has pruned this job due to missing the pending timeout.
-        if let Err(err) = requester
-            .do_update_job_state(num_assigned_jobs, num_active_jobs)
-            .await
-            .context("Failed to update job state")
-        {
-            tracing::warn!(
-                "[handle_run_job({})]: {:?} ({} -> {})",
-                job_id,
-                err,
-                "Started",
-                "Complete"
-            );
-        }
+        // // Notify the scheduler the job is complete.
+        // // Don't return an error, because this request is between the client and this server.
+        // // The client is expecting the server to perform this work, regardless of whether the
+        // // scheduler has pruned this job due to missing the pending timeout.
+        // if let Err(err) = requester
+        //     .do_update_job_state(num_assigned_jobs, num_active_jobs)
+        //     .await
+        //     .context("Failed to update job state")
+        // {
+        //     tracing::warn!(
+        //         "[handle_run_job({})]: {:?} ({} -> {})",
+        //         job_id,
+        //         err,
+        //         "Started",
+        //         "Complete"
+        //     );
+        // }
 
         match res {
             Err(e) => Err(e.context("run_job build failed")),
