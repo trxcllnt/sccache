@@ -252,9 +252,10 @@ fn run(command: Command) -> Result<i32> {
             num_cpus_to_ignore,
         }) => {
             let bind_addr = bind_addr.unwrap_or(public_addr);
-            let num_cpus = (num_cpus::get() - num_cpus_to_ignore).max(1);
+            let num_cpus =
+                (std::thread::available_parallelism().unwrap().get() - num_cpus_to_ignore).max(1);
 
-            tracing::trace!("Server num_cpus={num_cpus}");
+            tracing::debug!("Server num_cpus={num_cpus}");
 
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -646,7 +647,7 @@ impl SchedulerIncoming for Scheduler {
                     Err(err) => {
                         // If alloc_job failed, try the next best server
                         tracing::warn!(
-                            "[alloc_job({})]: {}",
+                            "[alloc_job({})]: Error assigning job to server: {}",
                             server_id.addr(),
                             error_chain_to_string(&err)
                         );

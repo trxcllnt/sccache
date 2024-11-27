@@ -137,7 +137,7 @@ impl PotBuilder {
             image_map: Arc::new(Mutex::new(HashMap::new())),
             container_lists: Arc::new(Mutex::new(HashMap::new())),
             cleanup_thread_count: Arc::new(AtomicUsize::new(0)),
-            max_cleanup_thread_count: num_cpus::get() * 3,
+            max_cleanup_thread_count: std::thread::available_parallelism().unwrap().get() * 3,
         };
         ret.cleanup().await?;
         Ok(ret)

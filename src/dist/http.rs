@@ -1366,21 +1366,6 @@ mod server {
                 .fallback(|| async move { (StatusCode::NOT_FOUND, "404") })
                 // 1GiB should be enough for toolchains and compile inputs, right?
                 .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
-                // .layer(
-                //     TraceLayer::new_for_http()
-                //         // Create our own span for the request and include the matched path. The matched
-                //         // path is useful for figuring out which handler the request was routed to.
-                //         .make_span_with(|req: &Request| {
-                //             let method = req.method();
-                //             let uri = req.uri();
-                //             // axum automatically adds this extension.
-                //             let matched_path = req
-                //                 .extensions()
-                //                 .get::<MatchedPath>()
-                //                 .map(|matched_path| matched_path.as_str());
-                //             tracing::debug_span!("request", %method, %uri, matched_path)
-                //         }),
-                // )
                 .layer(Extension(Arc::new(ServerState {
                     auth: JWTJobAuthorizer::new(jwt_key.clone()),
                     server_nonce: server_nonce.clone(),
