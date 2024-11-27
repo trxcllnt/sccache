@@ -112,7 +112,6 @@ pub struct PotBuilder {
     container_lists: Arc<Mutex<HashMap<Toolchain, Vec<String>>>>,
     cleanup_thread_count: Arc<AtomicUsize>,
     max_cleanup_thread_count: usize,
-    jobserver: sccache::jobserver::Client,
 }
 
 impl PotBuilder {
@@ -124,12 +123,10 @@ impl PotBuilder {
         clone_from: String,
         pot_cmd: PathBuf,
         pot_clone_args: Vec<String>,
-        jobserver: sccache::jobserver::Client,
     ) -> Result<Self> {
         tracing::info!("Creating pot builder");
 
         let ret = Self {
-            jobserver,
             pot_fs_root,
             clone_from,
             pot_cmd,
@@ -507,8 +504,6 @@ impl BuilderIncoming for PotBuilder {
             .get_container(job_id, &tc, tccache)
             .await
             .context("Failed to get a container for build")?;
-        // Guard invoking perform_build until we get a token from the jobserver
-        let token = self.jobserver.acquire().await?;
         tracing::debug!(
             "[run_build({})]: Performing build with container {}",
             job_id,
@@ -523,8 +518,6 @@ impl BuilderIncoming for PotBuilder {
             &self.pot_fs_root,
         )
         .await;
-        // Drop the jobserver token
-        drop(token);
         // Unwrap the result
         let res = res.context("Failed to perform build")?;
         tracing::debug!("[run_build({})]: Finishing with container {}", job_id, cid);

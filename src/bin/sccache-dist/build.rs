@@ -119,16 +119,11 @@ struct DeflatedToolchain {
 pub struct OverlayBuilder {
     bubblewrap: PathBuf,
     dir: PathBuf,
-    jobserver: sccache::jobserver::Client,
     toolchain_dir_map: Mutex<HashMap<Toolchain, DeflatedToolchain>>,
 }
 
 impl OverlayBuilder {
-    pub async fn new(
-        bubblewrap: PathBuf,
-        dir: PathBuf,
-        jobserver: sccache::jobserver::Client,
-    ) -> Result<Self> {
+    pub async fn new(bubblewrap: PathBuf, dir: PathBuf) -> Result<Self> {
         tracing::info!("Creating overlay builder");
 
         if !nix::unistd::getuid().is_root() || !nix::unistd::geteuid().is_root() {
@@ -170,7 +165,6 @@ impl OverlayBuilder {
         let ret = Self {
             bubblewrap,
             dir,
-            jobserver,
             toolchain_dir_map: Mutex::new(HashMap::new()),
         };
         ret.cleanup().await?;
@@ -577,8 +571,6 @@ impl BuilderIncoming for OverlayBuilder {
             .prepare_overlay_dirs(job_id, &tc, tccache)
             .await
             .context("failed to prepare overlay dirs")?;
-        // Guard invoking perform_build until we get a token from the jobserver
-        let token = self.jobserver.acquire().await?;
         tracing::debug!("[run_build({})]: Performing build in {:?}", job_id, overlay);
         let res = Self::perform_build(
             job_id,
@@ -589,8 +581,6 @@ impl BuilderIncoming for OverlayBuilder {
             overlay.clone(),
         )
         .await;
-        // Drop the jobserver token
-        drop(token);
         tracing::debug!("[run_build({})]: Finishing with overlay", job_id);
         self.finish_overlay(job_id, &tc, tccache, &overlay).await;
         tracing::debug!("[run_build({})]: Returning result", job_id);
@@ -624,7 +614,6 @@ async fn docker_rm(cid: &str) -> Result<()> {
 
 pub struct DockerBuilder {
     image_map: Mutex<HashMap<Toolchain, String>>,
-    jobserver: sccache::jobserver::Client,
     container_lists: Mutex<HashMap<Toolchain, Vec<String>>>,
 }
 
@@ -632,12 +621,11 @@ impl DockerBuilder {
     // TODO: this should accept a unique string, e.g. inode of the tccache directory
     // having locked a pidfile, or at minimum should loudly detect other running
     // instances - pidfile in /tmp
-    pub async fn new(jobserver: sccache::jobserver::Client) -> Result<Self> {
+    pub async fn new() -> Result<Self> {
         tracing::info!("Creating docker builder");
 
         let ret = Self {
             image_map: Mutex::new(HashMap::new()),
-            jobserver,
             container_lists: Mutex::new(HashMap::new()),
         };
         ret.cleanup().await?;
@@ -1074,16 +1062,12 @@ impl BuilderIncoming for DockerBuilder {
             .get_container(job_id, &tc, tccache)
             .await
             .context("Failed to get a container for build")?;
-        // Guard invoking perform_build until we get a token from the jobserver
-        let token = self.jobserver.acquire().await?;
         tracing::debug!(
             "[run_build({})]: Performing build with container {}",
             job_id,
             cid
         );
         let res = Self::perform_build(job_id, command, inputs_rdr, outputs, &cid).await;
-        // Drop the jobserver token
-        drop(token);
         tracing::debug!("[run_build({})]: Finishing with container {}", job_id, cid);
         self.finish_container(job_id, &tc, cid).await;
         tracing::debug!("[run_build({})]: Returning result", job_id);

@@ -265,7 +265,7 @@ fn run(command: Command) -> Result<i32> {
                 let builder: Box<dyn dist::BuilderIncoming> = match builder {
                     #[cfg(not(target_os = "freebsd"))]
                     server_config::BuilderType::Docker => Box::new(
-                        build::DockerBuilder::new(sccache::jobserver::Client::new_num(num_cpus))
+                        build::DockerBuilder::new()
                             .await
                             .context("Docker builder failed to start")?,
                     ),
@@ -274,13 +274,9 @@ fn run(command: Command) -> Result<i32> {
                         bwrap_path,
                         build_dir,
                     } => Box::new(
-                        build::OverlayBuilder::new(
-                            bwrap_path,
-                            build_dir,
-                            sccache::jobserver::Client::new_num(num_cpus),
-                        )
-                        .await
-                        .context("Overlay builder failed to start")?,
+                        build::OverlayBuilder::new(bwrap_path, build_dir)
+                            .await
+                            .context("Overlay builder failed to start")?,
                     ),
                     #[cfg(target_os = "freebsd")]
                     server_config::BuilderType::Pot {
@@ -289,15 +285,9 @@ fn run(command: Command) -> Result<i32> {
                         pot_cmd,
                         pot_clone_args,
                     } => Box::new(
-                        build::PotBuilder::new(
-                            pot_fs_root,
-                            clone_from,
-                            pot_cmd,
-                            pot_clone_args,
-                            sccache::jobserver::Client::new_num(num_cpus),
-                        )
-                        .await
-                        .context("Pot builder failed to start")?,
+                        build::PotBuilder::new(pot_fs_root, clone_from, pot_cmd, pot_clone_args)
+                            .await
+                            .context("Pot builder failed to start")?,
                     ),
                     _ => bail!(
                         "Builder type `{}` not supported on this platform",
@@ -334,8 +324,13 @@ fn run(command: Command) -> Result<i32> {
                     }
                 };
 
-                let server = Server::new(builder, &cache_dir, toolchain_cache_size)
-                    .context("Failed to create sccache server instance")?;
+                let server = Server::new(
+                    builder,
+                    &cache_dir,
+                    toolchain_cache_size,
+                    sccache::jobserver::Client::new_num(num_cpus),
+                )
+                .context("Failed to create sccache server instance")?;
 
                 let http_server = dist::http::Server::new(
                     public_addr,
@@ -580,7 +575,7 @@ impl SchedulerIncoming for Scheduler {
                         // Assume all pending and assigned jobs will eventually be handled
                         let num_assigned_jobs =
                         // Number of jobs assigned to this server and are waiting on the client to start
-                        (server.num_assigned_jobs * 2) // Penalize un-started jobs 2x
+                        server.num_assigned_jobs
                         // Number of jobs assigned to this server and are running
                         + server.num_active_jobs;
 
@@ -804,6 +799,7 @@ pub struct Server {
     job_count: AtomicUsize,
     jobs_active: Arc<AtomicUsize>,
     jobs_assigned: Arc<Mutex<HashMap<JobId, JobInfo>>>,
+    jobserver: sccache::jobserver::Client,
 }
 
 impl Server {
@@ -811,11 +807,13 @@ impl Server {
         builder: Box<dyn BuilderIncoming>,
         cache_dir: &Path,
         toolchain_cache_size: u64,
+        jobserver: sccache::jobserver::Client,
     ) -> Result<Server> {
         let cache = TcCache::new(&cache_dir.join("tc"), toolchain_cache_size)
             .context("Failed to create toolchain cache")?;
         Ok(Server {
             builder,
+            jobserver,
             cache: Mutex::new(cache),
             job_count: AtomicUsize::new(0),
             jobs_active: Arc::new(AtomicUsize::new(0)),
@@ -974,6 +972,9 @@ impl ServerIncoming for Server {
         outputs: Vec<String>,
         inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
     ) -> Result<RunJobResult> {
+        // Guard invoking run_build until we get a token from the jobserver
+        let token = self.jobserver.acquire().await?;
+
         // Remove the job from assigned map
         let (tc, _num_assigned_jobs) = {
             let mut jobs_assigned = self.jobs_assigned.lock().await;
@@ -1019,6 +1020,9 @@ impl ServerIncoming for Server {
             .jobs_active
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
             - 1;
+
+        // Drop the jobserver token
+        drop(token);
 
         // // Notify the scheduler the job is complete.
         // // Don't return an error, because this request is between the client and this server.
