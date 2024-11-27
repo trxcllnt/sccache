@@ -2714,7 +2714,7 @@ dependencies = [
 
 [[package]]
 name = "sccache"
-version = "0.8.3-rapids.45"
+version = "0.8.3-rapids.46"
 dependencies = [
  "anyhow",
  "ar",
