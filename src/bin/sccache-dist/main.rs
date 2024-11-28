@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Error, Result};
 use async_trait::async_trait;
 use base64::Engine;
 use futures::lock::Mutex;
+use futures::FutureExt;
 use itertools::Itertools;
 use rand::{rngs::OsRng, RngCore};
 use sccache::config::{
@@ -947,20 +948,20 @@ impl ServerIncoming for Server {
             // Drop the lock
             drop(cache);
 
-            // // Ignore the toolchain request body
-            // // TODO: Investigate if this causes early hangup warnings in
-            // // the load balancer. If so, use the implementation below.
-            // Ok(())
+            // Ignore the toolchain request body
+            // TODO: Investigate if this causes early hangup warnings in
+            // the load balancer. If so, use the implementation below.
+            Ok(())
 
-            // Consume the entire toolchain request body
-            tokio::io::copy(&mut tc_rdr, &mut tokio::io::empty())
-                .await
-                .map(|_| ())
-                .or_else(|err| {
-                    tracing::warn!("[handle_submit_toolchain({})]: {:?}", job_id, err);
-                    // Ignore errors reading the request body
-                    Ok(())
-                })
+            // // Consume the entire toolchain request body
+            // tokio::io::copy(&mut tc_rdr, &mut tokio::io::empty())
+            //     .await
+            //     .map(|_| ())
+            //     .or_else(|err| {
+            //         tracing::warn!("[handle_submit_toolchain({})]: {:?}", job_id, err);
+            //         // Ignore errors reading the request body
+            //         Ok(())
+            //     })
         } else {
             cache
                 .insert_with(&tc, |mut file| async move {
@@ -992,71 +993,45 @@ impl ServerIncoming for Server {
         let token = self.jobserver.acquire().await?;
 
         // Remove the job from assigned map
-        let (tc, _num_assigned_jobs) = {
+        let tc = {
             let mut jobs_assigned = self.jobs_assigned.lock().await;
             match jobs_assigned.remove(&job_id).map(|j| j.toolchain.clone()) {
-                Some(tc) => (tc, jobs_assigned.len()),
+                Some(tc) => tc,
                 None => return Ok(RunJobResult::JobNotFound),
             }
         };
 
         // Count the job as active
-        let _num_active_jobs = self
-            .jobs_active
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-
-        // // Notify the scheduler the job has started.
-        // // Don't return an error, because this request is between the client and this server.
-        // // The client is expecting the server to perform this work, regardless of whether the
-        // // scheduler has pruned this job due to missing the pending timeout.
-        // if let Err(err) = requester
-        //     .do_update_job_state(num_assigned_jobs, num_active_jobs)
-        //     .await
-        //     .context("Failed to update job state")
-        // {
-        //     tracing::warn!(
-        //         "[handle_run_job({})]: {:?} ({} -> {})",
-        //         job_id,
-        //         err,
-        //         "Ready",
-        //         "Started"
-        //     );
-        // }
+        self.jobs_active
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         // Do the build
-        let res = self
-            .builder
-            .run_build(job_id, tc, command, outputs, inputs_rdr, &self.cache)
-            .await;
+        let res = std::panic::AssertUnwindSafe(self.builder.run_build(
+            job_id,
+            tc,
+            command,
+            outputs,
+            inputs_rdr,
+            &self.cache,
+        ))
+        .catch_unwind()
+        .await
+        .map_err(|e| {
+            let msg = e
+                .downcast_ref::<&str>()
+                .map(|s| &**s)
+                .or_else(|| e.downcast_ref::<String>().map(|s| &**s))
+                .unwrap_or("An unknown panic was caught.");
+            anyhow::anyhow!("{msg}")
+        })
+        .and_then(std::convert::identity);
 
         // Move job from active to done
-        // let num_assigned_jobs = self.jobs_assigned.lock().await.len();
-        let _num_active_jobs = self
-            .jobs_active
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
-            - 1;
+        self.jobs_active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
 
         // Drop the jobserver token
         drop(token);
-
-        // // Notify the scheduler the job is complete.
-        // // Don't return an error, because this request is between the client and this server.
-        // // The client is expecting the server to perform this work, regardless of whether the
-        // // scheduler has pruned this job due to missing the pending timeout.
-        // if let Err(err) = requester
-        //     .do_update_job_state(num_assigned_jobs, num_active_jobs)
-        //     .await
-        //     .context("Failed to update job state")
-        // {
-        //     tracing::warn!(
-        //         "[handle_run_job({})]: {:?} ({} -> {})",
-        //         job_id,
-        //         err,
-        //         "Started",
-        //         "Complete"
-        //     );
-        // }
 
         match res {
             Err(e) => Err(e.context("run_job build failed")),
