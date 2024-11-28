@@ -1,5 +1,9 @@
 name: integration-tests
-on: [ push, pull_request ]
+# on: [ push, pull_request ]
+on:
+  push:
+    tags:
+      - v*
 
 env:
   RUST_BACKTRACE: full
