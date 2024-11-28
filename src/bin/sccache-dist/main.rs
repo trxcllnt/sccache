@@ -393,6 +393,7 @@ struct ServerDetails {
     max_per_core_load: f64,
     server_nonce: ServerNonce,
     job_authorizer: Box<dyn JobAuthorizer>,
+    num_pending_jobs: usize,
     num_assigned_jobs: usize,
     num_active_jobs: usize,
 }
@@ -478,6 +479,12 @@ impl SchedulerIncoming for Scheduler {
                 _ => bail!("Failed to assign job to unknown server"),
             };
 
+            if server.num_pending_jobs >= server.num_cpus {
+                bail!("Not assigning job to server with too many in-flight requests")
+            }
+
+            server.num_pending_jobs += 1;
+
             let assign_auth = server
                 .job_authorizer
                 .generate_token(JobId(server.server_nonce.as_u64()))
@@ -498,6 +505,8 @@ impl SchedulerIncoming for Scheduler {
                     let mut servers = self.servers.lock().await;
                     // Couldn't assign the job, so store the last_error
                     if let Some(server) = servers.get_mut(&server_id) {
+                        server.num_pending_jobs =
+                            ((server.num_pending_jobs as i64) - 1).max(0) as usize;
                         server.last_error = Some(Instant::now());
                     }
                     // Prune servers
@@ -515,6 +524,7 @@ impl SchedulerIncoming for Scheduler {
 
             // Assigned the job, so update server stats
             server.last_seen = Instant::now();
+            server.num_pending_jobs = ((server.num_pending_jobs as i64) - 1).max(0) as usize;
             server.num_assigned_jobs = num_assigned_jobs;
             server.num_active_jobs = num_active_jobs;
 
@@ -572,14 +582,12 @@ impl SchedulerIncoming for Scheduler {
                             .floor()
                             .max(1.0);
 
-                        // Assume all pending and assigned jobs will eventually be handled
-                        let num_assigned_jobs =
-                        // Number of jobs assigned to this server and are waiting on the client to start
-                        server.num_assigned_jobs
-                        // Number of jobs assigned to this server and are running
-                        + server.num_active_jobs;
+                        // Assume all pending and assigned jobs will eventually be run
+                        let num_jobs = server.num_pending_jobs //<< jobs that haven't been accepted yet
+                        + server.num_assigned_jobs //<< accepted jobs that the client has yet to start
+                        + server.num_active_jobs; //<< running jobs
 
-                        let load = num_assigned_jobs as f64 / num_vcpus;
+                        let load = num_jobs as f64 / num_vcpus;
 
                         // Exclude servers at max load and servers we've already tried
                         if load >= 1.0 || tried_servers.contains(server_id) {
@@ -605,6 +613,7 @@ impl SchedulerIncoming for Scheduler {
             };
 
         let mut tried_servers = HashSet::<ServerId>::new();
+        let mut assign_job_attempts = 0;
         let mut result = None;
 
         // Loop through candidate servers.
@@ -651,6 +660,12 @@ impl SchedulerIncoming for Scheduler {
                         continue;
                     }
                 }
+            }
+            // Try really hard to assign jobs before rejecting
+            if assign_job_attempts < 5 {
+                assign_job_attempts += 1;
+                tried_servers.clear();
+                continue;
             }
             break;
         }
@@ -714,6 +729,7 @@ impl SchedulerIncoming for Scheduler {
                 max_per_core_load,
                 server_nonce,
                 job_authorizer,
+                num_pending_jobs: 0,
                 num_assigned_jobs,
                 num_active_jobs,
             },
