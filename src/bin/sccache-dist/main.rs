@@ -843,9 +843,9 @@ impl ServerIncoming for Server {
     fn start_heartbeat(&self, requester: Arc<dyn ServerOutgoing>) {
         let jobs_active = self.jobs_active.clone();
         let jobs_assigned = self.jobs_assigned.clone();
-        // Wait up to 90s for a client to start a job.
+        // Wait up to 120s for a client to start a job.
         // Remove jobs the client hasn't started within this interval.
-        let unstarted_job_timeout = std::time::Duration::from_secs(90);
+        let unstarted_job_timeout = std::time::Duration::from_secs(120);
 
         // TODO: detect if this panics
         tokio::spawn(async move {
