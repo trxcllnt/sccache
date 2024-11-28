@@ -663,9 +663,10 @@ impl SchedulerIncoming for Scheduler {
                 }
             }
             // Try really hard to assign jobs before rejecting
-            if assign_job_attempts < 5 {
+            if assign_job_attempts < 150 {
                 assign_job_attempts += 1;
                 tried_servers.clear();
+                tokio::time::sleep(Duration::from_millis(33)).await;
                 continue;
             }
             break;
