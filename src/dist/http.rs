@@ -1138,7 +1138,6 @@ mod server {
 
             struct ServerState {
                 auth: Box<dyn JobAuthorizer>,
-                requester: Arc<ServerRequester>,
                 server_nonce: ServerNonce,
             }
 
@@ -1301,7 +1300,6 @@ mod server {
                               uri: Uri,
                               headers: HeaderMap,
                               AuthenticatedJob(job_id): AuthenticatedJob,
-                              Extension(state): Extension<Arc<ServerState>>,
                               request: Request| async move {
                             // Convert the request body stream into an `AsyncRead`
                             let body_reader = StreamReader::new(
@@ -1348,13 +1346,7 @@ mod server {
                             let RunJobHttpRequest { command, outputs } = run_job;
 
                             match handler
-                                .handle_run_job(
-                                    state.requester.as_ref(),
-                                    job_id,
-                                    command,
-                                    outputs,
-                                    inputs_reader,
-                                )
+                                .handle_run_job(job_id, command, outputs, inputs_reader)
                                 .await
                             {
                                 Ok(res) => Ok(accepts_response(&headers, &res).into_response()),
@@ -1369,7 +1361,6 @@ mod server {
                 .layer(Extension(Arc::new(ServerState {
                     auth: JWTJobAuthorizer::new(jwt_key.clone()),
                     server_nonce: server_nonce.clone(),
-                    requester,
                 })));
 
             let app = with_request_tracing(app);

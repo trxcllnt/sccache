@@ -705,7 +705,6 @@ pub trait ServerIncoming: Send + Sync {
     // From Client
     async fn handle_run_job(
         &self,
-        requester: &dyn ServerOutgoing,
         job_id: JobId,
         command: CompileCommand,
         outputs: Vec<String>,

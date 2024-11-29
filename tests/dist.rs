@@ -197,7 +197,6 @@ impl ServerIncoming for FailingServer {
     }
     async fn handle_run_job(
         &self,
-        _requester: &dyn ServerOutgoing,
         _job_id: JobId,
         _command: CompileCommand,
         _outputs: Vec<String>,

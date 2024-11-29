@@ -815,7 +815,7 @@ pub struct Server {
     builder: Box<dyn BuilderIncoming>,
     cache: Mutex<TcCache>,
     job_count: AtomicUsize,
-    jobs_active: Arc<AtomicUsize>,
+    jobs_active: Arc<Mutex<HashSet<JobId>>>,
     jobs_assigned: Arc<Mutex<HashMap<JobId, JobInfo>>>,
     jobserver: sccache::jobserver::Client,
 }
@@ -834,7 +834,7 @@ impl Server {
             jobserver,
             cache: Mutex::new(cache),
             job_count: AtomicUsize::new(0),
-            jobs_active: Arc::new(AtomicUsize::new(0)),
+            jobs_active: Arc::new(Mutex::new(HashSet::new())),
             jobs_assigned: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -872,7 +872,7 @@ impl ServerIncoming for Server {
                     jobs_assigned.len()
                 };
 
-                let num_active_jobs = jobs_active.load(std::sync::atomic::Ordering::SeqCst);
+                let num_active_jobs = jobs_active.lock().await.len();
 
                 let due_time = match requester
                     .do_heartbeat(num_assigned_jobs, num_active_jobs)
@@ -910,7 +910,7 @@ impl ServerIncoming for Server {
             );
             jobs_assigned.len()
         };
-        let num_active_jobs = self.jobs_active.load(std::sync::atomic::Ordering::Relaxed);
+        let num_active_jobs = self.jobs_active.lock().await.len();
 
         Ok(AssignJobResult {
             job_id,
@@ -984,7 +984,6 @@ impl ServerIncoming for Server {
 
     async fn handle_run_job(
         &self,
-        _requester: &dyn ServerOutgoing,
         job_id: JobId,
         command: CompileCommand,
         outputs: Vec<String>,
@@ -1003,8 +1002,7 @@ impl ServerIncoming for Server {
         };
 
         // Count the job as active
-        self.jobs_active
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.jobs_active.lock().await.insert(job_id);
 
         // Do the build
         let res = std::panic::AssertUnwindSafe(self.builder.run_build(
@@ -1028,8 +1026,7 @@ impl ServerIncoming for Server {
         .and_then(std::convert::identity);
 
         // Move job from active to done
-        self.jobs_active
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.jobs_active.lock().await.remove(&job_id);
 
         // Drop the jobserver token
         drop(token);
