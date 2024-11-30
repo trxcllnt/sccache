@@ -37,7 +37,7 @@ mod commands;
 mod compiler;
 pub mod config;
 pub mod dist;
-pub mod jobserver;
+mod jobserver;
 pub mod lru_disk_cache;
 pub mod mock_command;
 mod net;

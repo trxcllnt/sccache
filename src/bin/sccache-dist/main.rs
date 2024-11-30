@@ -331,13 +331,8 @@ fn run(command: Command) -> Result<i32> {
                     }
                 };
 
-                let server = Server::new(
-                    builder,
-                    &cache_dir,
-                    toolchain_cache_size,
-                    sccache::jobserver::Client::new_num(num_cpus),
-                )
-                .context("Failed to create sccache server instance")?;
+                let server = Server::new(builder, &cache_dir, toolchain_cache_size, num_cpus)
+                    .context("Failed to create sccache server instance")?;
 
                 let http_server = dist::http::Server::new(
                     public_addr,
@@ -840,10 +835,10 @@ struct JobInfo {
 pub struct Server {
     builder: Box<dyn BuilderIncoming>,
     cache: Mutex<TcCache>,
+    num_cpus: usize,
     job_count: AtomicUsize,
-    jobs_active: Arc<Mutex<HashSet<JobId>>>,
+    job_queue: Arc<tokio::sync::Semaphore>,
     jobs_assigned: Arc<Mutex<HashMap<JobId, JobInfo>>>,
-    jobserver: sccache::jobserver::Client,
 }
 
 impl Server {
@@ -851,16 +846,16 @@ impl Server {
         builder: Box<dyn BuilderIncoming>,
         cache_dir: &Path,
         toolchain_cache_size: u64,
-        jobserver: sccache::jobserver::Client,
+        num_cpus: usize,
     ) -> Result<Server> {
         let cache = TcCache::new(&cache_dir.join("tc"), toolchain_cache_size)
             .context("Failed to create toolchain cache")?;
         Ok(Server {
             builder,
-            jobserver,
+            num_cpus,
             cache: Mutex::new(cache),
             job_count: AtomicUsize::new(0),
-            jobs_active: Arc::new(Mutex::new(HashSet::new())),
+            job_queue: Arc::new(tokio::sync::Semaphore::new(num_cpus)),
             jobs_assigned: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -869,7 +864,8 @@ impl Server {
 #[async_trait]
 impl ServerIncoming for Server {
     fn start_heartbeat(&self, requester: Arc<dyn ServerOutgoing>) {
-        let jobs_active = self.jobs_active.clone();
+        let num_cpus = self.num_cpus;
+        let job_queue = self.job_queue.clone();
         let jobs_assigned = self.jobs_assigned.clone();
         // Wait up to 120s for a client to start a job.
         // Remove jobs the client hasn't started within this interval.
@@ -898,7 +894,7 @@ impl ServerIncoming for Server {
                     jobs_assigned.len()
                 };
 
-                let num_active_jobs = jobs_active.lock().await.len();
+                let num_active_jobs = num_cpus - job_queue.available_permits();
 
                 let due_time = match requester
                     .do_heartbeat(num_assigned_jobs, num_active_jobs)
@@ -936,7 +932,7 @@ impl ServerIncoming for Server {
             );
             jobs_assigned.len()
         };
-        let num_active_jobs = self.jobs_active.lock().await.len();
+        let num_active_jobs = self.num_cpus - self.job_queue.available_permits();
 
         Ok(AssignJobResult {
             job_id,
@@ -1015,8 +1011,8 @@ impl ServerIncoming for Server {
         outputs: Vec<String>,
         inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
     ) -> Result<RunJobResult> {
-        // Guard invoking run_build until we get a token from the jobserver
-        let token = self.jobserver.acquire().await?;
+        // Guard invoking run_build until we get a token from the job queue
+        let _token = self.job_queue.acquire().await?;
 
         // Remove the job from assigned map
         let tc = {
@@ -1026,9 +1022,6 @@ impl ServerIncoming for Server {
                 None => return Ok(RunJobResult::JobNotFound),
             }
         };
-
-        // Count the job as active
-        self.jobs_active.lock().await.insert(job_id);
 
         // Do the build
         let res = std::panic::AssertUnwindSafe(self.builder.run_build(
@@ -1050,12 +1043,6 @@ impl ServerIncoming for Server {
             anyhow::anyhow!("{msg}")
         })
         .and_then(std::convert::identity);
-
-        // Move job from active to done
-        self.jobs_active.lock().await.remove(&job_id);
-
-        // Drop the jobserver token
-        drop(token);
 
         match res {
             Err(e) => Err(e.context("run_job build failed")),
