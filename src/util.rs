@@ -942,8 +942,6 @@ pub fn new_reqwest_client(real_addr: Option<SocketAddr>) -> reqwest::Client {
 
     reqwest::Client::builder()
         .default_headers(headers)
-        // Use the connection pool
-        // .pool_max_idle_per_host(0)
         // Timeout idle pool connections after 10 seconds to help
         // hyper avoid opening more than `ulimit -n` connections.
         .pool_idle_timeout(Duration::from_secs(10))

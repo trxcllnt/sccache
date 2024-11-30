@@ -840,11 +840,11 @@ mod server {
                 }
                 // Finish the client
                 let new_client = client_builder
+                    // Timeout idle pool connections after 10 seconds to help
+                    // hyper avoid opening more than `ulimit -n` connections.
+                    .pool_idle_timeout(Duration::from_secs(10))
                     .timeout(get_dist_request_timeout())
                     .connect_timeout(get_dist_connect_timeout())
-                    // Disable connection pool to avoid broken connection
-                    // between runtime
-                    .pool_max_idle_per_host(0)
                     .build()
                     .context("failed to create a HTTP client")?;
                 // Use the updated certificates
@@ -1437,17 +1437,19 @@ mod client {
         self, AllocJobResult, CompileCommand, JobAlloc, PathTransformer, RunJobResult,
         SchedulerStatusResult, SubmitToolchainResult, Toolchain,
     };
+    use crate::util::new_reqwest_client;
 
     use async_trait::async_trait;
     use byteorder::{BigEndian, WriteBytesExt};
     use flate2::write::ZlibEncoder as ZlibWriteEncoder;
     use flate2::Compression;
+    use futures::lock::Mutex;
     use futures::TryFutureExt;
     use reqwest::Body;
     use std::collections::HashMap;
     use std::io::Write;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use super::common::{
         bincode_req_fut, AllocJobHttpResponse, ReqwestRequestBuilderExt, RunJobHttpRequest,
@@ -1477,14 +1479,7 @@ mod client {
             auth_token: String,
             rewrite_includes_only: bool,
         ) -> Result<Self> {
-            let client = reqwest::ClientBuilder::new()
-                .timeout(get_dist_request_timeout())
-                .connect_timeout(get_dist_connect_timeout())
-                // Disable connection pool to avoid broken connection
-                // between runtime
-                .pool_max_idle_per_host(0)
-                .build()
-                .context("failed to create an async HTTP client")?;
+            let client = new_reqwest_client(None);
             let client_toolchains =
                 cache::ClientToolchains::new(cache_dir, cache_size, toolchain_configs)
                     .context("failed to initialise client toolchains")?;
@@ -1521,10 +1516,11 @@ mod client {
             }
             // Finish the client
             let new_client_async = client_async_builder
+                // Timeout idle pool connections after 10 seconds to help
+                // hyper avoid opening more than `ulimit -n` connections.
+                .pool_idle_timeout(std::time::Duration::from_secs(10))
                 .timeout(get_dist_request_timeout())
                 .connect_timeout(get_dist_connect_timeout())
-                // Disable keep-alive
-                .pool_max_idle_per_host(0)
                 .build()
                 .context("failed to create an async HTTP client")?;
             // Use the updated certificates
@@ -1539,9 +1535,8 @@ mod client {
         async fn do_alloc_job(&self, tc: Toolchain) -> Result<AllocJobResult> {
             let scheduler_url = self.scheduler_url.clone();
             let url = urls::scheduler_alloc_job(&scheduler_url);
-            let mut req = self.client.lock().unwrap().post(url);
+            let mut req = self.client.lock().await.post(url);
             req = req.bearer_auth(self.auth_token.clone()).bincode(&tc)?;
-            // req = req.header(http::header::CONNECTION, "close");
 
             let client = self.client.clone();
             let server_certs = self.server_certs.clone();
@@ -1557,8 +1552,11 @@ mod client {
                         job_alloc,
                         need_toolchain,
                     });
-                    if let Some((digest, _)) = server_certs.lock().unwrap().get(&server_id) {
-                        if cert_digest == *digest {
+                    // Lock client and server_certs until the certs have been updated
+                    let mut client = client.lock().await;
+                    let mut server_certs = server_certs.lock().await;
+                    if let Some((saved_cert_digest, _)) = server_certs.get(&server_id) {
+                        if saved_cert_digest == &cert_digest {
                             return alloc_job_res;
                         }
                     }
@@ -1567,33 +1565,20 @@ mod client {
                         server_id.addr()
                     );
                     let url = urls::scheduler_server_certificate(&scheduler_url, server_id);
-                    let req = client.lock().unwrap().get(url);
-                    // let req = req.header(http::header::CONNECTION, "close");
+                    let req = client.get(url);
                     let res: ServerCertificateHttpResponse = bincode_req_fut(req)
                         .await
                         .context("GET to scheduler server_certificate failed")?;
 
-                    // TODO: Move to asynchronous reqwest client only.
-                    // This function internally builds a blocking reqwest client;
-                    // However, it does so by utilizing a runtime which it drops,
-                    // triggering (rightfully) a sanity check that prevents from
-                    // dropping a runtime in asynchronous context.
-                    // For the time being, we work around this by off-loading it
-                    // to a dedicated blocking-friendly thread pool.
-                    let _ = self
-                        .pool
-                        .spawn_blocking(move || {
-                            Self::update_certs(
-                                &mut client.lock().unwrap(),
-                                &mut server_certs.lock().unwrap(),
-                                server_id,
-                                res.cert_digest,
-                                res.cert_pem,
-                            )
-                            .context("Failed to update certificate")
-                            .unwrap_or_else(|e| warn!("Failed to update certificate: {:?}", e));
-                        })
-                        .await;
+                    Self::update_certs(
+                        &mut client,
+                        &mut server_certs,
+                        server_id,
+                        res.cert_digest,
+                        res.cert_pem,
+                    )
+                    .context("Failed to update certificate")
+                    .unwrap_or_else(|e| warn!("Failed to update certificate: {:?}", e));
 
                     alloc_job_res
                 }
@@ -1604,9 +1589,8 @@ mod client {
         async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
             let scheduler_url = self.scheduler_url.clone();
             let url = urls::scheduler_status(&scheduler_url);
-            let mut req = self.client.lock().unwrap().get(url);
+            let mut req = self.client.lock().await.get(url);
             req = req.bearer_auth(self.auth_token.clone());
-            // req = req.header(http::header::CONNECTION, "close");
             bincode_req_fut(req).await
         }
 
@@ -1618,12 +1602,11 @@ mod client {
             match self.tc_cache.get_toolchain(&tc) {
                 Ok(Some(toolchain_file)) => {
                     let url = urls::server_submit_toolchain(job_alloc.server_id, job_alloc.job_id);
-                    let req = self.client.lock().unwrap().post(url);
+                    let req = self.client.lock().await.post(url);
                     let toolchain_file = tokio::fs::File::from_std(toolchain_file.into());
                     let toolchain_file_stream = tokio_util::io::ReaderStream::new(toolchain_file);
                     let body = Body::wrap_stream(toolchain_file_stream);
                     let req = req.bearer_auth(job_alloc.auth).body(body);
-                    // let req = req.header(http::header::CONNECTION, "close");
                     bincode_req_fut(req).await
                 }
                 Ok(None) => Err(anyhow!("couldn't find toolchain locally")),
@@ -1670,9 +1653,8 @@ mod client {
                     Ok((body, path_transformer))
                 })
                 .await??;
-            let mut req = self.client.lock().unwrap().post(url);
+            let mut req = self.client.lock().await.post(url);
             req = req.bearer_auth(job_alloc.auth.clone()).bytes(body);
-            // req = req.header(http::header::CONNECTION, "close");
             bincode_req_fut(req)
                 .map_ok(|res| (res, path_transformer))
                 .await
