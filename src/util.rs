@@ -930,16 +930,6 @@ pub fn daemonize() -> Result<()> {
     Ok(())
 }
 
-/// Disable connection pool to avoid broken connection between runtime
-///
-/// # TODO
-///
-/// We should refactor sccache current model to make sure that we only have
-/// one tokio runtime and keep reqwest alive inside it.
-///
-/// ---
-///
-/// More details could be found at https://github.com/mozilla/sccache/pull/1563
 #[cfg(any(feature = "dist-server", feature = "dist-client"))]
 pub fn new_reqwest_client(real_addr: Option<SocketAddr>) -> reqwest::Client {
     let mut headers = reqwest::header::HeaderMap::new();
@@ -952,7 +942,11 @@ pub fn new_reqwest_client(real_addr: Option<SocketAddr>) -> reqwest::Client {
 
     reqwest::Client::builder()
         .default_headers(headers)
-        .pool_max_idle_per_host(0)
+        // Use the connection pool
+        // .pool_max_idle_per_host(0)
+        // Timeout idle pool connections after 10 seconds to help
+        // hyper avoid opening more than `ulimit -n` connections.
+        .pool_idle_timeout(Duration::from_secs(10))
         .timeout(get_dist_request_timeout())
         .connect_timeout(get_dist_connect_timeout())
         .build()

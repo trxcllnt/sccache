@@ -104,9 +104,10 @@ mod common {
     pub async fn bincode_req_fut<T: serde::de::DeserializeOwned + 'static>(
         req: reqwest::RequestBuilder,
     ) -> Result<T> {
-        // Work around tiny_http issue #151 by disabling HTTP pipeline with
-        // `Connection: close`.
-        let res = match req.header(header::CONNECTION, "close").send().await {
+        // // Work around tiny_http issue #151 by disabling HTTP pipeline with
+        // // `Connection: close`.
+        // let req = req.header(header::CONNECTION, "close");
+        let res = match req.send().await {
             Ok(res) => res,
             Err(err) => {
                 error!("Response error: err={err}");
@@ -1540,6 +1541,7 @@ mod client {
             let url = urls::scheduler_alloc_job(&scheduler_url);
             let mut req = self.client.lock().unwrap().post(url);
             req = req.bearer_auth(self.auth_token.clone()).bincode(&tc)?;
+            // req = req.header(http::header::CONNECTION, "close");
 
             let client = self.client.clone();
             let server_certs = self.server_certs.clone();
@@ -1566,6 +1568,7 @@ mod client {
                     );
                     let url = urls::scheduler_server_certificate(&scheduler_url, server_id);
                     let req = client.lock().unwrap().get(url);
+                    // let req = req.header(http::header::CONNECTION, "close");
                     let res: ServerCertificateHttpResponse = bincode_req_fut(req)
                         .await
                         .context("GET to scheduler server_certificate failed")?;
@@ -1603,6 +1606,7 @@ mod client {
             let url = urls::scheduler_status(&scheduler_url);
             let mut req = self.client.lock().unwrap().get(url);
             req = req.bearer_auth(self.auth_token.clone());
+            // req = req.header(http::header::CONNECTION, "close");
             bincode_req_fut(req).await
         }
 
@@ -1619,6 +1623,7 @@ mod client {
                     let toolchain_file_stream = tokio_util::io::ReaderStream::new(toolchain_file);
                     let body = Body::wrap_stream(toolchain_file_stream);
                     let req = req.bearer_auth(job_alloc.auth).body(body);
+                    // let req = req.header(http::header::CONNECTION, "close");
                     bincode_req_fut(req).await
                 }
                 Ok(None) => Err(anyhow!("couldn't find toolchain locally")),
@@ -1667,6 +1672,7 @@ mod client {
                 .await??;
             let mut req = self.client.lock().unwrap().post(url);
             req = req.bearer_auth(job_alloc.auth.clone()).bytes(body);
+            // req = req.header(http::header::CONNECTION, "close");
             bincode_req_fut(req)
                 .map_ok(|res| (res, path_transformer))
                 .await
