@@ -1079,6 +1079,20 @@ pub mod scheduler {
 
     use serde::{Deserialize, Serialize};
 
+    pub fn default_max_concurrent_requests() -> usize {
+        std::env::var("SCCACHE_DIST_MAX_CONCURRENT_REQUESTS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1024) // default for ulimit -n
+    }
+
+    pub fn default_max_concurrent_requests_per_server() -> usize {
+        std::env::var("SCCACHE_DIST_MAX_CONCURRENT_REQUESTS_PER_SERVER")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(32)
+    }
+
     pub fn default_remember_server_error_timeout() -> u64 {
         std::env::var("SCCACHE_DIST_REMEMBER_SERVER_ERROR_TIMEOUT")
             .ok()
@@ -1128,6 +1142,8 @@ pub mod scheduler {
         pub public_addr: SocketAddr,
         pub client_auth: ClientAuth,
         pub server_auth: ServerAuth,
+        pub max_concurrent_requests: usize,
+        pub max_concurrent_requests_per_server: usize,
         pub remember_server_error_timeout: u64,
     }
 
@@ -1137,6 +1153,8 @@ pub mod scheduler {
                 public_addr: SocketAddr::from_str("0.0.0.0:10500").unwrap(),
                 client_auth: ClientAuth::Insecure,
                 server_auth: ServerAuth::Insecure,
+                max_concurrent_requests: default_max_concurrent_requests(),
+                max_concurrent_requests_per_server: default_max_concurrent_requests_per_server(),
                 remember_server_error_timeout: default_remember_server_error_timeout(),
             }
         }
