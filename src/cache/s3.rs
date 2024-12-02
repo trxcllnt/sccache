@@ -14,7 +14,6 @@ use opendal::layers::LoggingLayer;
 use opendal::raw::HttpClient;
 use opendal::services::S3;
 use opendal::Operator;
-use reqwest::ClientBuilder;
 
 use crate::errors::*;
 
@@ -70,7 +69,10 @@ impl S3Cache {
 /// Set the user agent (helps with monitoring on the server side)
 fn set_user_agent() -> HttpClient {
     let user_agent = format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-    let client = ClientBuilder::new().user_agent(user_agent).build().unwrap();
+    let client = reqwest::Client::builder()
+        .user_agent(user_agent)
+        .build()
+        .unwrap();
     HttpClient::with(client)
 }
 

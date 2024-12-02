@@ -106,7 +106,7 @@ mod common {
     ) -> Result<T> {
         // // Work around tiny_http issue #151 by disabling HTTP pipeline with
         // // `Connection: close`.
-        // let req = req.header(header::CONNECTION, "close");
+        let req = req.header(header::CONNECTION, "close");
         let res = match req.send().await {
             Ok(res) => res,
             Err(err) => {
@@ -825,7 +825,7 @@ mod server {
                     "Adding new certificate for {} to scheduler",
                     server_id.addr()
                 );
-                let mut client_builder = reqwest::ClientBuilder::new();
+                let mut client_builder = reqwest::Client::builder();
                 // Add all the certificates we know about
                 client_builder = client_builder.add_root_certificate(
                     reqwest::Certificate::from_pem(&cert_pem)
@@ -840,9 +840,8 @@ mod server {
                 }
                 // Finish the client
                 let new_client = client_builder
-                    // Timeout idle pool connections after 10 seconds to help
-                    // hyper avoid opening more than `ulimit -n` connections.
-                    .pool_idle_timeout(Duration::from_secs(10))
+                    // Disable connection pool
+                    .pool_max_idle_per_host(0)
                     .timeout(get_dist_request_timeout())
                     .connect_timeout(get_dist_connect_timeout())
                     .build()
@@ -1501,7 +1500,7 @@ mod client {
             cert_digest: Vec<u8>,
             cert_pem: Vec<u8>,
         ) -> Result<()> {
-            let mut client_async_builder = reqwest::ClientBuilder::new();
+            let mut client_async_builder = reqwest::Client::builder();
             // Add all the certificates we know about
             client_async_builder = client_async_builder.add_root_certificate(
                 reqwest::Certificate::from_pem(&cert_pem)
@@ -1516,9 +1515,8 @@ mod client {
             }
             // Finish the client
             let new_client_async = client_async_builder
-                // Timeout idle pool connections after 10 seconds to help
-                // hyper avoid opening more than `ulimit -n` connections.
-                .pool_idle_timeout(std::time::Duration::from_secs(10))
+                // Disable connection pool
+                .pool_max_idle_per_host(0)
                 .timeout(get_dist_request_timeout())
                 .connect_timeout(get_dist_connect_timeout())
                 .build()
