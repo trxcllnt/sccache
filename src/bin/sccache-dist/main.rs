@@ -648,10 +648,13 @@ impl SchedulerIncoming for Scheduler {
             // loop. Computing load again ensures we allocate accurately based on the current
             // statistics.
             // LOCKS
-            let server_id = {
+            let (num_servers, server_id) = {
                 // LOCKS
                 let mut servers = self.servers.lock().await;
-                get_best_server_by_least_load_and_oldest_error(&mut servers, &tried_servers)
+                let num_servers = servers.len();
+                let server_id =
+                    get_best_server_by_least_load_and_oldest_error(&mut servers, &tried_servers);
+                (num_servers, server_id)
             };
 
             // Take the top candidate. If we can't allocate the job to it,
@@ -680,7 +683,6 @@ impl SchedulerIncoming for Scheduler {
             }
             // Try the next server.
             // If we've tried all the servers, wait a bit and try them again.
-            let num_servers = self.servers.lock().await.len();
             if num_servers > 0
                 && Instant::now().duration_since(start_time) < get_dist_request_timeout()
             {
