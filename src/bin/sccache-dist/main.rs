@@ -675,19 +675,22 @@ impl SchedulerIncoming for Scheduler {
                         );
                         tried_servers.insert(server_id);
                         result = Some(Err(err));
-                        // Try the next server.
-                        // If we've tried all the servers, wait a bit and try them again.
-                        if (Instant::now() - start_time) < get_dist_request_timeout() {
-                            // Try really hard to assign jobs before rejecting
-                            // If we've tried all the servers, wait a bit and try again
-                            if tried_servers.len() >= self.servers.lock().await.len() {
-                                tried_servers.clear();
-                                tokio::time::sleep(Duration::from_millis(33)).await;
-                            }
-                            continue;
-                        }
                     }
                 }
+            }
+            // Try the next server.
+            // If we've tried all the servers, wait a bit and try them again.
+            let num_servers = self.servers.lock().await.len();
+            if num_servers > 0
+                && Instant::now().duration_since(start_time) < get_dist_request_timeout()
+            {
+                // Try really hard to assign jobs before rejecting
+                // If we've tried all the servers, wait a bit and try again
+                if tried_servers.len() >= num_servers {
+                    tried_servers.clear();
+                    tokio::time::sleep(Duration::from_millis(33)).await;
+                }
+                continue;
             }
             // No available servers
             break;
