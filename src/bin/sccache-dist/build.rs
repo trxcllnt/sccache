@@ -14,7 +14,6 @@
 
 use anyhow::{anyhow, bail, Context, Error, Result};
 use async_trait::async_trait;
-use bytes::Buf;
 use flate2::read::GzDecoder;
 use fs_err as fs;
 use futures::lock::Mutex;
@@ -27,11 +26,10 @@ use sccache::lru_disk_cache::Error as LruError;
 use std::borrow::Borrow;
 use std::collections::{hash_map, HashMap};
 use std::io;
-use std::iter;
 use std::path::{self, Path, PathBuf};
 use std::process::{Output, Stdio};
-use tokio::io::AsyncReadExt;
 use tokio::process::ChildStdin;
+use tokio_util::compat::TokioAsyncReadCompatExt;
 use version_compare::Version;
 
 #[async_trait]
@@ -330,9 +328,10 @@ impl OverlayBuilder {
         job_id: JobId,
         bubblewrap: PathBuf,
         compile_command: CompileCommand,
-        mut inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
+        inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         output_paths: Vec<String>,
         overlay: OverlaySpec,
+        job_queue: &tokio::sync::Semaphore,
     ) -> Result<BuildResult> {
         tracing::trace!(
             "[perform_build({})]: Compile environment: {:?}",
@@ -346,9 +345,26 @@ impl OverlayBuilder {
             compile_command.arguments
         );
 
-        // Read into memory because we can't use asyncio in the thread below.
-        let mut inputs_buf = vec![];
-        inputs_rdr.read_to_end(&mut inputs_buf).await?;
+        // Read inputs here because we can't use asyncio in the thread below.
+        let work_dir = overlay.build_dir.join("work");
+        let upper_dir = overlay.build_dir.join("upper");
+        let target_dir = overlay.build_dir.join("target");
+        let inputs_dir = overlay.build_dir.join("inputs");
+        fs::create_dir_all(&work_dir).context("Failed to create overlay work directory")?;
+        fs::create_dir_all(&upper_dir).context("Failed to create overlay upper directory")?;
+        fs::create_dir_all(&target_dir).context("Failed to create overlay target directory")?;
+        fs::create_dir_all(&inputs_dir).context("Failed to create overlay inputs directory")?;
+
+        tracing::trace!("[perform_build({})]: copying in inputs", job_id);
+        // Note that we don't unpack directly into the upperdir since there overlayfs has some
+        // special marker files that we don't want to create by accident (or malicious intent)
+        async_tar::Archive::new(inputs_rdr.compat())
+            .unpack(&inputs_dir)
+            .await
+            .context("Failed to unpack inputs to overlay")?;
+
+        // Guard compiling until we get a token from the job queue
+        let _token = job_queue.acquire().await?;
 
         std::thread::scope(|scope| {
             scope
@@ -372,18 +388,10 @@ impl OverlayBuilder {
                     )
                     .context("Failed to turn / into a slave")?;
 
-                    let work_dir = overlay.build_dir.join("work");
-                    let upper_dir = overlay.build_dir.join("upper");
-                    let target_dir = overlay.build_dir.join("target");
-                    fs::create_dir_all(&work_dir)
-                        .context("Failed to create overlay work directory")?;
-                    fs::create_dir_all(&upper_dir)
-                        .context("Failed to create overlay upper directory")?;
-                    fs::create_dir_all(&target_dir)
-                        .context("Failed to create overlay target directory")?;
-
                     let () = Overlay::writable(
-                        iter::once(overlay.toolchain_dir.as_path()),
+                        [inputs_dir.as_path(), overlay.toolchain_dir.as_path()]
+                            .iter()
+                            .cloned(),
                         upper_dir,
                         work_dir,
                         &target_dir,
@@ -391,13 +399,6 @@ impl OverlayBuilder {
                     )
                     .mount()
                     .map_err(|e| anyhow!("Failed to mount overlay FS: {}", e.to_string()))?;
-
-                    tracing::trace!("[perform_build({})]: copying in inputs", job_id);
-                    // Note that we don't unpack directly into the upperdir since there overlayfs has some
-                    // special marker files that we don't want to create by accident (or malicious intent)
-                    tar::Archive::new(inputs_buf.reader())
-                        .unpack(&target_dir)
-                        .context("Failed to unpack inputs to overlay")?;
 
                     let CompileCommand {
                         executable,
@@ -568,6 +569,7 @@ impl BuilderIncoming for OverlayBuilder {
         outputs: Vec<String>,
         inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         tccache: &Mutex<TcCache>,
+        job_queue: &tokio::sync::Semaphore,
     ) -> Result<BuildResult> {
         tracing::debug!("[run_build({})]: Preparing overlay", job_id);
         let overlay = self
@@ -582,6 +584,7 @@ impl BuilderIncoming for OverlayBuilder {
             inputs_rdr,
             outputs,
             overlay.clone(),
+            job_queue,
         )
         .await;
         tracing::debug!("[run_build({})]: Finishing with overlay", job_id);
@@ -922,6 +925,7 @@ impl DockerBuilder {
         mut inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         output_paths: Vec<String>,
         cid: &str,
+        job_queue: &tokio::sync::Semaphore,
     ) -> Result<BuildResult> {
         tracing::trace!(
             "[perform_build({})]: Compile environment: {:?}",
@@ -979,6 +983,9 @@ impl DockerBuilder {
         cmd.check_run()
             .await
             .context("Failed to create directories required for compile in container")?;
+
+        // Guard compiling until we get a token from the job queue
+        let _token = job_queue.acquire().await?;
 
         tracing::trace!("[perform_build({})]: performing compile", job_id);
         // TODO: likely shouldn't perform the compile as root in the container
@@ -1059,6 +1066,7 @@ impl BuilderIncoming for DockerBuilder {
         outputs: Vec<String>,
         inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         tccache: &Mutex<TcCache>,
+        job_queue: &tokio::sync::Semaphore,
     ) -> Result<BuildResult> {
         tracing::debug!("[run_build({})]: Finding container", job_id);
         let cid = self
@@ -1070,7 +1078,7 @@ impl BuilderIncoming for DockerBuilder {
             job_id,
             cid
         );
-        let res = Self::perform_build(job_id, command, inputs_rdr, outputs, &cid).await;
+        let res = Self::perform_build(job_id, command, inputs_rdr, outputs, &cid, job_queue).await;
         tracing::debug!("[run_build({})]: Finishing with container {}", job_id, cid);
         self.finish_container(job_id, &tc, cid).await;
         tracing::debug!("[run_build({})]: Returning result", job_id);

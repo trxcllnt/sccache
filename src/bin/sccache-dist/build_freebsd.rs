@@ -372,6 +372,7 @@ impl PotBuilder {
         output_paths: Vec<String>,
         cid: &str,
         pot_fs_root: &Path,
+        job_queue: &tokio::sync::Semaphore,
     ) -> Result<BuildResult> {
         tracing::trace!(
             "[perform_build({})]: Compile environment: {:?}",
@@ -418,6 +419,9 @@ impl PotBuilder {
         cmd.check_run()
             .await
             .context("Failed to create directories required for compile in container")?;
+
+        // Guard compiling until we get a token from the job queue
+        let _token = job_queue.acquire().await?;
 
         tracing::trace!("[perform_build({})]: performing compile", job_id);
         // TODO: likely shouldn't perform the compile as root in the container
@@ -498,6 +502,7 @@ impl BuilderIncoming for PotBuilder {
         outputs: Vec<String>,
         inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         tccache: &Mutex<TcCache>,
+        job_queue: &tokio::sync::Semaphore,
     ) -> Result<BuildResult> {
         tracing::debug!("[run_build({})]: Finding container", job_id);
         let cid = self
@@ -516,6 +521,7 @@ impl BuilderIncoming for PotBuilder {
             outputs,
             &cid,
             &self.pot_fs_root,
+            job_queue,
         )
         .await;
         // Unwrap the result

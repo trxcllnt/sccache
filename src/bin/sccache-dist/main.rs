@@ -977,9 +977,6 @@ impl ServerIncoming for Server {
         outputs: Vec<String>,
         inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
     ) -> Result<RunJobResult> {
-        // Guard invoking run_build until we get a token from the job queue
-        let _token = self.job_queue.acquire().await?;
-
         // Remove the job from assigned map
         let tc = {
             let mut jobs_assigned = self.jobs_assigned.lock().await;
@@ -997,6 +994,7 @@ impl ServerIncoming for Server {
             outputs,
             inputs_rdr,
             &self.cache,
+            self.job_queue.as_ref(),
         ))
         .catch_unwind()
         .await

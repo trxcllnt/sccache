@@ -716,6 +716,7 @@ pub trait ServerIncoming: Send + Sync {
 #[async_trait]
 pub trait BuilderIncoming: Send + Sync {
     // From Server
+    #[allow(clippy::too_many_arguments)]
     async fn run_build(
         &self,
         job_id: JobId,
@@ -724,6 +725,7 @@ pub trait BuilderIncoming: Send + Sync {
         outputs: Vec<String>,
         inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         cache: &Mutex<TcCache>,
+        job_queue: &tokio::sync::Semaphore,
     ) -> ExtResult<BuildResult, Error>;
 }
 
