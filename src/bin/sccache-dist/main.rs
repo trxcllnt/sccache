@@ -8,7 +8,7 @@ use rand::{rngs::OsRng, RngCore};
 use sccache::config::{
     scheduler as scheduler_config, server as server_config, INSECURE_DIST_CLIENT_TOKEN,
 };
-use sccache::dist::http::{get_dist_connect_timeout, HEARTBEAT_ERROR_INTERVAL, HEARTBEAT_INTERVAL};
+use sccache::dist::http::{get_dist_request_timeout, HEARTBEAT_ERROR_INTERVAL, HEARTBEAT_INTERVAL};
 use sccache::dist::{
     self, AllocJobResult, AssignJobResult, BuilderIncoming, CompileCommand, HeartbeatServerResult,
     JobAlloc, JobAuthorizer, JobComplete, JobId, RunJobResult, SchedulerIncoming,
@@ -160,7 +160,6 @@ fn run(command: Command) -> Result<i32> {
             public_addr,
             client_auth,
             server_auth,
-            max_concurrent_requests,
             remember_server_error_timeout,
         }) => {
             let check_client_auth: Box<dyn dist::http::ClientAuthCheck> = match client_auth {
@@ -223,7 +222,7 @@ fn run(command: Command) -> Result<i32> {
                 .enable_all()
                 .build()?;
 
-            let scheduler = Scheduler::new(max_concurrent_requests, remember_server_error_timeout);
+            let scheduler = Scheduler::new(remember_server_error_timeout);
 
             let http_scheduler = dist::http::Scheduler::new(
                 public_addr,
@@ -379,7 +378,6 @@ fn init_logging() {
 // To avoid deadlocking, make sure to do all locking at once (i.e. no further locking in a downward scope),
 // in alphabetical order
 pub struct Scheduler {
-    request_queue: tokio::sync::Semaphore,
     remember_server_error_timeout: Duration,
     servers: Mutex<HashMap<ServerId, ServerDetails>>,
 }
@@ -397,9 +395,8 @@ struct ServerDetails {
 }
 
 impl Scheduler {
-    pub fn new(max_concurrent_requests: usize, remember_server_error_timeout: u64) -> Self {
+    pub fn new(remember_server_error_timeout: u64) -> Self {
         Scheduler {
-            request_queue: tokio::sync::Semaphore::new(max_concurrent_requests),
             remember_server_error_timeout: Duration::from_secs(remember_server_error_timeout),
             servers: Mutex::new(HashMap::new()),
         }
@@ -428,10 +425,7 @@ impl Scheduler {
 
 impl Default for Scheduler {
     fn default() -> Self {
-        Self::new(
-            scheduler_config::default_max_concurrent_requests(),
-            scheduler_config::default_remember_server_error_timeout(),
-        )
+        Self::new(scheduler_config::default_remember_server_error_timeout())
     }
 }
 
@@ -474,8 +468,6 @@ impl SchedulerIncoming for Scheduler {
         // All error conditions must fail gracefully.
 
         let try_assign_job = |server_id: ServerId, tc: Toolchain| async move {
-            let request_permit = self.request_queue.acquire().await?;
-
             // LOCKS
             let mut servers = self.servers.lock().await;
             let server = match servers.get_mut(&server_id) {
@@ -501,7 +493,6 @@ impl SchedulerIncoming for Scheduler {
             } = match requester.do_assign_job(server_id, tc, assign_auth).await {
                 Ok(res) => res,
                 Err(err) => {
-                    drop(request_permit);
                     // LOCKS
                     let mut servers = self.servers.lock().await;
                     // Couldn't assign the job, so store the last_error
@@ -515,8 +506,6 @@ impl SchedulerIncoming for Scheduler {
                     return Err(err);
                 }
             };
-
-            drop(request_permit);
 
             // LOCKS
             let mut servers = self.servers.lock().await;
@@ -616,6 +605,7 @@ impl SchedulerIncoming for Scheduler {
             };
 
         let start_time = Instant::now();
+        let request_timeout = Duration::from_secs(30);
         let mut tried_servers = HashSet::<ServerId>::new();
         let mut result = None;
 
@@ -670,7 +660,7 @@ impl SchedulerIncoming for Scheduler {
             }
             // Try really hard to assign jobs before rejecting
             let now = Instant::now();
-            if num_servers > 0 && now.duration_since(start_time) < get_dist_connect_timeout() {
+            if num_servers > 0 && now.duration_since(start_time) < request_timeout {
                 tried_servers.clear();
                 continue;
             }
@@ -854,9 +844,9 @@ impl ServerIncoming for Server {
         let num_cpus = self.num_cpus;
         let job_queue = self.job_queue.clone();
         let jobs_assigned = self.jobs_assigned.clone();
-        // Wait up to 120s for a client to start a job.
+        // Wait up to SCCACHE_DIST_REQUEST_TIMEOUT for a client to start a job.
         // Remove jobs the client hasn't started within this interval.
-        let unstarted_job_timeout = std::time::Duration::from_secs(120);
+        let unstarted_job_timeout = get_dist_request_timeout();
 
         // TODO: detect if this panics
         tokio::spawn(async move {
