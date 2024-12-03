@@ -475,13 +475,13 @@ impl SchedulerIncoming for Scheduler {
                 _ => bail!("Failed to assign job to unknown server"),
             };
 
-            server.num_pending_jobs += 1;
-
             let assign_auth = server
                 .job_authorizer
                 .generate_token(JobId(server.server_nonce.as_u64()))
                 .map_err(Error::from)
                 .context("Could not create assign_auth token")?;
+
+            server.num_pending_jobs += 1;
 
             drop(servers);
 
@@ -604,9 +604,9 @@ impl SchedulerIncoming for Scheduler {
                     .map(|(server_id, _, _)| *server_id)
             };
 
-        let start_time = Instant::now();
-        let request_timeout = Duration::from_secs(30);
         let mut tried_servers = HashSet::<ServerId>::new();
+        #[allow(unused_assignments)]
+        let mut num_servers = 0;
         let mut result = None;
 
         // Loop through candidate servers.
@@ -623,13 +623,11 @@ impl SchedulerIncoming for Scheduler {
             // loop. Computing load again ensures we allocate accurately based on the current
             // statistics.
             // LOCKS
-            let (num_servers, server_id) = {
+            let server_id = {
                 // LOCKS
                 let mut servers = self.servers.lock().await;
-                let num_servers = servers.len();
-                let server_id =
-                    get_best_server_by_least_load_and_oldest_error(&mut servers, &tried_servers);
-                (num_servers, server_id)
+                num_servers = servers.len();
+                get_best_server_by_least_load_and_oldest_error(&mut servers, &tried_servers)
             };
 
             // Take the top candidate. If we can't allocate the job to it,
@@ -658,12 +656,6 @@ impl SchedulerIncoming for Scheduler {
                     }
                 }
             }
-            // Try really hard to assign jobs before rejecting
-            let now = Instant::now();
-            if num_servers > 0 && now.duration_since(start_time) < request_timeout {
-                tried_servers.clear();
-                continue;
-            }
             // No available servers
             break;
         }
@@ -673,10 +665,7 @@ impl SchedulerIncoming for Scheduler {
         } else {
             // Fallback to the default failure case
             Ok(AllocJobResult::Fail {
-                msg: format!(
-                    "[alloc_job]: Insufficient capacity across {} available servers",
-                    self.servers.lock().await.len()
-                ),
+                msg: format!("Insufficient capacity across {num_servers} available servers",),
             })
         }
     }
