@@ -8,7 +8,7 @@ use rand::{rngs::OsRng, RngCore};
 use sccache::config::{
     scheduler as scheduler_config, server as server_config, INSECURE_DIST_CLIENT_TOKEN,
 };
-use sccache::dist::http::{get_dist_request_timeout, HEARTBEAT_ERROR_INTERVAL, HEARTBEAT_INTERVAL};
+use sccache::dist::http::{get_dist_connect_timeout, HEARTBEAT_ERROR_INTERVAL, HEARTBEAT_INTERVAL};
 use sccache::dist::{
     self, AllocJobResult, AssignJobResult, BuilderIncoming, CompileCommand, HeartbeatServerResult,
     JobAlloc, JobAuthorizer, JobComplete, JobId, RunJobResult, SchedulerIncoming,
@@ -161,7 +161,6 @@ fn run(command: Command) -> Result<i32> {
             client_auth,
             server_auth,
             max_concurrent_requests,
-            max_concurrent_requests_per_server,
             remember_server_error_timeout,
         }) => {
             let check_client_auth: Box<dyn dist::http::ClientAuthCheck> = match client_auth {
@@ -224,11 +223,7 @@ fn run(command: Command) -> Result<i32> {
                 .enable_all()
                 .build()?;
 
-            let scheduler = Scheduler::new(
-                max_concurrent_requests,
-                max_concurrent_requests_per_server,
-                remember_server_error_timeout,
-            );
+            let scheduler = Scheduler::new(max_concurrent_requests, remember_server_error_timeout);
 
             let http_scheduler = dist::http::Scheduler::new(
                 public_addr,
@@ -384,7 +379,6 @@ fn init_logging() {
 // To avoid deadlocking, make sure to do all locking at once (i.e. no further locking in a downward scope),
 // in alphabetical order
 pub struct Scheduler {
-    max_concurrent_requests_per_server: usize,
     request_queue: tokio::sync::Semaphore,
     remember_server_error_timeout: Duration,
     servers: Mutex<HashMap<ServerId, ServerDetails>>,
@@ -403,13 +397,8 @@ struct ServerDetails {
 }
 
 impl Scheduler {
-    pub fn new(
-        max_concurrent_requests: usize,
-        max_concurrent_requests_per_server: usize,
-        remember_server_error_timeout: u64,
-    ) -> Self {
+    pub fn new(max_concurrent_requests: usize, remember_server_error_timeout: u64) -> Self {
         Scheduler {
-            max_concurrent_requests_per_server,
             request_queue: tokio::sync::Semaphore::new(max_concurrent_requests),
             remember_server_error_timeout: Duration::from_secs(remember_server_error_timeout),
             servers: Mutex::new(HashMap::new()),
@@ -441,7 +430,6 @@ impl Default for Scheduler {
     fn default() -> Self {
         Self::new(
             scheduler_config::default_max_concurrent_requests(),
-            scheduler_config::default_max_concurrent_requests_per_server(),
             scheduler_config::default_remember_server_error_timeout(),
         )
     }
@@ -486,18 +474,14 @@ impl SchedulerIncoming for Scheduler {
         // All error conditions must fail gracefully.
 
         let try_assign_job = |server_id: ServerId, tc: Toolchain| async move {
+            let request_permit = self.request_queue.acquire().await?;
+
             // LOCKS
             let mut servers = self.servers.lock().await;
             let server = match servers.get_mut(&server_id) {
                 Some(server) => server,
                 _ => bail!("Failed to assign job to unknown server"),
             };
-
-            if server.num_pending_jobs >= self.max_concurrent_requests_per_server {
-                bail!("Not assigning job to server with too many in-flight requests")
-            }
-
-            let request_permit = self.request_queue.acquire().await?;
 
             server.num_pending_jobs += 1;
 
@@ -517,6 +501,7 @@ impl SchedulerIncoming for Scheduler {
             } = match requester.do_assign_job(server_id, tc, assign_auth).await {
                 Ok(res) => res,
                 Err(err) => {
+                    drop(request_permit);
                     // LOCKS
                     let mut servers = self.servers.lock().await;
                     // Couldn't assign the job, so store the last_error
@@ -678,35 +663,32 @@ impl SchedulerIncoming for Scheduler {
                         );
                         tried_servers.insert(server_id);
                         result = Some(Err(err));
+                        // Try the next server
+                        continue;
                     }
                 }
             }
-            // Try the next server.
-            // If we've tried all the servers, wait a bit and try them again.
-            if num_servers > 0
-                && Instant::now().duration_since(start_time) < get_dist_request_timeout()
-            {
-                // Try really hard to assign jobs before rejecting
-                // If we've tried all the servers, wait a bit and try again
-                if tried_servers.len() >= num_servers {
-                    tried_servers.clear();
-                    tokio::time::sleep(Duration::from_millis(33)).await;
-                }
+            // Try really hard to assign jobs before rejecting
+            let now = Instant::now();
+            if num_servers > 0 && now.duration_since(start_time) < get_dist_connect_timeout() {
+                tried_servers.clear();
                 continue;
             }
             // No available servers
             break;
         }
 
-        result.unwrap_or_else(|| {
+        if let Some(result) = result {
+            result
+        } else {
             // Fallback to the default failure case
             Ok(AllocJobResult::Fail {
                 msg: format!(
                     "[alloc_job]: Insufficient capacity across {} available servers",
-                    tried_servers.len()
+                    self.servers.lock().await.len()
                 ),
             })
-        })
+        }
     }
 
     async fn handle_heartbeat_server(
