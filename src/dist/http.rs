@@ -106,7 +106,7 @@ mod common {
     ) -> Result<T> {
         // // Work around tiny_http issue #151 by disabling HTTP pipeline with
         // // `Connection: close`.
-        let req = req.header(header::CONNECTION, "close");
+        // let req = req.header(header::CONNECTION, "close");
         let res = match req.send().await {
             Ok(res) => res,
             Err(err) => {
@@ -841,7 +841,7 @@ mod server {
                 // Finish the client
                 let new_client = client_builder
                     // Disable connection pool
-                    .pool_max_idle_per_host(0)
+                    // .pool_max_idle_per_host(0)
                     .timeout(get_dist_request_timeout())
                     .connect_timeout(get_dist_connect_timeout())
                     .build()
@@ -1516,7 +1516,7 @@ mod client {
             // Finish the client
             let new_client_async = client_async_builder
                 // Disable connection pool
-                .pool_max_idle_per_host(0)
+                // .pool_max_idle_per_host(0)
                 .timeout(get_dist_request_timeout())
                 .connect_timeout(get_dist_connect_timeout())
                 .build()

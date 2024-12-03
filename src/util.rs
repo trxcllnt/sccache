@@ -943,7 +943,7 @@ pub fn new_reqwest_client(real_addr: Option<SocketAddr>) -> reqwest::Client {
     reqwest::Client::builder()
         .default_headers(headers)
         // Disable connection pool
-        .pool_max_idle_per_host(0)
+        // .pool_max_idle_per_host(0)
         .timeout(get_dist_request_timeout())
         .connect_timeout(get_dist_connect_timeout())
         .build()
@@ -972,7 +972,7 @@ pub fn new_reqwest_blocking_client(real_addr: Option<SocketAddr>) -> reqwest::bl
 
     reqwest::blocking::Client::builder()
         .default_headers(headers)
-        .pool_max_idle_per_host(0)
+        // .pool_max_idle_per_host(0)
         .timeout(get_dist_request_timeout())
         .connect_timeout(get_dist_connect_timeout())
         .build()
