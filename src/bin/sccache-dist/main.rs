@@ -707,8 +707,6 @@ impl SchedulerIncoming for Scheduler {
 
         self.prune_servers(&mut servers);
 
-        tracing::info!("Registered new server {:?}", server_id);
-
         servers.insert(
             server_id,
             ServerDetails {
@@ -723,6 +721,8 @@ impl SchedulerIncoming for Scheduler {
                 num_active_jobs,
             },
         );
+
+        tracing::info!("Registered new server {:?}", server_id);
 
         Ok(HeartbeatServerResult { is_new: true })
     }

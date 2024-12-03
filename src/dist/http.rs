@@ -336,13 +336,8 @@ mod server {
     use serde_json::json;
 
     use std::{
-        borrow::{Borrow, BorrowMut},
-        collections::HashMap,
-        io,
-        net::SocketAddr,
-        result::Result as StdResult,
-        sync::Arc,
-        time::Duration,
+        borrow::Borrow, collections::HashMap, io, net::SocketAddr, result::Result as StdResult,
+        sync::Arc, time::Duration,
     };
 
     use tokio::{io::AsyncReadExt, net::TcpListener};
@@ -361,11 +356,9 @@ mod server {
         UpdateJobStateHttpRequest,
     };
     use crate::dist::{
-        self,
-        http::{get_dist_connect_timeout, get_dist_request_timeout, urls},
-        AssignJobResult, HeartbeatServerResult, JobAuthorizer, JobId, SchedulerIncoming,
-        SchedulerOutgoing, ServerId, ServerIncoming, ServerNonce, ServerOutgoing, Toolchain,
-        UpdateJobStateResult,
+        self, http::urls, AssignJobResult, HeartbeatServerResult, JobAuthorizer, JobId,
+        SchedulerIncoming, SchedulerOutgoing, ServerId, ServerIncoming, ServerNonce,
+        ServerOutgoing, Toolchain, UpdateJobStateResult,
     };
     use crate::util::new_reqwest_client;
 
@@ -809,49 +802,6 @@ mod server {
                 }
             }
 
-            fn maybe_update_certs(
-                client: &mut reqwest::Client,
-                certs: &mut HashMap<ServerId, (Vec<u8>, Vec<u8>)>,
-                server_id: ServerId,
-                cert_digest: Vec<u8>,
-                cert_pem: Vec<u8>,
-            ) -> Result<()> {
-                if let Some((saved_cert_digest, _)) = certs.get(&server_id) {
-                    if saved_cert_digest == &cert_digest {
-                        return Ok(());
-                    }
-                }
-                tracing::info!(
-                    "Adding new certificate for {} to scheduler",
-                    server_id.addr()
-                );
-                let mut client_builder = reqwest::Client::builder();
-                // Add all the certificates we know about
-                client_builder = client_builder.add_root_certificate(
-                    reqwest::Certificate::from_pem(&cert_pem)
-                        .context("failed to interpret pem as certificate")?,
-                );
-                // Remove the old entry first so it isn't added to the client in the following loop
-                certs.remove(&server_id);
-                for (_, cert_pem) in certs.values() {
-                    client_builder = client_builder.add_root_certificate(
-                        reqwest::Certificate::from_pem(cert_pem).expect("previously valid cert"),
-                    );
-                }
-                // Finish the client
-                let new_client = client_builder
-                    // Disable connection pool
-                    // .pool_max_idle_per_host(0)
-                    .timeout(get_dist_request_timeout())
-                    .connect_timeout(get_dist_connect_timeout())
-                    .build()
-                    .context("failed to create a HTTP client")?;
-                // Use the updated certificates
-                *client = new_client;
-                certs.insert(server_id, (cert_digest, cert_pem));
-                Ok(())
-            }
-
             let Self {
                 check_client_auth,
                 check_server_auth,
@@ -926,15 +876,34 @@ mod server {
                             AuthenticatedServerId(server_id): AuthenticatedServerId,
                             Bincode(heartbeat) : Bincode<HeartbeatServerHttpRequest>
                         | async move {
-                            if let Err(err) = maybe_update_certs(
-                                state.requester.client.lock().await.borrow_mut(),
-                                state.server_certs.lock().await.borrow_mut(),
-                                server_id,
-                                heartbeat.cert_digest,
-                                heartbeat.cert_pem
-                            ) {
-                                return anyhow_response(method, uri, err);
-                            }
+                            {
+                                // Lock client and server_certs until the certs have been updated
+                                let mut client = state.requester.client.lock().await;
+                                let mut server_certs = state.server_certs.lock().await;
+                                let current_matching_cert = server_certs.get(&server_id).filter(|(saved_cert_digest, _)| {
+                                    saved_cert_digest == &heartbeat.cert_digest
+                                });
+                                // If no current cert, or cert digest doesn't match new cert, update certs and recreate client
+                                if current_matching_cert.is_none() {
+                                    // Remove the old entry first
+                                    server_certs.remove(&server_id);
+                                    if reqwest::Certificate::from_pem(&heartbeat.cert_pem).is_ok() {
+                                        // Insert so it's added to the client in the following loop
+                                        server_certs.insert(server_id, (heartbeat.cert_digest, heartbeat.cert_pem));
+                                    } else {
+                                        warn!(
+                                            "[handle_heartbeat_server({})]: failed to interpret pem as certificate",
+                                            server_id.addr()
+                                        );
+                                    }
+                                    match new_reqwest_client(None, Some(&server_certs)) {
+                                        // Use the updated certificates
+                                        Ok(new_client) => *client = new_client,
+                                        Err(err) => return anyhow_response(method, uri, err.into()),
+                                    };
+                                }
+                            };
+
                             match handler.handle_heartbeat_server(
                                 server_id,
                                 heartbeat.server_nonce,
@@ -993,7 +962,7 @@ mod server {
                     server_auth: check_server_auth,
                     server_certs: Default::default(),
                     requester: SchedulerRequester {
-                        client: Mutex::new(new_reqwest_client(None)),
+                        client: Mutex::new(new_reqwest_client(None, None).expect("http client must build with success")),
                     },
                 })));
 
@@ -1224,7 +1193,8 @@ mod server {
             } = self;
 
             let requester = Arc::new(ServerRequester {
-                client: new_reqwest_client(Some(public_addr)),
+                client: new_reqwest_client(Some(public_addr), None)
+                    .expect("http client must build with success"),
                 scheduler_url: scheduler_url.clone(),
                 scheduler_auth: scheduler_auth.clone(),
                 heartbeat_url: urls::scheduler_heartbeat_server(&scheduler_url),
@@ -1454,7 +1424,7 @@ mod client {
         bincode_req_fut, AllocJobHttpResponse, ReqwestRequestBuilderExt, RunJobHttpRequest,
         ServerCertificateHttpResponse,
     };
-    use super::{get_dist_connect_timeout, get_dist_request_timeout, urls};
+    use super::urls;
     use crate::errors::*;
 
     pub struct Client {
@@ -1478,7 +1448,8 @@ mod client {
             auth_token: String,
             rewrite_includes_only: bool,
         ) -> Result<Self> {
-            let client = new_reqwest_client(None);
+            let client =
+                new_reqwest_client(None, None).expect("http client must build with success");
             let client_toolchains =
                 cache::ClientToolchains::new(cache_dir, cache_size, toolchain_configs)
                     .context("failed to initialise client toolchains")?;
@@ -1491,40 +1462,6 @@ mod client {
                 tc_cache: Arc::new(client_toolchains),
                 rewrite_includes_only,
             })
-        }
-
-        fn update_certs(
-            client: &mut reqwest::Client,
-            certs: &mut HashMap<dist::ServerId, (Vec<u8>, Vec<u8>)>,
-            server_id: dist::ServerId,
-            cert_digest: Vec<u8>,
-            cert_pem: Vec<u8>,
-        ) -> Result<()> {
-            let mut client_async_builder = reqwest::Client::builder();
-            // Add all the certificates we know about
-            client_async_builder = client_async_builder.add_root_certificate(
-                reqwest::Certificate::from_pem(&cert_pem)
-                    .context("failed to interpret pem as certificate")?,
-            );
-            // Remove the old entry first so it isn't added to the client in the following loop
-            certs.remove(&server_id);
-            for (_, cert_pem) in certs.values() {
-                client_async_builder = client_async_builder.add_root_certificate(
-                    reqwest::Certificate::from_pem(cert_pem).expect("previously valid cert"),
-                );
-            }
-            // Finish the client
-            let new_client_async = client_async_builder
-                // Disable connection pool
-                // .pool_max_idle_per_host(0)
-                .timeout(get_dist_request_timeout())
-                .connect_timeout(get_dist_connect_timeout())
-                .build()
-                .context("failed to create an async HTTP client")?;
-            // Use the updated certificates
-            *client = new_client_async;
-            certs.insert(server_id, (cert_digest, cert_pem));
-            Ok(())
         }
     }
 
@@ -1550,6 +1487,7 @@ mod client {
                         job_alloc,
                         need_toolchain,
                     });
+
                     // Lock client and server_certs until the certs have been updated
                     let mut client = client.lock().await;
                     let mut server_certs = server_certs.lock().await;
@@ -1568,15 +1506,22 @@ mod client {
                         .await
                         .context("GET to scheduler server_certificate failed")?;
 
-                    Self::update_certs(
-                        &mut client,
-                        &mut server_certs,
-                        server_id,
-                        res.cert_digest,
-                        res.cert_pem,
-                    )
-                    .context("Failed to update certificate")
-                    .unwrap_or_else(|e| warn!("Failed to update certificate: {:?}", e));
+                    // Remove the old entry first
+                    server_certs.remove(&server_id);
+
+                    if reqwest::Certificate::from_pem(&res.cert_pem).is_ok() {
+                        // Insert so it's added to the client in the following loop
+                        server_certs.insert(server_id, (res.cert_digest, res.cert_pem));
+                    } else {
+                        warn!(
+                            "[do_alloc_job({})]: failed to interpret pem as certificate",
+                            server_id.addr()
+                        );
+                    }
+
+                    // Use the updated certificates
+                    *client = new_reqwest_client(None, Some(&server_certs))
+                        .context("Failed to update certificates")?;
 
                     alloc_job_res
                 }
