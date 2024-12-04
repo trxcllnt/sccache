@@ -963,6 +963,7 @@ pub fn new_reqwest_client(
     builder
         // Disable connection pool
         // .pool_max_idle_per_host(0)
+        .pool_idle_timeout(Duration::from_secs(10))
         .timeout(get_dist_request_timeout())
         .connect_timeout(get_dist_connect_timeout())
         .build()
