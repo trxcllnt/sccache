@@ -389,7 +389,6 @@ struct ServerDetails {
     max_per_core_load: f64,
     server_nonce: ServerNonce,
     job_authorizer: Box<dyn JobAuthorizer>,
-    num_pending_jobs: usize,
     num_assigned_jobs: usize,
     num_active_jobs: usize,
 }
@@ -481,8 +480,6 @@ impl SchedulerIncoming for Scheduler {
                 .map_err(Error::from)
                 .context("Could not create assign_auth token")?;
 
-            server.num_pending_jobs += 1;
-
             drop(servers);
 
             let AssignJobResult {
@@ -497,8 +494,6 @@ impl SchedulerIncoming for Scheduler {
                     let mut servers = self.servers.lock().await;
                     // Couldn't assign the job, so store the last_error
                     if let Some(server) = servers.get_mut(&server_id) {
-                        server.num_pending_jobs =
-                            ((server.num_pending_jobs as i64) - 1).max(0) as usize;
                         server.last_error = Some(Instant::now());
                     }
                     // Prune servers
@@ -516,7 +511,6 @@ impl SchedulerIncoming for Scheduler {
 
             // Assigned the job, so update server stats
             server.last_seen = Instant::now();
-            server.num_pending_jobs = ((server.num_pending_jobs as i64) - 1).max(0) as usize;
             server.num_assigned_jobs = num_assigned_jobs;
             server.num_active_jobs = num_active_jobs;
 
@@ -574,10 +568,8 @@ impl SchedulerIncoming for Scheduler {
                             .floor()
                             .max(1.0);
 
-                        // Assume all pending and assigned jobs will eventually be run
-                        let num_jobs = server.num_pending_jobs //<< jobs that haven't been accepted yet
-                        + server.num_assigned_jobs //<< accepted jobs that the client has yet to start
-                        + server.num_active_jobs; //<< running jobs
+                        // Assume all pending and assigned jobs will eventually be run:
+                        let num_jobs = server.num_assigned_jobs + server.num_active_jobs;
 
                         let load = num_jobs as f64 / num_vcpus;
 
@@ -716,7 +708,6 @@ impl SchedulerIncoming for Scheduler {
                 max_per_core_load,
                 server_nonce,
                 job_authorizer,
-                num_pending_jobs: 0,
                 num_assigned_jobs,
                 num_active_jobs,
             },
