@@ -30,7 +30,7 @@ mod test;
 #[macro_use]
 pub mod errors;
 
-mod cache;
+pub mod cache;
 mod client;
 mod cmdline;
 mod commands;
@@ -67,7 +67,7 @@ pub fn main() {
         .iter()
         .for_each(|incr_str| match env::var(incr_str) {
             Ok(incr_val) if incr_val == "1" => {
-                println!("sccache: increment compilation is  prohibited.");
+                println!("sccache: cargo incremental compilation is not supported");
                 std::process::exit(1);
             }
             _ => (),

@@ -10,6 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,11 +30,27 @@ impl Storage for ReadOnlyStorage {
         self.0.get(key).await
     }
 
+    async fn get_stream(&self, key: &str) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>> {
+        self.0.get_stream(key).await
+    }
+
+    async fn has(&self, key: &str) -> bool {
+        self.0.has(key).await
+    }
+
     /// Put `entry` in the cache under `key`.
     ///
     /// Returns a `Future` that will provide the result or error when the put is
     /// finished.
     async fn put(&self, _key: &str, _entry: CacheWrite) -> Result<Duration> {
+        Err(anyhow!("Cannot write to read-only storage"))
+    }
+
+    async fn put_stream(
+        &self,
+        _key: &str,
+        _stream: Pin<&mut (dyn futures::AsyncRead + Send)>,
+    ) -> Result<()> {
         Err(anyhow!("Cannot write to read-only storage"))
     }
 
@@ -45,8 +62,8 @@ impl Storage for ReadOnlyStorage {
     }
 
     /// Get the storage location.
-    fn location(&self) -> String {
-        self.0.location()
+    async fn location(&self) -> String {
+        self.0.location().await
     }
 
     /// Get the current storage usage, if applicable.

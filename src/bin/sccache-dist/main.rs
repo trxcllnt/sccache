@@ -1,30 +1,27 @@
-use anyhow::{bail, Context, Error, Result};
 use async_trait::async_trait;
-use base64::Engine;
+
+use celery::prelude::*;
+use celery::protocol::MessageContentType;
 use futures::lock::Mutex;
 use futures::FutureExt;
-use itertools::Itertools;
-use rand::{rngs::OsRng, RngCore};
 use sccache::config::{
-    scheduler as scheduler_config, server as server_config, INSECURE_DIST_CLIENT_TOKEN,
+    scheduler as scheduler_config, server as server_config, MessageBroker,
+    INSECURE_DIST_CLIENT_TOKEN,
 };
-use sccache::dist::http::{get_dist_request_timeout, HEARTBEAT_ERROR_INTERVAL, HEARTBEAT_INTERVAL};
+
 use sccache::dist::{
-    self, AllocJobResult, AssignJobResult, BuilderIncoming, CompileCommand, HeartbeatServerResult,
-    JobAlloc, JobAuthorizer, JobComplete, JobId, RunJobResult, SchedulerIncoming,
-    SchedulerOutgoing, SchedulerStatusResult, ServerId, ServerIncoming, ServerNonce,
-    ServerOutgoing, ServerStatusResult, SubmitToolchainResult, TcCache, Toolchain,
-    UpdateJobStateResult,
+    self, BuildResult, BuildServerInfo, BuildServerStatus, CompileCommand, NewJobRequest,
+    NewJobResponse, RunJobRequest, RunJobResponse, SchedulerService, SchedulerStatusResult,
+    ServerService, ServerStatusResult, SubmitToolchainResult, Toolchain,
 };
 use sccache::util::daemonize;
-use sccache::util::BASE64_URL_SAFE_ENGINE;
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
-use std::path::Path;
-use std::sync::atomic::AtomicUsize;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use tokio::sync::OnceCell;
 
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -32,11 +29,14 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod build;
 
 mod cmdline;
+use cmdline::Command;
 mod token_check;
 
-use cmdline::{AuthSubcommand, Command};
+use crate::dist::ServerToolchains;
+use sccache::errors::*;
 
-pub const INSECURE_DIST_SERVER_TOKEN: &str = "dangerously_insecure_server";
+static SERVER: OnceCell<Arc<dyn crate::dist::ServerService>> = OnceCell::const_new();
+static SCHEDULER: OnceCell<Arc<dyn crate::dist::SchedulerService>> = OnceCell::const_new();
 
 // Only supported on x86_64/aarch64 Linux machines and on FreeBSD
 #[cfg(any(
@@ -52,7 +52,7 @@ fn main() {
         .iter()
         .for_each(|incr_str| match env::var(incr_str) {
             Ok(incr_val) if incr_val == "1" => {
-                println!("sccache: increment compilation is  prohibited.");
+                println!("sccache: cargo incremental compilation is not supported");
                 std::process::exit(1);
             }
             _ => (),
@@ -73,7 +73,7 @@ fn main() {
     };
 
     std::process::exit(match run(command) {
-        Ok(s) => s,
+        Ok(_) => 0,
         Err(e) => {
             eprintln!("sccache-dist: error: {}", e);
 
@@ -85,193 +85,184 @@ fn main() {
     });
 }
 
-fn create_server_token(server_id: ServerId, auth_token: &str) -> String {
-    format!("{} {}", server_id.addr(), auth_token)
-}
-fn check_server_token(server_token: &str, auth_token: &str) -> Option<ServerId> {
-    let mut split = server_token.splitn(2, |c| c == ' ');
-    let server_addr = split.next().and_then(|addr| addr.parse().ok())?;
-    match split.next() {
-        Some(t) if t == auth_token => Some(ServerId::new(server_addr)),
-        Some(_) | None => None,
-    }
-}
+fn run(command: Command) -> Result<()> {
+    let num_cpus = std::thread::available_parallelism()?.get();
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ServerJwt {
-    exp: u64,
-    server_id: ServerId,
-}
-fn create_jwt_server_token(
-    server_id: ServerId,
-    header: &jwt::Header,
-    key: &[u8],
-) -> Result<String> {
-    let key = jwt::EncodingKey::from_secret(key);
-    jwt::encode(header, &ServerJwt { exp: 0, server_id }, &key).map_err(Into::into)
-}
-fn dangerous_insecure_extract_jwt_server_token(server_token: &str) -> Result<ServerId> {
-    let validation = {
-        let mut validation = jwt::Validation::default();
-        validation.validate_exp = false;
-        validation.validate_nbf = false;
-        validation.insecure_disable_signature_validation();
-        validation
-    };
-    let dummy_key = jwt::DecodingKey::from_secret(b"secret");
-    jwt::decode::<ServerJwt>(server_token, &dummy_key, &validation)
-        .map(|res| res.claims.server_id)
-        .map_err(Into::into)
-}
-fn check_jwt_server_token(
-    server_token: &str,
-    key: &[u8],
-    validation: &jwt::Validation,
-) -> Option<ServerId> {
-    let key = jwt::DecodingKey::from_secret(key);
-    jwt::decode::<ServerJwt>(server_token, &key, validation)
-        .map(|res| res.claims.server_id)
-        .ok()
-}
-
-fn run(command: Command) -> Result<i32> {
     match command {
-        Command::Auth(AuthSubcommand::Base64 { num_bytes }) => {
-            let mut bytes = vec![0; num_bytes];
-            OsRng.fill_bytes(&mut bytes);
-            // As long as it can be copied, it doesn't matter if this is base64 or hex etc
-            println!("{}", BASE64_URL_SAFE_ENGINE.encode(bytes));
-            Ok(0)
-        }
-        Command::Auth(AuthSubcommand::JwtHS256ServerToken {
-            secret_key,
-            server_id,
-        }) => {
-            let header = jwt::Header::new(jwt::Algorithm::HS256);
-            let secret_key = BASE64_URL_SAFE_ENGINE.decode(secret_key)?;
-            let token = create_jwt_server_token(server_id, &header, &secret_key)
-                .context("Failed to create server token")?;
-            println!("{}", token);
-            Ok(0)
-        }
-
         Command::Scheduler(scheduler_config::Config {
-            public_addr,
+            enable_web_socket_server,
             client_auth,
-            server_auth,
-            remember_server_error_timeout,
+            job_time_limit,
+            max_body_size,
+            message_broker,
+            public_addr,
+            toolchains_fallback,
+            toolchains,
         }) => {
-            let check_client_auth: Box<dyn dist::http::ClientAuthCheck> = match client_auth {
-                scheduler_config::ClientAuth::Insecure => Box::new(token_check::EqCheck::new(
-                    INSECURE_DIST_CLIENT_TOKEN.to_owned(),
-                )),
-                scheduler_config::ClientAuth::Token { token } => {
-                    Box::new(token_check::EqCheck::new(token))
-                }
-                scheduler_config::ClientAuth::JwtValidate {
-                    audience,
-                    issuer,
-                    jwks_url,
-                } => Box::new(
-                    token_check::ValidJWTCheck::new(audience, issuer, &jwks_url)
-                        .context("Failed to create a checker for valid JWTs")?,
-                ),
-                scheduler_config::ClientAuth::Mozilla { required_groups } => {
-                    Box::new(token_check::MozillaCheck::new(required_groups))
-                }
-                scheduler_config::ClientAuth::ProxyToken { url, cache_secs } => {
-                    Box::new(token_check::ProxyTokenCheck::new(url, cache_secs))
-                }
-            };
-
-            let check_server_auth: dist::http::ServerAuthCheck = match server_auth {
-                scheduler_config::ServerAuth::Insecure => {
-                    tracing::warn!(
-                        "Scheduler starting with DANGEROUSLY_INSECURE server authentication"
-                    );
-                    let token = INSECURE_DIST_SERVER_TOKEN;
-                    Box::new(move |server_token| check_server_token(server_token, token))
-                }
-                scheduler_config::ServerAuth::Token { token } => {
-                    Box::new(move |server_token| check_server_token(server_token, &token))
-                }
-                scheduler_config::ServerAuth::JwtHS256 { secret_key } => {
-                    let secret_key = BASE64_URL_SAFE_ENGINE
-                        .decode(secret_key)
-                        .context("Secret key base64 invalid")?;
-                    if secret_key.len() != 256 / 8 {
-                        bail!("Size of secret key incorrect")
-                    }
-                    let validation = {
-                        let mut validation = jwt::Validation::new(jwt::Algorithm::HS256);
-                        validation.leeway = 0;
-                        validation.validate_exp = false;
-                        validation.validate_nbf = false;
-                        validation
-                    };
-                    Box::new(move |server_token| {
-                        check_jwt_server_token(server_token, &secret_key, &validation)
-                    })
-                }
-            };
-
-            daemonize()?;
+            let broker_uri =
+                match message_broker.expect("Missing required message broker configuration") {
+                    MessageBroker::AMQP(uri) => uri,
+                    MessageBroker::Redis(uri) => uri,
+                };
 
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
 
-            let scheduler = Scheduler::new(remember_server_error_timeout);
-
-            let http_scheduler = dist::http::Scheduler::new(
-                public_addr,
-                scheduler,
-                check_client_auth,
-                check_server_auth,
-            );
+            let toolchain_storage = sccache::cache::cache::storage_from_config(
+                &toolchains,
+                &toolchains_fallback,
+                runtime.handle(),
+            )
+            .context("Failed to initialize toolchain storage")?;
 
             runtime.block_on(async move {
-                match http_scheduler.start().await {
-                    Ok(_) => {}
-                    Err(err) => panic!("Err: {err}"),
-                }
-            });
+                let scheduler_id = format!(
+                    "sccache-dist-scheduler-{}",
+                    uuid::Uuid::new_v4().to_u128_le()
+                );
 
-            unreachable!();
+                let task_queue = Arc::new(
+                    celery::CeleryBuilder::new("sccache-dist", &broker_uri)
+                        .default_queue(&scheduler_id)
+                        .task_content_type(MessageContentType::MsgPack)
+                        .task_route("scheduler_build_failed", &scheduler_id)
+                        .task_route("scheduler_build_success", &scheduler_id)
+                        .task_route("server_run_build", "sccache-dist-servers")
+                        .task_route("scheduler_server_heartbeat", "sccache-dist-schedulers")
+                        .prefetch_count(100 * num_cpus as u16)
+                        .heartbeat(Some(10))
+                        .acks_late(true)
+                        .acks_on_failure_or_timeout(false)
+                        .nacks_enabled(true)
+                        .build()
+                        .await
+                        .unwrap(),
+                );
+
+                task_queue
+                    .register_task::<scheduler_build_failed>()
+                    .await
+                    .unwrap();
+
+                task_queue
+                    .register_task::<scheduler_build_success>()
+                    .await
+                    .unwrap();
+
+                task_queue
+                    .register_task::<scheduler_server_heartbeat>()
+                    .await
+                    .unwrap();
+
+                let scheduler = Arc::new(Scheduler::new(
+                    job_time_limit,
+                    scheduler_id.clone(),
+                    task_queue.clone(),
+                    toolchain_storage,
+                ));
+
+                SCHEDULER
+                    .set(scheduler.clone())
+                    .map_err(|e| anyhow!(e.to_string()))?;
+
+                let server = dist::server::Scheduler::new(
+                    scheduler,
+                    match client_auth {
+                        scheduler_config::ClientAuth::Insecure => Box::new(
+                            token_check::EqCheck::new(INSECURE_DIST_CLIENT_TOKEN.to_owned()),
+                        ),
+                        scheduler_config::ClientAuth::Token { token } => {
+                            Box::new(token_check::EqCheck::new(token))
+                        }
+                        scheduler_config::ClientAuth::JwtValidate {
+                            audience,
+                            issuer,
+                            jwks_url,
+                        } => Box::new(
+                            token_check::ValidJWTCheck::new(audience, issuer, &jwks_url)
+                                .context("Failed to create a checker for valid JWTs")?,
+                        ),
+                        scheduler_config::ClientAuth::Mozilla { required_groups } => {
+                            Box::new(token_check::MozillaCheck::new(required_groups))
+                        }
+                        scheduler_config::ClientAuth::ProxyToken { url, cache_secs } => {
+                            Box::new(token_check::ProxyTokenCheck::new(url, cache_secs))
+                        }
+                    },
+                );
+
+                task_queue.display_pretty().await;
+
+                daemonize()?;
+
+                let queues = [&scheduler_id, "sccache-dist-schedulers"];
+
+                let cancel = tokio::signal::ctrl_c();
+                let celery = task_queue.consume_from(&queues);
+                let server = server.serve(public_addr, enable_web_socket_server, max_body_size);
+
+                futures::select! {
+                    res = cancel.fuse() => res?,
+                    res = celery.fuse() => res?,
+                    res = server.fuse() => res?,
+                };
+
+                task_queue.close().await?;
+
+                Ok::<(), anyhow::Error>(())
+            })
         }
 
         Command::Server(server_config::Config {
+            message_broker,
             builder,
             cache_dir,
-            public_addr,
-            bind_addr,
-            scheduler_url,
-            scheduler_auth,
-            toolchain_cache_size,
             max_per_core_load,
             num_cpus_to_ignore,
+            toolchain_cache_size,
+            toolchains,
+            toolchains_fallback,
         }) => {
-            let bind_addr = bind_addr.unwrap_or(public_addr);
-            let num_cpus =
-                (std::thread::available_parallelism().unwrap().get() - num_cpus_to_ignore).max(1);
+            let num_cpus = (num_cpus - num_cpus_to_ignore).max(1) as f64;
+            let prefetch_count = (num_cpus * max_per_core_load).floor().max(1f64) as u16;
 
-            tracing::debug!("Server num_cpus={num_cpus}");
+            let broker_uri =
+                match message_broker.expect("Missing required message broker configuration") {
+                    MessageBroker::AMQP(uri) => uri,
+                    MessageBroker::Redis(uri) => uri,
+                };
+
+            let server_id =
+                env::var("SCCACHE_DIST_SERVER_ID").unwrap_or(uuid::Uuid::new_v4().to_string());
 
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
+
+            let toolchain_storage = sccache::cache::cache::storage_from_config(
+                &toolchains,
+                &toolchains_fallback,
+                runtime.handle(),
+            )
+            .context("Failed to initialize toolchain storage")?;
+
+            let toolchains_disk_cache = Arc::new(Mutex::new(ServerToolchains::new(
+                &cache_dir.join("tc"),
+                toolchain_cache_size,
+                toolchain_storage,
+            )));
 
             runtime.block_on(async move {
                 let builder: Box<dyn dist::BuilderIncoming> = match builder {
                     #[cfg(not(target_os = "freebsd"))]
-                    server_config::BuilderType::Docker => Box::new(
+                    sccache::config::server::BuilderType::Docker => Box::new(
                         build::DockerBuilder::new()
                             .await
                             .context("Docker builder failed to start")?,
                     ),
                     #[cfg(not(target_os = "freebsd"))]
-                    server_config::BuilderType::Overlay {
+                    sccache::config::server::BuilderType::Overlay {
                         bwrap_path,
                         build_dir,
                     } => Box::new(
@@ -280,7 +271,7 @@ fn run(command: Command) -> Result<i32> {
                             .context("Overlay builder failed to start")?,
                     ),
                     #[cfg(target_os = "freebsd")]
-                    server_config::BuilderType::Pot {
+                    sccache::config::server::BuilderType::Pot {
                         pot_fs_root,
                         clone_from,
                         pot_cmd,
@@ -299,53 +290,55 @@ fn run(command: Command) -> Result<i32> {
                     ),
                 };
 
-                let server_id = ServerId::new(public_addr);
-                let scheduler_auth = match scheduler_auth {
-                    server_config::SchedulerAuth::Insecure => {
-                        tracing::warn!(
-                            "Server starting with DANGEROUSLY_INSECURE scheduler authentication"
-                        );
-                        create_server_token(server_id, INSECURE_DIST_SERVER_TOKEN)
-                    }
-                    server_config::SchedulerAuth::Token { token } => {
-                        create_server_token(server_id, &token)
-                    }
-                    server_config::SchedulerAuth::JwtToken { token } => {
-                        let token_server_id: ServerId =
-                            dangerous_insecure_extract_jwt_server_token(&token)
-                                .context("Could not decode scheduler auth jwt")?;
-                        if token_server_id != server_id {
-                            bail!(
-                                "JWT server id ({:?}) did not match configured server id ({:?})",
-                                token_server_id,
-                                server_id
-                            )
-                        }
-                        token
-                    }
+                let task_queue = Arc::new(
+                    celery::CeleryBuilder::new("sccache-dist", &broker_uri)
+                        .default_queue("sccache-dist-servers")
+                        .task_content_type(MessageContentType::MsgPack)
+                        .task_route("scheduler_server_heartbeat", "sccache-dist-schedulers")
+                        .prefetch_count(prefetch_count)
+                        .heartbeat(Some(10))
+                        .acks_late(true)
+                        .acks_on_failure_or_timeout(false)
+                        .nacks_enabled(true)
+                        .build()
+                        .await?,
+                );
+
+                task_queue.register_task::<server_run_build>().await?;
+
+                let server = Arc::new(Server::new(
+                    max_per_core_load,
+                    num_cpus.floor() as usize,
+                    server_id,
+                    builder,
+                    task_queue.clone(),
+                    toolchains_disk_cache,
+                ));
+
+                SERVER.set(server.clone()).map_err(|err| anyhow!("{err}"))?;
+
+                tracing::debug!(
+                    "sccache: Server initialized to run {num_cpus} parallel build jobs"
+                );
+
+                task_queue.display_pretty().await;
+
+                daemonize()?;
+
+                let cancel = tokio::signal::ctrl_c();
+                let celery = task_queue.consume();
+                let server = server.start_heartbeat();
+
+                futures::select! {
+                    res = cancel.fuse() => res?,
+                    res = celery.fuse() => res?,
+                    res = server.fuse() => res?,
                 };
 
-                let server = Server::new(builder, &cache_dir, toolchain_cache_size, num_cpus)
-                    .context("Failed to create sccache server instance")?;
+                task_queue.close().await?;
 
-                let http_server = dist::http::Server::new(
-                    public_addr,
-                    bind_addr,
-                    scheduler_url.to_url(),
-                    scheduler_auth,
-                    max_per_core_load,
-                    num_cpus,
-                    server,
-                )
-                .context("Failed to create sccache HTTP server instance")?;
-
-                match http_server.start().await {
-                    Ok(_) => Ok(()),
-                    Err(err) => panic!("Err: {err}"),
-                }
-            })?;
-
-            unreachable!();
+                Ok(())
+            })
         }
     }
 }
@@ -375,636 +368,495 @@ fn init_logging() {
     }
 }
 
-// To avoid deadlocking, make sure to do all locking at once (i.e. no further locking in a downward scope),
-// in alphabetical order
 pub struct Scheduler {
+    id: String,
+    job_time_limit: u32,
+    jobs: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<RunJobResponse>>>>,
+    servers: Arc<Mutex<HashMap<String, BuildServerStatus>>>,
+    task_queue: Arc<celery::Celery>,
+    toolchains: Arc<dyn sccache::cache::Storage>,
     remember_server_error_timeout: Duration,
-    servers: Mutex<HashMap<ServerId, ServerDetails>>,
-}
-
-struct ServerDetails {
-    last_seen: Instant,
-    last_error: Option<Instant>,
-    num_cpus: usize,
-    max_per_core_load: f64,
-    server_nonce: ServerNonce,
-    job_authorizer: Box<dyn JobAuthorizer>,
-    num_assigned_jobs: usize,
-    num_active_jobs: usize,
 }
 
 impl Scheduler {
-    pub fn new(remember_server_error_timeout: u64) -> Self {
-        Scheduler {
-            remember_server_error_timeout: Duration::from_secs(remember_server_error_timeout),
-            servers: Mutex::new(HashMap::new()),
+    pub fn new(
+        job_time_limit: u32,
+        scheduler_id: String,
+        task_queue: Arc<celery::Celery>,
+        toolchains: Arc<dyn sccache::cache::Storage>,
+    ) -> Self {
+        Self {
+            id: scheduler_id,
+            job_time_limit,
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            servers: Arc::new(Mutex::new(HashMap::new())),
+            task_queue,
+            toolchains,
+            remember_server_error_timeout: Duration::from_secs(30),
         }
     }
-
-    fn prune_servers(&self, servers: &mut HashMap<ServerId, ServerDetails>) {
-        let now = Instant::now();
-
-        let mut dead_servers = Vec::new();
-
-        for (&server_id, server) in servers.iter_mut() {
-            if now.duration_since(server.last_seen) > dist::http::HEARTBEAT_TIMEOUT {
-                dead_servers.push(server_id);
-            }
-        }
-
-        for server_id in dead_servers {
-            tracing::warn!(
-                "[prune_servers({})]: Server appears to be dead, pruning it in the scheduler",
-                server_id.addr()
-            );
-            servers.remove(&server_id);
-        }
-    }
-}
-
-impl Default for Scheduler {
-    fn default() -> Self {
-        Self::new(scheduler_config::default_remember_server_error_timeout())
-    }
-}
-
-fn error_chain_to_string(err: &Error) -> String {
-    let mut err_msg = err.to_string();
-    let mut maybe_cause = err.source();
-    while let Some(cause) = maybe_cause {
-        err_msg.push_str(", caused by: ");
-        err_msg.push_str(&cause.to_string());
-        maybe_cause = cause.source();
-    }
-    err_msg
 }
 
 #[async_trait]
-impl SchedulerIncoming for Scheduler {
-    async fn handle_alloc_job(
-        &self,
-        requester: &dyn SchedulerOutgoing,
-        tc: Toolchain,
-    ) -> Result<AllocJobResult> {
-        let Scheduler {
-            remember_server_error_timeout,
-            ..
-        } = *self;
+impl SchedulerService for Scheduler {
+    async fn get_status(&self) -> Result<SchedulerStatusResult> {
+        let mut servers = HashMap::<String, ServerStatusResult>::new();
 
-        // Attempt to allocate a job to the best server. The best server is the server
-        // with the fewest assigned jobs and least-recently-reported error. Servers
-        // whose load exceeds `num_cpus` are not considered candidates for assignment.
-        //
-        // If we fail to assign a job to a server, attempt to assign the job to the next
-        // best candidate until either the job has been assigned successfully, or the
-        // candidate list has been exhausted.
-        //
-        // Special care is taken to not lock `self.servers` while network requests are
-        // in-flight, as that will block other request-handling threads and deadlock
-        // the scheduler.
-        //
-        // Do not assert!() anywhere, as that permanently corrupts the scheduler.
-        // All error conditions must fail gracefully.
-
-        let try_assign_job = |server_id: ServerId, tc: Toolchain| async move {
-            // LOCKS
-            let mut servers = self.servers.lock().await;
-            let server = match servers.get_mut(&server_id) {
-                Some(server) => server,
-                _ => bail!("Failed to assign job to unknown server"),
-            };
-
-            let assign_auth = server
-                .job_authorizer
-                .generate_token(JobId(server.server_nonce.as_u64()))
-                .map_err(Error::from)
-                .context("Could not create assign_auth token")?;
-
-            drop(servers);
-
-            let AssignJobResult {
-                job_id,
-                need_toolchain,
-                num_assigned_jobs,
-                num_active_jobs,
-            } = match requester.do_assign_job(server_id, tc, assign_auth).await {
-                Ok(res) => res,
-                Err(err) => {
-                    // LOCKS
-                    let mut servers = self.servers.lock().await;
-                    // Couldn't assign the job, so store the last_error
-                    if let Some(server) = servers.get_mut(&server_id) {
-                        server.last_error = Some(Instant::now());
-                    }
-                    // Prune servers
-                    self.prune_servers(&mut servers);
-                    return Err(err);
-                }
-            };
-
-            // LOCKS
-            let mut servers = self.servers.lock().await;
-            let server = match servers.get_mut(&server_id) {
-                Some(server) => server,
-                _ => bail!("Failed to assign job to unknown server"),
-            };
-
-            // Assigned the job, so update server stats
-            server.last_seen = Instant::now();
-            server.num_assigned_jobs = num_assigned_jobs;
-            server.num_active_jobs = num_active_jobs;
-
-            let job_auth = server
-                .job_authorizer
-                .generate_token(job_id)
-                .map_err(Error::from)
-                .context("Could not create job auth token")?;
-
-            if let Some(last_error) = server.last_error {
-                tracing::debug!(
-                    "[alloc_job({}, {})]: Assigned job to server whose most recent error was {:?} ago",
-                    server_id.addr(),
-                    job_id,
-                    Instant::now() - last_error
-                );
-            } else {
-                tracing::debug!(
-                    "[alloc_job({}, {})]: Job created and assigned to server",
-                    server_id.addr(),
-                    job_id,
-                );
-            }
-
-            // Prune servers only after updating this server's last_seen time.
-            self.prune_servers(&mut servers);
-
-            Ok(AllocJobResult::Success {
-                job_alloc: JobAlloc {
-                    auth: job_auth,
-                    job_id,
-                    server_id,
-                },
-                need_toolchain,
-            })
-        };
-
-        let get_best_server_by_least_load_and_oldest_error =
-            |servers: &mut HashMap<ServerId, ServerDetails>, tried_servers: &HashSet<ServerId>| {
-                let now = Instant::now();
-
-                // Compute instantaneous load and update shared server state
-                servers
-                    .iter_mut()
-                    .filter_map(|(server_id, server)| {
-                        // Forget errors that are too old to care about anymore
-                        if let Some(last_error) = server.last_error {
-                            if now.duration_since(last_error) >= remember_server_error_timeout {
-                                server.last_error = None;
-                            }
-                        }
-
-                        // Each server defines its own `max_per_core_load` multiple
-                        let num_vcpus = (server.num_cpus as f64 * server.max_per_core_load)
-                            .floor()
-                            .max(1.0);
-
-                        // Assume all pending and assigned jobs will eventually be run:
-                        let num_jobs = server.num_assigned_jobs + server.num_active_jobs;
-
-                        let load = num_jobs as f64 / num_vcpus;
-
-                        // Exclude servers at max load and servers we've already tried
-                        if load >= 1.0 || tried_servers.contains(server_id) {
-                            None
-                        } else {
-                            Some((server_id, server, load))
-                        }
-                    })
-                    // Sort servers by least load and oldest error
-                    .sorted_by(|(_, server_a, load_a), (_, server_b, load_b)| {
-                        match (server_a.last_error, server_b.last_error) {
-                            // If neither server has a recent error, prefer the one with lowest load
-                            (None, None) => load_a.total_cmp(load_b),
-                            // Prefer servers with no recent errors over servers with recent errors
-                            (None, Some(_)) => std::cmp::Ordering::Less,
-                            (Some(_), None) => std::cmp::Ordering::Greater,
-                            // If both servers have an error, prefer the one with the oldest error
-                            (Some(err_a), Some(err_b)) => err_b.cmp(&err_a),
-                        }
-                    })
-                    .find_or_first(|_| true)
-                    .map(|(server_id, _, _)| *server_id)
-            };
-
-        let mut tried_servers = HashSet::<ServerId>::new();
-        #[allow(unused_assignments)]
-        let mut num_servers = 0;
-        let mut result = None;
-
-        // Loop through candidate servers.
-        // Exit the loop once we've allocated the job.
-        // Try the next candidate if we encounter an error.
-        loop {
-            // Get the latest best server candidate after sorting all servers by least load
-            // and oldest error, sans the servers we've already tried.
-            //
-            // This computes each server's load again local to this loop.
-            //
-            // Since alloc_job in other threads can recover from errors and assign jobs to the
-            // next-best candidate, the load could drift if we only compute it once outside this
-            // loop. Computing load again ensures we allocate accurately based on the current
-            // statistics.
-            // LOCKS
-            let server_id = {
-                // LOCKS
-                let mut servers = self.servers.lock().await;
-                num_servers = servers.len();
-                get_best_server_by_least_load_and_oldest_error(&mut servers, &tried_servers)
-            };
-
-            // Take the top candidate. If we can't allocate the job to it,
-            // remove it from the candidates list and try the next server.
-            if let Some(server_id) = server_id {
-                // Attempt to assign the job to this server. If assign_job fails,
-                // store the error and attempt to assign to the next server.
-                // If all servers error, return the last error to the client.
-                match try_assign_job(server_id, tc.clone()).await {
-                    Ok(res) => {
-                        // If assign_job succeeded, return the result
-                        result = Some(Ok(res));
-                        break;
-                    }
-                    Err(err) => {
-                        // If alloc_job failed, try the next best server
-                        tracing::warn!(
-                            "[alloc_job({})]: Error assigning job to server: {}",
-                            server_id.addr(),
-                            error_chain_to_string(&err)
-                        );
-                        tried_servers.insert(server_id);
-                        result = Some(Err(err));
-                        // Try the next server
-                        continue;
-                    }
-                }
-            }
-            // No available servers
-            break;
-        }
-
-        if let Some(result) = result {
-            result
-        } else {
-            // Fallback to the default failure case
-            Ok(AllocJobResult::Fail {
-                msg: format!("Insufficient capacity across {num_servers} available servers",),
-            })
-        }
-    }
-
-    async fn handle_heartbeat_server(
-        &self,
-        server_id: ServerId,
-        server_nonce: ServerNonce,
-        num_cpus: usize,
-        max_per_core_load: f64,
-        job_authorizer: Box<dyn JobAuthorizer>,
-        num_assigned_jobs: usize,
-        num_active_jobs: usize,
-    ) -> Result<HeartbeatServerResult> {
-        if num_cpus == 0 {
-            bail!("Invalid number of CPUs (0) specified in heartbeat")
-        }
-
-        // LOCKS
-        let mut servers = self.servers.lock().await;
-
-        match servers.get_mut(&server_id) {
-            Some(ref mut server) if server.server_nonce == server_nonce => {
-                server.last_seen = Instant::now();
-                server.num_cpus = num_cpus;
-                server.job_authorizer = job_authorizer;
-                server.max_per_core_load = max_per_core_load;
-                server.num_assigned_jobs = num_assigned_jobs;
-                server.num_active_jobs = num_active_jobs;
-
-                // Prune servers only after updating this server's last_seen time.
-                // This ensures the server which sent this heartbeat isn't pruned.
-                self.prune_servers(&mut servers);
-
-                return Ok(HeartbeatServerResult { is_new: false });
-            }
-            _ => (),
-        }
-
-        self.prune_servers(&mut servers);
-
-        servers.insert(
-            server_id,
-            ServerDetails {
-                last_seen: Instant::now(),
-                last_error: None,
-                num_cpus,
-                max_per_core_load,
-                server_nonce,
-                job_authorizer,
-                num_assigned_jobs,
-                num_active_jobs,
-            },
-        );
-
-        tracing::info!("Registered new server {:?}", server_id);
-
-        Ok(HeartbeatServerResult { is_new: true })
-    }
-
-    async fn handle_update_job_state(
-        &self,
-        server_id: ServerId,
-        num_assigned_jobs: usize,
-        num_active_jobs: usize,
-    ) -> Result<UpdateJobStateResult> {
-        let mut servers = self.servers.lock().await;
-        let server = match servers.get_mut(&server_id) {
-            Some(server) => server,
-            _ => bail!("Failed to reserve job on unknown server"),
-        };
-
-        server.last_seen = Instant::now();
-        server.num_assigned_jobs = num_assigned_jobs;
-        server.num_active_jobs = num_active_jobs;
-
-        // Prune servers only after updating this server's last_seen time.
-        self.prune_servers(&mut servers);
-
-        Ok(UpdateJobStateResult::Success)
-    }
-
-    async fn handle_status(&self) -> Result<SchedulerStatusResult> {
-        let Scheduler {
-            remember_server_error_timeout,
-            ..
-        } = *self;
-
-        // LOCKS
-        let mut servers = self.servers.lock().await;
-
-        // Prune servers before reporting the scheduler status
-        self.prune_servers(&mut servers);
-
-        let mut assigned_jobs = 0;
-        let mut active_jobs = 0;
-
-        let mut servers_map = HashMap::<std::net::SocketAddr, ServerStatusResult>::new();
-        for (server_id, server) in servers.iter() {
-            assigned_jobs += server.num_assigned_jobs;
-            active_jobs += server.num_active_jobs;
-            servers_map.insert(
-                server_id.addr(),
+        for (server_id, server) in self.servers.lock().await.iter() {
+            servers.insert(
+                server_id.clone(),
                 ServerStatusResult {
-                    assigned: server.num_assigned_jobs,
-                    active: server.num_active_jobs,
-                    num_cpus: server.num_cpus,
                     max_per_core_load: server.max_per_core_load,
-                    last_seen: server.last_seen.elapsed().as_secs(),
-                    last_error: server
-                        .last_error
-                        .map(|e| (remember_server_error_timeout - e.elapsed()).as_secs()),
+                    num_cpus: server.num_cpus,
+                    num_jobs: server.num_jobs,
+                    last_success: server.last_success.elapsed().as_secs(),
+                    last_failure: server
+                        .last_failure
+                        .map(|last_failure| last_failure.elapsed().as_secs())
+                        .unwrap_or(0),
                 },
             );
         }
 
         Ok(SchedulerStatusResult {
             num_cpus: servers.values().map(|v| v.num_cpus).sum(),
+            num_jobs: servers.values().map(|v| v.num_jobs).sum(),
             num_servers: servers.len(),
-            assigned: assigned_jobs,
-            active: active_jobs,
-            servers: servers_map,
+            servers,
         })
+    }
+
+    async fn has_toolchain(&self, toolchain: Toolchain) -> bool {
+        self.toolchains.has(&toolchain.archive_id).await
+    }
+
+    async fn put_toolchain(
+        &self,
+        toolchain: Toolchain,
+        toolchain_reader: Pin<&mut (dyn futures::AsyncRead + Send)>,
+    ) -> Result<SubmitToolchainResult> {
+        // Upload toolchain to toolchains storage (S3, GCS, etc.)
+        self.toolchains
+            .put_stream(&toolchain.archive_id, toolchain_reader)
+            .await
+            .context("Failed to put toolchain")
+            .map(|_| SubmitToolchainResult::Success)
+            .map_err(|err| {
+                tracing::error!("[put_toolchain({})]: {err:?}", toolchain.archive_id);
+                err
+            })
+    }
+
+    async fn new_job(&self, request: NewJobRequest) -> Result<NewJobResponse> {
+        Ok(NewJobResponse {
+            has_toolchain: self.has_toolchain(request.toolchain).await,
+            job_id: uuid::Uuid::new_v4().to_string(),
+            timeout: self.job_time_limit,
+        })
+    }
+
+    async fn run_job(
+        &self,
+        RunJobRequest {
+            job_id,
+            toolchain,
+            command,
+            outputs,
+            inputs,
+        }: RunJobRequest,
+    ) -> Result<RunJobResponse> {
+        let (tx, rx) = tokio::sync::oneshot::channel::<RunJobResponse>();
+        self.jobs.lock().await.insert(job_id.clone(), tx);
+
+        let res = self
+            .task_queue
+            .send_task(
+                server_run_build::new(
+                    job_id.clone(),
+                    self.id.clone(),
+                    toolchain,
+                    command,
+                    outputs,
+                    inputs,
+                )
+                .with_time_limit(self.job_time_limit),
+            )
+            .await
+            .map_err(anyhow::Error::new);
+
+        if let Err(err) = res {
+            self.jobs.lock().await.remove(&job_id);
+            Err(err)
+        } else {
+            rx.await.map_err(anyhow::Error::new)
+        }
+    }
+
+    async fn job_failure(&self, job_id: &str, reason: &str, info: BuildServerInfo) -> Result<()> {
+        let send_res = if let Some(sndr) = self.jobs.lock().await.remove(job_id) {
+            sndr.send(RunJobResponse::JobFailed {
+                reason: reason.to_owned(),
+            })
+            .map_err(|_| anyhow!("Failed to send job result"))
+        } else {
+            Err(anyhow!(
+                "[job_failed({job_id})]: Failed to send response for unknown job"
+            ))
+        };
+        let info_res = self.server_heartbeat(info, Some(false)).await;
+        send_res.and(info_res)
+    }
+
+    async fn job_success(
+        &self,
+        job_id: &str,
+        result: BuildResult,
+        info: BuildServerInfo,
+    ) -> Result<()> {
+        let send_res = if let Some(sndr) = self.jobs.lock().await.remove(job_id) {
+            sndr.send(RunJobResponse::JobComplete {
+                result,
+                server_id: info.server_id.clone(),
+            })
+            .map_err(|_| anyhow!("Failed to send job result"))
+        } else {
+            Err(anyhow!(
+                "[job_complete({job_id})]: Failed to send response for unknown job"
+            ))
+        };
+        let info_res = self.server_heartbeat(info, Some(true)).await;
+        send_res.and(info_res)
+    }
+
+    async fn server_heartbeat(
+        &self,
+        info: BuildServerInfo,
+        job_status: Option<bool>,
+    ) -> Result<()> {
+        let mut servers = self.servers.lock().await;
+        let now = Instant::now();
+
+        // Insert or update the server info
+        servers
+            .entry(info.server_id.clone())
+            .and_modify(|server| {
+                if let Some(success) = job_status {
+                    if success {
+                        server.last_success = now;
+                    } else {
+                        server.last_failure = Some(now);
+                    }
+                }
+                server.max_per_core_load = info.max_per_core_load;
+                server.num_cpus = info.num_cpus;
+                server.num_jobs = info.num_jobs;
+            })
+            .or_insert_with(|| BuildServerStatus {
+                last_success: now,
+                last_failure: None,
+                max_per_core_load: info.max_per_core_load,
+                num_cpus: info.num_cpus,
+                num_jobs: info.num_jobs,
+            });
+
+        fn prune_servers(
+            now: Instant,
+            remember_server_error_timeout: Duration,
+            servers: &mut HashMap<String, BuildServerStatus>,
+        ) -> Vec<String> {
+            let mut to_remove = vec![];
+            // Remove servers we haven't seen in 5 minutes
+            for (server_id, server) in servers.iter_mut() {
+                let last_seen = now - server.last_success;
+                let last_seen = if let Some(last_failure) = server.last_failure {
+                    if now.duration_since(last_failure) >= remember_server_error_timeout {
+                        server.last_failure = None;
+                    }
+                    last_seen.min(now - last_failure)
+                } else {
+                    last_seen
+                };
+                if last_seen > Duration::from_secs(120) {
+                    to_remove.push(server_id.clone());
+                }
+            }
+            to_remove
+        }
+
+        for server_id in prune_servers(now, self.remember_server_error_timeout, &mut servers) {
+            servers.remove(&server_id);
+        }
+
+        Ok(())
     }
 }
 
-struct JobInfo {
-    ctime: Instant,
-    toolchain: Toolchain,
-}
-
 pub struct Server {
-    builder: Box<dyn BuilderIncoming>,
-    cache: Mutex<TcCache>,
+    max_per_core_load: f64,
     num_cpus: usize,
-    job_count: AtomicUsize,
-    job_queue: Arc<tokio::sync::Semaphore>,
-    jobs_assigned: Arc<Mutex<HashMap<JobId, JobInfo>>>,
+    server_id: String,
+    builder: Box<dyn crate::dist::BuilderIncoming>,
+    jobs: Arc<Mutex<HashMap<String, (String, String)>>>,
+    task_queue: Arc<celery::Celery>,
+    toolchains: Arc<Mutex<ServerToolchains>>,
 }
 
 impl Server {
     pub fn new(
-        builder: Box<dyn BuilderIncoming>,
-        cache_dir: &Path,
-        toolchain_cache_size: u64,
+        max_per_core_load: f64,
         num_cpus: usize,
-    ) -> Result<Server> {
-        let cache = TcCache::new(&cache_dir.join("tc"), toolchain_cache_size)
-            .context("Failed to create toolchain cache")?;
-        Ok(Server {
-            builder,
+        server_id: String,
+        builder: Box<dyn crate::dist::BuilderIncoming>,
+        task_queue: Arc<celery::Celery>,
+        toolchains: Arc<Mutex<ServerToolchains>>,
+    ) -> Self {
+        Self {
+            max_per_core_load,
             num_cpus,
-            cache: Mutex::new(cache),
-            job_count: AtomicUsize::new(0),
-            job_queue: Arc::new(tokio::sync::Semaphore::new(num_cpus)),
-            jobs_assigned: Arc::new(Mutex::new(HashMap::new())),
-        })
+            server_id,
+            builder,
+            jobs: Default::default(),
+            task_queue,
+            toolchains,
+        }
     }
 }
 
 #[async_trait]
-impl ServerIncoming for Server {
-    fn start_heartbeat(&self, requester: Arc<dyn ServerOutgoing>) {
-        let num_cpus = self.num_cpus;
-        let job_queue = self.job_queue.clone();
-        let jobs_assigned = self.jobs_assigned.clone();
-        // Wait up to SCCACHE_DIST_REQUEST_TIMEOUT for a client to start a job.
-        // Remove jobs the client hasn't started within this interval.
-        let unstarted_job_timeout = get_dist_request_timeout();
-
-        // TODO: detect if this panics
-        tokio::spawn(async move {
-            loop {
-                let stale_jobs = {
-                    let jobs_assigned = jobs_assigned.lock().await;
-                    let now = std::time::Instant::now();
-                    let mut stale_jobs = vec![];
-                    for (&job_id, job_info) in jobs_assigned.iter() {
-                        if now.duration_since(job_info.ctime) >= unstarted_job_timeout {
-                            stale_jobs.push(job_id);
+impl ServerService for Server {
+    async fn start_heartbeat(&self) -> Result<()> {
+        tokio::spawn({
+            let task_queue = self.task_queue.clone();
+            let max_per_core_load = self.max_per_core_load;
+            let num_cpus = self.num_cpus;
+            let jobs = self.jobs.clone();
+            let server_id = self.server_id.clone();
+            async move {
+                loop {
+                    let info = BuildServerInfo {
+                        max_per_core_load,
+                        num_cpus,
+                        num_jobs: jobs.lock().await.len(),
+                        server_id: server_id.clone(),
+                    };
+                    tracing::trace!("Sending heartbeat: {info:?}");
+                    let due_time = match task_queue
+                        .send_task(scheduler_server_heartbeat::new(info))
+                        .await
+                    {
+                        Ok(_) => {
+                            tracing::trace!("Heartbeat success");
+                            Duration::from_secs(60)
                         }
-                    }
-                    stale_jobs
-                };
+                        Err(e) => {
+                            tracing::error!("Failed to send heartbeat to scheduler: {e}");
+                            Duration::from_secs(10)
+                        }
+                    };
 
-                let num_assigned_jobs = {
-                    let mut jobs_assigned = jobs_assigned.lock().await;
-                    for job_id in stale_jobs {
-                        jobs_assigned.remove(&job_id);
-                    }
-                    jobs_assigned.len()
-                };
-
-                let num_active_jobs = num_cpus - job_queue.available_permits();
-
-                let due_time = match requester
-                    .do_heartbeat(num_assigned_jobs, num_active_jobs)
-                    .await
-                {
-                    Ok(HeartbeatServerResult { is_new }) => {
-                        tracing::trace!("Heartbeat success is_new={}", is_new);
-                        HEARTBEAT_INTERVAL
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to send heartbeat to server: {}", e);
-                        HEARTBEAT_ERROR_INTERVAL
-                    }
-                };
-
-                tokio::time::sleep(due_time).await;
+                    tokio::time::sleep(due_time).await;
+                }
             }
-        });
-    }
-
-    async fn handle_assign_job(&self, tc: Toolchain) -> Result<AssignJobResult> {
-        let need_toolchain = !self.cache.lock().await.contains_toolchain(&tc);
-        let job_id = JobId(
-            self.job_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst) as u64,
-        );
-        let num_assigned_jobs = {
-            let mut jobs_assigned = self.jobs_assigned.lock().await;
-            jobs_assigned.insert(
-                job_id,
-                JobInfo {
-                    ctime: Instant::now(),
-                    toolchain: tc,
-                },
-            );
-            jobs_assigned.len()
-        };
-        let num_active_jobs = self.num_cpus - self.job_queue.available_permits();
-
-        Ok(AssignJobResult {
-            job_id,
-            need_toolchain,
-            num_assigned_jobs,
-            num_active_jobs,
         })
+        .await
+        .map_err(anyhow::Error::new)
     }
 
-    async fn handle_submit_toolchain(
+    async fn run_job(
         &self,
-        job_id: JobId,
-        mut tc_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
-    ) -> Result<SubmitToolchainResult> {
-        // TODO: need to lock the toolchain until the container has started
-        // TODO: can start prepping container
-
-        let tc = match self
-            .jobs_assigned
-            .lock()
-            .await
-            .get(&job_id)
-            .map(|j| j.toolchain.clone())
-        {
-            Some(tc) => tc,
-            None => {
-                // Remove the job on error
-                self.jobs_assigned.lock().await.remove(&job_id);
-                return Ok(SubmitToolchainResult::JobNotFound);
-            }
-        };
-
-        let mut cache = self.cache.lock().await;
-
-        let res = if cache.contains_toolchain(&tc) {
-            // Drop the lock
-            drop(cache);
-
-            // Ignore the toolchain request body
-            // TODO: Investigate if this causes early hangup warnings in
-            // the load balancer. If so, use the implementation below.
-            Ok(())
-
-            // // Consume the entire toolchain request body
-            // tokio::io::copy(&mut tc_rdr, &mut tokio::io::empty())
-            //     .await
-            //     .map(|_| ())
-            //     .or_else(|err| {
-            //         tracing::warn!("[handle_submit_toolchain({})]: {:?}", job_id, err);
-            //         // Ignore errors reading the request body
-            //         Ok(())
-            //     })
-        } else {
-            cache
-                .insert_with(&tc, |mut file| async move {
-                    tokio::io::copy(&mut tc_rdr, &mut file).await
-                })
-                .await
-        };
-
-        match res {
-            Ok(_) => Ok(SubmitToolchainResult::Success),
-            Err(err) => {
-                tracing::warn!("[handle_submit_toolchain({})]: {:?}", job_id, err);
-                // Remove the job on error
-                self.jobs_assigned.lock().await.remove(&job_id);
-                Ok(SubmitToolchainResult::CannotCache)
-            }
-        }
-    }
-
-    async fn handle_run_job(
-        &self,
-        job_id: JobId,
+        task_id: &str,
+        job_id: &str,
+        scheduler_id: &str,
+        toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
-    ) -> Result<RunJobResult> {
-        // Remove the job from assigned map
-        let tc = {
-            let mut jobs_assigned = self.jobs_assigned.lock().await;
-            match jobs_assigned.remove(&job_id).map(|j| j.toolchain.clone()) {
-                Some(tc) => tc,
-                None => return Ok(RunJobResult::JobNotFound),
-            }
-        };
+        inputs: Vec<u8>,
+    ) -> Result<BuildResult> {
+        // Associate the task with the scheduler and job so we can report success or failure
+        self.jobs.lock().await.insert(
+            task_id.to_owned(),
+            (scheduler_id.to_owned(), job_id.to_owned()),
+        );
 
-        // Do the build
-        let res = std::panic::AssertUnwindSafe(self.builder.run_build(
-            job_id,
-            tc,
-            command,
-            outputs,
-            inputs_rdr,
-            &self.cache,
-            self.job_queue.as_ref(),
-        ))
-        .catch_unwind()
-        .await
-        .map_err(|e| {
-            let msg = e
-                .downcast_ref::<&str>()
-                .map(|s| &**s)
-                .or_else(|| e.downcast_ref::<String>().map(|s| &**s))
-                .unwrap_or("An unknown panic was caught.");
-            anyhow::anyhow!("{msg}")
-        })
-        .and_then(std::convert::identity);
+        let tc_dir = self.toolchains.lock().await.acquire(&toolchain).await?;
 
-        match res {
-            Err(e) => Err(e.context("run_job build failed")),
-            Ok(res) => Ok(RunJobResult::Complete(JobComplete {
-                output: res.output,
-                outputs: res.outputs,
-            })),
-        }
+        let result = self
+            .builder
+            .run_build(job_id, &tc_dir, command, outputs, inputs)
+            .await;
+
+        self.toolchains.lock().await.release(&toolchain).await?;
+
+        result
     }
+
+    async fn job_failure(&self, task_id: &str, reason: &str) -> Result<()> {
+        let mut jobs = self.jobs.lock().await;
+        if let Some((scheduler_id, job_id)) = jobs.remove(task_id) {
+            let info = BuildServerInfo {
+                max_per_core_load: self.max_per_core_load,
+                num_cpus: self.num_cpus,
+                num_jobs: jobs.len(),
+                server_id: self.server_id.clone(),
+            };
+            drop(jobs);
+            return self
+                .task_queue
+                .send_task(
+                    scheduler_build_failed::new(job_id, reason.to_owned(), info)
+                        .with_queue(&scheduler_id),
+                )
+                .await
+                .map_err(anyhow::Error::new)
+                .map(|_| ());
+        }
+        tracing::error!("[job_failure({task_id})]: Failed to report task failure");
+        Err(anyhow!("Cannot report task failure ({task_id})"))
+    }
+
+    async fn job_success(&self, task_id: &str, result: &BuildResult) -> Result<()> {
+        let mut jobs = self.jobs.lock().await;
+        if let Some((scheduler_id, job_id)) = jobs.remove(task_id) {
+            let info = BuildServerInfo {
+                max_per_core_load: self.max_per_core_load,
+                num_cpus: self.num_cpus,
+                num_jobs: jobs.len(),
+                server_id: self.server_id.clone(),
+            };
+            drop(jobs);
+
+            return self
+                .task_queue
+                .send_task(
+                    scheduler_build_success::new(job_id, result.to_owned(), info)
+                        .with_queue(&scheduler_id),
+                )
+                .await
+                .map_err(anyhow::Error::new)
+                .map(|_| ());
+        }
+        tracing::error!("[job_success({task_id})]: Failed to report task success");
+        Err(anyhow!("Cannot report task success ({task_id})"))
+    }
+}
+
+// Runs on the server
+#[celery::task(
+    bind = true,
+    on_failure = on_server_run_build_failure,
+    on_success = on_server_run_build_success,
+)]
+pub async fn server_run_build(
+    task: &Self,
+    job_id: String,
+    scheduler_id: String,
+    toolchain: Toolchain,
+    command: CompileCommand,
+    outputs: Vec<String>,
+    inputs: Vec<u8>,
+) -> TaskResult<BuildResult> {
+    let task_id = task.request.id.clone();
+
+    tracing::debug!(
+        "server_run_build: job_id={}, task_id={}, scheduler_id={}, toolchain={}, executable={:?}, arguments={:?}, outputs={:?}",
+        job_id,
+        task_id,
+        scheduler_id,
+        toolchain.archive_id,
+        command.executable,
+        command.arguments,
+        outputs
+    );
+
+    if let Some(server) = SERVER.get() {
+        server
+            .run_job(
+                &task_id,
+                &job_id,
+                &scheduler_id,
+                toolchain,
+                command,
+                outputs,
+                inputs,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("[server_run_build({job_id})]: run_job failed with: {e:?}");
+                TaskError::UnexpectedError(e.to_string())
+            })
+    } else {
+        Err(TaskError::UnexpectedError(
+            "sccache-dist server is not initialized".into(),
+        ))
+    }
+}
+
+async fn on_server_run_build_failure(task: &server_run_build, err: &TaskError) {
+    let task_id = task.request().id.clone();
+    if let Err(err) = SERVER
+        .get()
+        .unwrap()
+        .job_failure(
+            &task_id,
+            &match err {
+                TaskError::TimeoutError => {
+                    format!("[server_run_build({task_id})]: Timed out")
+                }
+                _ => {
+                    format!("[server_run_build({task_id})]: Failed with `{err}`")
+                }
+            },
+        )
+        .await
+    {
+        tracing::error!("[on_server_run_build_failure({task_id})]: {err}");
+    }
+}
+
+async fn on_server_run_build_success(task: &server_run_build, result: &BuildResult) {
+    let task_id = task.request().id.clone();
+    if let Err(err) = SERVER.get().unwrap().job_success(&task_id, result).await {
+        tracing::error!("[on_server_run_build_success({task_id})]: {err}");
+    }
+}
+
+// Runs on scheduler to handle heartbeats from servers
+#[celery::task]
+pub async fn scheduler_server_heartbeat(info: BuildServerInfo) -> TaskResult<()> {
+    SCHEDULER
+        .get()
+        .unwrap()
+        .server_heartbeat(info, None)
+        .await
+        .map_err(|e| TaskError::UnexpectedError(e.to_string()))
+}
+
+// Runs on the scheduler
+#[celery::task]
+async fn scheduler_build_failed(
+    job_id: String,
+    reason: String,
+    info: BuildServerInfo,
+) -> TaskResult<()> {
+    SCHEDULER
+        .get()
+        .unwrap()
+        .job_failure(&job_id, &reason, info)
+        .await
+        .map_err(|e| TaskError::UnexpectedError(e.to_string()))
+}
+
+// Runs on the scheduler
+#[celery::task]
+async fn scheduler_build_success(
+    job_id: String,
+    result: BuildResult,
+    info: BuildServerInfo,
+) -> TaskResult<()> {
+    SCHEDULER
+        .get()
+        .unwrap()
+        .job_success(&job_id, result, info)
+        .await
+        .map_err(|e| TaskError::UnexpectedError(e.to_string()))
 }

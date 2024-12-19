@@ -843,22 +843,24 @@ where
 {
     use std::io;
 
+    use crate::dist::NewJobResponse;
+
     let mut dist_compile_cmd =
         dist_compile_cmd.context("Could not create distributed compile command")?;
 
-    trace!("[{}]: Creating distributed compile request", out_pretty);
+    trace!("[{out_pretty}]: Creating distributed compile request");
 
     let dist_output_paths = compilation
         .outputs()
         .map(|output| path_transformer.as_dist_abs(&cwd.join(output.path)))
         .collect::<Option<_>>()
         .context("Failed to adapt an output path for distributed compile")?;
+
     let (inputs_packager, toolchain_packager, outputs_rewriter) =
         compilation.into_dist_packagers(path_transformer)?;
 
     trace!(
-        "[{}]: Identifying dist toolchain for {:?}",
-        out_pretty,
+        "[{out_pretty}]: Identifying dist toolchain for {:?}",
         compile_cmd.get_executable()
     );
     let (dist_toolchain, maybe_dist_compile_executable) = dist_client
@@ -868,125 +870,80 @@ where
             toolchain_packager,
         )
         .await?;
+
     let mut tc_archive = None;
+
     if let Some((dist_compile_executable, archive_path)) = maybe_dist_compile_executable {
         dist_compile_cmd.executable = dist_compile_executable;
         tc_archive = Some(archive_path);
     }
 
-    trace!("[{}]: Requesting allocation", out_pretty);
-    let jares = dist_client.do_alloc_job(dist_toolchain.clone()).await?;
-    let job_alloc = match jares {
-        dist::AllocJobResult::Success {
-            job_alloc,
-            need_toolchain: true,
-        } => {
-            debug!(
-                "[{}, {}, {}]: Successfully allocated job",
-                out_pretty,
-                job_alloc.job_id,
-                job_alloc.server_id.addr()
-            );
-            debug!(
-                "[{}, {}, {}]: Sending toolchain {}",
-                out_pretty,
-                job_alloc.job_id,
-                job_alloc.server_id.addr(),
-                dist_toolchain.archive_id
-            );
+    let NewJobResponse {
+        has_toolchain,
+        job_id,
+        timeout,
+    } = dist_client.new_job(dist_toolchain.clone()).await?;
 
-            let archive_id = dist_toolchain.archive_id.clone();
-
-            match dist_client
-                .do_submit_toolchain(job_alloc.clone(), dist_toolchain)
-                .await
-                .map_err(|e| e.context("Could not submit toolchain"))?
-            {
-                dist::SubmitToolchainResult::Success => {
-                    trace!(
-                        "[{}, {}, {}]: Successfully sent toolchain {}",
-                        out_pretty,
-                        job_alloc.job_id,
-                        job_alloc.server_id.addr(),
-                        archive_id,
-                    );
-                    Ok(job_alloc)
-                }
-                dist::SubmitToolchainResult::JobNotFound => {
-                    bail!(
-                        "[{}, {}, {}]: Failed to submit toolchain, job not found on server",
-                        out_pretty,
-                        job_alloc.job_id,
-                        job_alloc.server_id.addr()
-                    )
-                }
-                dist::SubmitToolchainResult::CannotCache => bail!(
-                    "[{}, {}, {}]: Toolchain for job could not be cached by server",
-                    out_pretty,
-                    job_alloc.job_id,
-                    job_alloc.server_id.addr()
-                ),
+    if !has_toolchain {
+        trace!(
+            "[{}]: Submitting toolchain `{}`",
+            out_pretty,
+            dist_toolchain.archive_id,
+        );
+        match dist_client
+            .do_submit_toolchain(dist_toolchain.clone())
+            .await
+            .map_err(|e| e.context("Could not submit toolchain"))?
+        {
+            dist::SubmitToolchainResult::Success => {
+                trace!(
+                    "[{out_pretty}]: Successfully sent toolchain `{}`",
+                    dist_toolchain.archive_id,
+                );
+            }
+            dist::SubmitToolchainResult::Error { message } => {
+                trace!(
+                    "[{out_pretty}]: Failed sending toolchain `{}`: {message}",
+                    dist_toolchain.archive_id,
+                );
+                return Err(anyhow!(message));
             }
         }
-        dist::AllocJobResult::Success {
-            job_alloc,
-            need_toolchain: false,
-        } => {
-            debug!(
-                "[{}, {}, {}]: Successfully allocated job on server",
-                out_pretty,
-                job_alloc.job_id,
-                job_alloc.server_id.addr()
-            );
-            Ok(job_alloc)
-        }
-        dist::AllocJobResult::Fail { msg } => Err(anyhow!("Failed to allocate job").context(msg)),
-    }?;
-    let job_id = job_alloc.job_id;
-    let server_id = job_alloc.server_id;
-    debug!(
-        "[{}, {}, {}]: Running job on server",
-        out_pretty,
-        job_id,
-        server_id.addr()
-    );
-    let ((job_id, server_id), (jres, path_transformer)) = dist_client
-        .do_run_job(
-            job_alloc,
+    }
+
+    debug!("[{out_pretty}, {job_id}]: Running job");
+
+    let job_result = dist_client
+        .run_job(
+            &job_id,
+            Duration::from_secs(timeout as u64),
+            dist_toolchain,
             dist_compile_cmd,
             dist_output_paths,
             inputs_packager,
         )
-        .await
-        .map(move |res| ((job_id, server_id), res))
-        .with_context(|| {
-            format!(
-                "Could not run distributed compilation job on {:?}",
-                server_id.addr()
-            )
-        })?;
+        .await;
 
-    let jc = match jres {
-        dist::RunJobResult::Complete(jc) => jc,
-        dist::RunJobResult::JobNotFound => {
-            bail!(
-                "[{}, {}, {}]: Failed to run job, job not found on server",
-                out_pretty,
-                job_id,
-                server_id.addr()
-            )
+    let (jc, server_id, path_transformer) = match job_result {
+        Ok((dist::RunJobResponse::JobComplete { result, server_id }, path_transformer)) => {
+            (result, server_id, path_transformer)
+        }
+        Ok((dist::RunJobResponse::JobFailed { reason }, _)) => {
+            bail!("[{out_pretty}, {job_id}]: Could not run distributed compilation job: {reason}")
+        }
+        Err(err) => {
+            bail!("[{out_pretty}, {job_id}]: Could not run distributed compilation job: {err}")
         }
     };
+
     debug!(
-        "[{}, {}, {}]: Fetched {:?}",
-        out_pretty,
-        job_id,
-        server_id.addr(),
+        "[{out_pretty}, {job_id}]: Fetched {:?}",
         jc.outputs
             .iter()
             .map(|(p, bs)| (p, bs.lens().to_string()))
             .collect::<Vec<_>>()
     );
+
     let mut output_paths: Vec<PathBuf> = vec![];
     macro_rules! try_or_cleanup {
         ($v:expr) => {{
@@ -998,14 +955,7 @@ where
                     for local_path in output_paths.iter() {
                         if let Err(e) = fs::remove_file(local_path) {
                             if e.kind() != io::ErrorKind::NotFound {
-                                warn!(
-                                    "[{}, {}, {}]: {} while attempting to clear up {}",
-                                    out_pretty,
-                                    job_id,
-                                    server_id.addr(),
-                                    e,
-                                    local_path.display()
-                                )
+                                warn!("[{out_pretty}, {job_id}]: {e} while attempting to remove `{}`", local_path.display())
                             }
                         }
                     }
@@ -1018,7 +968,7 @@ where
     for (path, output_data) in jc.outputs {
         let len = output_data.lens().actual;
         let local_path = try_or_cleanup!(path_transformer.to_local(&path).with_context(
-            || format!("[{}]: unable to transform output path {}", out_pretty, path)
+            || format!("[{out_pretty}, {job_id}]: unable to transform output path {path}")
         ));
         output_paths.push(local_path);
         // Do this first so cleanup works correctly
@@ -1038,6 +988,7 @@ where
     try_or_cleanup!(outputs_rewriter
         .handle_outputs(&path_transformer, &output_paths, &extra_inputs)
         .with_context(|| "Failed to rewrite outputs from compile"));
+
     Ok((DistType::Ok(server_id), jc.output.into()))
 }
 
@@ -1159,7 +1110,7 @@ pub enum DistType {
     /// Distribution was not enabled.
     NoDist,
     /// Distributed compile success.
-    Ok(dist::ServerId),
+    Ok(String),
     /// Distributed compile failed.
     Error,
 }
@@ -3119,15 +3070,15 @@ LLVM version: 6.0",
 #[cfg(test)]
 #[cfg(feature = "dist-client")]
 mod test_dist {
-    use crate::dist::pkg;
     use crate::dist::{
-        self, AllocJobResult, CompileCommand, JobAlloc, JobComplete, JobId, OutputData,
-        PathTransformer, ProcessOutput, RunJobResult, SchedulerStatusResult, ServerId,
-        SubmitToolchainResult, Toolchain,
+        self, CompileCommand, NewJobResponse, OutputData, PathTransformer, ProcessOutput,
+        RunJobResponse, SchedulerStatusResult, SubmitToolchainResult, Toolchain,
     };
+    use crate::dist::{pkg, BuildResult};
     use async_trait::async_trait;
     use std::path::{Path, PathBuf};
     use std::sync::{atomic::AtomicBool, Arc};
+    use std::time::Duration;
 
     use crate::errors::*;
 
@@ -3140,26 +3091,24 @@ mod test_dist {
     }
     #[async_trait]
     impl dist::Client for ErrorPutToolchainClient {
-        async fn do_alloc_job(&self, _: Toolchain) -> Result<AllocJobResult> {
+        async fn new_job(&self, _: Toolchain) -> Result<NewJobResponse> {
             unreachable!()
         }
         async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
             unreachable!()
         }
-        async fn do_submit_toolchain(
-            &self,
-            _: JobAlloc,
-            _: Toolchain,
-        ) -> Result<SubmitToolchainResult> {
+        async fn do_submit_toolchain(&self, _: Toolchain) -> Result<SubmitToolchainResult> {
             unreachable!()
         }
-        async fn do_run_job(
+        async fn run_job(
             &self,
-            _: JobAlloc,
+            _: &str,
+            _: Duration,
+            _: Toolchain,
             _: CompileCommand,
             _: Vec<String>,
             _: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(RunJobResult, PathTransformer)> {
+        ) -> Result<(RunJobResponse, PathTransformer)> {
             unreachable!()
         }
         async fn put_toolchain(
@@ -3193,27 +3142,25 @@ mod test_dist {
     }
     #[async_trait]
     impl dist::Client for ErrorAllocJobClient {
-        async fn do_alloc_job(&self, tc: Toolchain) -> Result<AllocJobResult> {
+        async fn new_job(&self, tc: Toolchain) -> Result<NewJobResponse> {
             assert_eq!(self.tc, tc);
             Err(anyhow!("MOCK: alloc job failure"))
         }
         async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
             unreachable!()
         }
-        async fn do_submit_toolchain(
-            &self,
-            _: JobAlloc,
-            _: Toolchain,
-        ) -> Result<SubmitToolchainResult> {
+        async fn do_submit_toolchain(&self, _: Toolchain) -> Result<SubmitToolchainResult> {
             unreachable!()
         }
-        async fn do_run_job(
+        async fn run_job(
             &self,
-            _: JobAlloc,
+            _: &str,
+            _: Duration,
+            _: Toolchain,
             _: CompileCommand,
             _: Vec<String>,
             _: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(RunJobResult, PathTransformer)> {
+        ) -> Result<(RunJobResponse, PathTransformer)> {
             unreachable!()
         }
         async fn put_toolchain(
@@ -3250,40 +3197,34 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for ErrorSubmitToolchainClient {
-        async fn do_alloc_job(&self, tc: Toolchain) -> Result<AllocJobResult> {
+        async fn new_job(&self, tc: Toolchain) -> Result<NewJobResponse> {
             assert!(!self
                 .has_started
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
             assert_eq!(self.tc, tc);
-            Ok(AllocJobResult::Success {
-                job_alloc: JobAlloc {
-                    auth: "abcd".to_owned(),
-                    job_id: JobId(0),
-                    server_id: ServerId::new(([0, 0, 0, 0], 1).into()),
-                },
-                need_toolchain: true,
+            Ok(NewJobResponse {
+                has_toolchain: false,
+                job_id: "job_id".into(),
+                timeout: 10,
             })
         }
         async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
             unreachable!("fn do_get_status is not used for this test. qed")
         }
-        async fn do_submit_toolchain(
-            &self,
-            job_alloc: JobAlloc,
-            tc: Toolchain,
-        ) -> Result<SubmitToolchainResult> {
-            assert_eq!(job_alloc.job_id, JobId(0));
+        async fn do_submit_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
             assert_eq!(self.tc, tc);
             Err(anyhow!("MOCK: submit toolchain failure"))
         }
-        async fn do_run_job(
+        async fn run_job(
             &self,
-            _: JobAlloc,
+            _: &str,
+            _: Duration,
+            _: Toolchain,
             _: CompileCommand,
             _: Vec<String>,
             _: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(RunJobResult, PathTransformer)> {
-            unreachable!("fn do_run_job is not used for this test. qed")
+        ) -> Result<(RunJobResponse, PathTransformer)> {
+            unreachable!("fn run_job is not used for this test. qed")
         }
         async fn put_toolchain(
             &self,
@@ -3319,40 +3260,36 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for ErrorRunJobClient {
-        async fn do_alloc_job(&self, tc: Toolchain) -> Result<AllocJobResult> {
+        async fn new_job(&self, tc: Toolchain) -> Result<NewJobResponse> {
             assert!(!self
                 .has_started
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
             assert_eq!(self.tc, tc);
-            Ok(AllocJobResult::Success {
-                job_alloc: JobAlloc {
-                    auth: "abcd".to_owned(),
-                    job_id: JobId(0),
-                    server_id: ServerId::new(([0, 0, 0, 0], 1).into()),
-                },
-                need_toolchain: true,
+            Ok(NewJobResponse {
+                has_toolchain: false,
+                job_id: "job_id".into(),
+                timeout: 10,
             })
         }
         async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
             unreachable!()
         }
-        async fn do_submit_toolchain(
-            &self,
-            job_alloc: JobAlloc,
-            tc: Toolchain,
-        ) -> Result<SubmitToolchainResult> {
-            assert_eq!(job_alloc.job_id, JobId(0));
+        async fn do_submit_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
             assert_eq!(self.tc, tc);
             Ok(SubmitToolchainResult::Success)
         }
-        async fn do_run_job(
+        async fn run_job(
             &self,
-            job_alloc: JobAlloc,
+            job_id: &str,
+            timeout: Duration,
+            tc: Toolchain,
             command: CompileCommand,
             _: Vec<String>,
             _: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(RunJobResult, PathTransformer)> {
-            assert_eq!(job_alloc.job_id, JobId(0));
+        ) -> Result<(RunJobResponse, PathTransformer)> {
+            assert_eq!(job_id, "job_id");
+            assert_eq!(timeout, Duration::from_secs(10));
+            assert_eq!(self.tc, tc);
             assert_eq!(command.executable, "/overridden/compiler");
             Err(anyhow!("MOCK: run job failure"))
         }
@@ -3399,42 +3336,37 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for OneshotClient {
-        async fn do_alloc_job(&self, tc: Toolchain) -> Result<AllocJobResult> {
+        async fn new_job(&self, tc: Toolchain) -> Result<NewJobResponse> {
             assert!(!self
                 .has_started
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
             assert_eq!(self.tc, tc);
-
-            Ok(AllocJobResult::Success {
-                job_alloc: JobAlloc {
-                    auth: "abcd".to_owned(),
-                    job_id: JobId(0),
-                    server_id: ServerId::new(([0, 0, 0, 0], 1).into()),
-                },
-                need_toolchain: true,
+            Ok(NewJobResponse {
+                has_toolchain: false,
+                job_id: "job_id".into(),
+                timeout: 10,
             })
         }
         async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
             unreachable!("fn do_get_status is not used for this test. qed")
         }
-        async fn do_submit_toolchain(
-            &self,
-            job_alloc: JobAlloc,
-            tc: Toolchain,
-        ) -> Result<SubmitToolchainResult> {
-            assert_eq!(job_alloc.job_id, JobId(0));
+        async fn do_submit_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
             assert_eq!(self.tc, tc);
 
             Ok(SubmitToolchainResult::Success)
         }
-        async fn do_run_job(
+        async fn run_job(
             &self,
-            job_alloc: JobAlloc,
+            job_id: &str,
+            timeout: Duration,
+            tc: Toolchain,
             command: CompileCommand,
             outputs: Vec<String>,
             inputs_packager: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(RunJobResult, PathTransformer)> {
-            assert_eq!(job_alloc.job_id, JobId(0));
+        ) -> Result<(RunJobResponse, PathTransformer)> {
+            assert_eq!(job_id, "job_id");
+            assert_eq!(timeout, Duration::from_secs(10));
+            assert_eq!(self.tc, tc);
             assert_eq!(command.executable, "/overridden/compiler");
 
             let mut inputs = vec![];
@@ -3447,10 +3379,13 @@ mod test_dist {
                     (name, data)
                 })
                 .collect();
-            let result = RunJobResult::Complete(JobComplete {
-                output: self.output.clone(),
-                outputs,
-            });
+            let result = RunJobResponse::JobComplete {
+                server_id: "".into(),
+                result: BuildResult {
+                    output: self.output.clone(),
+                    outputs,
+                },
+            };
             Ok((result, path_transformer))
         }
         async fn put_toolchain(

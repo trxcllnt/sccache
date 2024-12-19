@@ -17,11 +17,14 @@ use crate::compiler::PreprocessorCacheEntry;
 use crate::lru_disk_cache::LruDiskCache;
 use crate::lru_disk_cache::{Error as LruError, ReadSeek};
 use async_trait::async_trait;
+use futures::AsyncReadExt;
 use std::ffi::{OsStr, OsString};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::errors::*;
 
@@ -74,6 +77,7 @@ pub struct DiskCache {
     preprocessor_cache_mode_config: PreprocessorCacheModeConfig,
     preprocessor_cache: Arc<Mutex<LazyDiskCache>>,
     rw_mode: CacheMode,
+    root: PathBuf,
 }
 
 impl DiskCache {
@@ -99,6 +103,7 @@ impl DiskCache {
                 max_size,
             })),
             rw_mode,
+            root: PathBuf::from(root.as_ref()),
         }
     }
 }
@@ -136,6 +141,30 @@ impl Storage for DiskCache {
             .await?
     }
 
+    async fn get_stream(&self, key: &str) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>> {
+        // HACK: Ignore the LRU and assume the file exists
+        trace!("DiskCache::get_stream({})", key);
+        let path = self.root.join(make_key_path(key));
+        let file = tokio::fs::File::open(path).await?;
+        Ok(Box::new(file.compat()) as Box<dyn futures::AsyncRead + Unpin + Send>)
+    }
+
+    async fn has(&self, key: &str) -> bool {
+        let path = make_key_path(key);
+        let lru = self.lru.clone();
+
+        self.pool
+            .spawn_blocking(move || {
+                lru.lock()
+                    .unwrap()
+                    .get_or_init()
+                    .and_then(|lru| lru.get(&path).map_err(|e| e.into()))
+                    .is_ok()
+            })
+            .await
+            .unwrap_or(false)
+    }
+
     async fn put(&self, key: &str, entry: CacheWrite) -> Result<Duration> {
         // We should probably do this on a background thread if we're going to buffer
         // everything in memory...
@@ -164,11 +193,43 @@ impl Storage for DiskCache {
             .await?
     }
 
+    async fn put_stream(
+        &self,
+        key: &str,
+        mut source: Pin<&mut (dyn futures::AsyncRead + Send)>,
+    ) -> Result<()> {
+        if self.rw_mode == CacheMode::ReadOnly {
+            return Err(anyhow!("Cannot write to a read-only cache"));
+        }
+
+        let lru = self.lru.clone();
+        let key = make_key_path(key);
+
+        let mut v = vec![];
+        source.read_to_end(&mut v).await?;
+
+        self.pool
+            .spawn_blocking(move || {
+                let mut f = lru
+                    .lock()
+                    .unwrap()
+                    .get_or_init()?
+                    .prepare_add(key, v.len() as u64)?;
+
+                f.as_file_mut().write_all(&v)?;
+
+                lru.lock().unwrap().get().unwrap().commit(f)?;
+
+                Ok(())
+            })
+            .await?
+    }
+
     async fn check(&self) -> Result<CacheMode> {
         Ok(self.rw_mode)
     }
 
-    fn location(&self) -> String {
+    async fn location(&self) -> String {
         format!("Local disk: {:?}", self.lru.lock().unwrap().path())
     }
 

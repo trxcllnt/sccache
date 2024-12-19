@@ -369,7 +369,8 @@ impl DistClientContainer {
                     &config.toolchains,
                     auth_token,
                     config.rewrite_includes_only,
-                );
+                )
+                .await;
                 let dist_client =
                     try_or_retry_later!(dist_client.context("failure during dist client creation"));
                 use crate::dist::Client;
@@ -441,7 +442,7 @@ pub fn start_server(config: &Config, addr: &crate::net::SocketAddr) -> Result<()
 
     let notify = env::var_os("SCCACHE_STARTUP_NOTIFY");
 
-    let raw_storage = match storage_from_config(config, &pool) {
+    let raw_storage = match storage_from_config(&config.cache, &config.fallback_cache, &pool) {
         Ok(storage) => storage,
         Err(err) => {
             error!("storage init failed for: {err:?}");
@@ -1423,10 +1424,8 @@ where
 
                         match dist_type {
                             DistType::NoDist => {}
-                            DistType::Ok(id) => {
-                                let server = id.addr().to_string();
-                                let server_count = stats.dist_compiles.entry(server).or_insert(0);
-                                *server_count += 1;
+                            DistType::Ok(server_id) => {
+                                stats.dist_compiles.entry(server_id).and_modify(|c| *c += 1).or_insert(1);
                             }
                             DistType::Error => stats.dist_errors += 1,
                         }
@@ -1788,6 +1787,11 @@ impl ServerStats {
         );
         set_stat!(
             stats_vec,
+            self.dist_compiles.values().sum::<usize>(),
+            "Successful distributed compiles"
+        );
+        set_stat!(
+            stats_vec,
             self.dist_errors,
             "Failed distributed compilations"
         );
@@ -1907,7 +1911,7 @@ impl ServerInfo {
         let cache_size;
         let max_cache_size;
         if let Some(storage) = storage {
-            cache_location = storage.location();
+            cache_location = storage.location().await;
             use_preprocessor_cache_mode = storage
                 .preprocessor_cache_mode_config()
                 .use_preprocessor_cache_mode;

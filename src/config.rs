@@ -145,7 +145,7 @@ impl HTTPUrl {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AzureCacheConfig {
     pub connection_string: String,
@@ -153,7 +153,7 @@ pub struct AzureCacheConfig {
     pub key_prefix: String,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(default)]
 pub struct DiskCacheConfig {
@@ -193,7 +193,7 @@ impl From<CacheModeConfig> for CacheMode {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GCSCacheConfig {
     pub bucket: String,
@@ -204,7 +204,7 @@ pub struct GCSCacheConfig {
     pub credential_url: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GHACacheConfig {
     pub enabled: bool,
@@ -226,7 +226,7 @@ fn default_memcached_cache_expiration() -> u32 {
     DEFAULT_MEMCACHED_CACHE_EXPIRATION
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MemcachedCacheConfig {
     #[serde(alias = "endpoint")]
@@ -256,7 +256,7 @@ pub struct MemcachedCacheConfig {
 /// Please change this value freely if we have a better choice.
 const DEFAULT_REDIS_CACHE_TTL: u64 = 0;
 pub const DEFAULT_REDIS_DB: u32 = 0;
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RedisCacheConfig {
     /// The single-node redis endpoint.
@@ -293,7 +293,7 @@ pub struct RedisCacheConfig {
     pub key_prefix: String,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebdavCacheConfig {
     pub endpoint: String,
@@ -304,7 +304,7 @@ pub struct WebdavCacheConfig {
     pub token: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct S3CacheConfig {
     pub bucket: String,
@@ -317,7 +317,7 @@ pub struct S3CacheConfig {
     pub server_side_encryption: Option<bool>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OSSCacheConfig {
     pub bucket: String,
@@ -327,7 +327,7 @@ pub struct OSSCacheConfig {
     pub no_credentials: bool,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CacheType {
     Azure(AzureCacheConfig),
     GCS(GCSCacheConfig),
@@ -425,6 +425,45 @@ impl CacheConfigs {
 
         if oss.is_some() {
             self.oss = oss
+        }
+    }
+}
+
+impl From<CacheType> for CacheConfigs {
+    fn from(cache_type: CacheType) -> Self {
+        match cache_type {
+            CacheType::Azure(opts) => Self {
+                azure: Some(opts),
+                ..Default::default()
+            },
+            CacheType::GCS(opts) => Self {
+                gcs: Some(opts),
+                ..Default::default()
+            },
+            CacheType::GHA(opts) => Self {
+                gha: Some(opts),
+                ..Default::default()
+            },
+            CacheType::Memcached(opts) => Self {
+                memcached: Some(opts),
+                ..Default::default()
+            },
+            CacheType::Redis(opts) => Self {
+                redis: Some(opts),
+                ..Default::default()
+            },
+            CacheType::S3(opts) => Self {
+                s3: Some(opts),
+                ..Default::default()
+            },
+            CacheType::Webdav(opts) => Self {
+                webdav: Some(opts),
+                ..Default::default()
+            },
+            CacheType::OSS(opts) => Self {
+                oss: Some(opts),
+                ..Default::default()
+            },
         }
     }
 }
@@ -1071,22 +1110,63 @@ impl CachedConfig {
 }
 
 #[cfg(feature = "dist-server")]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MessageBroker {
+    AMQP(String),
+    Redis(String),
+}
+
+#[cfg(feature = "dist-server")]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageBrokerConfigs {
+    pub amqp: Option<MessageBroker>,
+    pub redis: Option<MessageBroker>,
+}
+
+#[cfg(feature = "dist-server")]
 pub mod scheduler {
-    use std::path::Path;
+    use std::path::PathBuf;
     use std::{net::SocketAddr, str::FromStr};
 
     use crate::errors::*;
 
     use serde::{Deserialize, Serialize};
 
-    pub fn default_remember_server_error_timeout() -> u64 {
-        std::env::var("SCCACHE_DIST_REMEMBER_SERVER_ERROR_TIMEOUT")
+    use super::{
+        config_from_env, try_read_config_file, CacheConfigs, CacheModeConfig, CacheType,
+        DiskCacheConfig, MessageBroker, MessageBrokerConfigs,
+    };
+
+    pub fn default_max_body_size() -> usize {
+        std::env::var("SCCACHE_DIST_MAX_BODY_SIZE")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(300)
+            // 1GiB should be enough for toolchains and compile inputs, right?
+            .unwrap_or(1024 * 1024 * 1024)
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    pub fn default_job_time_limit() -> u32 {
+        std::env::var("SCCACHE_DIST_JOB_TIME_LIMIT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(600)
+    }
+
+    pub fn default_enable_web_socket_server() -> bool {
+        std::env::var("SCCACHE_DIST_ENABLE_WEB_SOCKET_SERVER")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(true)
+    }
+
+    // pub fn default_remember_server_error_timeout() -> u64 {
+    //     std::env::var("SCCACHE_DIST_REMEMBER_SERVER_ERROR_TIMEOUT")
+    //         .ok()
+    //         .and_then(|s| s.parse().ok())
+    //         .unwrap_or(300)
+    // }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
     #[serde(tag = "type")]
     #[serde(deny_unknown_fields)]
     pub enum ClientAuth {
@@ -1124,35 +1204,140 @@ pub mod scheduler {
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(default)]
     #[serde(deny_unknown_fields)]
-    pub struct Config {
-        pub public_addr: SocketAddr,
+    pub struct FileConfig {
         pub client_auth: ClientAuth,
-        pub server_auth: ServerAuth,
-        pub remember_server_error_timeout: u64,
+        pub enable_web_socket_server: Option<bool>,
+        pub job_time_limit: Option<u32>,
+        pub max_body_size: Option<usize>,
+        pub message_broker: Option<MessageBrokerConfigs>,
+        pub public_addr: SocketAddr,
+        pub toolchains: CacheConfigs,
     }
 
-    impl Default for Config {
+    impl Default for FileConfig {
         fn default() -> Self {
             Self {
-                public_addr: SocketAddr::from_str("0.0.0.0:10500").unwrap(),
                 client_auth: ClientAuth::Insecure,
-                server_auth: ServerAuth::Insecure,
-                remember_server_error_timeout: default_remember_server_error_timeout(),
+                enable_web_socket_server: Some(default_enable_web_socket_server()),
+                job_time_limit: Some(default_job_time_limit()),
+                max_body_size: Some(default_max_body_size()),
+                message_broker: Some(MessageBrokerConfigs {
+                    amqp: std::env::var("AMQP_ADDR").ok().map(MessageBroker::AMQP),
+                    redis: std::env::var("REDIS_ADDR").ok().map(MessageBroker::Redis),
+                }),
+                public_addr: SocketAddr::from_str("0.0.0.0:10500").unwrap(),
+                toolchains: CacheConfigs {
+                    disk: Some(DiskCacheConfig {
+                        dir: PathBuf::from_str("/tmp/sccache/toolchains").unwrap(),
+                        preprocessor_cache_mode: Default::default(),
+                        rw_mode: CacheModeConfig::ReadWrite,
+                        size: u64::MAX,
+                    }),
+                    ..Default::default()
+                },
             }
         }
     }
 
-    pub fn from_path(conf_path: &Path) -> Result<Option<Config>> {
-        super::try_read_config_file(conf_path).context("Failed to load scheduler config file")
+    #[derive(Debug)]
+    pub struct Config {
+        pub client_auth: ClientAuth,
+        pub enable_web_socket_server: bool,
+        pub job_time_limit: u32,
+        pub max_body_size: usize,
+        pub message_broker: Option<MessageBroker>,
+        pub public_addr: SocketAddr,
+        pub toolchains_fallback: DiskCacheConfig,
+        pub toolchains: Option<CacheType>,
+    }
+
+    impl Config {
+        pub fn load(conf_path: Option<PathBuf>) -> Result<Self> {
+            let mut conf_caches: CacheConfigs = Default::default();
+
+            let FileConfig {
+                client_auth,
+                enable_web_socket_server,
+                job_time_limit,
+                max_body_size,
+                message_broker,
+                public_addr,
+                toolchains,
+            } = conf_path
+                .map(|path| {
+                    let conf = try_read_config_file::<FileConfig>(&path)
+                        .context("Failed to load scheduler config file");
+                    match conf {
+                        Ok(conf) => conf.unwrap_or_default(),
+                        Err(err) => {
+                            warn!("{err}");
+                            Default::default()
+                        }
+                    }
+                })
+                .unwrap_or_default();
+
+            conf_caches.merge(toolchains);
+            conf_caches.merge(config_from_env()?.cache);
+
+            let (toolchains, toolchains_fallback) = conf_caches.into_fallback();
+
+            Ok(Self {
+                client_auth,
+                enable_web_socket_server: enable_web_socket_server.unwrap_or(true),
+                job_time_limit: job_time_limit.unwrap_or_else(default_job_time_limit),
+                max_body_size: max_body_size.unwrap_or_else(default_max_body_size),
+                message_broker: message_broker.and_then(|mb| mb.amqp.or(mb.redis)),
+                public_addr,
+                toolchains_fallback,
+                toolchains,
+            })
+        }
+
+        pub fn into_file(self) -> FileConfig {
+            self.into()
+        }
+    }
+
+    impl From<Config> for FileConfig {
+        fn from(scheduler_config: Config) -> Self {
+            Self {
+                client_auth: scheduler_config.client_auth.clone(),
+                enable_web_socket_server: Some(scheduler_config.enable_web_socket_server),
+                job_time_limit: Some(scheduler_config.job_time_limit),
+                max_body_size: Some(scheduler_config.max_body_size),
+                message_broker: match scheduler_config.message_broker {
+                    Some(MessageBroker::AMQP(conf)) => Some(MessageBrokerConfigs {
+                        amqp: Some(MessageBroker::AMQP(conf)),
+                        ..Default::default()
+                    }),
+                    Some(MessageBroker::Redis(conf)) => Some(MessageBrokerConfigs {
+                        redis: Some(MessageBroker::Redis(conf)),
+                        ..Default::default()
+                    }),
+                    None => None,
+                },
+                public_addr: scheduler_config.public_addr,
+                toolchains: scheduler_config
+                    .toolchains
+                    .map(|x| x.clone().into())
+                    .unwrap_or(CacheConfigs {
+                        disk: Some(scheduler_config.toolchains_fallback),
+                        ..Default::default()
+                    }),
+            }
+        }
     }
 }
 
 #[cfg(feature = "dist-server")]
 pub mod server {
-    use super::HTTPUrl;
+    use super::{
+        config_from_env, try_read_config_file, CacheConfigs, CacheModeConfig, CacheType,
+        DiskCacheConfig, MessageBroker, MessageBrokerConfigs,
+    };
     use serde::{Deserialize, Serialize};
-    use std::net::SocketAddr;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::str::FromStr;
 
     use crate::errors::*;
@@ -1166,8 +1351,8 @@ pub mod server {
         std::env::var("SCCACHE_DIST_MAX_PER_CORE_LOAD")
             .ok()
             .and_then(|s| s.parse().ok())
-            // Default to 8 to match the server's thread pool multiple
-            .unwrap_or(8f64)
+            // Default to 2
+            .unwrap_or(2f64)
     }
 
     fn default_num_cpus_to_ignore() -> usize {
@@ -1201,7 +1386,7 @@ pub mod server {
             .collect()
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Clone, Debug, Serialize, Deserialize)]
     #[serde(tag = "type")]
     #[serde(deny_unknown_fields)]
     pub enum BuilderType {
@@ -1240,38 +1425,129 @@ pub mod server {
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(default)]
     #[serde(deny_unknown_fields)]
-    pub struct Config {
+    pub struct FileConfig {
+        pub message_broker: Option<MessageBrokerConfigs>,
         pub builder: BuilderType,
         pub cache_dir: PathBuf,
-        pub public_addr: SocketAddr,
-        pub bind_addr: Option<SocketAddr>,
-        pub scheduler_url: HTTPUrl,
-        pub scheduler_auth: SchedulerAuth,
-        pub toolchain_cache_size: u64,
         pub max_per_core_load: f64,
         pub num_cpus_to_ignore: usize,
+        pub toolchain_cache_size: u64,
+        pub toolchains: CacheConfigs,
     }
 
-    impl Default for Config {
+    impl Default for FileConfig {
         fn default() -> Self {
             Self {
+                message_broker: Some(MessageBrokerConfigs {
+                    amqp: std::env::var("AMQP_ADDR").ok().map(MessageBroker::AMQP),
+                    redis: std::env::var("REDIS_ADDR").ok().map(MessageBroker::Redis),
+                }),
                 builder: BuilderType::Docker,
                 cache_dir: Default::default(),
-                public_addr: SocketAddr::from_str("0.0.0.0:10600").unwrap(),
-                bind_addr: None,
-                scheduler_url: HTTPUrl::from_url(
-                    reqwest::Url::from_str("http://0.0.0.0:10500").unwrap(),
-                ),
-                scheduler_auth: SchedulerAuth::Insecure,
-                toolchain_cache_size: default_toolchain_cache_size(),
                 max_per_core_load: default_max_per_core_load(),
                 num_cpus_to_ignore: default_num_cpus_to_ignore(),
+                toolchain_cache_size: default_toolchain_cache_size(),
+                toolchains: CacheConfigs {
+                    disk: Some(DiskCacheConfig {
+                        dir: PathBuf::from_str("/tmp/sccache/toolchains").unwrap(),
+                        preprocessor_cache_mode: Default::default(),
+                        rw_mode: CacheModeConfig::ReadWrite,
+                        size: u64::MAX,
+                    }),
+                    ..Default::default()
+                },
             }
         }
     }
 
-    pub fn from_path(conf_path: &Path) -> Result<Option<Config>> {
-        super::try_read_config_file(conf_path).context("Failed to load server config file")
+    #[derive(Debug)]
+    pub struct Config {
+        pub message_broker: Option<MessageBroker>,
+        pub builder: BuilderType,
+        pub cache_dir: PathBuf,
+        pub max_per_core_load: f64,
+        pub num_cpus_to_ignore: usize,
+        pub toolchain_cache_size: u64,
+        pub toolchains: Option<CacheType>,
+        pub toolchains_fallback: DiskCacheConfig,
+    }
+
+    impl Config {
+        pub fn load(conf_path: Option<PathBuf>) -> Result<Self> {
+            let mut conf_caches: CacheConfigs = Default::default();
+
+            let FileConfig {
+                message_broker,
+                builder,
+                cache_dir,
+                max_per_core_load,
+                num_cpus_to_ignore,
+                toolchain_cache_size,
+                toolchains,
+            } = conf_path
+                .map(|path| {
+                    let conf = try_read_config_file::<FileConfig>(&path)
+                        .context("Failed to load server config file");
+                    match conf {
+                        Ok(conf) => conf.unwrap_or_default(),
+                        Err(err) => {
+                            warn!("{err:?}");
+                            Default::default()
+                        }
+                    }
+                })
+                .unwrap_or_default();
+
+            conf_caches.merge(toolchains);
+            conf_caches.merge(config_from_env()?.cache);
+
+            let (toolchains, toolchains_fallback) = conf_caches.into_fallback();
+
+            Ok(Self {
+                message_broker: message_broker.and_then(|mb| mb.amqp.or(mb.redis)),
+                builder,
+                cache_dir,
+                max_per_core_load,
+                num_cpus_to_ignore,
+                toolchain_cache_size,
+                toolchains,
+                toolchains_fallback,
+            })
+        }
+
+        pub fn into_file(self) -> FileConfig {
+            self.into()
+        }
+    }
+
+    impl From<Config> for FileConfig {
+        fn from(server_config: Config) -> Self {
+            Self {
+                builder: server_config.builder.clone(),
+                cache_dir: server_config.cache_dir.clone(),
+                max_per_core_load: server_config.max_per_core_load,
+                message_broker: match server_config.message_broker {
+                    Some(MessageBroker::AMQP(conf)) => Some(MessageBrokerConfigs {
+                        amqp: Some(MessageBroker::AMQP(conf)),
+                        ..Default::default()
+                    }),
+                    Some(MessageBroker::Redis(conf)) => Some(MessageBrokerConfigs {
+                        redis: Some(MessageBroker::Redis(conf)),
+                        ..Default::default()
+                    }),
+                    None => Default::default(),
+                },
+                num_cpus_to_ignore: server_config.num_cpus_to_ignore,
+                toolchain_cache_size: server_config.toolchain_cache_size,
+                toolchains: server_config
+                    .toolchains
+                    .map(|x| x.clone().into())
+                    .unwrap_or(CacheConfigs {
+                        disk: Some(server_config.toolchains_fallback),
+                        ..Default::default()
+                    }),
+            }
+        }
     }
 }
 

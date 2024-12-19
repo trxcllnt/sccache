@@ -12,19 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compiler;
 use async_trait::async_trait;
-#[cfg(feature = "dist-server")]
-use futures::lock::Mutex;
-use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Read};
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "dist-server")]
+use std::pin::Pin;
 use std::process;
-use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use crate::errors::*;
 
@@ -34,11 +31,16 @@ mod cache;
 pub mod client_auth;
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 pub mod http;
+#[cfg(feature = "dist-server")]
+pub mod server;
 #[cfg(test)]
 mod test;
 
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 pub use crate::dist::cache::TcCache;
+
+#[cfg(feature = "dist-server")]
+pub use crate::dist::cache::ServerToolchains;
 
 // TODO: paths (particularly outputs, which are accessed by an unsandboxed program)
 // should be some pre-sanitised AbsPath type
@@ -317,95 +319,10 @@ pub fn strings_to_osstrings(strings: &[String]) -> Vec<OsString> {
         .collect::<Vec<_>>()
 }
 
-// TODO: TryFrom
-pub fn try_compile_command_to_dist(
-    command: compiler::SingleCompileCommand,
-) -> Option<CompileCommand> {
-    let compiler::SingleCompileCommand {
-        executable,
-        arguments,
-        env_vars,
-        cwd,
-    } = command;
-    Some(CompileCommand {
-        executable: executable.into_os_string().into_string().ok()?,
-        arguments: arguments
-            .into_iter()
-            .map(|arg| arg.into_string().ok())
-            .collect::<Option<_>>()?,
-        env_vars: env_vars
-            .into_iter()
-            .map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-            .collect::<Option<_>>()?,
-        cwd: cwd.into_os_string().into_string().ok()?,
-    })
-}
-
-// TODO: Clone by assuming immutable/no GC for now
-// TODO: make fields non-public?
-// TODO: make archive_id validate that it's just a bunch of hex chars
-#[derive(Debug, Hash, Eq, PartialEq, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Toolchain {
-    pub archive_id: String,
-}
-
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Ord, PartialOrd, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JobId(pub u64);
-impl fmt::Display for JobId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-impl FromStr for JobId {
-    type Err = <u64 as FromStr>::Err;
-    fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
-        u64::from_str(s).map(JobId)
-    }
-}
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ServerId(SocketAddr);
-impl ServerId {
-    pub fn new(addr: SocketAddr) -> Self {
-        ServerId(addr)
-    }
-    pub fn addr(&self) -> SocketAddr {
-        self.0
-    }
-}
-impl FromStr for ServerId {
-    type Err = <SocketAddr as FromStr>::Err;
-    fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
-        SocketAddr::from_str(s).map(ServerId)
-    }
-}
-#[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ServerNonce(u64);
-impl ServerNonce {
-    pub fn new() -> Self {
-        ServerNonce(OsRng.next_u64())
-    }
-    pub fn as_u64(&self) -> u64 {
-        self.0
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompileCommand {
-    pub executable: String,
-    pub arguments: Vec<String>,
-    pub env_vars: Vec<(String, String)>,
-    pub cwd: String,
-}
-
 // process::Output is not serialize so we have a custom Output type. However,
 // we cannot encode all information in here, such as Unix signals, as the other
 // end may not understand them (e.g. if it's Windows)
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessOutput {
     code: i32,
@@ -465,7 +382,7 @@ impl From<ProcessOutput> for process::Output {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputData(Vec<u8>, u64);
 impl OutputData {
@@ -490,82 +407,147 @@ impl OutputData {
         ZlibReadDecoder::new(io::Cursor::new(self.0))
     }
 }
+
 pub struct OutputDataLens {
     pub actual: u64,
     pub compressed: u64,
 }
+
 impl fmt::Display for OutputDataLens {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Size: {}->{}", self.actual, self.compressed)
     }
 }
 
-// TODO: standardise on compressed or not for inputs and toolchain
-
 // TODO: make fields not public
 
-// AllocJob
+// BuildResult
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BuildResult {
+    pub output: ProcessOutput,
+    pub outputs: Vec<(String, OutputData)>,
+}
+
+// CompileCommand
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct JobAlloc {
-    pub auth: String,
-    pub job_id: JobId,
-    pub server_id: ServerId,
-}
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub enum AllocJobResult {
-    Success {
-        job_alloc: JobAlloc,
-        need_toolchain: bool,
-    },
-    Fail {
-        msg: String,
-    },
+pub struct CompileCommand {
+    pub executable: String,
+    pub arguments: Vec<String>,
+    pub env_vars: Vec<(String, String)>,
+    pub cwd: String,
 }
 
-// AssignJob
+// NewJob
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AssignJobResult {
-    pub job_id: JobId,
-    pub need_toolchain: bool,
-    pub num_assigned_jobs: usize,
-    pub num_active_jobs: usize,
+pub struct NewJobRequest {
+    pub toolchain: Toolchain,
 }
 
-// JobState
-
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub enum UpdateJobStateResult {
-    Success,
-    Fail { msg: String },
-}
-
-// HeartbeatServer
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HeartbeatServerResult {
-    pub is_new: bool,
+pub struct NewJobResponse {
+    pub has_toolchain: bool,
+    pub job_id: String,
+    pub timeout: u32,
 }
 
 // RunJob
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub enum RunJobResult {
-    JobNotFound,
-    Complete(JobComplete),
+pub struct RunJobRequest {
+    pub job_id: String,
+    pub command: CompileCommand,
+    pub inputs: Vec<u8>,
+    pub outputs: Vec<String>,
+    pub toolchain: Toolchain,
 }
-#[derive(Clone, Serialize, Deserialize)]
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct JobComplete {
-    pub output: ProcessOutput,
-    pub outputs: Vec<(String, OutputData)>,
+pub enum RunJobResponse {
+    JobFailed {
+        reason: String,
+    },
+    JobComplete {
+        result: BuildResult,
+        server_id: String,
+    },
+}
+
+// ClientOutgoing
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum ClientOutgoing {
+    NewJob(NewJobRequest),
+    RunJob(RunJobRequest),
+}
+
+impl fmt::Display for ClientOutgoing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NewJob(NewJobRequest { toolchain }) => {
+                write!(f, "Request::NewJob(`{}`)", toolchain.archive_id)
+            }
+            Self::RunJob(RunJobRequest { job_id, .. }) => {
+                write!(f, "Request::RunJob(job_id={})", job_id)
+            }
+        }
+    }
+}
+
+// ClientIncoming
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum ClientIncoming {
+    Error { message: String },
+    NewJob(NewJobResponse),
+    RunJob(RunJobResponse),
+}
+
+impl fmt::Display for ClientIncoming {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Error { message } => write!(f, "Response::Error(`{message}`)"),
+            Self::NewJob(NewJobResponse {
+                job_id,
+                has_toolchain,
+                ..
+            }) => {
+                write!(
+                    f,
+                    "Response::NewJob(job_id={job_id}, has_toolchain={has_toolchain})"
+                )
+            }
+            Self::RunJob(RunJobResponse::JobFailed { reason }) => {
+                write!(f, "Response::JobFailed(`{reason}`)")
+            }
+            Self::RunJob(RunJobResponse::JobComplete { result, server_id }) => {
+                write!(f, "Response::JobComplete({:?}, {server_id})", result.output)
+            }
+        }
+    }
+}
+
+pub type ServerIncoming = ClientOutgoing;
+pub type ServerOutgoing = ClientIncoming;
+
+// Toolchain
+
+// TODO: Clone by assuming immutable/no GC for now
+// TODO: make fields non-public?
+// TODO: make archive_id validate that it's just a bunch of hex chars
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Toolchain {
+    pub archive_id: String,
 }
 
 // Status
@@ -574,41 +556,49 @@ pub struct JobComplete {
 #[serde(deny_unknown_fields)]
 pub struct SchedulerStatusResult {
     pub num_cpus: usize,
+    pub num_jobs: usize,
     pub num_servers: usize,
-    pub assigned: usize,
-    pub active: usize,
-    pub servers: std::collections::HashMap<SocketAddr, ServerStatusResult>,
+    pub servers: std::collections::HashMap<String, ServerStatusResult>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerStatusResult {
-    pub active: usize,
-    pub assigned: usize,
+    pub last_success: u64,
+    pub last_failure: u64,
     pub max_per_core_load: f64,
     pub num_cpus: usize,
-    pub last_seen: u64,
-    pub last_error: Option<u64>,
+    pub num_jobs: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct BuildServerStatus {
+    pub last_success: Instant,
+    pub last_failure: Option<Instant>,
+    pub max_per_core_load: f64,
+    pub num_cpus: usize,
+    pub num_jobs: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildServerInfo {
+    pub max_per_core_load: f64,
+    pub num_cpus: usize,
+    pub num_jobs: usize,
+    pub server_id: String,
 }
 
 // SubmitToolchain
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum SubmitToolchainResult {
     Success,
-    JobNotFound,
-    CannotCache,
+    Error { message: String },
 }
 
 ///////////////////
-
-// BuildResult
-
-pub struct BuildResult {
-    pub output: ProcessOutput,
-    pub outputs: Vec<(String, OutputData)>,
-}
 
 ///////////////////
 
@@ -621,111 +611,71 @@ pub struct BuildResult {
 type ExtResult<T, E> = ::std::result::Result<T, E>;
 
 #[cfg(feature = "dist-server")]
+pub type WebSocketSend =
+    futures::stream::SplitSink<axum::extract::ws::WebSocket, axum::extract::ws::Message>;
+
+#[cfg(feature = "dist-server")]
+pub type WebSocketRecv = futures::stream::SplitStream<axum::extract::ws::WebSocket>;
+
+#[cfg(feature = "dist-server")]
 #[async_trait]
-pub trait SchedulerOutgoing: Send + Sync {
-    // To Server
-    async fn do_assign_job(
+pub trait SchedulerService: Send + Sync {
+    async fn get_status(&self) -> Result<SchedulerStatusResult>;
+
+    async fn has_toolchain(&self, toolchain: Toolchain) -> bool;
+
+    async fn put_toolchain(
         &self,
-        server_id: ServerId,
-        tc: Toolchain,
-        auth: String,
-    ) -> Result<AssignJobResult>;
+        toolchain: Toolchain,
+        toolchain_reader: Pin<&mut (dyn futures::AsyncRead + Send)>,
+    ) -> Result<SubmitToolchainResult>;
+
+    async fn new_job(&self, request: NewJobRequest) -> Result<NewJobResponse>;
+    async fn run_job(&self, request: RunJobRequest) -> Result<RunJobResponse>;
+    async fn job_failure(&self, job_id: &str, reason: &str, info: BuildServerInfo) -> Result<()>;
+    async fn job_success(
+        &self,
+        job_id: &str,
+        result: BuildResult,
+        info: BuildServerInfo,
+    ) -> Result<()>;
+
+    async fn server_heartbeat(&self, info: BuildServerInfo, status: Option<bool>) -> Result<()>;
 }
 
 #[cfg(feature = "dist-server")]
 #[async_trait]
-pub trait ServerOutgoing: Send + Sync {
-    // To Scheduler
-    async fn do_heartbeat(
-        &self,
-        num_assigned_jobs: usize,
-        num_active_jobs: usize,
-    ) -> Result<HeartbeatServerResult>;
-    // To Scheduler
-    async fn do_update_job_state(
-        &self,
-        num_assigned_jobs: usize,
-        num_active_jobs: usize,
-    ) -> Result<UpdateJobStateResult>;
-}
+pub trait ServerService: Send + Sync {
+    async fn start_heartbeat(&self) -> Result<()>;
 
-// Trait to handle the creation and verification of job authorization tokens
-#[cfg(feature = "dist-server")]
-pub trait JobAuthorizer: Send + Sync {
-    fn generate_token(&self, job_id: JobId) -> Result<String>;
-    fn verify_token(&self, job_id: JobId, token: &str) -> Result<()>;
-}
-
-#[cfg(feature = "dist-server")]
-#[async_trait]
-pub trait SchedulerIncoming: Send + Sync {
-    // From Client
-    async fn handle_alloc_job(
-        &self,
-        requester: &dyn SchedulerOutgoing,
-        tc: Toolchain,
-    ) -> ExtResult<AllocJobResult, Error>;
-    // // From Client
-    // From Server
     #[allow(clippy::too_many_arguments)]
-    async fn handle_heartbeat_server(
+    async fn run_job(
         &self,
-        server_id: ServerId,
-        server_nonce: ServerNonce,
-        num_cpus: usize,
-        max_per_core_load: f64,
-        job_authorizer: Box<dyn JobAuthorizer>,
-        num_assigned_jobs: usize,
-        num_active_jobs: usize,
-    ) -> ExtResult<HeartbeatServerResult, Error>;
-    // From Server
-    async fn handle_update_job_state(
-        &self,
-        server_id: ServerId,
-        num_assigned_jobs: usize,
-        num_active_jobs: usize,
-    ) -> ExtResult<UpdateJobStateResult, Error>;
-    // From anyone
-    async fn handle_status(&self) -> ExtResult<SchedulerStatusResult, Error>;
-}
-
-#[cfg(feature = "dist-server")]
-#[async_trait]
-pub trait ServerIncoming: Send + Sync {
-    // To scheduler
-    fn start_heartbeat(&self, requester: std::sync::Arc<dyn ServerOutgoing>);
-    // From Scheduler
-    async fn handle_assign_job(&self, tc: Toolchain) -> ExtResult<AssignJobResult, Error>;
-    // From Client
-    async fn handle_submit_toolchain(
-        &self,
-        job_id: JobId,
-        tc_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
-    ) -> ExtResult<SubmitToolchainResult, Error>;
-    // From Client
-    async fn handle_run_job(
-        &self,
-        job_id: JobId,
+        task_id: &str,
+        job_id: &str,
+        scheduler_id: &str,
+        toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
-    ) -> ExtResult<RunJobResult, Error>;
+        inputs: Vec<u8>,
+    ) -> Result<BuildResult>;
+
+    async fn job_failure(&self, task_id: &str, reason: &str) -> Result<()>;
+
+    async fn job_success(&self, task_id: &str, result: &BuildResult) -> Result<()>;
 }
 
 #[cfg(feature = "dist-server")]
 #[async_trait]
 pub trait BuilderIncoming: Send + Sync {
     // From Server
-    #[allow(clippy::too_many_arguments)]
     async fn run_build(
         &self,
-        job_id: JobId,
-        toolchain: Toolchain,
+        job_id: &str,
+        toolchain_dir: &Path,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
-        cache: &Mutex<TcCache>,
-        job_queue: &tokio::sync::Semaphore,
+        inputs: Vec<u8>,
     ) -> ExtResult<BuildResult, Error>;
 }
 
@@ -733,23 +683,21 @@ pub trait BuilderIncoming: Send + Sync {
 #[async_trait]
 pub trait Client: Send + Sync {
     // To Scheduler
-    async fn do_alloc_job(&self, tc: Toolchain) -> Result<AllocJobResult>;
+    async fn new_job(&self, toolchain: Toolchain) -> Result<NewJobResponse>;
     // To Scheduler
-    async fn do_get_status(&self) -> Result<SchedulerStatusResult>;
-    // To Server
-    async fn do_submit_toolchain(
+    async fn run_job(
         &self,
-        job_alloc: JobAlloc,
-        tc: Toolchain,
-    ) -> Result<SubmitToolchainResult>;
-    // To Server
-    async fn do_run_job(
-        &self,
-        job_alloc: JobAlloc,
+        job_id: &str,
+        timeout: Duration,
+        toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
         inputs_packager: Box<dyn pkg::InputsPackager>,
-    ) -> Result<(RunJobResult, PathTransformer)>;
+    ) -> Result<(RunJobResponse, PathTransformer)>;
+    // To Scheduler
+    async fn do_get_status(&self) -> Result<SchedulerStatusResult>;
+    // To Scheduler
+    async fn do_submit_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult>;
     async fn put_toolchain(
         &self,
         compiler_path: PathBuf,
