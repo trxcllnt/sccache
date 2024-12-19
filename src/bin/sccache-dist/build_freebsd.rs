@@ -112,6 +112,7 @@ pub struct PotBuilder {
     container_lists: Arc<Mutex<HashMap<Toolchain, Vec<String>>>>,
     cleanup_thread_count: Arc<AtomicUsize>,
     max_cleanup_thread_count: usize,
+    toolchain_cache: &Mutex<TcCache>,
 }
 
 impl PotBuilder {
@@ -119,6 +120,7 @@ impl PotBuilder {
     // having locked a pidfile, or at minimum should loudly detect other running
     // instances - pidfile in /tmp
     pub async fn new(
+        toolchain_cache: &Mutex<TcCache>,
         pot_fs_root: PathBuf,
         clone_from: String,
         pot_cmd: PathBuf,
@@ -135,6 +137,7 @@ impl PotBuilder {
             container_lists: Arc::new(Mutex::new(HashMap::new())),
             cleanup_thread_count: Arc::new(AtomicUsize::new(0)),
             max_cleanup_thread_count: std::thread::available_parallelism().unwrap().get() * 3,
+            toolchain_cache,
         };
         ret.cleanup().await?;
         Ok(ret)
@@ -372,7 +375,6 @@ impl PotBuilder {
         output_paths: Vec<String>,
         cid: &str,
         pot_fs_root: &Path,
-        job_queue: &tokio::sync::Semaphore,
     ) -> Result<BuildResult> {
         tracing::trace!(
             "[perform_build({})]: Compile environment: {:?}",
@@ -419,9 +421,6 @@ impl PotBuilder {
         cmd.check_run()
             .await
             .context("Failed to create directories required for compile in container")?;
-
-        // Guard compiling until we get a token from the job queue
-        let _token = job_queue.acquire().await?;
 
         tracing::trace!("[perform_build({})]: performing compile", job_id);
         // TODO: likely shouldn't perform the compile as root in the container
@@ -501,12 +500,10 @@ impl BuilderIncoming for PotBuilder {
         command: CompileCommand,
         outputs: Vec<String>,
         inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
-        tccache: &Mutex<TcCache>,
-        job_queue: &tokio::sync::Semaphore,
     ) -> Result<BuildResult> {
         tracing::debug!("[run_build({})]: Finding container", job_id);
         let cid = self
-            .get_container(job_id, &tc, tccache)
+            .get_container(job_id, &tc, self.toolchain_cache)
             .await
             .context("Failed to get a container for build")?;
         tracing::debug!(
@@ -521,7 +518,6 @@ impl BuilderIncoming for PotBuilder {
             outputs,
             &cid,
             &self.pot_fs_root,
-            job_queue,
         )
         .await;
         // Unwrap the result

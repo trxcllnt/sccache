@@ -30,7 +30,7 @@ mod test;
 #[macro_use]
 pub mod errors;
 
-mod cache;
+pub mod cache;
 mod client;
 mod cmdline;
 mod commands;

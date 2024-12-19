@@ -13,33 +13,30 @@
 // limitations under the License.
 
 use anyhow::{anyhow, bail, Context, Error, Result};
+use async_compression::tokio::bufread::ZlibDecoder as ZlibDecoderAsync;
 use async_trait::async_trait;
-use flate2::read::GzDecoder;
+use bytes::Buf;
+use flate2::read::ZlibDecoder as ZlibDecoderSync;
 use fs_err as fs;
-use futures::lock::Mutex;
+// use futures::lock::Mutex;
 use libmount::Overlay;
-use sccache::dist::{
-    BuildResult, BuilderIncoming, CompileCommand, JobId, OutputData, ProcessOutput, TcCache,
-    Toolchain,
-};
-use sccache::lru_disk_cache::Error as LruError;
-use std::borrow::Borrow;
-use std::collections::{hash_map, HashMap};
+use sccache::dist::{BuildResult, BuilderIncoming, CompileCommand, OutputData, ProcessOutput};
 use std::io;
 use std::path::{self, Path, PathBuf};
-use std::process::{Output, Stdio};
-use tokio::process::ChildStdin;
-use tokio_util::compat::TokioAsyncReadCompatExt;
+use std::process::Output;
+// use std::process::{Output, Stdio};
+// use tokio::process::ChildStdin;
+use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use version_compare::Version;
 
 #[async_trait]
 trait AsyncCommandExt {
     async fn check_stdout_trim(&mut self) -> Result<String>;
-    async fn check_piped<F, Fut>(&mut self, pipe: F) -> Result<()>
-    where
-        F: FnOnce(ChildStdin) -> Fut + std::marker::Send,
-        Fut: std::future::Future<Output = Result<()>> + std::marker::Send;
-    async fn check_run(&mut self) -> Result<()>;
+    // async fn check_piped<F, Fut>(&mut self, pipe: F) -> Result<()>
+    // where
+    //     F: FnOnce(ChildStdin) -> Fut + std::marker::Send,
+    //     Fut: std::future::Future<Output = Result<()>> + std::marker::Send;
+    // async fn check_run(&mut self) -> Result<()>;
 }
 
 #[async_trait]
@@ -52,33 +49,33 @@ impl AsyncCommandExt for tokio::process::Command {
         Ok(stdout.trim().to_owned())
     }
     // Should really take a FnOnce/FnBox
-    async fn check_piped<F, Fut>(&mut self, pipe: F) -> Result<()>
-    where
-        F: FnOnce(ChildStdin) -> Fut + std::marker::Send,
-        Fut: std::future::Future<Output = Result<()>> + std::marker::Send,
-    {
-        let mut process = self
-            .stdin(Stdio::piped())
-            .spawn()
-            .context("Failed to start command")?;
-        pipe(
-            process
-                .stdin
-                .take()
-                .expect("Requested piped stdin but not present"),
-        )
-        .await
-        .context("Failed to pipe input to process")?;
-        let output = process
-            .wait_with_output()
-            .await
-            .context("Failed to wait for process to return")?;
-        check_output(&output)
-    }
-    async fn check_run(&mut self) -> Result<()> {
-        let output = self.output().await.context("Failed to start command")?;
-        check_output(&output)
-    }
+    // async fn check_piped<F, Fut>(&mut self, pipe: F) -> Result<()>
+    // where
+    //     F: FnOnce(ChildStdin) -> Fut + std::marker::Send,
+    //     Fut: std::future::Future<Output = Result<()>> + std::marker::Send,
+    // {
+    //     let mut process = self
+    //         .stdin(Stdio::piped())
+    //         .spawn()
+    //         .context("Failed to start command")?;
+    //     pipe(
+    //         process
+    //             .stdin
+    //             .take()
+    //             .expect("Requested piped stdin but not present"),
+    //     )
+    //     .await
+    //     .context("Failed to pipe input to process")?;
+    //     let output = process
+    //         .wait_with_output()
+    //         .await
+    //         .context("Failed to wait for process to return")?;
+    //     check_output(&output)
+    // }
+    // async fn check_run(&mut self) -> Result<()> {
+    //     let output = self.output().await.context("Failed to start command")?;
+    //     check_output(&output)
+    // }
 }
 
 fn check_output(output: &Output) -> Result<()> {
@@ -108,16 +105,9 @@ struct OverlaySpec {
     toolchain_dir: PathBuf,
 }
 
-#[derive(Debug, Clone)]
-struct DeflatedToolchain {
-    path: PathBuf,
-    build_count: u64,
-}
-
 pub struct OverlayBuilder {
     bubblewrap: PathBuf,
     dir: PathBuf,
-    toolchain_dir_map: Mutex<HashMap<Toolchain, DeflatedToolchain>>,
 }
 
 impl OverlayBuilder {
@@ -163,7 +153,6 @@ impl OverlayBuilder {
         let ret = Self {
             bubblewrap,
             dir,
-            toolchain_dir_map: Mutex::new(HashMap::new()),
         };
         ret.cleanup().await?;
         fs::create_dir_all(&ret.dir).context("Failed to create base directory for builder")?;
@@ -181,135 +170,16 @@ impl OverlayBuilder {
         Ok(())
     }
 
-    async fn cleanup_old_toolchains(
-        &self,
-        job_id: JobId,
-        tccache: &TcCache,
-        tc_dirs: &mut HashMap<Toolchain, DeflatedToolchain>,
-    ) {
-        if tc_dirs.len() >= tccache.len() {
-            let dir_map = tc_dirs.clone();
-            for (tc, entry) in dir_map.iter() {
-                // Only clean up old uncompressed toolchains that aren't currently in use
-                if !tccache.contains_toolchain(tc) && entry.build_count == 0 {
-                    tracing::warn!(
-                        "[cleanup_old_toolchains({})]: Removing old un-compressed toolchain: {:?}",
-                        job_id,
-                        tc.archive_id
-                    );
-                    if tc_dirs.remove(tc).is_none() {
-                        tracing::warn!(
-                            "[cleanup_old_toolchains({})]: Toochain {} not in toolchain_dir_map",
-                            job_id,
-                            tc.archive_id
-                        );
-                    }
-                    fs::remove_dir_all(self.dir.join("toolchains").join(&tc.archive_id))
-                        .context("Failed to remove old toolchain")
-                        .unwrap_or_else(|err| {
-                            tracing::warn!("[cleanup_old_toolchains({})]: {:?}", job_id, err)
-                        });
-                }
-            }
-        }
-    }
-
     async fn prepare_overlay_dirs(
         &self,
-        job_id: JobId,
-        tc: &Toolchain,
-        tccache: &Mutex<TcCache>,
+        job_id: &str,
+        toolchain_dir: &Path,
     ) -> Result<OverlaySpec> {
-        let DeflatedToolchain {
-            path: toolchain_dir,
-            build_count: _,
-        } = {
-            let mut toolchain_dir_map = self.toolchain_dir_map.lock().await;
-            // Create the toolchain dir (if necessary) while we have an exclusive lock
-            let toolchain_dir = self.dir.join("toolchains").join(&tc.archive_id);
-            if toolchain_dir_map.contains_key(tc) && toolchain_dir.exists() {
-                // TODO: use if let when sccache can use NLL
-                let entry = toolchain_dir_map
-                    .get_mut(tc)
-                    .expect("Key missing after checking");
-                entry.build_count += 1;
-                entry.clone()
-            } else {
-                tracing::trace!(
-                    "[prepare_overlay_dirs({})]: Creating toolchain directory for archive {}: {:?}",
-                    job_id,
-                    tc.archive_id,
-                    toolchain_dir
-                );
 
-                let mut tccache = tccache.lock().await;
-
-                self.cleanup_old_toolchains(job_id, &tccache, &mut toolchain_dir_map)
-                    .await;
-
-                let toolchain_rdr = match tccache.get(tc) {
-                    Ok(rdr) => rdr,
-                    Err(LruError::FileNotInCache) => {
-                        bail!(
-                            "[prepare_overlay_dirs({})]: Expected toolchain {}, but not available",
-                            job_id,
-                            tc.archive_id
-                        )
-                    }
-                    Err(e) => {
-                        return Err(Error::from(e).context("Failed to get toolchain from cache"))
-                    }
-                };
-
-                fs::create_dir_all(&toolchain_dir)
-                    .context("Failed to create toolchain dir")
-                    .unwrap_or_else(|err| {
-                        tracing::warn!("[prepare_overlay_dirs({})]: {:?}", job_id, err)
-                    });
-
-                tar::Archive::new(GzDecoder::new(toolchain_rdr))
-                    .unpack(&toolchain_dir)
-                    .map_err(|err| {
-                        tracing::warn!(
-                            "[prepare_overlay_dirs({})]: Failed to unpack toolchain {}: {:?}",
-                            job_id,
-                            tc.archive_id,
-                            err
-                        );
-                        fs::remove_dir_all(&toolchain_dir)
-                            .context("Failed to remove unpacked toolchain")
-                            .unwrap_or_else(|err| {
-                                tracing::warn!("[prepare_overlay_dirs({})]: {:?}", job_id, err)
-                            });
-                        tccache
-                            .remove(tc)
-                            .context("Failed to remove corrupt toolchain")
-                            .unwrap_or_else(|err| {
-                                tracing::warn!("[prepare_overlay_dirs({})]: {:?}", job_id, err)
-                            });
-                        Error::from(err)
-                    })?;
-
-                let entry = DeflatedToolchain {
-                    path: toolchain_dir,
-                    build_count: 1,
-                };
-
-                toolchain_dir_map.insert(tc.clone(), entry.clone());
-
-                entry
-            }
-        };
-
-        let build_dir = self
-            .dir
-            .join("builds")
-            .join(format!("{}-{}", tc.archive_id, job_id));
+        let build_dir = self.dir.join("builds").join(job_id);
 
         tracing::trace!(
-            "[prepare_overlay_dirs({})]: Creating build directory for {}-{}: {:?}",
-            job_id,
-            tc.archive_id,
+            "[prepare_overlay_dirs({})]: Creating build directory: {:?}",
             job_id,
             build_dir
         );
@@ -320,18 +190,17 @@ impl OverlayBuilder {
 
         Ok(OverlaySpec {
             build_dir,
-            toolchain_dir,
+            toolchain_dir: toolchain_dir.to_owned(),
         })
     }
 
     async fn perform_build(
-        job_id: JobId,
+        job_id: &str,
         bubblewrap: PathBuf,
         compile_command: CompileCommand,
-        inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
+        inputs: Vec<u8>,
         output_paths: Vec<String>,
         overlay: OverlaySpec,
-        job_queue: &tokio::sync::Semaphore,
     ) -> Result<BuildResult> {
         tracing::trace!(
             "[perform_build({})]: Compile environment: {:?}",
@@ -345,187 +214,179 @@ impl OverlayBuilder {
             compile_command.arguments
         );
 
-        // Read inputs here because we can't use asyncio in the thread below.
-        let work_dir = overlay.build_dir.join("work");
-        let upper_dir = overlay.build_dir.join("upper");
-        let target_dir = overlay.build_dir.join("target");
-        let inputs_dir = overlay.build_dir.join("inputs");
-        fs::create_dir_all(&work_dir).context("Failed to create overlay work directory")?;
-        fs::create_dir_all(&upper_dir).context("Failed to create overlay upper directory")?;
-        fs::create_dir_all(&target_dir).context("Failed to create overlay target directory")?;
-        fs::create_dir_all(&inputs_dir).context("Failed to create overlay inputs directory")?;
+        let job_id = job_id.to_owned();
 
-        tracing::trace!("[perform_build({})]: copying in inputs", job_id);
-        // Note that we don't unpack directly into the upperdir since there overlayfs has some
-        // special marker files that we don't want to create by accident (or malicious intent)
-        async_tar::Archive::new(inputs_rdr.compat())
-            .unpack(&inputs_dir)
-            .await
-            .context("Failed to unpack inputs to overlay")?;
+        tokio::runtime::Handle::current()
+            .spawn_blocking(move || {
+                // Now mounted filesystems will be automatically unmounted when this thread dies
+                // (and tmpfs filesystems will be completely destroyed)
+                nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS)
+                    .context("Failed to enter a new Linux namespace")?;
+                // Make sure that all future mount changes are private to this namespace
+                // TODO: shouldn't need to add these annotations
+                let source: Option<&str> = None;
+                let fstype: Option<&str> = None;
+                let data: Option<&str> = None;
+                // Turn / into a 'slave', so it receives mounts from real root, but doesn't propagate back
+                nix::mount::mount(
+                    source,
+                    "/",
+                    fstype,
+                    nix::mount::MsFlags::MS_REC | nix::mount::MsFlags::MS_PRIVATE,
+                    data,
+                )
+                .context("Failed to turn / into a slave")?;
 
-        // Guard compiling until we get a token from the job queue
-        let _token = job_queue.acquire().await?;
+                let work_dir = overlay.build_dir.join("work");
+                let upper_dir = overlay.build_dir.join("upper");
+                let target_dir = overlay.build_dir.join("target");
+                fs::create_dir_all(&work_dir).context("Failed to create overlay work directory")?;
+                fs::create_dir_all(&upper_dir)
+                    .context("Failed to create overlay upper directory")?;
+                fs::create_dir_all(&target_dir)
+                    .context("Failed to create overlay target directory")?;
 
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    // Now mounted filesystems will be automatically unmounted when this thread dies
-                    // (and tmpfs filesystems will be completely destroyed)
-                    nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS)
-                        .context("Failed to enter a new Linux namespace")?;
-                    // Make sure that all future mount changes are private to this namespace
-                    // TODO: shouldn't need to add these annotations
-                    let source: Option<&str> = None;
-                    let fstype: Option<&str> = None;
-                    let data: Option<&str> = None;
-                    // Turn / into a 'slave', so it receives mounts from real root, but doesn't propagate back
-                    nix::mount::mount(
-                        source,
-                        "/",
-                        fstype,
-                        nix::mount::MsFlags::MS_REC | nix::mount::MsFlags::MS_PRIVATE,
-                        data,
-                    )
-                    .context("Failed to turn / into a slave")?;
+                let () = Overlay::writable(
+                    std::iter::once(overlay.toolchain_dir.as_path()),
+                    upper_dir,
+                    work_dir,
+                    &target_dir,
+                    // This error is unfortunately not Send+Sync
+                )
+                .mount()
+                .map_err(|e| anyhow!("Failed to mount overlay FS: {}", e.to_string()))?;
 
-                    let () = Overlay::writable(
-                        [inputs_dir.as_path(), overlay.toolchain_dir.as_path()]
-                            .iter()
-                            .cloned(),
-                        upper_dir,
-                        work_dir,
-                        &target_dir,
-                        // This error is unfortunately not Send+Sync
-                    )
-                    .mount()
-                    .map_err(|e| anyhow!("Failed to mount overlay FS: {}", e.to_string()))?;
+                tracing::trace!("[perform_build({})]: copying in inputs", job_id);
+                // Note that we don't unpack directly into the upperdir since there overlayfs has some
+                // special marker files that we don't want to create by accident (or malicious intent)
+                tar::Archive::new(ZlibDecoderSync::new(inputs.reader()))
+                    .unpack(&target_dir)
+                    .context("Failed to unpack inputs to overlay")?;
 
-                    let CompileCommand {
-                        executable,
-                        arguments,
-                        env_vars,
-                        cwd,
-                    } = compile_command;
-                    let cwd = Path::new(&cwd);
+                let CompileCommand {
+                    executable,
+                    arguments,
+                    env_vars,
+                    cwd,
+                } = compile_command;
+                let cwd = Path::new(&cwd);
 
-                    tracing::trace!("[perform_build({})]: creating output directories", job_id);
-                    fs::create_dir_all(join_suffix(&target_dir, cwd))
-                        .context("Failed to create cwd")?;
-                    for path in output_paths.iter() {
-                        // If it doesn't have a parent, nothing needs creating
-                        let output_parent = if let Some(p) = Path::new(path).parent() {
-                            p
-                        } else {
-                            continue;
-                        };
-                        fs::create_dir_all(join_suffix(&target_dir, cwd.join(output_parent)))
-                            .context("Failed to create an output directory")?;
+                tracing::trace!("[perform_build({})]: creating output directories", job_id);
+                fs::create_dir_all(join_suffix(&target_dir, cwd))
+                    .context("Failed to create cwd")?;
+                for path in output_paths.iter() {
+                    // If it doesn't have a parent, nothing needs creating
+                    let output_parent = if let Some(p) = Path::new(path).parent() {
+                        p
+                    } else {
+                        continue;
+                    };
+                    fs::create_dir_all(join_suffix(&target_dir, cwd.join(output_parent)))
+                        .context("Failed to create an output directory")?;
+                }
+
+                tracing::trace!("[perform_build({})]: performing compile", job_id);
+                // Bubblewrap notes:
+                // - We're running as uid 0 (to do the mounts above), and so bubblewrap is run as uid 0
+                // - There's special handling in bubblewrap to compare uid and euid - of interest to us,
+                //   if uid == euid == 0, bubblewrap preserves capabilities (not good!) so we explicitly
+                //   drop all capabilities
+                // - By entering a new user namespace means any set of capabilities do not apply to any
+                //   other user namespace, i.e. you lose privileges. This is not strictly necessary because
+                //   we're dropping caps anyway so it's irrelevant which namespace we're in, but it doesn't
+                //   hurt.
+                // - --unshare-all is not ideal as it happily continues if it fails to unshare either
+                //   the user or cgroups namespace, so we list everything explicitly
+                // - The order of bind vs proc + dev is important - the new root must be put in place
+                //   first, otherwise proc and dev get hidden
+                let mut cmd = std::process::Command::new(bubblewrap);
+                cmd.arg("--die-with-parent")
+                    .args(["--cap-drop", "ALL"])
+                    .args([
+                        "--unshare-user",
+                        "--unshare-cgroup",
+                        "--unshare-ipc",
+                        "--unshare-pid",
+                        "--unshare-net",
+                        "--unshare-uts",
+                    ])
+                    .arg("--bind")
+                    .arg(&target_dir)
+                    .arg("/")
+                    .args(["--proc", "/proc"])
+                    .args(["--dev", "/dev"])
+                    .arg("--chdir")
+                    .arg(cwd);
+
+                for (k, v) in env_vars {
+                    if k.contains('=') {
+                        tracing::warn!(
+                            "[perform_build({})]: Skipping environment variable: {:?}",
+                            job_id,
+                            k
+                        );
+                        continue;
                     }
+                    cmd.arg("--setenv").arg(k).arg(v);
+                }
+                cmd.arg("--");
+                cmd.arg(executable);
+                cmd.args(arguments);
 
-                    tracing::trace!("[perform_build({})]: performing compile", job_id);
-                    // Bubblewrap notes:
-                    // - We're running as uid 0 (to do the mounts above), and so bubblewrap is run as uid 0
-                    // - There's special handling in bubblewrap to compare uid and euid - of interest to us,
-                    //   if uid == euid == 0, bubblewrap preserves capabilities (not good!) so we explicitly
-                    //   drop all capabilities
-                    // - By entering a new user namespace means any set of capabilities do not apply to any
-                    //   other user namespace, i.e. you lose privileges. This is not strictly necessary because
-                    //   we're dropping caps anyway so it's irrelevant which namespace we're in, but it doesn't
-                    //   hurt.
-                    // - --unshare-all is not ideal as it happily continues if it fails to unshare either
-                    //   the user or cgroups namespace, so we list everything explicitly
-                    // - The order of bind vs proc + dev is important - the new root must be put in place
-                    //   first, otherwise proc and dev get hidden
-                    let mut cmd = std::process::Command::new(bubblewrap);
-                    cmd.arg("--die-with-parent")
-                        .args(["--cap-drop", "ALL"])
-                        .args([
-                            "--unshare-user",
-                            "--unshare-cgroup",
-                            "--unshare-ipc",
-                            "--unshare-pid",
-                            "--unshare-net",
-                            "--unshare-uts",
-                        ])
-                        .arg("--bind")
-                        .arg(&target_dir)
-                        .arg("/")
-                        .args(["--proc", "/proc"])
-                        .args(["--dev", "/dev"])
-                        .arg("--chdir")
-                        .arg(cwd);
+                tracing::trace!("[perform_build({})]: bubblewrap command: {:?}", job_id, cmd);
 
-                    for (k, v) in env_vars {
-                        if k.contains('=') {
-                            tracing::warn!(
-                                "[perform_build({})]: Skipping environment variable: {:?}",
-                                job_id,
-                                k
-                            );
-                            continue;
+                let compile_output = cmd
+                    .output()
+                    .context("Failed to retrieve output from compile")?;
+                tracing::trace!(
+                    "[perform_build({})]: compile_output: {:?}",
+                    job_id,
+                    compile_output
+                );
+
+                tracing::trace!("[perform_build({})]: retrieving {:?}", job_id, output_paths);
+
+                let mut outputs = vec![];
+
+                for path in output_paths {
+                    let abspath = join_suffix(&target_dir, cwd.join(&path)); // Resolve in case it's relative since we copy it from the root level
+                    match fs::File::open(abspath) {
+                        Ok(file) => {
+                            let output = OutputData::try_from_reader(file)
+                                .context("Failed to read output file")?;
+                            outputs.push((path, output))
                         }
-                        cmd.arg("--setenv").arg(k).arg(v);
-                    }
-                    cmd.arg("--");
-                    cmd.arg(executable);
-                    cmd.args(arguments);
-
-                    tracing::trace!("[perform_build({})]: bubblewrap command: {:?}", job_id, cmd);
-
-                    let compile_output = cmd
-                        .output()
-                        .context("Failed to retrieve output from compile")?;
-                    tracing::trace!(
-                        "[perform_build({})]: compile_output: {:?}",
-                        job_id,
-                        compile_output
-                    );
-
-                    let mut outputs = vec![];
-                    tracing::trace!("[perform_build({})]: retrieving {:?}", job_id, output_paths);
-                    for path in output_paths {
-                        let abspath = join_suffix(&target_dir, cwd.join(&path)); // Resolve in case it's relative since we copy it from the root level
-                        match fs::File::open(abspath) {
-                            Ok(file) => {
-                                let output = OutputData::try_from_reader(file)
-                                    .context("Failed to read output file")?;
-                                outputs.push((path, output))
-                            }
-                            Err(e) => {
-                                if e.kind() == io::ErrorKind::NotFound {
-                                    tracing::debug!(
-                                        "[perform_build({})]: Missing output path {:?}",
-                                        job_id,
-                                        path
-                                    )
-                                } else {
-                                    return Err(
-                                        Error::from(e).context("Failed to open output file")
-                                    );
-                                }
+                        Err(e) => {
+                            if e.kind() == io::ErrorKind::NotFound {
+                                tracing::debug!(
+                                    "[perform_build({})]: Missing output path {:?}",
+                                    job_id,
+                                    path
+                                )
+                            } else {
+                                return Err(Error::from(e).context("Failed to open output file"));
                             }
                         }
                     }
-                    let compile_output = ProcessOutput::try_from(compile_output)
-                        .context("Failed to convert compilation exit status")?;
-                    Ok(BuildResult {
-                        output: compile_output,
-                        outputs,
-                    })
-                    // Bizarrely there's no way to actually get any information from a thread::Result::Err
+                }
+
+                let compile_output = ProcessOutput::try_from(compile_output)
+                    .context("Failed to convert compilation exit status")?;
+
+                Ok(BuildResult {
+                    output: compile_output,
+                    outputs,
                 })
-                .join()
-                .unwrap_or_else(|_e| Err(anyhow!("Build thread exited unsuccessfully")))
-        })
+            })
+            .await
+            .context("Build thread exited unsuccessfully")?
     }
 
     // Failing during cleanup is pretty unexpected, but we can still return the successful compile
     // TODO: if too many of these fail, we should mark this builder as faulty
     async fn finish_overlay(
         &self,
-        job_id: JobId,
-        tc: &Toolchain,
-        tccache: &Mutex<TcCache>,
+        job_id: &str,
         overlay: &OverlaySpec,
     ) {
         let OverlaySpec {
@@ -541,21 +402,6 @@ impl OverlayBuilder {
                 e
             );
         }
-
-        // TODO: collect toolchain directories
-
-        // Decrement the build count so its toolchain can be cleaned up later
-        let mut toolchain_dir_map = self.toolchain_dir_map.lock().await;
-        if let Some(entry) = toolchain_dir_map.get_mut(tc) {
-            entry.build_count = std::cmp::max(0, entry.build_count - 1);
-        }
-
-        self.cleanup_old_toolchains(
-            job_id,
-            tccache.lock().await.borrow(),
-            &mut toolchain_dir_map,
-        )
-        .await;
     }
 }
 
@@ -563,369 +409,391 @@ impl OverlayBuilder {
 impl BuilderIncoming for OverlayBuilder {
     async fn run_build(
         &self,
-        job_id: JobId,
-        tc: Toolchain,
+        job_id: &str,
+        toolchain_dir: &Path,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
-        tccache: &Mutex<TcCache>,
-        job_queue: &tokio::sync::Semaphore,
+        inputs: Vec<u8>,
     ) -> Result<BuildResult> {
-        tracing::debug!("[run_build({})]: Preparing overlay", job_id);
+
+        tracing::debug!("[run_build({job_id})]: Preparing overlay");
+
         let overlay = self
-            .prepare_overlay_dirs(job_id, &tc, tccache)
+            .prepare_overlay_dirs(job_id, toolchain_dir)
             .await
             .context("failed to prepare overlay dirs")?;
-        tracing::debug!("[run_build({})]: Performing build in {:?}", job_id, overlay);
+
+        tracing::debug!("[run_build({job_id})]: Performing build in {overlay:?}");
+
         let res = Self::perform_build(
             job_id,
             self.bubblewrap.clone(),
             command,
-            inputs_rdr,
+            inputs,
             outputs,
             overlay.clone(),
-            job_queue,
         )
         .await;
-        tracing::debug!("[run_build({})]: Finishing with overlay", job_id);
-        self.finish_overlay(job_id, &tc, tccache, &overlay).await;
-        tracing::debug!("[run_build({})]: Returning result", job_id);
+
+        tracing::debug!("[run_build({job_id})]: Finishing with overlay");
+
+        self.finish_overlay(job_id, &overlay).await;
+
+        tracing::debug!("[run_build({job_id})]: Returning result");
+
         res.context("Failed to perform build")
     }
 }
 
-const BASE_DOCKER_IMAGE: &str = "busybox:stable-musl";
+const BUSYBOX_DOCKER_IMAGE: &str = "busybox:stable-musl";
 // Make sure sh doesn't exec the final command, since we need it to do
 // init duties (reaping zombies). Also, because we kill -9 -1, that kills
 // the sleep (it's not a builtin) so it needs to be a loop.
-const DOCKER_SHELL_INIT: &str = "while true; do busybox sleep 365d && busybox true; done";
+// const DOCKER_SHELL_INIT: &str = "while true; do busybox sleep 365d && busybox true; done";
 
 // Check the diff and clean up the FS
-async fn docker_diff(cid: &str) -> Result<String> {
-    let mut cmd = tokio::process::Command::new("docker");
-    cmd.args(["diff", cid])
-        .check_stdout_trim()
-        .await
-        .context("Failed to Docker diff container")
-}
+// async fn docker_diff(cid: &str) -> Result<String> {
+//     let mut cmd = tokio::process::Command::new("docker");
+//     cmd.args(["diff", cid])
+//         .check_stdout_trim()
+//         .await
+//         .context("Failed to Docker diff container")
+// }
 
 // Force remove the container
-async fn docker_rm(cid: &str) -> Result<()> {
-    let mut cmd = tokio::process::Command::new("docker");
-    cmd.args(["rm", "-f", cid])
-        .check_run()
-        .await
-        .context("Failed to force delete container")
-}
+// async fn docker_rm(cid: &str) -> Result<()> {
+//     let mut cmd = tokio::process::Command::new("docker");
+//     cmd.args(["rm", "-f", cid])
+//         .check_run()
+//         .await
+//         .context("Failed to force delete container")
+// }
 
 pub struct DockerBuilder {
-    image_map: Mutex<HashMap<Toolchain, String>>,
-    container_lists: Mutex<HashMap<Toolchain, Vec<String>>>,
+    // container_lists: Mutex<HashMap<Toolchain, Vec<String>>>,
+    // container_lists: Mutex<HashMap<Path, Vec<String>>>,
+    // image_map: Mutex<HashMap<Toolchain, String>>,
+    toolchain_base_dir: PathBuf,
+    // toolchain_cache: &Mutex<TcCache>,
 }
 
 impl DockerBuilder {
     // TODO: this should accept a unique string, e.g. inode of the tccache directory
     // having locked a pidfile, or at minimum should loudly detect other running
     // instances - pidfile in /tmp
-    pub async fn new() -> Result<Self> {
+    pub async fn new(toolchain_base_dir: &Path) -> Result<Self> {
         tracing::info!("Creating docker builder");
 
         let ret = Self {
-            image_map: Mutex::new(HashMap::new()),
-            container_lists: Mutex::new(HashMap::new()),
+            // container_lists: Mutex::new(HashMap::new()),
+            // image_map: Mutex::new(HashMap::new()),
+            toolchain_base_dir: toolchain_base_dir.to_owned(),
+            // toolchain_cache,
         };
-        ret.cleanup().await?;
+        // ret.cleanup().await?;
         Ok(ret)
     }
 
     // TODO: this should really reclaim, and should check in the image map and container lists, so
     // that when things are removed from there it becomes a form of GC
-    async fn cleanup(&self) -> Result<()> {
-        tracing::info!("Performing initial Docker cleanup");
+    // async fn cleanup(&self) -> Result<()> {
+    //     tracing::info!("Performing initial Docker cleanup");
 
-        let mut cmd = tokio::process::Command::new("docker");
-        let containers = cmd
-            .args(["ps", "-a", "--format", "{{.ID}} {{.Image}}"])
-            .check_stdout_trim()
-            .await
-            .context("Unable to list all Docker containers")?;
-        if !containers.is_empty() {
-            let mut containers_to_rm = vec![];
-            for line in containers.split(|c| c == '\n') {
-                let mut iter = line.splitn(2, ' ');
-                let container_id = iter
-                    .next()
-                    .context("Malformed container listing - no container ID")?;
-                let image_name = iter
-                    .next()
-                    .context("Malformed container listing - no image name")?;
-                if iter.next().is_some() {
-                    bail!("Malformed container listing - third field on row")
-                }
-                if image_name.starts_with("sccache-builder-") {
-                    containers_to_rm.push(container_id)
-                }
-            }
-            if !containers_to_rm.is_empty() {
-                let mut cmd = tokio::process::Command::new("docker");
-                cmd.args(["rm", "-f"])
-                    .args(containers_to_rm)
-                    .check_run()
-                    .await
-                    .context("Failed to start command to remove old containers")?;
-            }
-        }
+    //     let mut cmd = tokio::process::Command::new("docker");
+    //     let containers = cmd
+    //         .args(["ps", "-a", "--format", "{{.ID}} {{.Image}}"])
+    //         .check_stdout_trim()
+    //         .await
+    //         .context("Unable to list all Docker containers")?;
+    //     if !containers.is_empty() {
+    //         let mut containers_to_rm = vec![];
+    //         for line in containers.split(|c| c == '\n') {
+    //             let mut iter = line.splitn(2, ' ');
+    //             let container_id = iter
+    //                 .next()
+    //                 .context("Malformed container listing - no container ID")?;
+    //             let image_name = iter
+    //                 .next()
+    //                 .context("Malformed container listing - no image name")?;
+    //             if iter.next().is_some() {
+    //                 bail!("Malformed container listing - third field on row")
+    //             }
+    //             if image_name.starts_with("sccache-builder-") {
+    //                 containers_to_rm.push(container_id)
+    //             }
+    //         }
+    //         if !containers_to_rm.is_empty() {
+    //             let mut cmd = tokio::process::Command::new("docker");
+    //             cmd.args(["rm", "-f"])
+    //                 .args(containers_to_rm)
+    //                 .check_run()
+    //                 .await
+    //                 .context("Failed to start command to remove old containers")?;
+    //         }
+    //     }
 
-        let mut cmd = tokio::process::Command::new("docker");
-        let images = cmd
-            .args(["images", "--format", "{{.ID}} {{.Repository}}"])
-            .check_stdout_trim()
-            .await
-            .context("Failed to list all docker images")?;
-        if !images.is_empty() {
-            let mut images_to_rm = vec![];
-            for line in images.split(|c| c == '\n') {
-                let mut iter = line.splitn(2, ' ');
-                let image_id = iter
-                    .next()
-                    .context("Malformed image listing - no image ID")?;
-                let image_name = iter
-                    .next()
-                    .context("Malformed image listing - no image name")?;
-                if iter.next().is_some() {
-                    bail!("Malformed image listing - third field on row")
-                }
-                if image_name.starts_with("sccache-builder-") {
-                    images_to_rm.push(image_id)
-                }
-            }
-            if !images_to_rm.is_empty() {
-                let mut cmd = tokio::process::Command::new("docker");
-                cmd.args(["rmi"])
-                    .args(images_to_rm)
-                    .check_run()
-                    .await
-                    .context("Failed to remove image")?
-            }
-        }
+    //     let mut cmd = tokio::process::Command::new("docker");
+    //     let images = cmd
+    //         .args(["images", "--format", "{{.ID}} {{.Repository}}"])
+    //         .check_stdout_trim()
+    //         .await
+    //         .context("Failed to list all docker images")?;
+    //     if !images.is_empty() {
+    //         let mut images_to_rm = vec![];
+    //         for line in images.split(|c| c == '\n') {
+    //             let mut iter = line.splitn(2, ' ');
+    //             let image_id = iter
+    //                 .next()
+    //                 .context("Malformed image listing - no image ID")?;
+    //             let image_name = iter
+    //                 .next()
+    //                 .context("Malformed image listing - no image name")?;
+    //             if iter.next().is_some() {
+    //                 bail!("Malformed image listing - third field on row")
+    //             }
+    //             if image_name.starts_with("sccache-builder-") {
+    //                 images_to_rm.push(image_id)
+    //             }
+    //         }
+    //         if !images_to_rm.is_empty() {
+    //             let mut cmd = tokio::process::Command::new("docker");
+    //             cmd.args(["rmi"])
+    //                 .args(images_to_rm)
+    //                 .check_run()
+    //                 .await
+    //                 .context("Failed to remove image")?
+    //         }
+    //     }
 
-        tracing::info!("Completed initial Docker cleanup");
-        Ok(())
-    }
+    //     tracing::info!("Completed initial Docker cleanup");
+    //     Ok(())
+    // }
 
     // If we have a spare running container, claim it and remove it from the available list,
     // otherwise try and create a new container (possibly creating the Docker image along
     // the way)
-    async fn get_container(
-        &self,
-        job_id: JobId,
-        tc: &Toolchain,
-        tccache: &Mutex<TcCache>,
-    ) -> Result<String> {
-        let container = {
-            let mut map = self.container_lists.lock().await;
-            map.entry(tc.clone()).or_default().pop()
-        };
-        match container {
-            Some(cid) => Ok(cid),
-            None => {
-                // TODO: can improve parallelism (of creating multiple images at a time) by using another
-                // (more fine-grained) mutex around the entry value and checking if its empty a second time
-                let image = {
-                    let mut map = self.image_map.lock().await;
-                    match map.entry(tc.clone()) {
-                        hash_map::Entry::Occupied(e) => e.get().clone(),
-                        hash_map::Entry::Vacant(e) => {
-                            tracing::info!("[get_container({})]: Creating Docker image for {:?} (may block requests)", job_id, tc);
-                            let image = Self::make_image(job_id, tc, tccache).await?;
-                            e.insert(image.clone());
-                            image
-                        }
-                    }
-                };
-                Self::start_container(&image).await
-            }
-        }
-    }
+    // async fn get_container(
+    //     &self,
+    //     job_id: &str,
+    //     toolchain_base_dir: &Path,
+    //     toolchain_dir: &Path,
+    //     // tc: &Toolchain,
+    //     // tccache: &Mutex<TcCache>,
+    // ) -> Result<String> {
+    //     let container = {
+    //         let mut map = self.container_lists.lock().await;
+    //         map.entry(toolchain_dir).or_default().pop()
+    //     };
+    //     match container {
+    //         Some(cid) => Ok(cid),
+    //         None => {
+    //             // TODO: can improve parallelism (of creating multiple images at a time) by using another
+    //             // (more fine-grained) mutex around the entry value and checking if its empty a second time
+    //             // let image = {
+    //             //     let mut map = self.image_map.lock().await;
+    //             //     match map.entry(tc.clone()) {
+    //             //         hash_map::Entry::Occupied(e) => e.get().clone(),
+    //             //         hash_map::Entry::Vacant(e) => {
+    //             //             tracing::info!("[get_container({})]: Creating Docker image for {:?} (may block requests)", job_id, tc);
+    //             //             let image = Self::make_image(job_id, tc, tccache).await?;
+    //             //             e.insert(image.clone());
+    //             //             image
+    //             //         }
+    //             //     }
+    //             // };
+    //             let image = BUSYBOX_DOCKER_IMAGE;
+    //             Self::start_container(&image, toolchain_base_dir, toolchain_dir).await
+    //         }
+    //     }
+    // }
 
-    async fn clean_container(&self, job_id: JobId, cid: &str) -> Result<()> {
-        // Clean up any running processes
-        let mut cmd = tokio::process::Command::new("docker");
-        cmd.args(["exec", cid, "busybox", "kill", "-9", "-1"])
-            .check_run()
-            .await
-            .context("Failed to run kill on all processes in container")?;
+    // async fn clean_container(&self, job_id: &str, cid: &str) -> Result<()> {
+    //     // Clean up any running processes
+    //     let mut cmd = tokio::process::Command::new("docker");
+    //     cmd.args(["exec", cid, "busybox", "kill", "-9", "-1"])
+    //         .check_run()
+    //         .await
+    //         .context("Failed to run kill on all processes in container")?;
 
-        let diff = docker_diff(cid).await?;
-        if !diff.is_empty() {
-            let mut lastpath = None;
-            for line in diff.split(|c| c == '\n') {
-                let mut iter = line.splitn(2, ' ');
-                let changetype = iter
-                    .next()
-                    .context("Malformed container diff - no change type")?;
-                let changepath = iter
-                    .next()
-                    .context("Malformed container diff - no change path")?;
-                if iter.next().is_some() {
-                    bail!("Malformed container diff - third field on row")
-                }
-                // TODO: If files are created in this dir, it gets marked as modified.
-                // A similar thing applies to /root or /build etc
-                if changepath == "/tmp" {
-                    continue;
-                }
-                if changetype != "A" {
-                    bail!(
-                        "Path {} had a non-A changetype of {}",
-                        changepath,
-                        changetype
-                    );
-                }
-                // Docker diff paths are in alphabetical order and we do `rm -rf`, so we might be able to skip
-                // calling Docker more than necessary (since it's slow)
-                if let Some(lastpath) = lastpath {
-                    if Path::new(changepath).starts_with(lastpath) {
-                        continue;
-                    }
-                }
-                lastpath = Some(changepath);
-                let mut cmd = tokio::process::Command::new("docker");
-                if let Err(e) = cmd
-                    .args(["exec", cid, "busybox", "rm", "-rf", changepath])
-                    .check_run()
-                    .await
-                {
-                    // We do a final check anyway, so just continue
-                    tracing::warn!(
-                        "[clean_container({})]: Failed to remove added path in a container: {}",
-                        job_id,
-                        e
-                    )
-                }
-            }
+    //     let diff = docker_diff(cid).await?;
+    //     if !diff.is_empty() {
+    //         let mut lastpath = None;
+    //         for line in diff.split(|c| c == '\n') {
+    //             let mut iter = line.splitn(2, ' ');
+    //             let changetype = iter
+    //                 .next()
+    //                 .context("Malformed container diff - no change type")?;
+    //             let changepath = iter
+    //                 .next()
+    //                 .context("Malformed container diff - no change path")?;
+    //             if iter.next().is_some() {
+    //                 bail!("Malformed container diff - third field on row")
+    //             }
+    //             // TODO: If files are created in this dir, it gets marked as modified.
+    //             // A similar thing applies to /root or /build etc
+    //             if changepath == "/tmp" {
+    //                 continue;
+    //             }
+    //             if changetype != "A" {
+    //                 bail!(
+    //                     "Path {} had a non-A changetype of {}",
+    //                     changepath,
+    //                     changetype
+    //                 );
+    //             }
+    //             // Docker diff paths are in alphabetical order and we do `rm -rf`, so we might be able to skip
+    //             // calling Docker more than necessary (since it's slow)
+    //             if let Some(lastpath) = lastpath {
+    //                 if Path::new(changepath).starts_with(lastpath) {
+    //                     continue;
+    //                 }
+    //             }
+    //             lastpath = Some(changepath);
+    //             let mut cmd = tokio::process::Command::new("docker");
+    //             if let Err(e) = cmd
+    //                 .args(["exec", cid, "busybox", "rm", "-rf", changepath])
+    //                 .check_run()
+    //                 .await
+    //             {
+    //                 // We do a final check anyway, so just continue
+    //                 tracing::warn!(
+    //                     "[clean_container({})]: Failed to remove added path in a container: {}",
+    //                     job_id,
+    //                     e
+    //                 )
+    //             }
+    //         }
 
-            let newdiff = docker_diff(cid).await?;
-            // See note about changepath == "/tmp" above
-            if !newdiff.is_empty() && newdiff != "C /tmp" {
-                bail!(
-                    "Attempted to delete files, but container still has a diff: {:?}",
-                    newdiff
-                );
-            }
-        }
+    //         let newdiff = docker_diff(cid).await?;
+    //         // See note about changepath == "/tmp" above
+    //         if !newdiff.is_empty() && newdiff != "C /tmp" {
+    //             bail!(
+    //                 "Attempted to delete files, but container still has a diff: {:?}",
+    //                 newdiff
+    //             );
+    //         }
+    //     }
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     // Failing during cleanup is pretty unexpected, but we can still return the successful compile
     // TODO: if too many of these fail, we should mark this builder as faulty
-    async fn finish_container(&self, job_id: JobId, tc: &Toolchain, cid: String) {
-        // TODO: collect images
+    // async fn finish_container(&self, job_id: &str, toolchain_dir: &Path, cid: &str) {
+    //     // TODO: collect images
 
-        if let Err(e) = self.clean_container(job_id, &cid).await {
-            tracing::info!(
-                "[finish_container({})]: Failed to clean container {}: {}",
-                job_id,
-                cid,
-                e
-            );
-            if let Err(e) = docker_rm(&cid).await {
-                tracing::warn!(
-                    "[finish_container({})]: Failed to remove container {} after failed clean: {}",
-                    job_id,
-                    cid,
-                    e
-                );
-            }
-            return;
-        }
+    //     if let Err(e) = self.clean_container(job_id, cid).await {
+    //         tracing::info!(
+    //             "[finish_container({})]: Failed to clean container {}: {}",
+    //             job_id,
+    //             cid,
+    //             e
+    //         );
+    //         if let Err(e) = docker_rm(cid).await {
+    //             tracing::warn!(
+    //                 "[finish_container({})]: Failed to remove container {} after failed clean: {}",
+    //                 job_id,
+    //                 cid,
+    //                 e
+    //             );
+    //         }
+    //         return;
+    //     }
 
-        // Good as new, add it back to the container list
-        if let Some(entry) = self.container_lists.lock().await.get_mut(tc) {
-            tracing::debug!(
-                "[finish_container({})]: Reclaimed container {}",
-                job_id,
-                cid
-            );
-            entry.push(cid)
-        } else {
-            tracing::warn!(
-                "[finish_container({})]: Was ready to reclaim container {} but toolchain went missing",
-                job_id, cid
-            );
-            if let Err(e) = docker_rm(&cid).await {
-                tracing::warn!(
-                    "[finish_container({})]: Failed to remove container {}: {}",
-                    job_id,
-                    cid,
-                    e
-                );
-            }
-        }
-    }
+    //     // Good as new, add it back to the container list
+    //     if let Some(entry) = self.container_lists.lock().await.get_mut(toolchain_dir) {
+    //         tracing::debug!(
+    //             "[finish_container({})]: Reclaimed container {}",
+    //             job_id,
+    //             cid
+    //         );
+    //         entry.push(cid.to_owned())
+    //     } else {
+    //         tracing::warn!(
+    //             "[finish_container({})]: Was ready to reclaim container {} but toolchain went missing",
+    //             job_id, cid
+    //         );
+    //         if let Err(e) = docker_rm(cid).await {
+    //             tracing::warn!(
+    //                 "[finish_container({})]: Failed to remove container {}: {}",
+    //                 job_id,
+    //                 cid,
+    //                 e
+    //             );
+    //         }
+    //     }
+    // }
 
-    async fn make_image(job_id: JobId, tc: &Toolchain, tccache: &Mutex<TcCache>) -> Result<String> {
-        let mut cmd = tokio::process::Command::new("docker");
-        let cid = cmd
-            .args(["create", BASE_DOCKER_IMAGE, "busybox", "true"])
-            .check_stdout_trim()
-            .await
-            .context("Failed to create docker container")?;
+    // async fn make_image(job_id: &str, tc: &Toolchain, tccache: &Mutex<TcCache>) -> Result<String> {
+    //     let mut cmd = tokio::process::Command::new("docker");
+    //     let cid = cmd
+    //         .args(["create", BUSYBOX_DOCKER_IMAGE, "busybox", "true"])
+    //         .check_stdout_trim()
+    //         .await
+    //         .context("Failed to create docker container")?;
 
-        let mut tccache = tccache.lock().await;
-        let mut toolchain_rdr = match tccache.get_async(tc).await {
-            Ok(rdr) => rdr,
-            Err(LruError::FileNotInCache) => bail!(
-                "Expected to find toolchain {}, but not available",
-                tc.archive_id
-            ),
-            Err(e) => {
-                return Err(e).with_context(|| format!("Failed to use toolchain {}", tc.archive_id))
-            }
-        };
+    //     let mut tccache = tccache.lock().await;
+    //     let mut toolchain_rdr = match tccache.get_async(tc).await {
+    //         Ok(rdr) => rdr,
+    //         Err(LruError::FileNotInCache) => bail!(
+    //             "Expected to find toolchain {}, but not available",
+    //             tc.archive_id
+    //         ),
+    //         Err(e) => {
+    //             return Err(e).with_context(|| format!("Failed to use toolchain {}", tc.archive_id))
+    //         }
+    //     };
 
-        tracing::trace!("[make_image({})]: Copying in toolchain", job_id);
-        let mut cmd = tokio::process::Command::new("docker");
-        cmd.args(["cp", "-", &format!("{}:/", cid)])
-            .check_piped(|mut stdin| async move {
-                tokio::io::copy(&mut toolchain_rdr, &mut stdin).await?;
-                Ok(())
-            })
-            .await
-            .context("Failed to copy toolchain tar into container")?;
+    //     tracing::trace!("[make_image({})]: Copying in toolchain", job_id);
+    //     let mut cmd = tokio::process::Command::new("docker");
+    //     cmd.args(["cp", "-", &format!("{}:/", cid)])
+    //         .check_piped(|mut stdin| async move {
+    //             tokio::io::copy(&mut toolchain_rdr, &mut stdin).await?;
+    //             Ok(())
+    //         })
+    //         .await
+    //         .context("Failed to copy toolchain tar into container")?;
 
-        let imagename = format!("sccache-builder-{}", &tc.archive_id);
-        let mut cmd = tokio::process::Command::new("docker");
-        cmd.args(["commit", &cid, &imagename])
-            .check_run()
-            .await
-            .context("Failed to commit container after build")?;
+    //     let imagename = format!("sccache-builder-{}", &tc.archive_id);
+    //     let mut cmd = tokio::process::Command::new("docker");
+    //     cmd.args(["commit", &cid, &imagename])
+    //         .check_run()
+    //         .await
+    //         .context("Failed to commit container after build")?;
 
-        let mut cmd = tokio::process::Command::new("docker");
-        cmd.args(["rm", "-f", &cid])
-            .check_run()
-            .await
-            .context("Failed to remove temporary build container")?;
+    //     let mut cmd = tokio::process::Command::new("docker");
+    //     cmd.args(["rm", "-f", &cid])
+    //         .check_run()
+    //         .await
+    //         .context("Failed to remove temporary build container")?;
 
-        Ok(imagename)
-    }
+    //     Ok(imagename)
+    // }
 
-    async fn start_container(image: &str) -> Result<String> {
-        let mut cmd = tokio::process::Command::new("docker");
-        cmd.args(["run", "-d", image, "busybox", "sh", "-c", DOCKER_SHELL_INIT])
-            .check_stdout_trim()
-            .await
-            .context("Failed to run container")
-    }
+    // async fn start_container(
+    //     image: &str,
+    //     toolchain_base_dir: &Path,
+    //     toolchain_dir: &Path,
+    // ) -> Result<String> {
+    //     let mut cmd = tokio::process::Command::new("docker");
+    //     let toolchain_container_dir = toolchain_dir.strip_prefix(toolchain_base_dir);
+    //     cmd.args(["run", "-d"])
+    //         .args(["-v", &format!("{toolchain_dir}:{toolchain_container_dir}")])
+    //         .args([image, "busybox", "sh", "-c", DOCKER_SHELL_INIT])
+    //         .check_stdout_trim()
+    //         .await
+    //         .context("Failed to run container")
+    // }
 
     async fn perform_build(
-        job_id: JobId,
+        job_id: &str,
+        toolchain_base_dir: &Path,
+        toolchain_dir: &Path,
         compile_command: CompileCommand,
-        mut inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
+        // mut inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
         output_paths: Vec<String>,
-        cid: &str,
-        job_queue: &tokio::sync::Semaphore,
+        inputs: Vec<u8>,
+        // cid: &str,
     ) -> Result<BuildResult> {
         tracing::trace!(
             "[perform_build({})]: Compile environment: {:?}",
@@ -951,14 +819,31 @@ impl DockerBuilder {
 
         tracing::trace!("[perform_build({})]: copying in inputs", job_id);
 
-        let mut cmd = tokio::process::Command::new("docker");
-        cmd.args(["cp", "-", &format!("{}:/", cid)])
-            .check_piped(|mut stdin| async move {
-                tokio::io::copy(&mut inputs_rdr, &mut stdin).await?;
-                Ok(())
-            })
-            .await
-            .context("Failed to copy inputs tar into container")?;
+        // Should automatically get deleted when cwd_temp goes out of scope
+        let cwd_temp = tempfile::Builder::new().prefix("sccache-dist").tempdir()?;
+        let cwd_host = cwd_temp.path();
+
+        // Copy inputs to cwd_host
+        {
+            let file = tokio::fs::File::create(&cwd_host).await?;
+            let mut file_writer = tokio::io::BufWriter::new(file);
+            let inputs_reader = inputs.reader();
+            let inputs_reader = futures::io::AllowStdIo::new(inputs_reader);
+            let inputs_reader = ZlibDecoderAsync::new(inputs_reader.compat());
+            let inputs_reader = async_tar::Archive::new(inputs_reader.compat());
+            tokio::io::copy(&mut inputs_reader.compat(), &mut file_writer).await?;
+        }
+
+        let toolchain_container_dir = toolchain_dir.strip_prefix(toolchain_base_dir)?;
+
+        // let mut cmd = tokio::process::Command::new("docker");
+        // cmd.args(["cp", "-", &format!("{}:/", cid)])
+        //     .check_piped(|mut stdin| async move {
+        //         tokio::io::copy(&mut inputs_rdr, &mut stdin).await?;
+        //         Ok(())
+        //     })
+        //     .await
+        //     .context("Failed to copy inputs tar into container")?;
 
         let CompileCommand {
             executable,
@@ -968,29 +853,42 @@ impl DockerBuilder {
         } = compile_command;
         let cwd = Path::new(&cwd);
 
-        tracing::trace!("[perform_build({})]: creating output directories", job_id);
-        let mut cmd = tokio::process::Command::new("docker");
-        cmd.args(["exec", cid, "busybox", "mkdir", "-p"]).arg(cwd);
-        for path in output_paths.iter() {
-            // If it doesn't have a parent, nothing needs creating
-            let output_parent = if let Some(p) = Path::new(path).parent() {
-                p
-            } else {
-                continue;
-            };
-            cmd.arg(cwd.join(output_parent));
-        }
-        cmd.check_run()
-            .await
-            .context("Failed to create directories required for compile in container")?;
-
-        // Guard compiling until we get a token from the job queue
-        let _token = job_queue.acquire().await?;
+        // tracing::trace!("[perform_build({})]: creating output directories", job_id);
+        // let mut cmd = tokio::process::Command::new("docker");
+        // cmd.args(["exec", cid, "busybox", "mkdir", "-p"]).arg(cwd);
+        // for path in output_paths.iter() {
+        //     // If it doesn't have a parent, nothing needs creating
+        //     let output_parent = if let Some(p) = Path::new(path).parent() {
+        //         p
+        //     } else {
+        //         continue;
+        //     };
+        //     cmd.arg(cwd.join(output_parent));
+        // }
+        // cmd.check_run()
+        //     .await
+        //     .context("Failed to create directories required for compile in container")?;
 
         tracing::trace!("[perform_build({})]: performing compile", job_id);
         // TODO: likely shouldn't perform the compile as root in the container
         let mut cmd = tokio::process::Command::new("docker");
-        cmd.arg("exec");
+        // Start a new container and remove it on exit
+        cmd.args(["run", "--rm", "-t"])
+            // Run in `cwd`
+            .args(["-w", &format!("{}", cwd.display())])
+            // Mount inputs
+            .args(["-v", &format!("{}:{}", cwd_host.display(), cwd.display())])
+            // Mount toolchain as read-only
+            .args([
+                "-v",
+                &format!(
+                    "{}:{}:ro",
+                    toolchain_dir.display(),
+                    toolchain_container_dir.display()
+                ),
+            ]);
+
+        // Define envvars
         for (k, v) in env_vars {
             if k.contains('=') {
                 tracing::warn!(
@@ -1000,21 +898,14 @@ impl DockerBuilder {
                 );
                 continue;
             }
-            let mut env = k;
-            env.push('=');
-            env.push_str(&v);
-            cmd.arg("-e").arg(env);
+            cmd.args(["-e", &format!("{k}={v}")]);
         }
-        let shell_cmd = "cd \"$1\" && shift && exec \"$@\"";
-        cmd.args([cid, "busybox", "sh", "-c", shell_cmd]);
-        cmd.arg(&executable);
-        cmd.arg(cwd);
+        // let shell_cmd = "cd \"$1\" && shift && exec \"$@\"";
+        // cmd.args([cid, "busybox", "sh", "-c", shell_cmd]);
+        cmd.arg(BUSYBOX_DOCKER_IMAGE);
         cmd.arg(executable);
         cmd.args(arguments);
-        let compile_output = cmd
-            .output()
-            .await
-            .context("Failed to start executing compile")?;
+        let compile_output = cmd.output().await.context("Failed to compile")?;
         tracing::trace!(
             "[perform_build({})]: compile_output: {:?}",
             job_id,
@@ -1024,30 +915,53 @@ impl DockerBuilder {
         let mut outputs = vec![];
         tracing::trace!("[perform_build({})]: retrieving {:?}", job_id, output_paths);
         for path in output_paths {
-            let abspath = cwd.join(&path); // Resolve in case it's relative since we copy it from the root level
-                                           // TODO: this isn't great, but cp gives it out as a tar
-            let mut cmd = tokio::process::Command::new("docker");
-            let output = cmd
-                .args(["exec", cid, "busybox", "cat"])
-                .arg(abspath)
-                .output()
-                .await
-                .context("Failed to start command to retrieve output file")?;
-            if output.status.success() {
-                let output = OutputData::try_from_reader(&*output.stdout)
-                    .expect("Failed to read compress output stdout");
-                outputs.push((path, output))
-            } else {
-                tracing::debug!(
-                    "[perform_build({})]: Missing output path {:?}",
-                    job_id,
-                    path
-                )
+            let abspath = join_suffix(cwd_host, &path); // Resolve in case it's relative since we copy it from the root level
+            match fs::File::open(abspath) {
+                Ok(file) => {
+                    let output =
+                        OutputData::try_from_reader(file).context("Failed to read output file")?;
+                    outputs.push((path, output))
+                }
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::NotFound {
+                        tracing::debug!(
+                            "[perform_build({})]: Missing output path {:?}",
+                            job_id,
+                            path
+                        )
+                    } else {
+                        return Err(Error::from(e).context("Failed to open output file"));
+                    }
+                }
             }
         }
 
+        // for path in output_paths {
+        //     let abspath = cwd.join(&path); // Resolve in case it's relative since we copy it from the root level
+        //                                    // TODO: this isn't great, but cp gives it out as a tar
+        //     let mut cmd = tokio::process::Command::new("docker");
+        //     let output = cmd
+        //         .args(["exec", cid, "busybox", "cat"])
+        //         .arg(abspath)
+        //         .output()
+        //         .await
+        //         .context("Failed to start command to retrieve output file")?;
+        //     if output.status.success() {
+        //         let output = OutputData::try_from_reader(&*output.stdout)
+        //             .expect("Failed to read compress output stdout");
+        //         outputs.push((path, output))
+        //     } else {
+        //         tracing::debug!(
+        //             "[perform_build({})]: Missing output path {:?}",
+        //             job_id,
+        //             path
+        //         )
+        //     }
+        // }
+
         let compile_output = ProcessOutput::try_from(compile_output)
             .context("Failed to convert compilation exit status")?;
+
         Ok(BuildResult {
             output: compile_output,
             outputs,
@@ -1060,27 +974,31 @@ impl BuilderIncoming for DockerBuilder {
     // From Server
     async fn run_build(
         &self,
-        job_id: JobId,
-        tc: Toolchain,
+        job_id: &str,
+        toolchain_dir: &Path,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
-        tccache: &Mutex<TcCache>,
-        job_queue: &tokio::sync::Semaphore,
+        inputs: Vec<u8>,
     ) -> Result<BuildResult> {
-        tracing::debug!("[run_build({})]: Finding container", job_id);
-        let cid = self
-            .get_container(job_id, &tc, tccache)
-            .await
-            .context("Failed to get a container for build")?;
-        tracing::debug!(
-            "[run_build({})]: Performing build with container {}",
-            job_id,
-            cid
-        );
-        let res = Self::perform_build(job_id, command, inputs_rdr, outputs, &cid, job_queue).await;
-        tracing::debug!("[run_build({})]: Finishing with container {}", job_id, cid);
-        self.finish_container(job_id, &tc, cid).await;
+        let job_id = job_id.to_string();
+        // tracing::debug!("[run_build({})]: Finding container", job_id);
+        // let cid = self
+        //     .get_container(job_id, &self.toolchain_base_dir, toolchain_dir)
+        //     .await
+        //     .context("Failed to get a container for build")?;
+        tracing::debug!("[run_build({})]: Performing build in container", job_id,);
+        let res = Self::perform_build(
+            &job_id,
+            &self.toolchain_base_dir,
+            toolchain_dir,
+            command,
+            outputs,
+            inputs,
+            // &cid
+        )
+        .await;
+        // tracing::debug!("[run_build({})]: Finishing with container {}", job_id, cid);
+        // self.finish_container(job_id, toolchain_dir, &cid).await;
         tracing::debug!("[run_build({})]: Returning result", job_id);
         res.context("Failed to perform build")
     }

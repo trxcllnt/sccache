@@ -25,7 +25,6 @@ use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
 use std::hash::Hasher;
 use std::io::prelude::*;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{self, Stdio};
 use std::str;
@@ -931,42 +930,14 @@ pub fn daemonize() -> Result<()> {
 }
 
 #[cfg(any(feature = "dist-server", feature = "dist-client"))]
-pub fn new_reqwest_client(
-    real_addr: Option<SocketAddr>,
-    certs: Option<&std::collections::HashMap<crate::dist::ServerId, (Vec<u8>, Vec<u8>)>>,
-) -> std::result::Result<reqwest::Client, reqwest::Error> {
-    let mut builder = reqwest::Client::builder();
-
-    if let Some(addr) = real_addr {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            "X-Real-IP",
-            reqwest::header::HeaderValue::from_str(&format!("{}", addr.ip())).unwrap(),
-        );
-        builder = builder.default_headers(headers);
-    }
-
-    // Add all the existing certificates
-    if let Some(certs) = certs {
-        for (server_id, (_, pem)) in certs.iter() {
-            if let Ok(cert) = reqwest::Certificate::from_pem(pem) {
-                builder = builder.add_root_certificate(cert);
-            } else {
-                warn!(
-                    "[new_reqwest_client({})]: skipping previously valid cert",
-                    server_id.addr()
-                );
-            }
-        }
-    }
-
-    builder
+pub fn new_reqwest_client() -> reqwest::Client {
+    reqwest::Client::builder()
         // Disable connection pool
         .pool_max_idle_per_host(0)
         .timeout(get_dist_request_timeout())
         .connect_timeout(get_dist_connect_timeout())
         .build()
-    // .expect("http client must build with success")
+        .expect("http client must build with success")
 }
 
 /// Disable connection pool to avoid broken connection between runtime
@@ -980,18 +951,8 @@ pub fn new_reqwest_client(
 ///
 /// More details could be found at https://github.com/mozilla/sccache/pull/1563
 #[cfg(any(feature = "dist-server", feature = "dist-client"))]
-pub fn new_reqwest_blocking_client(real_addr: Option<SocketAddr>) -> reqwest::blocking::Client {
-    let mut builder = reqwest::blocking::Client::builder();
-    if let Some(addr) = real_addr {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            "X-Real-IP",
-            reqwest::header::HeaderValue::from_str(&format!("{}", addr.ip())).unwrap(),
-        );
-        builder = builder.default_headers(headers);
-    }
-
-    builder
+pub fn new_reqwest_blocking_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
         // Disable connection pool
         .pool_max_idle_per_host(0)
         .timeout(get_dist_request_timeout())
