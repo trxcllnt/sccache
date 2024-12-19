@@ -23,7 +23,7 @@ fn test_gcp_arg_check() -> Result<()> {
 
     let mut cmd = Command::new(SCCACHE_BIN.as_os_str());
     cmd.arg("--start-server")
-        .env("SCCACHE_LOG", "debug")
+        .env("SCCACHE_LOG", "sccache=debug")
         .env("SCCACHE_GCS_KEY_PATH", "foo.json");
 
     cmd.assert().failure().stderr(predicate::str::contains(
@@ -34,7 +34,7 @@ fn test_gcp_arg_check() -> Result<()> {
 
     let mut cmd = Command::new(SCCACHE_BIN.as_os_str());
     cmd.arg("--start-server")
-        .env("SCCACHE_LOG", "debug")
+        .env("SCCACHE_LOG", "sccache=debug")
         .env("SCCACHE_GCS_OAUTH_URL", "http://127.0.0.1");
 
     cmd.assert().failure().stderr(predicate::str::contains(
@@ -44,7 +44,7 @@ fn test_gcp_arg_check() -> Result<()> {
     stop_sccache()?;
     let mut cmd = Command::new(SCCACHE_BIN.as_os_str());
     cmd.arg("--start-server")
-        .env("SCCACHE_LOG", "debug")
+        .env("SCCACHE_LOG", "sccache=debug")
         .env("SCCACHE_GCS_BUCKET", "b")
         .env("SCCACHE_GCS_CREDENTIALS_URL", "not_valid_url//127.0.0.1")
         .env("SCCACHE_GCS_KEY_PATH", "foo.json");
@@ -65,7 +65,7 @@ fn test_s3_invalid_args() -> Result<()> {
 
     let mut cmd = Command::new(SCCACHE_BIN.as_os_str());
     cmd.arg("--start-server")
-        .env("SCCACHE_LOG", "debug")
+        .env("SCCACHE_LOG", "sccache=debug")
         .env("SCCACHE_BUCKET", "test")
         .env("SCCACHE_REGION", "us-east-1")
         .env("AWS_ACCESS_KEY_ID", "invalid_ak")

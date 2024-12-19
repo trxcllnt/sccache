@@ -89,37 +89,50 @@ build_and_test_project()
 	if [ $FAULT -ne 0 ]; then return 1; fi
 }
 
-prepare_and_run_sccache_dist()
+prepare_sccache_dist()
 {
 	echo "#### preparing sccache-dist"
-	SECRET_KEY="$(sccache-dist auth generate-jwt-hs256-key)"
-	CLIENT_AUTH_KEY="$(sccache-dist auth generate-jwt-hs256-key)"
+	# SECRET_KEY="$(sccache-dist auth generate-jwt-hs256-key)"
+	# CLIENT_AUTH_KEY="$(sccache-dist auth generate-jwt-hs256-key)"
+    CLIENT_AUTH_KEY="client_token"
 	# create scheduler.conf
 	cat >"$TEST_TMPDIR"/scheduler.conf <<-EOF
 	public_addr = "127.0.0.1:10600"
 	[client_auth]
 	type = "token"
 	token = "$CLIENT_AUTH_KEY"
-	[server_auth]
-	type = "jwt_hs256"
-	secret_key = "$SECRET_KEY"
 	EOF
-	SERVER_TOKEN="$(sccache-dist auth generate-jwt-hs256-server-token \
-	  --config="$TEST_TMPDIR"/scheduler.conf \
-	  --server="127.0.0.1:10501")"
+	# cat >"$TEST_TMPDIR"/scheduler.conf <<-EOF
+	# public_addr = "127.0.0.1:10600"
+	# [client_auth]
+	# type = "token"
+	# token = "$CLIENT_AUTH_KEY"
+	# [server_auth]
+	# type = "jwt_hs256"
+	# secret_key = "$SECRET_KEY"
+	# EOF
+	# SERVER_TOKEN="$(sccache-dist auth generate-jwt-hs256-server-token \
+	#   --config="$TEST_TMPDIR"/scheduler.conf \
+	#   --server="127.0.0.1:10501")"
 
 	# Create server.conf
 	cat >"$TEST_TMPDIR"/server.conf <<-EOF
 	cache_dir = "$TEST_TMPDIR/toolchains"
-	public_addr = "127.0.0.1:10501"
-	scheduler_url = "http://127.0.0.1:10600"
 	[builder]
 	type = "pot"
 	pot_fs_root = "$TEST_TMPDIR/pot"
-	[scheduler_auth]
-	type = "jwt_token"
-	token = "$SERVER_TOKEN"
 	EOF
+	# cat >"$TEST_TMPDIR"/server.conf <<-EOF
+	# cache_dir = "$TEST_TMPDIR/toolchains"
+	# public_addr = "127.0.0.1:10501"
+	# scheduler_url = "http://127.0.0.1:10600"
+	# [builder]
+	# type = "pot"
+	# pot_fs_root = "$TEST_TMPDIR/pot"
+	# [scheduler_auth]
+	# type = "jwt_token"
+	# token = "$SERVER_TOKEN"
+	# EOF
 
 	# create sccache client config
 	TC="$(rustup toolchain list | grep default | awk '{ print $1 }')"
@@ -150,9 +163,6 @@ prepare_and_run_sccache_dist()
 	  gzip -n >"$TEST_TMPDIR/empty.tar.gz"
 	gtar cf - --sort=name --mtime='2022-06-28 17:35Z' "$HOME/.rustup"  | \
 	  gzip -n >"$TEST_TMPDIR/rust-toolchain.tgz"
-
-	echo "Starting scheduler"
-	sccache-dist scheduler --config "$TEST_TMPDIR"/scheduler.conf
 }
 
 prepare_zpool()
@@ -175,6 +185,16 @@ prepare_pot()
 	sudo sysrc -f /usr/local/etc/pot/pot.conf POT_GROUP=wheel
 	sudo pot init -f ""
 	sudo pot version
+	echo "pot clone description:"
+	sudo pot clone -h
+	echo "pot snapshot description:"
+	sudo pot snapshot -h
+	echo "pot mount-in description:"
+	sudo pot mount-in -h
+	echo "pot start description:"
+	sudo pot start -h
+	echo "pot run description:"
+    sudo pot run -h
 	sudo cp "$HOME"/.potcache/*.txz /var/cache/pot 2>/dev/null || true
 	sudo pot create -p sccache-template -N alias -i "lo0|127.0.0.2" \
 	  -t single -b "$OS_VERSION"
@@ -183,12 +203,18 @@ prepare_pot()
 	sudo pot snapshot -p sccache-template
 }
 
+start_scheduler()
+{
+	echo "#### starting scheduler"
+	SCCACHE_LOG="celery=trace,sccache=debug,tower_http=debug,axum::rejection=trace" \
+	sccache-dist scheduler --config "$TEST_TMPDIR"/scheduler.conf
+}
+
 start_build_server()
 {
 	echo "#### starting build-server (as root)"
-	SCCACHE_DIST_LOG=debug RUST_LOG=info sudo \
-	  "$HOME"/.cargo/bin/sccache-dist server \
-	  --config "$TEST_TMPDIR"/server.conf &
+	SCCACHE_LOG="celery=trace,sccache=debug" \
+    sudo "$HOME"/.cargo/bin/sccache-dist server --config "$TEST_TMPDIR"/server.conf
 }
 
 wait_for_build_server()
@@ -236,7 +262,9 @@ test_sccache_dist_01()
 	FAILED_DIST="$(echo "$STATS" | \
 	  grep "Failed distributed compilations" | awk '{ print $4 }')"
 	SUCCEEDED_DIST="$(echo "$STATS" | \
-	  (grep -F "127.0.0.1:10501" || echo 0 0) | awk '{ print $2 }')"
+	  grep "Successful distributed compiles" | awk '{ print $4 }')"
+	# SUCCEEDED_DIST="$(echo "$STATS" | \
+	#   (grep -F "127.0.0.1:10501" || echo 0 0) | awk '{ print $2 }')"
 
 	if [ "$CACHE_HITS" -ne 0 ]; then
 		2>&1 echo "Unexpected cache hits"
@@ -272,7 +300,9 @@ test_sccache_dist_02()
 	FAILED_DIST="$(echo "$STATS" | \
 	  grep "Failed distributed compilations" | awk '{ print $4 }')"
 	SUCCEEDED_DIST="$(echo "$STATS" | \
-	  (grep -F "127.0.0.1:10501" || echo 0 0) | awk '{ print $2 }')"
+	  grep "Successful distributed compiles" | awk '{ print $4 }')"
+	# SUCCEEDED_DIST="$(echo "$STATS" | \
+	#   (grep -F "127.0.0.1:10501" || echo 0 0) | awk '{ print $2 }')"
 
 	if [ "$CACHE_HITS" -eq 0 ]; then
 		2>&1 echo "No cache hits when there should be some"
@@ -333,11 +363,12 @@ main()
 	init
 	output_env_info
 	build_and_test_project
-	prepare_and_run_sccache_dist
+	prepare_sccache_dist
 	prepare_zpool
 	prepare_pot
+	start_scheduler
 	start_build_server
-	wait_for_build_server
+	# wait_for_build_server
 	create_build_test_project
 	start_sccache_server
 	test_sccache_dist_01

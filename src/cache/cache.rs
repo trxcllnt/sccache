@@ -30,7 +30,6 @@ use crate::cache::s3::S3Cache;
 #[cfg(feature = "webdav")]
 use crate::cache::webdav::WebdavCache;
 use crate::compiler::PreprocessorCacheEntry;
-use crate::config::Config;
 #[cfg(any(
     feature = "azure",
     feature = "gcs",
@@ -41,16 +40,28 @@ use crate::config::Config;
     feature = "webdav",
     feature = "oss"
 ))]
-use crate::config::{self, CacheType};
+use crate::config;
+use crate::config::{CacheType, DiskCacheConfig};
 use async_trait::async_trait;
 use fs_err as fs;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{self, Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::NamedTempFile;
+#[cfg(any(
+    feature = "azure",
+    feature = "gcs",
+    feature = "gha",
+    feature = "memcached",
+    feature = "redis",
+    feature = "s3",
+    feature = "webdav",
+))]
+use tokio_util::compat::{FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -185,10 +196,17 @@ impl CacheRead {
         self.get_bytes("stderr")
     }
 
-    fn get_bytes(&mut self, name: &str) -> Vec<u8> {
+    pub fn get_bytes(&mut self, name: &str) -> Vec<u8> {
         let mut bytes = Vec::new();
         drop(self.get_object(name, &mut bytes));
         bytes
+    }
+
+    pub fn into_inner(self) -> Box<dyn ReadSeek> {
+        self.zip.into_inner()
+        // let mut reader = self.zip.into_inner();
+        // reader.seek(std::io::SeekFrom::Start(0)).unwrap();
+        // reader
     }
 
     pub async fn extract_objects<T>(
@@ -344,11 +362,25 @@ pub trait Storage: Send + Sync {
     /// return a `Cache::Hit`.
     async fn get(&self, key: &str) -> Result<Cache>;
 
+    async fn get_stream(&self, key: &str) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>>;
+
+    /// Check if the cache has an entry for `key`.
+    ///
+    /// If the entry is successfully found in the cache, return true.
+    /// If an error occurs, or the entry is not found in the cache, return false.
+    async fn has(&self, key: &str) -> bool;
+
     /// Put `entry` in the cache under `key`.
     ///
     /// Returns a `Future` that will provide the result or error when the put is
     /// finished.
     async fn put(&self, key: &str, entry: CacheWrite) -> Result<Duration>;
+
+    async fn put_stream(
+        &self,
+        key: &str,
+        stream: Pin<&mut (dyn futures::AsyncRead + Send)>,
+    ) -> Result<()>;
 
     /// Check the cache capability.
     ///
@@ -367,7 +399,7 @@ pub trait Storage: Send + Sync {
     }
 
     /// Get the storage location.
-    fn location(&self) -> String;
+    async fn location(&self) -> String;
 
     /// Get the current storage usage, if applicable.
     async fn current_size(&self) -> Result<Option<u64>>;
@@ -478,12 +510,39 @@ impl Storage for opendal::Operator {
         }
     }
 
+    async fn get_stream(&self, key: &str) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>> {
+        Ok(Box::new(
+            self.reader(&normalize_key(key))
+                .await?
+                .into_futures_async_read(..)
+                .await?,
+        ) as Box<dyn futures::AsyncRead + Send + Unpin>)
+    }
+
+    async fn has(&self, key: &str) -> bool {
+        self.stat(&normalize_key(key)).await.is_ok()
+    }
+
     async fn put(&self, key: &str, entry: CacheWrite) -> Result<Duration> {
         let start = std::time::Instant::now();
 
         self.write(&normalize_key(key), entry.finish()?).await?;
 
         Ok(start.elapsed())
+    }
+
+    async fn put_stream(
+        &self,
+        key: &str,
+        source: Pin<&mut (dyn futures::AsyncRead + Send)>,
+    ) -> Result<()> {
+        let sink = self.writer(&normalize_key(key)).await?;
+        tokio::io::copy(
+            &mut source.compat(),
+            &mut sink.into_futures_async_write().compat_write(),
+        )
+        .await?;
+        Ok(())
     }
 
     async fn check(&self) -> Result<CacheMode> {
@@ -532,7 +591,7 @@ impl Storage for opendal::Operator {
         Ok(mode)
     }
 
-    fn location(&self) -> String {
+    async fn location(&self) -> String {
         let meta = self.info();
         format!(
             "{}, name: {}, prefix: {}",
@@ -559,10 +618,11 @@ pub(in crate::cache) fn normalize_key(key: &str) -> String {
 /// Get a suitable `Storage` implementation from configuration.
 #[allow(clippy::cognitive_complexity)] // TODO simplify!
 pub fn storage_from_config(
-    config: &Config,
+    cache: &Option<CacheType>,
+    fallback_cache: &DiskCacheConfig,
     pool: &tokio::runtime::Handle,
 ) -> Result<Arc<dyn Storage>> {
-    if let Some(cache_type) = &config.cache {
+    if let Some(cache_type) = &cache {
         match cache_type {
             #[cfg(feature = "azure")]
             CacheType::Azure(config::AzureCacheConfig {
@@ -732,9 +792,9 @@ pub fn storage_from_config(
         }
     }
 
-    let (dir, size) = (&config.fallback_cache.dir, config.fallback_cache.size);
-    let preprocessor_cache_mode_config = config.fallback_cache.preprocessor_cache_mode;
-    let rw_mode = config.fallback_cache.rw_mode.into();
+    let (dir, size) = (&fallback_cache.dir, fallback_cache.size);
+    let preprocessor_cache_mode_config = fallback_cache.preprocessor_cache_mode;
+    let rw_mode = fallback_cache.rw_mode.into();
     debug!("Init disk cache with dir {:?}, size {}", dir, size);
     Ok(Arc::new(DiskCache::new(
         dir,
@@ -748,7 +808,7 @@ pub fn storage_from_config(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::config::CacheModeConfig;
+    use crate::config::{CacheModeConfig, Config};
 
     #[test]
     fn test_normalize_key() {
@@ -786,7 +846,9 @@ mod test {
         config.fallback_cache.rw_mode = CacheModeConfig::ReadWrite;
 
         {
-            let cache = storage_from_config(&config, runtime.handle()).unwrap();
+            let cache =
+                storage_from_config(&config.cache, &config.fallback_cache, runtime.handle())
+                    .unwrap();
 
             runtime.block_on(async move {
                 cache.put("test1", CacheWrite::default()).await.unwrap();
@@ -801,7 +863,9 @@ mod test {
         config.fallback_cache.rw_mode = CacheModeConfig::ReadOnly;
 
         {
-            let cache = storage_from_config(&config, runtime.handle()).unwrap();
+            let cache =
+                storage_from_config(&config.cache, &config.fallback_cache, runtime.handle())
+                    .unwrap();
 
             runtime.block_on(async move {
                 assert_eq!(

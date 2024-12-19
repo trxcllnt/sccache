@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 
 #[cfg(feature = "dist-client")]
 pub use self::client::ClientToolchains;
+#[cfg(feature = "dist-server")]
+pub use self::server::ServerToolchains;
+
 use crate::util::Digest;
 use std::io::Read;
 
@@ -499,15 +502,6 @@ impl TcCache {
         self.inner.get(make_lru_key_path(&tc.archive_id))
     }
 
-    pub async fn get_async(
-        &mut self,
-        tc: &Toolchain,
-    ) -> LruResult<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
-        self.inner
-            .get_async(make_lru_key_path(&tc.archive_id))
-            .await
-    }
-
     pub fn len(&self) -> usize {
         self.inner.len()
     }
@@ -540,4 +534,154 @@ fn file_key<R: Read>(rdr: R) -> Result<String> {
 /// Make a path to the cache entry with key `key`.
 fn make_lru_key_path(key: &str) -> PathBuf {
     Path::new(&key[0..1]).join(&key[1..2]).join(key)
+}
+
+#[cfg(feature = "dist-server")]
+mod server {
+    use async_compression::tokio::bufread::GzipDecoder;
+
+    use tokio::io::BufReader;
+    use tokio::sync::{Mutex, Notify};
+    use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
+
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use crate::cache::cache;
+    use crate::dist::Toolchain;
+    use crate::errors::*;
+
+    use super::make_lru_key_path;
+
+    pub struct ServerToolchains {
+        cached_toolchains_dir: PathBuf,
+        cached_toolchains_capacity: i64,
+        cached_toolchains_size: i64,
+        cached_toolchains: Mutex<HashMap<Toolchain, (i64, i64)>>,
+        remote_toolchains: Arc<dyn cache::Storage>,
+        toolchain_evicted: Notify,
+    }
+
+    // pub fn dir_size_on_disk(path: impl Into<PathBuf>) -> io::Result<u64> {
+    //     fn dir_size(mut dir: fs::ReadDir) -> io::Result<u64> {
+    //         dir.try_fold(0, |acc, file| {
+    //             let file = file?;
+    //             let size = match file.metadata()? {
+    //                 data if data.is_dir() => dir_size(fs::read_dir(file.path())?)?,
+    //                 data => data.len(),
+    //             };
+    //             Ok(acc + size)
+    //         })
+    //     }
+
+    //     dir_size(fs::read_dir(path.into())?)
+    // }
+
+    impl ServerToolchains {
+        pub fn new(
+            cached_toolchains_dir: &Path,
+            cached_toolchains_capacity: i64,
+            remote_toolchains: Arc<dyn cache::Storage>,
+        ) -> Self {
+            trace!(
+                "Using ServerToolchains({:?}, {})",
+                cached_toolchains_dir,
+                cached_toolchains_capacity
+            );
+            ServerToolchains {
+                cached_toolchains_capacity,
+                cached_toolchains_dir: cached_toolchains_dir.to_owned(),
+                cached_toolchains_size: 0,
+                cached_toolchains: Mutex::new(HashMap::new()),
+                remote_toolchains,
+                toolchain_evicted: Notify::new(),
+            }
+        }
+
+        pub async fn acquire(&mut self, toolchain: &Toolchain) -> Result<PathBuf> {
+            let remote = &self.remote_toolchains;
+            let toolchain_id = &toolchain.archive_id;
+            let path = self
+                .cached_toolchains_dir
+                .join(make_lru_key_path(toolchain_id));
+
+            let toolchain_is_loaded = {
+                let mut cached_toolchains = self.cached_toolchains.lock().await;
+                if cached_toolchains.contains_key(toolchain) {
+                    cached_toolchains
+                        .entry(toolchain.clone())
+                        .and_modify(|(_, c)| *c += 1);
+                    true
+                } else {
+                    false
+                }
+            };
+
+            if !toolchain_is_loaded {
+                // TODO: Get the _uncompressed_ size of the toolchain archive
+                let inflated_size = 0;
+                let toolchain_reader = remote.get_stream(toolchain_id).await?.compat();
+                loop {
+                    if self.cached_toolchains_size + inflated_size
+                        <= self.cached_toolchains_capacity
+                    {
+                        trace!("ServerToolchains: Unpacking toolchain {toolchain_id} to {path:?}");
+                        async_tar::Archive::new(
+                            GzipDecoder::new(BufReader::new(toolchain_reader)).compat(),
+                        )
+                        .unpack(&path)
+                        .await
+                        .context("Failed to unpack toolchain")?;
+                        self.cached_toolchains_size += inflated_size;
+                        trace!("ServerToolchains: Toolchain {toolchain_id} unpacked, new cache size is {}", self.cached_toolchains_size);
+                        break;
+                    }
+                    self.toolchain_evicted.notified().await;
+                }
+                self.cached_toolchains
+                    .lock()
+                    .await
+                    .entry(toolchain.clone())
+                    .and_modify(|(_, c)| *c += 1)
+                    .or_insert((inflated_size, 1));
+            }
+            Ok(path.clone())
+        }
+
+        pub async fn release(&mut self, toolchain: &Toolchain) -> Result<()> {
+            trace!(
+                "ServerToolchains: Releasing toolchain {}",
+                toolchain.archive_id
+            );
+
+            let mut toolchains = self.cached_toolchains.lock().await;
+
+            toolchains
+                .entry(toolchain.clone())
+                .and_modify(|(_, c)| *c = (*c - 1).max(0));
+
+            let toolchains_clone = toolchains.clone();
+
+            for (toolchain, (inflated_size, _)) in
+                toolchains_clone.iter().filter(|(_, (_, c))| *c <= 0)
+            {
+                let path = self
+                    .cached_toolchains_dir
+                    .join(make_lru_key_path(&toolchain.archive_id));
+                toolchains.remove(toolchain);
+                if path.exists() {
+                    trace!("ServerToolchains: Removing toolchain dir {:?}", path);
+                    tokio::fs::remove_dir_all(&path)
+                        .await
+                        .expect("Failed to clean up toolchain directory");
+                    self.cached_toolchains_size =
+                        (self.cached_toolchains_size - inflated_size).max(0);
+                    self.toolchain_evicted.notify_one();
+                }
+            }
+
+            Ok(())
+        }
+    }
 }
