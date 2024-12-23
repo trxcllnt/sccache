@@ -88,6 +88,33 @@ fn main() {
     });
 }
 
+fn message_broker_uri(message_broker: Option<MessageBroker>) -> Result<String> {
+    match message_broker {
+        Some(MessageBroker::AMQP(uri)) => Ok(uri),
+        Some(MessageBroker::Redis(uri)) => Ok(uri),
+        None => bail!(
+            "Missing required message broker configuration!\n\n{}",
+            message_broker_info_text()
+        ),
+    }
+}
+
+fn message_broker_info_text() -> String {
+    "\
+The sccache-dist scheduler and servers communicate via an external message
+broker, either an AMQP v0.9.1 implementation (like RabbitMQ) or Redis.
+
+All major CSPs provide managed AMQP or Redis services, or you can deploy
+RabbitMQ or Redis as part of your infrastructure.
+
+For local development, you can install RabbitMQ/Redis services locally or
+run their containers.
+
+More details can be found in in the sccache-dist documentation at:
+https://github.com/mozilla/sccache/blob/main/docs/Distributed.md#message-brokers"
+        .into()
+}
+
 fn run(command: Command) -> Result<()> {
     let num_cpus = std::thread::available_parallelism()?.get();
 
@@ -102,24 +129,20 @@ fn run(command: Command) -> Result<()> {
             toolchains_fallback,
             toolchains,
         }) => {
-            let broker_uri =
-                match message_broker.expect("Missing required message broker configuration") {
-                    MessageBroker::AMQP(uri) => uri,
-                    MessageBroker::Redis(uri) => uri,
-                };
+            let broker_uri = message_broker_uri(message_broker)?;
 
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
 
-            runtime.block_on(async move {
-                let toolchain_storage = sccache::cache::cache::storage_from_config(
-                    &toolchains,
-                    &toolchains_fallback,
-                    &tokio::runtime::Handle::current(),
-                )
-                .context("Failed to initialize toolchain storage")?;
+            let toolchain_storage = sccache::cache::cache::storage_from_config(
+                &toolchains,
+                &toolchains_fallback,
+                runtime.handle(),
+            )
+            .context("Failed to initialize toolchain storage")?;
 
+            runtime.block_on(async move {
                 // Verify read/write access to toolchain storage
                 match toolchain_storage.check().await {
                     Ok(sccache::cache::CacheMode::ReadWrite) => {}
@@ -148,7 +171,13 @@ fn run(command: Command) -> Result<()> {
                         .nacks_enabled(true)
                         .build()
                         .await
-                        .unwrap(),
+                        .map_err(|err| {
+                            let err_message = match err {
+                                CeleryError::BrokerError(err) => err.to_string(),
+                                err => err.to_string(),
+                            };
+                            anyhow!("{}\n\n{}", err_message, message_broker_info_text())
+                        })?,
                 );
 
                 task_queue
@@ -235,32 +264,22 @@ fn run(command: Command) -> Result<()> {
             toolchains,
             toolchains_fallback,
         }) => {
-            let num_cpus = (num_cpus - num_cpus_to_ignore).max(1) as f64;
-            let prefetch_count = (num_cpus * max_per_core_load).floor().max(1f64) as u16;
-
-            let broker_uri =
-                match message_broker.expect("Missing required message broker configuration") {
-                    MessageBroker::AMQP(uri) => uri,
-                    MessageBroker::Redis(uri) => uri,
-                };
-
-            let server_id =
-                env::var("SCCACHE_DIST_SERVER_ID").unwrap_or(uuid::Uuid::new_v4().to_string());
+            let broker_uri = message_broker_uri(message_broker)?;
 
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
 
-            runtime.block_on(async move {
-                let toolchain_storage = sccache::cache::cache::storage_from_config(
-                    &toolchains,
-                    &toolchains_fallback,
-                    &tokio::runtime::Handle::current(),
-                )
-                .context("Failed to initialize toolchain storage")?;
+            let toolchain_storage = sccache::cache::cache::storage_from_config(
+                &toolchains,
+                &toolchains_fallback,
+                runtime.handle(),
+            )
+            .context("Failed to initialize toolchain storage")?;
 
+            runtime.block_on(async move {
                 // Verify toolchain storage
-                let _ = toolchain_storage
+                toolchain_storage
                     .check()
                     .await
                     .context("Failed to initialize toolchain storage")?;
@@ -270,6 +289,11 @@ fn run(command: Command) -> Result<()> {
                     toolchain_cache_size,
                     toolchain_storage,
                 )));
+
+                let num_cpus = (num_cpus - num_cpus_to_ignore).max(1) as f64;
+                let prefetch_count = (num_cpus * max_per_core_load).floor().max(1f64) as u16;
+                let server_id =
+                    env::var("SCCACHE_DIST_SERVER_ID").unwrap_or(uuid::Uuid::new_v4().to_string());
 
                 let builder: Box<dyn dist::BuilderIncoming> = match builder {
                     #[cfg(not(target_os = "freebsd"))]
@@ -318,7 +342,14 @@ fn run(command: Command) -> Result<()> {
                         .acks_on_failure_or_timeout(false)
                         .nacks_enabled(true)
                         .build()
-                        .await?,
+                        .await
+                        .map_err(|err| {
+                            let err_message = match err {
+                                CeleryError::BrokerError(err) => err.to_string(),
+                                err => err.to_string(),
+                            };
+                            anyhow!("{}\n\n{}", err_message, message_broker_info_text())
+                        })?,
                 );
 
                 task_queue.register_task::<server_run_build>().await?;
