@@ -720,8 +720,7 @@ mod server {
                     tokio::fs::remove_dir_all(&path)
                         .await
                         .expect("Failed to clean up toolchain directory");
-                    self.cached_toolchains_size =
-                        (self.cached_toolchains_size - inflated_size).max(0);
+                    self.cached_toolchains_size -= inflated_size;
                 }
             }
 

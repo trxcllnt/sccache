@@ -112,14 +112,22 @@ fn run(command: Command) -> Result<()> {
                 .enable_all()
                 .build()?;
 
-            let toolchain_storage = sccache::cache::cache::storage_from_config(
-                &toolchains,
-                &toolchains_fallback,
-                runtime.handle(),
-            )
-            .context("Failed to initialize toolchain storage")?;
-
             runtime.block_on(async move {
+                let toolchain_storage = sccache::cache::cache::storage_from_config(
+                    &toolchains,
+                    &toolchains_fallback,
+                    &tokio::runtime::Handle::current(),
+                )
+                .context("Failed to initialize toolchain storage")?;
+
+                // Verify read/write access to toolchain storage
+                match toolchain_storage.check().await {
+                    Ok(sccache::cache::CacheMode::ReadWrite) => {}
+                    _ => {
+                        bail!("Scheduler toolchain storage must be read/write")
+                    }
+                }
+
                 let scheduler_id = format!(
                     "sccache-dist-scheduler-{}",
                     uuid::Uuid::new_v4().to_u128_le()
@@ -243,20 +251,26 @@ fn run(command: Command) -> Result<()> {
                 .enable_all()
                 .build()?;
 
-            let toolchain_storage = sccache::cache::cache::storage_from_config(
-                &toolchains,
-                &toolchains_fallback,
-                runtime.handle(),
-            )
-            .context("Failed to initialize toolchain storage")?;
-
-            let toolchains_disk_cache = Arc::new(Mutex::new(ServerToolchains::new(
-                &cache_dir.join("tc"),
-                toolchain_cache_size,
-                toolchain_storage,
-            )));
-
             runtime.block_on(async move {
+                let toolchain_storage = sccache::cache::cache::storage_from_config(
+                    &toolchains,
+                    &toolchains_fallback,
+                    &tokio::runtime::Handle::current(),
+                )
+                .context("Failed to initialize toolchain storage")?;
+
+                // Verify toolchain storage
+                let _ = toolchain_storage
+                    .check()
+                    .await
+                    .context("Failed to initialize toolchain storage")?;
+
+                let toolchains_disk_cache = Arc::new(Mutex::new(ServerToolchains::new(
+                    &cache_dir.join("tc"),
+                    toolchain_cache_size,
+                    toolchain_storage,
+                )));
+
                 let builder: Box<dyn dist::BuilderIncoming> = match builder {
                     #[cfg(not(target_os = "freebsd"))]
                     sccache::config::server::BuilderType::Docker => Box::new(

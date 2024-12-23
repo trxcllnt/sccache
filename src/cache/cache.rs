@@ -30,6 +30,9 @@ use crate::cache::s3::S3Cache;
 #[cfg(feature = "webdav")]
 use crate::cache::webdav::WebdavCache;
 use crate::compiler::PreprocessorCacheEntry;
+use crate::config::{CacheType, DiskCacheConfig};
+use async_trait::async_trait;
+use fs_err as fs;
 #[cfg(any(
     feature = "azure",
     feature = "gcs",
@@ -40,10 +43,7 @@ use crate::compiler::PreprocessorCacheEntry;
     feature = "webdav",
     feature = "oss"
 ))]
-use crate::config;
-use crate::config::{CacheType, DiskCacheConfig};
-use async_trait::async_trait;
-use fs_err as fs;
+use {crate::config, futures::AsyncWriteExt};
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -53,16 +53,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::NamedTempFile;
-#[cfg(any(
-    feature = "azure",
-    feature = "gcs",
-    feature = "gha",
-    feature = "memcached",
-    feature = "redis",
-    feature = "s3",
-    feature = "webdav",
-))]
-use tokio_util::compat::{FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -537,12 +527,12 @@ impl Storage for opendal::Operator {
         key: &str,
         source: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<()> {
-        let sink = self.writer(&normalize_key(key)).await?;
-        tokio::io::copy(
-            &mut source.compat(),
-            &mut sink.into_futures_async_write().compat_write(),
-        )
-        .await?;
+        let mut sink = self
+            .writer(&normalize_key(key))
+            .await?
+            .into_futures_async_write();
+        futures::io::copy(source, &mut sink).await?;
+        sink.close().await?;
         Ok(())
     }
 
