@@ -1642,6 +1642,7 @@ fn config_overrides() {
 
 #[test]
 #[serial]
+#[cfg(feature = "s3")]
 fn test_s3_no_credentials_conflict() {
     env::set_var("SCCACHE_S3_NO_CREDENTIALS", "true");
     env::set_var("SCCACHE_BUCKET", "my-bucket");
@@ -1732,6 +1733,7 @@ fn test_s3_no_credentials_valid_false() {
 
 #[test]
 #[serial]
+#[cfg(feature = "gcs")]
 fn test_gcs_service_account() {
     env::set_var("SCCACHE_S3_NO_CREDENTIALS", "false");
     env::set_var("SCCACHE_GCS_BUCKET", "my-bucket");

@@ -2,7 +2,7 @@
 edition = "2021"
 name = "sccache"
 rust-version = "1.75.0"
-version = "0.8.3-rapids.64"
+version = "0.9.0-rapids.1"
 
 categories = ["command-line-utilities", "development-tools::build-utils"]
 description = "Sccache is a ccache-like tool. It is used as a compiler wrapper and avoids compilation when possible. Sccache has the capability to utilize caching in remote storage environments, including various cloud storage options, or alternatively, in local storage."
@@ -100,7 +100,7 @@ tokio = { version = "1", features = [
 tokio-serde = "0.8"
 tokio-util = { version = "0.7", features = ["codec", "compat", "io"] }
 toml = "0.8"
-tower = "0.4"
+tower = { version = "0.4", features = ["util"] }
 url = { version = "2", optional = true }
 uuid = { version = "1.9", features = ["v4"] }
 walkdir = "2"
@@ -191,16 +191,16 @@ all = [
   "webdav",
   "oss",
 ]
-azure = ["opendal/services-azblob", "reqsign"]
+azure = ["opendal/services-azblob", "reqsign", "reqwest"]
 default = ["all"]
-gcs = ["opendal/services-gcs", "reqsign", "url", "reqwest/blocking"]
-gha = ["opendal/services-ghac"]
+gcs = ["opendal/services-gcs", "reqsign", "url", "reqwest"]
+gha = ["opendal/services-ghac", "reqwest"]
 memcached = ["opendal/services-memcached"]
 native-zlib = []
-oss = ["opendal/services-oss", "reqsign"]
+oss = ["opendal/services-oss", "reqsign", "reqwest"]
 redis = ["url", "opendal/services-redis"]
 s3 = ["opendal/services-s3", "reqsign", "reqwest"]
-webdav = ["opendal/services-webdav"]
+webdav = ["opendal/services-webdav", "reqwest"]
 # Enable features that will build a vendored version of openssl and
 # statically linked with it, instead of linking against the system-wide openssl
 # dynamically or statically.

@@ -11,11 +11,12 @@
 // limitations under the License.
 
 use opendal::layers::LoggingLayer;
-use opendal::raw::HttpClient;
 use opendal::services::S3;
 use opendal::Operator;
 
 use crate::errors::*;
+
+use super::http_client::set_user_agent;
 
 pub struct S3Cache;
 
@@ -64,16 +65,6 @@ impl S3Cache {
             .finish();
         Ok(op)
     }
-}
-
-/// Set the user agent (helps with monitoring on the server side)
-fn set_user_agent() -> HttpClient {
-    let user_agent = format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-    let client = reqwest::Client::builder()
-        .user_agent(user_agent)
-        .build()
-        .unwrap();
-    HttpClient::with(client)
 }
 
 /// Resolve given endpoint along with use_ssl settings.

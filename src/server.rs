@@ -429,7 +429,7 @@ pub fn start_server(config: &Config, addr: &crate::net::SocketAddr) -> Result<()
         });
         panic_hook(info)
     }));
-    let client = unsafe { Client::new() };
+    let client = Client::new();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(std::cmp::max(
@@ -1309,8 +1309,22 @@ where
 
         let out_pretty = hasher.output_pretty().into_owned();
         let color_mode = hasher.color_mode();
-        let kind = compiler.kind();
-        let lang = hasher.language();
+
+        let (kind, lang) = {
+            // HACK: See note in src/compiler/nvcc.rs
+            if env_vars
+                .iter()
+                .any(|(k, _)| k == "__SCCACHE_THIS_IS_A_CUDA_COMPILATION__")
+            {
+                (
+                    CompilerKind::C(crate::compiler::CCompilerKind::Nvcc),
+                    Language::Cuda,
+                )
+            } else {
+                (compiler.kind(), hasher.language())
+            }
+        };
+
         let me = self.clone();
 
         self.rt
@@ -1397,7 +1411,7 @@ where
                                 stats.compilations += 1;
                                 stats.cache_misses.increment(&kind, &lang);
                                 stats.compiler_write_duration += duration;
-                                trace!("[{}]: stats after compile result: {:?}", out_pretty, stats);
+                                trace!("[{}]: stats after compile result: {stats:?}", out_pretty);
                                 cache_write = Some(future);
                             }
                             CompileResult::NotCached(dt, duration) => {

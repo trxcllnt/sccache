@@ -1,3 +1,6 @@
+// Ignore lint introduced by celery::task macros
+#![allow(non_local_definitions)]
+
 use async_trait::async_trait;
 
 use celery::prelude::*;
