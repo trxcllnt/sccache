@@ -794,7 +794,7 @@ impl ServerService for Server {
     on_failure = on_server_run_build_failure,
     on_success = on_server_run_build_success,
 )]
-pub async fn server_run_build(
+async fn server_run_build(
     task: &Self,
     job_id: String,
     scheduler_id: String,
@@ -870,7 +870,7 @@ async fn on_server_run_build_success(task: &server_run_build, result: &BuildResu
 
 // Runs on scheduler to handle heartbeats from servers
 #[celery::task]
-pub async fn scheduler_server_heartbeat(info: BuildServerInfo) -> TaskResult<()> {
+async fn scheduler_server_heartbeat(info: BuildServerInfo) -> TaskResult<()> {
     SCHEDULER
         .get()
         .unwrap()
