@@ -1118,6 +1118,7 @@ pub enum MessageBroker {
     Redis(String),
 }
 
+#[cfg(feature = "dist-server")]
 fn message_broker_from_env() -> Option<MessageBroker> {
     None.or(std::env::var("AMQP_ADDR").ok().map(MessageBroker::AMQP))
         .or(std::env::var("REDIS_ADDR").ok().map(MessageBroker::Redis))
@@ -1128,6 +1129,7 @@ pub mod scheduler {
     use std::path::PathBuf;
     use std::{net::SocketAddr, str::FromStr};
 
+    use crate::config::message_broker_from_env;
     use crate::errors::*;
 
     use serde::{Deserialize, Serialize};
@@ -1320,8 +1322,8 @@ pub mod scheduler {
 #[cfg(feature = "dist-server")]
 pub mod server {
     use super::{
-        config_from_env, try_read_config_file, CacheConfigs, CacheModeConfig, CacheType,
-        DiskCacheConfig, MessageBroker,
+        config_from_env, message_broker_from_env, try_read_config_file, CacheConfigs,
+        CacheModeConfig, CacheType, DiskCacheConfig, MessageBroker,
     };
     use serde::{Deserialize, Serialize};
     use std::path::PathBuf;
