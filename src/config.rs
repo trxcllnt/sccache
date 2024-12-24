@@ -1112,15 +1112,15 @@ impl CachedConfig {
 #[cfg(feature = "dist-server")]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MessageBroker {
+    #[serde(rename = "amqp")]
     AMQP(String),
+    #[serde(rename = "redis")]
     Redis(String),
 }
 
-#[cfg(feature = "dist-server")]
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MessageBrokerConfigs {
-    pub amqp: Option<MessageBroker>,
-    pub redis: Option<MessageBroker>,
+fn message_broker_from_env() -> Option<MessageBroker> {
+    None.or(std::env::var("AMQP_ADDR").ok().map(MessageBroker::AMQP))
+        .or(std::env::var("REDIS_ADDR").ok().map(MessageBroker::Redis))
 }
 
 #[cfg(feature = "dist-server")]
@@ -1133,31 +1133,9 @@ pub mod scheduler {
     use serde::{Deserialize, Serialize};
 
     use super::{
-        config_from_env, try_read_config_file, CacheConfigs, CacheModeConfig, CacheType,
-        DiskCacheConfig, MessageBroker, MessageBrokerConfigs,
+        bool_from_env_var, config_from_env, number_from_env_var, try_read_config_file,
+        CacheConfigs, CacheModeConfig, CacheType, DiskCacheConfig, MessageBroker,
     };
-
-    pub fn default_max_body_size() -> usize {
-        std::env::var("SCCACHE_DIST_MAX_BODY_SIZE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            // 1GiB should be enough for toolchains and compile inputs, right?
-            .unwrap_or(1024 * 1024 * 1024)
-    }
-
-    pub fn default_job_time_limit() -> u32 {
-        std::env::var("SCCACHE_DIST_JOB_TIME_LIMIT_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(600)
-    }
-
-    pub fn default_enable_web_socket_server() -> bool {
-        std::env::var("SCCACHE_DIST_ENABLE_WEB_SOCKET_SERVER")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(true)
-    }
 
     // pub fn default_remember_server_error_timeout() -> u64 {
     //     std::env::var("SCCACHE_DIST_REMEMBER_SERVER_ERROR_TIMEOUT")
@@ -1209,7 +1187,7 @@ pub mod scheduler {
         pub enable_web_socket_server: Option<bool>,
         pub job_time_limit: Option<u32>,
         pub max_body_size: Option<usize>,
-        pub message_broker: Option<MessageBrokerConfigs>,
+        pub message_broker: Option<MessageBroker>,
         pub public_addr: SocketAddr,
         pub toolchains: CacheConfigs,
     }
@@ -1218,13 +1196,10 @@ pub mod scheduler {
         fn default() -> Self {
             Self {
                 client_auth: ClientAuth::Insecure,
-                enable_web_socket_server: Some(default_enable_web_socket_server()),
-                job_time_limit: Some(default_job_time_limit()),
-                max_body_size: Some(default_max_body_size()),
-                message_broker: Some(MessageBrokerConfigs {
-                    amqp: std::env::var("AMQP_ADDR").ok().map(MessageBroker::AMQP),
-                    redis: std::env::var("REDIS_ADDR").ok().map(MessageBroker::Redis),
-                }),
+                enable_web_socket_server: None,
+                job_time_limit: None,
+                max_body_size: None,
+                message_broker: None,
                 public_addr: SocketAddr::from_str("0.0.0.0:10500").unwrap(),
                 toolchains: CacheConfigs {
                     disk: Some(DiskCacheConfig {
@@ -1270,7 +1245,7 @@ pub mod scheduler {
                     match conf {
                         Ok(conf) => conf.unwrap_or_default(),
                         Err(err) => {
-                            warn!("{err}");
+                            warn!("{err:?}");
                             Default::default()
                         }
                     }
@@ -1282,12 +1257,34 @@ pub mod scheduler {
 
             let (toolchains, toolchains_fallback) = conf_caches.into_fallback();
 
+            debug!("scheduler::Config {{ enable_web_socket_server={enable_web_socket_server:?}, job_time_limit={job_time_limit:?}, max_body_size={max_body_size:?} }}");
+
+            let enable_web_socket_server =
+                bool_from_env_var("SCCACHE_DIST_ENABLE_WEB_SOCKET_SERVER")?
+                    .or(enable_web_socket_server)
+                    .unwrap_or(false);
+
+            let job_time_limit = number_from_env_var("SCCACHE_DIST_JOB_TIME_LIMIT_SECS")
+                .transpose()?
+                .or(job_time_limit)
+                .unwrap_or(600);
+
+            let max_body_size = number_from_env_var("SCCACHE_DIST_MAX_BODY_SIZE")
+                .transpose()?
+                .or(max_body_size)
+                // 1GiB should be enough for toolchains and compile inputs, right?
+                .unwrap_or(1024 * 1024 * 1024);
+
+            debug!("scheduler::Config {{ enable_web_socket_server={enable_web_socket_server:?}, job_time_limit={job_time_limit:?}, max_body_size={max_body_size:?} }}");
+
+            let message_broker = message_broker_from_env().or(message_broker);
+
             Ok(Self {
                 client_auth,
-                enable_web_socket_server: enable_web_socket_server.unwrap_or(true),
-                job_time_limit: job_time_limit.unwrap_or_else(default_job_time_limit),
-                max_body_size: max_body_size.unwrap_or_else(default_max_body_size),
-                message_broker: message_broker.and_then(|mb| mb.amqp.or(mb.redis)),
+                enable_web_socket_server,
+                job_time_limit,
+                max_body_size,
+                message_broker,
                 public_addr,
                 toolchains_fallback,
                 toolchains,
@@ -1306,17 +1303,7 @@ pub mod scheduler {
                 enable_web_socket_server: Some(scheduler_config.enable_web_socket_server),
                 job_time_limit: Some(scheduler_config.job_time_limit),
                 max_body_size: Some(scheduler_config.max_body_size),
-                message_broker: match scheduler_config.message_broker {
-                    Some(MessageBroker::AMQP(conf)) => Some(MessageBrokerConfigs {
-                        amqp: Some(MessageBroker::AMQP(conf)),
-                        ..Default::default()
-                    }),
-                    Some(MessageBroker::Redis(conf)) => Some(MessageBrokerConfigs {
-                        redis: Some(MessageBroker::Redis(conf)),
-                        ..Default::default()
-                    }),
-                    None => None,
-                },
+                message_broker: scheduler_config.message_broker,
                 public_addr: scheduler_config.public_addr,
                 toolchains: scheduler_config
                     .toolchains
@@ -1334,7 +1321,7 @@ pub mod scheduler {
 pub mod server {
     use super::{
         config_from_env, try_read_config_file, CacheConfigs, CacheModeConfig, CacheType,
-        DiskCacheConfig, MessageBroker, MessageBrokerConfigs,
+        DiskCacheConfig, MessageBroker,
     };
     use serde::{Deserialize, Serialize};
     use std::path::PathBuf;
@@ -1426,10 +1413,10 @@ pub mod server {
     #[serde(default)]
     #[serde(deny_unknown_fields)]
     pub struct FileConfig {
-        pub message_broker: Option<MessageBrokerConfigs>,
         pub builder: BuilderType,
         pub cache_dir: PathBuf,
         pub max_per_core_load: f64,
+        pub message_broker: Option<MessageBroker>,
         pub num_cpus_to_ignore: usize,
         pub toolchain_cache_size: u64,
         pub toolchains: CacheConfigs,
@@ -1438,13 +1425,10 @@ pub mod server {
     impl Default for FileConfig {
         fn default() -> Self {
             Self {
-                message_broker: Some(MessageBrokerConfigs {
-                    amqp: std::env::var("AMQP_ADDR").ok().map(MessageBroker::AMQP),
-                    redis: std::env::var("REDIS_ADDR").ok().map(MessageBroker::Redis),
-                }),
                 builder: BuilderType::Docker,
                 cache_dir: Default::default(),
                 max_per_core_load: default_max_per_core_load(),
+                message_broker: None,
                 num_cpus_to_ignore: default_num_cpus_to_ignore(),
                 toolchain_cache_size: default_toolchain_cache_size(),
                 toolchains: CacheConfigs {
@@ -1462,10 +1446,10 @@ pub mod server {
 
     #[derive(Debug)]
     pub struct Config {
-        pub message_broker: Option<MessageBroker>,
         pub builder: BuilderType,
         pub cache_dir: PathBuf,
         pub max_per_core_load: f64,
+        pub message_broker: Option<MessageBroker>,
         pub num_cpus_to_ignore: usize,
         pub toolchain_cache_size: u64,
         pub toolchains: Option<CacheType>,
@@ -1503,11 +1487,13 @@ pub mod server {
 
             let (toolchains, toolchains_fallback) = conf_caches.into_fallback();
 
+            let message_broker = message_broker_from_env().or(message_broker);
+
             Ok(Self {
-                message_broker: message_broker.and_then(|mb| mb.amqp.or(mb.redis)),
                 builder,
                 cache_dir,
                 max_per_core_load,
+                message_broker,
                 num_cpus_to_ignore,
                 toolchain_cache_size,
                 toolchains,
@@ -1526,17 +1512,7 @@ pub mod server {
                 builder: server_config.builder.clone(),
                 cache_dir: server_config.cache_dir.clone(),
                 max_per_core_load: server_config.max_per_core_load,
-                message_broker: match server_config.message_broker {
-                    Some(MessageBroker::AMQP(conf)) => Some(MessageBrokerConfigs {
-                        amqp: Some(MessageBroker::AMQP(conf)),
-                        ..Default::default()
-                    }),
-                    Some(MessageBroker::Redis(conf)) => Some(MessageBrokerConfigs {
-                        redis: Some(MessageBroker::Redis(conf)),
-                        ..Default::default()
-                    }),
-                    None => Default::default(),
-                },
+                message_broker: server_config.message_broker,
                 num_cpus_to_ignore: server_config.num_cpus_to_ignore,
                 toolchain_cache_size: server_config.toolchain_cache_size,
                 toolchains: server_config

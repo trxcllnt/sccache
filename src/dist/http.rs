@@ -331,7 +331,7 @@ mod client {
             let (sndr, recv) = match connect().await.context("WebSocket connect failed") {
                 Ok(res) => res,
                 Err(err) => {
-                    warn!("{err}");
+                    info!("{err}");
                     return Err(anyhow!(err));
                 }
             };
@@ -632,7 +632,7 @@ mod client {
                                     {
                                         Ok(res) => res,
                                         Err(err) => {
-                                            error!("Failed to connect to dist server: {err}");
+                                            info!("Failed to connect to dist server: {err}");
                                             return Err(anyhow!(err));
                                         }
                                     };

@@ -129,8 +129,6 @@ fn run(command: Command) -> Result<()> {
             toolchains_fallback,
             toolchains,
         }) => {
-            let broker_uri = message_broker_uri(message_broker)?;
-
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
@@ -151,10 +149,11 @@ fn run(command: Command) -> Result<()> {
                     }
                 }
 
-                let scheduler_id = format!(
-                    "sccache-dist-scheduler-{}",
-                    uuid::Uuid::new_v4().to_u128_le()
-                );
+                let scheduler_id =
+                    format!("sccache-dist-scheduler-{}", uuid::Uuid::new_v4().simple());
+
+                let broker_uri = message_broker_uri(message_broker)?;
+                tracing::debug!("Message broker URI: {broker_uri}");
 
                 let task_queue = Arc::new(
                     celery::CeleryBuilder::new("sccache-dist", &broker_uri)
@@ -264,8 +263,6 @@ fn run(command: Command) -> Result<()> {
             toolchains,
             toolchains_fallback,
         }) => {
-            let broker_uri = message_broker_uri(message_broker)?;
-
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
@@ -292,8 +289,34 @@ fn run(command: Command) -> Result<()> {
 
                 let num_cpus = (num_cpus - num_cpus_to_ignore).max(1) as f64;
                 let prefetch_count = (num_cpus * max_per_core_load).floor().max(1f64) as u16;
-                let server_id =
-                    env::var("SCCACHE_DIST_SERVER_ID").unwrap_or(uuid::Uuid::new_v4().to_string());
+                let server_id = env::var("SCCACHE_DIST_SERVER_ID")
+                    .unwrap_or(uuid::Uuid::new_v4().simple().to_string());
+
+                let broker_uri = message_broker_uri(message_broker)?;
+                tracing::debug!("Message broker URI: {broker_uri}");
+
+                let task_queue = Arc::new(
+                    celery::CeleryBuilder::new("sccache-dist", &broker_uri)
+                        .default_queue("sccache-dist-servers")
+                        .task_content_type(MessageContentType::MsgPack)
+                        .task_route("scheduler_server_heartbeat", "sccache-dist-schedulers")
+                        .prefetch_count(prefetch_count)
+                        .heartbeat(Some(10))
+                        .acks_late(true)
+                        .acks_on_failure_or_timeout(false)
+                        .nacks_enabled(true)
+                        .build()
+                        .await
+                        .map_err(|err| {
+                            let err_message = match err {
+                                CeleryError::BrokerError(err) => err.to_string(),
+                                err => err.to_string(),
+                            };
+                            anyhow!("{}\n\n{}", err_message, message_broker_info_text())
+                        })?,
+                );
+
+                task_queue.register_task::<server_run_build>().await?;
 
                 let builder: Box<dyn dist::BuilderIncoming> = match builder {
                     #[cfg(not(target_os = "freebsd"))]
@@ -330,29 +353,6 @@ fn run(command: Command) -> Result<()> {
                             .unwrap_or("")
                     ),
                 };
-
-                let task_queue = Arc::new(
-                    celery::CeleryBuilder::new("sccache-dist", &broker_uri)
-                        .default_queue("sccache-dist-servers")
-                        .task_content_type(MessageContentType::MsgPack)
-                        .task_route("scheduler_server_heartbeat", "sccache-dist-schedulers")
-                        .prefetch_count(prefetch_count)
-                        .heartbeat(Some(10))
-                        .acks_late(true)
-                        .acks_on_failure_or_timeout(false)
-                        .nacks_enabled(true)
-                        .build()
-                        .await
-                        .map_err(|err| {
-                            let err_message = match err {
-                                CeleryError::BrokerError(err) => err.to_string(),
-                                err => err.to_string(),
-                            };
-                            anyhow!("{}\n\n{}", err_message, message_broker_info_text())
-                        })?,
-                );
-
-                task_queue.register_task::<server_run_build>().await?;
 
                 let server = Arc::new(Server::new(
                     max_per_core_load,
@@ -498,7 +498,7 @@ impl SchedulerService for Scheduler {
     async fn new_job(&self, request: NewJobRequest) -> Result<NewJobResponse> {
         Ok(NewJobResponse {
             has_toolchain: self.has_toolchain(request.toolchain).await,
-            job_id: uuid::Uuid::new_v4().to_string(),
+            job_id: uuid::Uuid::new_v4().simple().to_string(),
             timeout: self.job_time_limit,
         })
     }
