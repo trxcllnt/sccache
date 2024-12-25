@@ -1259,8 +1259,6 @@ pub mod scheduler {
 
             let (toolchains, toolchains_fallback) = conf_caches.into_fallback();
 
-            debug!("scheduler::Config {{ enable_web_socket_server={enable_web_socket_server:?}, job_time_limit={job_time_limit:?}, max_body_size={max_body_size:?} }}");
-
             let enable_web_socket_server =
                 bool_from_env_var("SCCACHE_DIST_ENABLE_WEB_SOCKET_SERVER")?
                     .or(enable_web_socket_server)
@@ -1276,8 +1274,6 @@ pub mod scheduler {
                 .or(max_body_size)
                 // 1GiB should be enough for toolchains and compile inputs, right?
                 .unwrap_or(1024 * 1024 * 1024);
-
-            debug!("scheduler::Config {{ enable_web_socket_server={enable_web_socket_server:?}, job_time_limit={job_time_limit:?}, max_body_size={max_body_size:?} }}");
 
             let message_broker = message_broker_from_env().or(message_broker);
 
@@ -1322,10 +1318,11 @@ pub mod scheduler {
 #[cfg(feature = "dist-server")]
 pub mod server {
     use super::{
-        config_from_env, message_broker_from_env, try_read_config_file, CacheConfigs,
-        CacheModeConfig, CacheType, DiskCacheConfig, MessageBroker,
+        config_from_env, message_broker_from_env, number_from_env_var, try_read_config_file,
+        CacheConfigs, CacheModeConfig, CacheType, DiskCacheConfig, MessageBroker,
     };
     use serde::{Deserialize, Serialize};
+    use std::env;
     use std::path::PathBuf;
     use std::str::FromStr;
 
@@ -1334,21 +1331,6 @@ pub mod server {
     const TEN_GIGS: u64 = 10 * 1024 * 1024 * 1024;
     fn default_toolchain_cache_size() -> u64 {
         TEN_GIGS
-    }
-
-    pub fn default_max_per_core_load() -> f64 {
-        std::env::var("SCCACHE_DIST_MAX_PER_CORE_LOAD")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            // Default to 2
-            .unwrap_or(2f64)
-    }
-
-    fn default_num_cpus_to_ignore() -> usize {
-        std::env::var("SCCACHE_DIST_NUM_CPUS_TO_IGNORE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0)
     }
 
     const DEFAULT_POT_CLONE_FROM: &str = "sccache-template";
@@ -1417,10 +1399,11 @@ pub mod server {
     pub struct FileConfig {
         pub builder: BuilderType,
         pub cache_dir: PathBuf,
-        pub max_per_core_load: f64,
+        pub max_per_core_load: Option<f64>,
         pub message_broker: Option<MessageBroker>,
-        pub num_cpus_to_ignore: usize,
-        pub toolchain_cache_size: u64,
+        pub num_cpus_to_ignore: Option<usize>,
+        pub server_id: Option<String>,
+        pub toolchain_cache_size: Option<u64>,
         pub toolchains: CacheConfigs,
     }
 
@@ -1429,10 +1412,11 @@ pub mod server {
             Self {
                 builder: BuilderType::Docker,
                 cache_dir: Default::default(),
-                max_per_core_load: default_max_per_core_load(),
+                max_per_core_load: None,
                 message_broker: None,
-                num_cpus_to_ignore: default_num_cpus_to_ignore(),
-                toolchain_cache_size: default_toolchain_cache_size(),
+                num_cpus_to_ignore: None,
+                server_id: None,
+                toolchain_cache_size: None,
                 toolchains: CacheConfigs {
                     disk: Some(DiskCacheConfig {
                         dir: PathBuf::from_str("/tmp/sccache/toolchains").unwrap(),
@@ -1453,6 +1437,7 @@ pub mod server {
         pub max_per_core_load: f64,
         pub message_broker: Option<MessageBroker>,
         pub num_cpus_to_ignore: usize,
+        pub server_id: String,
         pub toolchain_cache_size: u64,
         pub toolchains: Option<CacheType>,
         pub toolchains_fallback: DiskCacheConfig,
@@ -1468,6 +1453,7 @@ pub mod server {
                 cache_dir,
                 max_per_core_load,
                 num_cpus_to_ignore,
+                server_id,
                 toolchain_cache_size,
                 toolchains,
             } = conf_path
@@ -1489,7 +1475,28 @@ pub mod server {
 
             let (toolchains, toolchains_fallback) = conf_caches.into_fallback();
 
+            let max_per_core_load = number_from_env_var("SCCACHE_DIST_MAX_PER_CORE_LOAD")
+                .transpose()?
+                .or(max_per_core_load)
+                // Default to 2
+                .unwrap_or(2f64);
+
+            let num_cpus_to_ignore = number_from_env_var("SCCACHE_DIST_NUM_CPUS_TO_IGNORE")
+                .transpose()?
+                .or(num_cpus_to_ignore)
+                .unwrap_or(0);
+
             let message_broker = message_broker_from_env().or(message_broker);
+
+            let server_id = env::var("SCCACHE_DIST_SERVER_ID")
+                .ok()
+                .or(server_id)
+                .unwrap_or(uuid::Uuid::new_v4().simple().to_string());
+
+            let toolchain_cache_size = number_from_env_var("SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE")
+                .transpose()?
+                .or(toolchain_cache_size)
+                .unwrap_or(default_toolchain_cache_size());
 
             Ok(Self {
                 builder,
@@ -1497,6 +1504,7 @@ pub mod server {
                 max_per_core_load,
                 message_broker,
                 num_cpus_to_ignore,
+                server_id,
                 toolchain_cache_size,
                 toolchains,
                 toolchains_fallback,
@@ -1513,10 +1521,11 @@ pub mod server {
             Self {
                 builder: server_config.builder.clone(),
                 cache_dir: server_config.cache_dir.clone(),
-                max_per_core_load: server_config.max_per_core_load,
+                max_per_core_load: Some(server_config.max_per_core_load),
                 message_broker: server_config.message_broker,
-                num_cpus_to_ignore: server_config.num_cpus_to_ignore,
-                toolchain_cache_size: server_config.toolchain_cache_size,
+                num_cpus_to_ignore: Some(server_config.num_cpus_to_ignore),
+                server_id: Some(server_config.server_id),
+                toolchain_cache_size: Some(server_config.toolchain_cache_size),
                 toolchains: server_config
                     .toolchains
                     .map(|x| x.clone().into())

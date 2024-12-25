@@ -259,6 +259,7 @@ fn run(command: Command) -> Result<()> {
             cache_dir,
             max_per_core_load,
             num_cpus_to_ignore,
+            server_id,
             toolchain_cache_size,
             toolchains,
             toolchains_fallback,
@@ -289,8 +290,6 @@ fn run(command: Command) -> Result<()> {
 
                 let num_cpus = (num_cpus - num_cpus_to_ignore).max(1) as f64;
                 let prefetch_count = (num_cpus * max_per_core_load).floor().max(1f64) as u16;
-                let server_id = env::var("SCCACHE_DIST_SERVER_ID")
-                    .unwrap_or(uuid::Uuid::new_v4().simple().to_string());
 
                 let broker_uri = message_broker_uri(message_broker)?;
                 tracing::debug!("Message broker URI: {broker_uri}");
