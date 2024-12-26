@@ -415,9 +415,17 @@ mod internal {
                                     }
                                     Message::Close(Some(CloseFrame { code, reason })) => {
                                         return std::ops::ControlFlow::Break(format!(
-                                            "WebSocket disconnected code={}, reason=`{}`",
-                                            code, reason
+                                            "WebSocket disconnected code={code}, reason=`{reason}`"
                                         ));
+                                    }
+                                    Message::Ping(buf) => {
+                                        if sndr.lock().await.send(Message::Pong(buf)).await.is_err()
+                                        {
+                                            return std::ops::ControlFlow::Break(
+                                                "WebSocket failed to respond to client ping".into(),
+                                            );
+                                        }
+                                        return std::ops::ControlFlow::Continue(String::new());
                                     }
                                     Message::Text(str) => {
                                         return std::ops::ControlFlow::Continue(format!(
