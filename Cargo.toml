@@ -139,7 +139,9 @@ rouille = { version = "3.6", optional = true, default-features = false, features
 syslog = { version = "6", optional = true }
 tokio-openssl = { version = "0.6.5", optional = true }
 tokio-stream = { version = "0.1.17", optional = true }
-tokio-tungstenite = { version = "0.24", optional = true }
+tokio-tungstenite = { version = "0.24", optional = true, features = [
+  "rustls-tls-native-roots",
+] }
 tower-http = { version = "0.6", features = [
   "request-id",
   "sensitive-headers",
