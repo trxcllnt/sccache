@@ -315,48 +315,45 @@ mod internal {
                         },
                     ),
                 )
-        }
-
-        fn with_http_routes(app: axum::Router) -> axum::Router {
-            app.route(
-                "/api/v2/jobs/new",
-                routing::post(
-                    |// Authenticate the client bearer token first
-                     _: AuthenticatedClient,
-                     headers: HeaderMap,
-                     method: Method,
-                     uri: Uri,
-                     Extension(state): Extension<Arc<SchedulerState>>,
-                     Bincode(req): Bincode<NewJobRequest>| async move {
-                        state.service.new_job(req).await.map_or_else(
-                            anyhow_to_response(method, uri),
-                            result_to_response(headers),
-                        )
-                    },
-                ),
-            )
-            .route(
-                "/api/v2/job/:job_id/run",
-                routing::post(
-                    |// Authenticate the client bearer token first
-                     _: AuthenticatedClient,
-                     headers: HeaderMap,
-                     method: Method,
-                     uri: Uri,
-                     Extension(state): Extension<Arc<SchedulerState>>,
-                     Path(job_id): Path<String>,
-                     Bincode(req): Bincode<RunJobRequest>| async move {
-                        if job_id != req.job_id {
-                            Ok((StatusCode::BAD_REQUEST).into_response())
-                        } else {
-                            state.service.run_job(req).await.map_or_else(
+                .route(
+                    "/api/v2/jobs/new",
+                    routing::post(
+                        |// Authenticate the client bearer token first
+                         _: AuthenticatedClient,
+                         headers: HeaderMap,
+                         method: Method,
+                         uri: Uri,
+                         Extension(state): Extension<Arc<SchedulerState>>,
+                         Bincode(req): Bincode<NewJobRequest>| async move {
+                            state.service.new_job(req).await.map_or_else(
                                 anyhow_to_response(method, uri),
                                 result_to_response(headers),
                             )
-                        }
-                    },
-                ),
-            )
+                        },
+                    ),
+                )
+                .route(
+                    "/api/v2/job/:job_id/run",
+                    routing::post(
+                        |// Authenticate the client bearer token first
+                         _: AuthenticatedClient,
+                         headers: HeaderMap,
+                         method: Method,
+                         uri: Uri,
+                         Extension(state): Extension<Arc<SchedulerState>>,
+                         Path(job_id): Path<String>,
+                         Bincode(req): Bincode<RunJobRequest>| async move {
+                            if job_id != req.job_id {
+                                Ok((StatusCode::BAD_REQUEST).into_response())
+                            } else {
+                                state.service.run_job(req).await.map_or_else(
+                                    anyhow_to_response(method, uri),
+                                    result_to_response(headers),
+                                )
+                            }
+                        },
+                    ),
+                )
         }
 
         fn with_websocket_routes(app: axum::Router) -> axum::Router {
@@ -448,7 +445,7 @@ mod internal {
                                 },
                             };
 
-                            tracing::trace!("WebSocket received request: id={req_id} req={req}");
+                            tracing::debug!("WebSocket received request: id={req_id} req={req}");
 
                             let res = match req {
                                 ClientOutgoing::NewJob(req) => match service.new_job(req).await {
@@ -465,7 +462,7 @@ mod internal {
                                 },
                             };
 
-                            tracing::trace!("WebSocket sending response: id={req_id} res={res}");
+                            tracing::debug!("WebSocket sending response: id={req_id} res={res}");
 
                             // Serialize the request
                             let buf = match bincode_serialize((req_id.clone(), res)).await {
@@ -526,7 +523,7 @@ mod internal {
         ) -> Result<()> {
             let state = self.state.clone();
 
-            let mut app = Self::with_http_routes(Self::make_router());
+            let mut app = Self::make_router();
 
             if enable_web_socket_server {
                 app = Self::with_websocket_routes(app);

@@ -16,7 +16,10 @@
 pub use self::client::Client;
 #[cfg(feature = "dist-server")]
 pub use self::{
-    common::{bincode_deserialize, bincode_req_fut, bincode_serialize, for_all_concurrent},
+    common::{
+        bincode_deserialize, bincode_req_fut, bincode_serialize, for_all_concurrent,
+        ResourceLoaderQueue,
+    },
     server::{ClientAuthCheck, ClientVisibleMsg},
 };
 
@@ -54,9 +57,15 @@ pub fn get_dist_request_timeout() -> Duration {
 mod common {
     use reqwest::header;
 
-    use futures::{FutureExt, StreamExt, TryFutureExt};
+    use futures::{lock::Mutex, FutureExt, StreamExt, TryFutureExt};
+    use std::cmp::Eq;
+    use std::collections::HashMap;
+    use std::hash::Hash;
+    use std::ops::DerefMut;
+    use std::sync::Arc;
 
     use crate::errors::*;
+    use crate::lru_disk_cache::LruCache;
 
     pub fn for_all_concurrent<S, F, Fut>(
         pool: &tokio::runtime::Handle,
@@ -208,6 +217,84 @@ mod common {
             Ok(bincode::deserialize(&bytes)?)
         }
     }
+
+    pub struct ResourceLoaderQueue<K: Eq + Hash, V> {
+        fetch: Arc<
+            dyn Fn(&K) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<V>> + Send>>
+                + Send
+                + Sync,
+        >,
+        state: Arc<
+            Mutex<(
+                LruCache<K, V>,
+                HashMap<K, tokio::sync::broadcast::Sender<V>>,
+            )>,
+        >,
+    }
+
+    impl<K, V> ResourceLoaderQueue<K, V>
+    where
+        K: Clone + std::fmt::Debug + Eq + Hash + Send + Sync + 'static,
+        V: Clone + Send + Sync + 'static,
+    {
+        pub fn new<
+            F: Fn(&K) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<V>> + Send>>
+                + Send
+                + Sync
+                + 'static,
+        >(
+            capacity: u64,
+            fetch: F,
+        ) -> Self {
+            Self {
+                fetch: Arc::new(fetch),
+                state: Arc::new(Mutex::new((LruCache::new(capacity), HashMap::new()))),
+            }
+        }
+
+        pub async fn enqueue(&self, input: &K) -> Result<V> {
+            let mut state = self.state.lock().await;
+            let (fetched, pending) = state.deref_mut();
+            if fetched.capacity() > 0 {
+                if let Some(val) = fetched.get(input) {
+                    return Ok(val.clone());
+                }
+            }
+            let mut recv = if let Some(sndr) = pending.get(input) {
+                sndr.subscribe()
+            } else {
+                let (sndr, recv) = tokio::sync::broadcast::channel(1);
+                pending.insert(input.clone(), sndr);
+                tokio::runtime::Handle::current().spawn({
+                    let input = input.clone();
+                    let fetch = self.fetch.clone();
+                    let state = self.state.clone();
+                    async move {
+                        let val = match fetch(&input).await {
+                            Ok(val) => val,
+                            Err(_) => {
+                                state.lock().await.1.remove(&input);
+                                return;
+                            }
+                        };
+                        let mut state = state.lock().await;
+                        let (fetched, pending) = state.deref_mut();
+                        let sender = pending.remove(&input).unwrap();
+                        if fetched.capacity() > 0 {
+                            fetched.insert(input, val.clone());
+                        }
+                        let _ = sender.send(val);
+                    }
+                });
+
+                recv
+            };
+
+            drop(state);
+
+            recv.recv().await.map_err(anyhow::Error::new)
+        }
+    }
 }
 
 pub mod urls {
@@ -289,7 +376,7 @@ mod client {
     use std::path::{Path, PathBuf};
 
     use super::common::{bincode_req_fut, for_all_concurrent, ReqwestRequestBuilderExt};
-    use super::urls;
+    use super::{urls, ResourceLoaderQueue};
     use crate::errors::*;
 
     type WebSocketCallback<Incoming> = tokio::sync::oneshot::Sender<Incoming>;
@@ -371,7 +458,7 @@ mod client {
 
                     async move {
                         // Send the ping. Abort on error.
-                        if sndr.lock().await.send(Message::Ping(vec![])).await.is_err() {
+                        if sndr.lock().await.send(Message::Ping(uuid::Uuid::new_v4().as_bytes().into())).await.is_err() {
                             return std::ops::ControlFlow::Break("WebSocket send failure".into());
                         }
                         std::ops::ControlFlow::Continue(String::new())
@@ -602,8 +689,7 @@ mod client {
         pool: tokio::runtime::Handle,
         tc_cache: Arc<cache::ClientToolchains>,
         rewrite_includes_only: bool,
-        pending_toolchain_submissions:
-            Arc<Mutex<HashMap<Toolchain, tokio::sync::broadcast::Sender<SubmitToolchainResult>>>>,
+        submit_toolchain_reqs: ResourceLoaderQueue<(Toolchain, PathBuf), SubmitToolchainResult>,
     }
 
     impl Client {
@@ -617,17 +703,39 @@ mod client {
             rewrite_includes_only: bool,
         ) -> Result<Self> {
             let client = new_reqwest_client();
+            let client = Arc::new(Mutex::new(client));
             let client_toolchains =
                 cache::ClientToolchains::new(cache_dir, cache_size, toolchain_configs)
                     .context("failed to initialise client toolchains")?;
 
+            let submit_toolchain_reqs = ResourceLoaderQueue::new(0, {
+                let client = client.clone();
+                let auth_token = auth_token.clone();
+                let scheduler_url = scheduler_url.clone();
+
+                move |(tc, path): &(Toolchain, PathBuf)| {
+                    let path = path.clone();
+                    let client = client.clone();
+                    let auth_token = auth_token.clone();
+                    let url = urls::scheduler_submit_toolchain(&scheduler_url, &tc.archive_id);
+                    Box::pin(async move {
+                        let req = client.lock().await.put(url).bearer_auth(auth_token).body(
+                            Body::wrap_stream(tokio_util::io::ReaderStream::new(
+                                tokio::fs::File::open(path).await?,
+                            )),
+                        );
+                        bincode_req_fut::<SubmitToolchainResult>(req).await
+                    })
+                }
+            });
+
             Ok(Self {
                 auth_token: auth_token.clone(),
                 scheduler_url: scheduler_url.clone(),
-                client: Arc::new(Mutex::new(client)),
-                pending_toolchain_submissions: Default::default(),
+                client,
                 pool: pool.clone(),
                 tc_cache: Arc::new(client_toolchains),
+                submit_toolchain_reqs,
                 rewrite_includes_only,
                 ws_client: tokio::sync::OnceCell::new_with(
                     {
@@ -653,7 +761,7 @@ mod client {
                                     match tokio_tungstenite::connect_async_with_config(
                                         connect_req,
                                         Some(config),
-                                        true,
+                                        false,
                                     )
                                     .await
                                     {
@@ -708,15 +816,14 @@ mod client {
                     Ok(res) => Err(anyhow!("Unexpected new_job response: {res:?}")),
                 }
             } else {
-                bincode_req_fut(
-                    self.client
-                        .lock()
-                        .await
-                        .post(urls::scheduler_new_job(&self.scheduler_url))
-                        .bearer_auth(self.auth_token.clone())
-                        .bincode(&toolchain)?,
-                )
-                .await
+                let req = self
+                    .client
+                    .lock()
+                    .await
+                    .post(urls::scheduler_new_job(&self.scheduler_url))
+                    .bearer_auth(self.auth_token.clone())
+                    .bincode(&toolchain)?;
+                bincode_req_fut(req).await
             }
         }
 
@@ -777,96 +884,43 @@ mod client {
                     Ok(res) => Err(anyhow!("Unexpected run_job response: {res:?}")),
                 }
             } else {
-                bincode_req_fut(
-                    self.client
-                        .lock()
-                        .await
-                        .post(urls::scheduler_run_job(&self.scheduler_url, &req.job_id))
-                        .bearer_auth(self.auth_token.clone())
-                        .timeout(timeout)
-                        .bincode(&req)?,
-                )
-                .await
+                debug!(
+                    "[run_job({})]: sending scheduler_run_job request",
+                    req.job_id
+                );
+                let req = self
+                    .client
+                    .lock()
+                    .await
+                    .post(urls::scheduler_run_job(&self.scheduler_url, &req.job_id))
+                    .bearer_auth(self.auth_token.clone())
+                    .timeout(timeout)
+                    .bincode(&req)?;
+                bincode_req_fut(req).await
             }
             .map(|res| (res, path_transformer))
         }
 
         async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
-            bincode_req_fut(
-                self.client
-                    .lock()
-                    .await
-                    .get(urls::scheduler_status(&self.scheduler_url))
-                    .bearer_auth(self.auth_token.clone()),
-            )
-            .await
+            let req = self
+                .client
+                .lock()
+                .await
+                .get(urls::scheduler_status(&self.scheduler_url))
+                .bearer_auth(self.auth_token.clone());
+            bincode_req_fut(req).await
         }
 
         async fn do_submit_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
-            let mut rx = match self.tc_cache.get_toolchain(&tc) {
+            match self.tc_cache.get_toolchain(&tc) {
                 Ok(Some(toolchain_file)) => {
-                    let pending_tc_subs = self.pending_toolchain_submissions.clone();
-                    let mut pending_subs = pending_tc_subs.lock().await;
-                    if !pending_subs.contains_key(&tc) {
-                        let (tx, rx) = tokio::sync::broadcast::channel(1);
-                        pending_subs.insert(tc.clone(), tx);
-                        self.pool.clone().spawn({
-                            let tc = tc.clone();
-                            let tc_id = tc.archive_id.clone();
-                            let auth_token = self.auth_token.clone();
-                            let http_client = self.client.clone();
-                            let pending_tc_subs = pending_tc_subs.clone();
-                            let scheduler_url = self.scheduler_url.clone();
-
-                            async move {
-                                let res = match bincode_req_fut::<SubmitToolchainResult>(
-                                    http_client
-                                        .lock()
-                                        .await
-                                        .put(urls::scheduler_submit_toolchain(
-                                            &scheduler_url,
-                                            &tc_id,
-                                        ))
-                                        .bearer_auth(auth_token.clone())
-                                        .body(Body::wrap_stream(
-                                            tokio_util::io::ReaderStream::new(
-                                                tokio::fs::File::from_std(toolchain_file.into()),
-                                            ),
-                                        )),
-                                )
-                                .await
-                                {
-                                    Ok(res) => {
-                                        debug!("[do_submit_toolchain({})]: {:?}", tc_id, res);
-                                        res
-                                    }
-                                    Err(err) => {
-                                        warn!("[do_submit_toolchain({})]: {:?}", tc_id, err);
-                                        SubmitToolchainResult::Error {
-                                            message: format!("{err}"),
-                                        }
-                                    }
-                                };
-
-                                pending_tc_subs
-                                    .lock()
-                                    .await
-                                    .remove(&tc)
-                                    .unwrap()
-                                    .send(res)
-                                    .unwrap();
-                            }
-                        });
-                        rx
-                    } else {
-                        pending_subs.get(&tc).unwrap().subscribe()
-                    }
+                    self.submit_toolchain_reqs
+                        .enqueue(&(tc, toolchain_file.path().to_path_buf()))
+                        .await
                 }
                 Ok(None) => return Err(anyhow!("couldn't find toolchain locally")),
                 Err(e) => return Err(e),
-            };
-
-            rx.recv().await.map_err(anyhow::Error::new)
+            }
         }
 
         async fn put_toolchain(

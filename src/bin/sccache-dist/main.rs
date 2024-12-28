@@ -282,11 +282,11 @@ fn run(command: Command) -> Result<()> {
                     .await
                     .context("Failed to initialize toolchain storage")?;
 
-                let toolchains_disk_cache = Arc::new(Mutex::new(ServerToolchains::new(
+                let server_toolchains = ServerToolchains::new(
                     &cache_dir.join("tc"),
                     toolchain_cache_size,
                     toolchain_storage,
-                )));
+                );
 
                 let num_cpus = (num_cpus - num_cpus_to_ignore).max(1) as f64;
                 let prefetch_count = (num_cpus * max_per_core_load).floor().max(1f64) as u16;
@@ -359,7 +359,7 @@ fn run(command: Command) -> Result<()> {
                     server_id,
                     builder,
                     task_queue.clone(),
-                    toolchains_disk_cache,
+                    server_toolchains,
                 ));
 
                 SERVER.set(server.clone()).map_err(|err| anyhow!("{err}"))?;
@@ -645,7 +645,7 @@ pub struct Server {
     builder: Box<dyn crate::dist::BuilderIncoming>,
     jobs: Arc<Mutex<HashMap<String, (String, String)>>>,
     task_queue: Arc<celery::Celery>,
-    toolchains: Arc<Mutex<ServerToolchains>>,
+    toolchains: ServerToolchains,
 }
 
 impl Server {
@@ -655,7 +655,7 @@ impl Server {
         server_id: String,
         builder: Box<dyn crate::dist::BuilderIncoming>,
         task_queue: Arc<celery::Celery>,
-        toolchains: Arc<Mutex<ServerToolchains>>,
+        toolchains: ServerToolchains,
     ) -> Self {
         Self {
             max_per_core_load,
@@ -725,14 +725,14 @@ impl ServerService for Server {
             (scheduler_id.to_owned(), job_id.to_owned()),
         );
 
-        let tc_dir = self.toolchains.lock().await.acquire(&toolchain).await?;
+        let tc_dir = self.toolchains.acquire(&toolchain).await?;
 
         let result = self
             .builder
             .run_build(job_id, &tc_dir, command, outputs, inputs)
             .await;
 
-        self.toolchains.lock().await.release(&toolchain).await?;
+        self.toolchains.release(&toolchain).await?;
 
         result
     }
