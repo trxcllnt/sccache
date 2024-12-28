@@ -43,7 +43,16 @@ use std::time::Duration;
 use tempfile::NamedTempFile;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
-#[cfg(feature = "cloud-storage")]
+#[cfg(any(
+    feature = "azure",
+    feature = "gcs",
+    feature = "gha",
+    feature = "memcached",
+    feature = "redis",
+    feature = "s3",
+    feature = "webdav",
+    feature = "oss"
+))]
 use {crate::config, futures::AsyncWriteExt};
 
 use crate::errors::*;
@@ -466,7 +475,16 @@ impl PreprocessorCacheModeConfig {
 }
 
 /// Implement storage for operator.
-#[cfg(feature = "cloud-storage")]
+#[cfg(any(
+    feature = "azure",
+    feature = "gcs",
+    feature = "gha",
+    feature = "memcached",
+    feature = "redis",
+    feature = "s3",
+    feature = "webdav",
+    feature = "oss"
+))]
 #[async_trait]
 impl Storage for opendal::Operator {
     async fn get(&self, key: &str) -> Result<Cache> {
