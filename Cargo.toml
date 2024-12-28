@@ -183,7 +183,10 @@ version = "0.52"
 
 [features]
 all = [
+  "cloud-storage",
   "dist-client",
+]
+cloud-storage = [
   "redis",
   "s3",
   "memcached",
@@ -207,6 +210,7 @@ webdav = ["opendal/services-webdav", "reqwest"]
 # statically linked with it, instead of linking against the system-wide openssl
 # dynamically or statically.
 vendored-openssl = ["openssl?/vendored", "reqwest?/native-tls-vendored"]
+vendored-openssl = ["openssl?/vendored", "reqwest?/native-tls-vendored", "tokio-tungstenite?/native-tls-vendored"]
 # Enable features that require unstable features of Nightly Rust.
 unstable = []
 # Enables distributed support in the sccache client

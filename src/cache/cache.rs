@@ -33,18 +33,6 @@ use crate::compiler::PreprocessorCacheEntry;
 use crate::config::{CacheType, DiskCacheConfig};
 use async_trait::async_trait;
 use fs_err as fs;
-#[cfg(any(
-    feature = "azure",
-    feature = "gcs",
-    feature = "gha",
-    feature = "memcached",
-    feature = "redis",
-    feature = "s3",
-    feature = "webdav",
-    feature = "oss"
-))]
-use {crate::config, futures::AsyncWriteExt};
-
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{self, Cursor, Read, Seek, Write};
@@ -55,6 +43,8 @@ use std::time::Duration;
 use tempfile::NamedTempFile;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
+#[cfg(feature = "cloud-storage")]
+use {crate::config, futures::AsyncWriteExt};
 
 use crate::errors::*;
 
@@ -476,15 +466,7 @@ impl PreprocessorCacheModeConfig {
 }
 
 /// Implement storage for operator.
-#[cfg(any(
-    feature = "azure",
-    feature = "gcs",
-    feature = "gha",
-    feature = "memcached",
-    feature = "redis",
-    feature = "s3",
-    feature = "webdav",
-))]
+#[cfg(feature = "cloud-storage")]
 #[async_trait]
 impl Storage for opendal::Operator {
     async fn get(&self, key: &str) -> Result<Cache> {
