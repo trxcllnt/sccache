@@ -183,7 +183,7 @@ mod common {
     ) -> Result<T> {
         // // Work around tiny_http issue #151 by disabling HTTP pipeline with
         // // `Connection: close`.
-        let req = req.header(header::CONNECTION, "close");
+        // let req = req.header(header::CONNECTION, "close");
         let res = match req.send().await {
             Ok(res) => res,
             Err(err) => {

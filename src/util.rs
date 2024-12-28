@@ -938,7 +938,7 @@ pub fn daemonize() -> Result<()> {
 pub fn new_reqwest_client() -> reqwest::Client {
     reqwest::Client::builder()
         // Disable connection pool
-        .pool_max_idle_per_host(0)
+        // .pool_max_idle_per_host(0)
         .timeout(get_dist_request_timeout())
         .connect_timeout(get_dist_connect_timeout())
         .build()
