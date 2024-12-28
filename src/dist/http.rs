@@ -375,8 +375,10 @@ mod client {
     use std::io::Write;
     use std::path::{Path, PathBuf};
 
-    use super::common::{bincode_req_fut, for_all_concurrent, ReqwestRequestBuilderExt};
-    use super::{urls, ResourceLoaderQueue};
+    use super::common::{
+        bincode_req_fut, for_all_concurrent, ReqwestRequestBuilderExt, ResourceLoaderQueue,
+    };
+    use super::urls;
     use crate::errors::*;
 
     type WebSocketCallback<Incoming> = tokio::sync::oneshot::Sender<Incoming>;

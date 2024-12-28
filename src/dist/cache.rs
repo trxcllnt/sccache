@@ -540,13 +540,10 @@ fn make_lru_key_path(key: &str) -> PathBuf {
 mod server {
     use async_compression::tokio::bufread::GzipDecoder;
 
-    use fs_err as fs;
     use futures::{lock::Mutex, StreamExt};
     use tokio::io::BufReader;
-    use tokio::sync::Notify;
     use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 
-    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -554,32 +551,32 @@ mod server {
     use crate::dist::http::ResourceLoaderQueue;
     use crate::dist::Toolchain;
     use crate::errors::*;
+    use crate::lru_disk_cache::{LruCache, Meter};
 
     use super::make_lru_key_path;
 
-    fn cached_toolchains_size(toolchains: &HashMap<Toolchain, (PathBuf, u64, i64)>) -> u64 {
-        toolchains.iter().map(|(_, (_, size, _))| size).sum()
+    fn cached_toolchains_size(
+        toolchains: &LruCache<Toolchain, (PathBuf, u64), std::hash::RandomState, ToolchainSize>,
+    ) -> u64 {
+        toolchains.iter().map(|(_, (_, size))| size).sum()
     }
 
     async fn load_toolchain_archive(
-        toolchain_id: &str,
-        toolchain_storage: &dyn cache::Storage,
+        id: &str,
+        tc_storage: &dyn cache::Storage,
     ) -> Result<async_tar::Archive<Box<dyn futures::AsyncRead + Send + Unpin>>> {
-        let reader = toolchain_storage.get_stream(toolchain_id).await?;
+        let reader = tc_storage.get_stream(id).await?;
         let reader = GzipDecoder::new(BufReader::new(reader.compat()));
         let reader = Box::new(reader.compat()) as Box<dyn futures::AsyncRead + Send + Unpin>;
         Ok(async_tar::Archive::new(reader))
     }
 
-    async fn load_toolchain_size(
-        toolchain_id: String,
-        toolchain_storage: Arc<dyn cache::Storage>,
-    ) -> Result<u64> {
-        trace!("[ServerToolchains({toolchain_id})]: Loading toolchain to compute inflated size");
+    async fn load_toolchain_size(id: String, tc_storage: Arc<dyn cache::Storage>) -> Result<u64> {
+        trace!("[ServerToolchains({id})]: Loading toolchain to compute inflated size");
 
         // Download the toolchain and compute its inflated size
         // TODO: Would be better if this was stored as metadata
-        let inflated_size = load_toolchain_archive(&toolchain_id, toolchain_storage.as_ref())
+        let inflated_size = load_toolchain_archive(&id, tc_storage.as_ref())
             .await?
             .entries()?
             .fold(0, |inflated_size, entry| async move {
@@ -591,184 +588,133 @@ mod server {
             })
             .await;
 
-        trace!("[ServerToolchains({toolchain_id})]: Computed inflated size: {inflated_size}");
+        trace!("[ServerToolchains({id})]: Computed inflated size: {inflated_size}");
 
         Ok(inflated_size)
     }
 
     async fn load_and_unpack_toolchain(
-        toolchain: Toolchain,
-        toolchain_dir: PathBuf,
-        toolchain_cache_capacity: u64,
-        toolchain_cache: Arc<Mutex<HashMap<Toolchain, (PathBuf, u64, i64)>>>,
-        toolchain_evicted: Arc<Notify>,
-        toolchain_sizes: Arc<ResourceLoaderQueue<Toolchain, u64>>,
-        toolchain_storage: Arc<dyn cache::Storage>,
+        tc: Toolchain,
+        root_dir: PathBuf,
+        tc_sizes: Arc<ResourceLoaderQueue<Toolchain, u64>>,
+        tc_storage: Arc<dyn cache::Storage>,
+        toolchains: Arc<
+            Mutex<LruCache<Toolchain, (PathBuf, u64), std::hash::RandomState, ToolchainSize>>,
+        >,
     ) -> Result<()> {
-        let toolchain_id = &toolchain.archive_id;
-        let inflated_size = toolchain_sizes.enqueue(&toolchain).await?;
-        let path = toolchain_dir.join(make_lru_key_path(toolchain_id));
+        let toolchain_id = &tc.archive_id;
+        let inflated_size = tc_sizes.enqueue(&tc).await?;
+        let path = root_dir.join(make_lru_key_path(toolchain_id));
 
-        loop {
-            // Hold this lock until after the toolchain is unpacked
-            let mut cached_toolchains = toolchain_cache.lock().await;
-            let cached_size = cached_toolchains_size(&cached_toolchains) + inflated_size;
-            if cached_size <= toolchain_cache_capacity {
-                trace!("[ServerToolchains({toolchain_id})]: Unpacking toolchain to {path:?}");
-                // Load and unpack the toolchain
-                // TODO: Cache the compressed toolchain on disk instead of downloading it again
-                load_toolchain_archive(toolchain_id, toolchain_storage.as_ref())
-                    .await?
-                    .unpack(&path)
-                    .await
-                    .context("Failed to unpack toolchain")?;
-                debug!("ServerToolchains({toolchain_id})]: Toolchain unpacked, new cache size is: {cached_size}");
-                // Insert the toolchain entry into the map
-                cached_toolchains.insert(toolchain, (path.clone(), inflated_size, 0));
-                return Ok(());
+        // Hold this lock until after the toolchain is unpacked
+        let mut cached_toolchains = toolchains.lock().await;
+        let mut cached_size = cached_toolchains_size(&cached_toolchains);
+
+        // Remove old toolchains if necessary
+        while cached_size + inflated_size > cached_toolchains.capacity() {
+            if let Some((toolchain, (path, inflated_size))) = cached_toolchains.remove_lru() {
+                if path.exists() {
+                    trace!("[ServerToolchains({})]: Removing toolchain with size={inflated_size}, path={path:?}", toolchain.archive_id);
+                    tokio::fs::remove_dir_all(&path)
+                        .await
+                        .expect("Failed to clean up toolchain directory");
+                    cached_size = cached_toolchains_size(&cached_toolchains);
+                }
+            } else {
+                break;
             }
-            trace!("[ServerToolchains({toolchain_id})]: Toolchain cache full, waiting for next eviction to unpack");
-            toolchain_evicted.notified().await;
+        }
+
+        // Load and unpack the toolchain
+        trace!("[ServerToolchains({toolchain_id})]: Unpacking toolchain to {path:?}");
+        // TODO: Cache the compressed toolchain on disk instead of downloading it again
+        load_toolchain_archive(toolchain_id, tc_storage.as_ref())
+            .await?
+            .unpack(&path)
+            .await
+            .context("Failed to unpack toolchain")?;
+
+        cached_size += inflated_size;
+        debug!("ServerToolchains({toolchain_id})]: Toolchain unpacked, new cache size is: {cached_size}");
+
+        // Insert the toolchain entry into the map
+        cached_toolchains.insert(tc, (path.clone(), inflated_size));
+
+        Ok(())
+    }
+
+    struct ToolchainSize;
+
+    /// Given a tuple of (path, filesize), use the filesize for measurement.
+    impl<K> Meter<K, (PathBuf, u64)> for ToolchainSize {
+        type Measure = usize;
+        fn measure<Q: ?Sized>(&self, _: &Q, v: &(PathBuf, u64)) -> usize
+        where
+            K: std::borrow::Borrow<Q>,
+        {
+            v.1 as usize
         }
     }
 
     pub struct ServerToolchains {
-        cached_toolchains: Arc<Mutex<HashMap<Toolchain, (PathBuf, u64, i64)>>>,
-        cached_toolchains_dir: PathBuf,
-        toolchain_evicted: Arc<Notify>,
+        toolchains:
+            Arc<Mutex<LruCache<Toolchain, (PathBuf, u64), std::hash::RandomState, ToolchainSize>>>,
         toolchains_loader: ResourceLoaderQueue<Toolchain, ()>,
     }
 
     impl ServerToolchains {
-        pub fn new(
-            cached_toolchains_dir: &Path,
-            cached_toolchains_capacity: u64,
-            toolchain_storage: Arc<dyn cache::Storage>,
-        ) -> Self {
-            trace!(
-                "Using ServerToolchains({:?}, {})",
-                cached_toolchains_dir,
-                cached_toolchains_capacity
-            );
-            let cached_toolchains_dir = cached_toolchains_dir.to_owned();
-            let cached_toolchains =
-                Arc::new(Mutex::new(HashMap::<Toolchain, (PathBuf, u64, i64)>::new()));
-            let toolchain_evicted = Arc::new(Notify::new());
+        pub fn new(root_dir: &Path, capacity: u64, tc_storage: Arc<dyn cache::Storage>) -> Self {
+            trace!("Using ServerToolchains({:?}, {})", root_dir, capacity);
+
+            let toolchains = Arc::new(Mutex::new(LruCache::with_meter(capacity, ToolchainSize)));
 
             let toolchains_loader = ResourceLoaderQueue::new(0, {
-                // Local clones that the closure below can own
-                let cached_toolchains_dir = cached_toolchains_dir.clone();
-                let cached_toolchains = cached_toolchains.clone();
-                let toolchain_evicted = toolchain_evicted.clone();
-                let toolchain_sizes = Arc::new(ResourceLoaderQueue::new(
+                let tc_sizes = Arc::new(ResourceLoaderQueue::new(
                     // Arbitrary: remember the sizes of the 1000 most recent toolchains
                     1000,
                     {
-                        // Local clone that the closure below can own
-                        let toolchain_storage = toolchain_storage.clone();
-                        move |toolchain: &Toolchain| {
-                            let toolchain = toolchain.clone();
-                            let toolchain_storage = toolchain_storage.clone();
-                            Box::pin(load_toolchain_size(toolchain.archive_id, toolchain_storage))
+                        // Local clone that the closure can own
+                        let tc_storage = tc_storage.clone();
+                        move |tc: &Toolchain| {
+                            Box::pin(load_toolchain_size(
+                                tc.archive_id.clone(),
+                                tc_storage.clone(),
+                            ))
                         }
                     },
                 ));
 
-                move |toolchain: &Toolchain| {
+                // Local clones that the closure can own
+                let root_dir = root_dir.to_owned();
+                let toolchains = toolchains.clone();
+
+                move |tc: &Toolchain| {
                     Box::pin(load_and_unpack_toolchain(
-                        toolchain.clone(),
-                        cached_toolchains_dir.clone(),
-                        cached_toolchains_capacity,
-                        cached_toolchains.clone(),
-                        toolchain_evicted.clone(),
-                        toolchain_sizes.clone(),
-                        toolchain_storage.clone(),
+                        tc.clone(),
+                        root_dir.clone(),
+                        tc_sizes.clone(),
+                        tc_storage.clone(),
+                        toolchains.clone(),
                     ))
                 }
             });
 
             Self {
-                cached_toolchains_dir,
-                cached_toolchains,
+                toolchains,
                 toolchains_loader,
-                toolchain_evicted,
             }
         }
 
         pub async fn acquire(&self, toolchain: &Toolchain) -> Result<PathBuf> {
             let toolchain_id = &toolchain.archive_id;
-
-            if !self.cached_toolchains.lock().await.contains_key(toolchain) {
+            loop {
+                if let Some((path, inflated_size)) = self.toolchains.lock().await.get(toolchain) {
+                    trace!("[ServerToolchains({toolchain_id})]: Acquired toolchain with size={inflated_size}");
+                    return Ok(path.clone());
+                }
                 trace!("[ServerToolchains({toolchain_id})]: Loading toolchain");
                 self.toolchains_loader.enqueue(toolchain).await?;
             }
-
-            if let Some((path, inflated_size, refcount)) =
-                self.cached_toolchains.lock().await.get_mut(toolchain)
-            {
-                *refcount += 1;
-                trace!("[ServerToolchains({toolchain_id})]: Acquired toolchain with size={inflated_size}, refcount={refcount}");
-                Ok(path.clone())
-            } else {
-                Err(anyhow!("Could not load toolchain {toolchain_id}"))
-            }
-        }
-
-        pub async fn release(&self, toolchain: &Toolchain) -> Result<()> {
-            trace!(
-                "ServerToolchains::release({})]: Releasing toolchain",
-                toolchain.archive_id
-            );
-
-            let mut cached_toolchains = self.cached_toolchains.lock().await;
-            let cache_size_start = cached_toolchains_size(&cached_toolchains);
-
-            let unused_toolchains = cached_toolchains
-                .iter_mut()
-                .filter_map(|(tc, (_, inflated_size, refcount))| {
-                    if tc == toolchain {
-                        *refcount = (*refcount - 1).max(0);
-                        trace!("[ServerToolchains({})]: Released toolchain with size={inflated_size}, refcount={refcount}", tc.archive_id);
-                    }
-                    if *refcount <= 0 {
-                        Some(tc.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            for toolchain in unused_toolchains {
-                cached_toolchains.remove(&toolchain);
-
-                let path = self
-                    .cached_toolchains_dir
-                    .join(make_lru_key_path(&toolchain.archive_id));
-
-                if path.exists() {
-                    trace!(
-                        "ServerToolchains({})]: Removing toolchain dir {:?}",
-                        toolchain.archive_id,
-                        path
-                    );
-                    fs::remove_dir_all(&path).expect("Failed to clean up toolchain directory");
-                }
-            }
-
-            let cache_size_end = cached_toolchains_size(&cached_toolchains);
-
-            drop(cached_toolchains);
-
-            // Notify all waiting inserters if we evicted any toolchains
-            if cache_size_start != cache_size_end {
-                debug!(
-                    "ServerToolchains({})]: Evicted unused toolchains, new cache size is {cache_size_end}",
-                    toolchain.archive_id
-                );
-                self.toolchain_evicted.notify_waiters();
-            }
-
-            Ok(())
         }
     }
 }

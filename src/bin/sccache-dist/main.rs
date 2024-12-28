@@ -153,7 +153,7 @@ fn run(command: Command) -> Result<()> {
                     format!("sccache-dist-scheduler-{}", uuid::Uuid::new_v4().simple());
 
                 let broker_uri = message_broker_uri(message_broker)?;
-                tracing::debug!("Message broker URI: {broker_uri}");
+                tracing::trace!("Message broker URI: {broker_uri}");
 
                 let task_queue = Arc::new(
                     celery::CeleryBuilder::new("sccache-dist", &broker_uri)
@@ -292,7 +292,7 @@ fn run(command: Command) -> Result<()> {
                 let prefetch_count = (num_cpus * max_per_core_load).floor().max(1f64) as u16;
 
                 let broker_uri = message_broker_uri(message_broker)?;
-                tracing::debug!("Message broker URI: {broker_uri}");
+                tracing::trace!("Message broker URI: {broker_uri}");
 
                 let task_queue = Arc::new(
                     celery::CeleryBuilder::new("sccache-dist", &broker_uri)
@@ -364,9 +364,7 @@ fn run(command: Command) -> Result<()> {
 
                 SERVER.set(server.clone()).map_err(|err| anyhow!("{err}"))?;
 
-                tracing::debug!(
-                    "sccache: Server initialized to run {num_cpus} parallel build jobs"
-                );
+                tracing::info!("sccache: Server initialized to run {num_cpus} parallel build jobs");
 
                 task_queue.display_pretty().await;
 
@@ -725,16 +723,11 @@ impl ServerService for Server {
             (scheduler_id.to_owned(), job_id.to_owned()),
         );
 
-        let tc_dir = self.toolchains.acquire(&toolchain).await?;
+        let toolchain_dir = self.toolchains.acquire(&toolchain).await?;
 
-        let result = self
-            .builder
-            .run_build(job_id, &tc_dir, command, outputs, inputs)
-            .await;
-
-        self.toolchains.release(&toolchain).await?;
-
-        result
+        self.builder
+            .run_build(job_id, &toolchain_dir, command, outputs, inputs)
+            .await
     }
 
     async fn job_failure(&self, task_id: &str, reason: &str) -> Result<()> {
