@@ -659,20 +659,23 @@ pub trait SchedulerService: Send + Sync {
         info: BuildServerInfo,
     ) -> Result<()>;
 
-    async fn server_heartbeat(&self, info: BuildServerInfo, status: Option<bool>) -> Result<()>;
+    async fn request_status(&self) -> Result<()>;
+    async fn receive_status(&self, info: BuildServerInfo, status: Option<bool>) -> Result<()>;
 }
 
 #[cfg(feature = "dist-server")]
 #[async_trait]
 pub trait ServerService: Send + Sync {
-    async fn start_heartbeat(&self) -> Result<()>;
+    async fn broadcast_status(&self) -> Result<()>;
+
+    async fn report_status(&self, respond_to: &str) -> Result<()>;
 
     #[allow(clippy::too_many_arguments)]
     async fn run_job(
         &self,
         task_id: &str,
         job_id: &str,
-        scheduler_id: &str,
+        respond_to: &str,
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,

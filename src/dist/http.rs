@@ -353,9 +353,6 @@ mod client {
     };
     use crate::util::new_reqwest_client;
 
-    // use byteorder::{BigEndian, WriteBytesExt};
-
-    // use futures::lock::Mutex;
     use futures::{lock::Mutex, StreamExt};
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 

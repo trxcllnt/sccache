@@ -1126,6 +1126,7 @@ fn message_broker_from_env() -> Option<MessageBroker> {
 
 #[cfg(feature = "dist-server")]
 pub mod scheduler {
+    use std::env;
     use std::path::PathBuf;
     use std::{net::SocketAddr, str::FromStr};
 
@@ -1191,6 +1192,7 @@ pub mod scheduler {
         pub max_body_size: Option<usize>,
         pub message_broker: Option<MessageBroker>,
         pub public_addr: SocketAddr,
+        pub scheduler_id: Option<String>,
         pub toolchains: CacheConfigs,
     }
 
@@ -1203,6 +1205,7 @@ pub mod scheduler {
                 max_body_size: None,
                 message_broker: None,
                 public_addr: SocketAddr::from_str("0.0.0.0:10500").unwrap(),
+                scheduler_id: None,
                 toolchains: CacheConfigs {
                     disk: Some(DiskCacheConfig {
                         dir: PathBuf::from_str("/tmp/sccache/toolchains").unwrap(),
@@ -1224,6 +1227,7 @@ pub mod scheduler {
         pub max_body_size: usize,
         pub message_broker: Option<MessageBroker>,
         pub public_addr: SocketAddr,
+        pub scheduler_id: String,
         pub toolchains_fallback: DiskCacheConfig,
         pub toolchains: Option<CacheType>,
     }
@@ -1239,6 +1243,7 @@ pub mod scheduler {
                 max_body_size,
                 message_broker,
                 public_addr,
+                scheduler_id,
                 toolchains,
             } = conf_path
                 .map(|path| {
@@ -1277,6 +1282,11 @@ pub mod scheduler {
 
             let message_broker = message_broker_from_env().or(message_broker);
 
+            let scheduler_id = env::var("SCCACHE_DIST_SCHEDULER_ID")
+                .ok()
+                .or(scheduler_id)
+                .unwrap_or(uuid::Uuid::new_v4().simple().to_string());
+
             Ok(Self {
                 client_auth,
                 enable_web_socket_server,
@@ -1284,6 +1294,7 @@ pub mod scheduler {
                 max_body_size,
                 message_broker,
                 public_addr,
+                scheduler_id,
                 toolchains_fallback,
                 toolchains,
             })
@@ -1303,6 +1314,7 @@ pub mod scheduler {
                 max_body_size: Some(scheduler_config.max_body_size),
                 message_broker: scheduler_config.message_broker,
                 public_addr: scheduler_config.public_addr,
+                scheduler_id: Some(scheduler_config.scheduler_id),
                 toolchains: scheduler_config
                     .toolchains
                     .map(|x| x.clone().into())
