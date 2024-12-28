@@ -544,6 +544,7 @@ mod server {
     use tokio::io::BufReader;
     use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 
+    use std::collections::hash_map::RandomState;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -556,7 +557,7 @@ mod server {
     use super::make_lru_key_path;
 
     fn cached_toolchains_size(
-        toolchains: &LruCache<Toolchain, (PathBuf, u64), std::hash::RandomState, ToolchainSize>,
+        toolchains: &LruCache<Toolchain, (PathBuf, u64), RandomState, ToolchainSize>,
     ) -> u64 {
         toolchains.iter().map(|(_, (_, size))| size).sum()
     }
@@ -598,9 +599,7 @@ mod server {
         root_dir: PathBuf,
         tc_sizes: Arc<ResourceLoaderQueue<Toolchain, u64>>,
         tc_storage: Arc<dyn cache::Storage>,
-        toolchains: Arc<
-            Mutex<LruCache<Toolchain, (PathBuf, u64), std::hash::RandomState, ToolchainSize>>,
-        >,
+        toolchains: Arc<Mutex<LruCache<Toolchain, (PathBuf, u64), RandomState, ToolchainSize>>>,
     ) -> Result<()> {
         let toolchain_id = &tc.archive_id;
         let inflated_size = tc_sizes.enqueue(&tc).await?;
@@ -657,8 +656,7 @@ mod server {
     }
 
     pub struct ServerToolchains {
-        toolchains:
-            Arc<Mutex<LruCache<Toolchain, (PathBuf, u64), std::hash::RandomState, ToolchainSize>>>,
+        toolchains: Arc<Mutex<LruCache<Toolchain, (PathBuf, u64), RandomState, ToolchainSize>>>,
         toolchains_loader: ResourceLoaderQueue<Toolchain, ()>,
     }
 
