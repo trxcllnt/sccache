@@ -322,7 +322,7 @@ pub fn strings_to_osstrings(strings: &[String]) -> Vec<OsString> {
 // process::Output is not serialize so we have a custom Output type. However,
 // we cannot encode all information in here, such as Unix signals, as the other
 // end may not understand them (e.g. if it's Windows)
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessOutput {
     code: i32,
@@ -357,6 +357,19 @@ impl ProcessOutput {
         }
     }
 }
+
+impl fmt::Debug for ProcessOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{{ code: {}, stdout: {:?}, stderr: {:?} }}",
+            self.code,
+            String::from_utf8_lossy(&self.stdout),
+            String::from_utf8_lossy(&self.stderr)
+        )
+    }
+}
+
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 #[cfg(windows)]
@@ -382,7 +395,7 @@ impl From<ProcessOutput> for process::Output {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputData(Vec<u8>, u64);
 impl OutputData {
@@ -405,6 +418,12 @@ impl OutputData {
     pub fn into_reader(self) -> impl Read {
         use flate2::read::ZlibDecoder as ZlibReadDecoder;
         ZlibReadDecoder::new(io::Cursor::new(self.0))
+    }
+}
+
+impl fmt::Debug for OutputData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Size: {}->{}", self.1, self.0.len())
     }
 }
 
