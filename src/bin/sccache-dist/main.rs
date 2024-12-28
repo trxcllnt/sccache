@@ -691,7 +691,7 @@ impl ServerService for Server {
                     {
                         Ok(_) => {
                             tracing::trace!("Heartbeat success");
-                            Duration::from_secs(60)
+                            Duration::from_secs(30)
                         }
                         Err(e) => {
                             tracing::error!("Failed to send heartbeat to scheduler: {e}");
