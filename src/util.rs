@@ -941,6 +941,7 @@ pub fn new_reqwest_client() -> reqwest::Client {
         // .pool_max_idle_per_host(0)
         .timeout(get_dist_request_timeout())
         .connect_timeout(get_dist_connect_timeout())
+        .pool_idle_timeout(get_dist_request_timeout())
         .build()
         .expect("http client must build with success")
 }
