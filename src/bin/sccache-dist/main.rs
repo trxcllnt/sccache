@@ -467,6 +467,41 @@ impl Scheduler {
             remember_server_error_timeout: Duration::from_secs(30),
         }
     }
+
+    fn prune_servers(
+        servers: &mut HashMap<String, BuildServerStatus>,
+        remember_server_error_timeout: &Duration,
+    ) {
+        let now = Instant::now();
+
+        fn prune_servers(
+            now: Instant,
+            remember_server_error_timeout: Duration,
+            servers: &mut HashMap<String, BuildServerStatus>,
+        ) -> Vec<String> {
+            let mut to_remove = vec![];
+            // Remove servers we haven't seen in 5 minutes
+            for (server_id, server) in servers.iter_mut() {
+                let last_seen = now - server.last_success;
+                let last_seen = if let Some(last_failure) = server.last_failure {
+                    if now.duration_since(last_failure) >= remember_server_error_timeout {
+                        server.last_failure = None;
+                    }
+                    last_seen.min(now - last_failure)
+                } else {
+                    last_seen
+                };
+                if last_seen > Duration::from_secs(180) {
+                    to_remove.push(server_id.clone());
+                }
+            }
+            to_remove
+        }
+
+        for server_id in prune_servers(now, *remember_server_error_timeout, servers) {
+            servers.remove(&server_id);
+        }
+    }
 }
 
 #[async_trait]
@@ -605,12 +640,20 @@ impl SchedulerService for Scheduler {
             let servers = self.servers.clone();
             let task_queue = self.task_queue.clone();
             let respond_to = self.to_this_scheduler.clone();
+            let error_timeout = self.remember_server_error_timeout;
+            // Report status at least every 60s (1min)
+            let request_interval = Duration::from_secs(60);
+
             async move {
                 loop {
                     let due_time = {
-                        let servers = servers.lock().await;
+                        let mut servers = servers.lock().await;
+
+                        // Prune servers before requesting status
+                        Self::prune_servers(&mut servers, &error_timeout);
+
                         if servers.len() == 0 {
-                            Duration::from_secs(60)
+                            request_interval
                         } else {
                             tracing::trace!("Requesting servers status");
 
@@ -628,11 +671,11 @@ impl SchedulerService for Scheduler {
                             match report_reqs.await {
                                 Ok(_) => {
                                     tracing::trace!("Request servers status success");
-                                    Duration::from_secs(60)
+                                    request_interval
                                 }
                                 Err(e) => {
                                     tracing::error!("Request servers status failure: {e}");
-                                    Duration::from_secs(30)
+                                    request_interval / 2
                                 }
                             }
                         }
@@ -650,7 +693,6 @@ impl SchedulerService for Scheduler {
         tracing::trace!("Received server status: {info:?}");
 
         let mut servers = self.servers.lock().await;
-        let now = Instant::now();
 
         // Insert or update the server info
         servers
@@ -658,9 +700,9 @@ impl SchedulerService for Scheduler {
             .and_modify(|server| {
                 if let Some(success) = job_status {
                     if success {
-                        server.last_success = now;
+                        server.last_success = Instant::now();
                     } else {
-                        server.last_failure = Some(now);
+                        server.last_failure = Some(Instant::now());
                     }
                 }
                 server.max_per_core_load = info.max_per_core_load;
@@ -668,40 +710,14 @@ impl SchedulerService for Scheduler {
                 server.num_jobs = info.num_jobs;
             })
             .or_insert_with(|| BuildServerStatus {
-                last_success: now,
+                last_success: Instant::now(),
                 last_failure: None,
                 max_per_core_load: info.max_per_core_load,
                 num_cpus: info.num_cpus,
                 num_jobs: info.num_jobs,
             });
 
-        fn prune_servers(
-            now: Instant,
-            remember_server_error_timeout: Duration,
-            servers: &mut HashMap<String, BuildServerStatus>,
-        ) -> Vec<String> {
-            let mut to_remove = vec![];
-            // Remove servers we haven't seen in 5 minutes
-            for (server_id, server) in servers.iter_mut() {
-                let last_seen = now - server.last_success;
-                let last_seen = if let Some(last_failure) = server.last_failure {
-                    if now.duration_since(last_failure) >= remember_server_error_timeout {
-                        server.last_failure = None;
-                    }
-                    last_seen.min(now - last_failure)
-                } else {
-                    last_seen
-                };
-                if last_seen > Duration::from_secs(180) {
-                    to_remove.push(server_id.clone());
-                }
-            }
-            to_remove
-        }
-
-        for server_id in prune_servers(now, self.remember_server_error_timeout, &mut servers) {
-            servers.remove(&server_id);
-        }
+        Self::prune_servers(&mut servers, &self.remember_server_error_timeout);
 
         Ok(())
     }
