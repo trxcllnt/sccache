@@ -416,6 +416,7 @@ mod internal {
                                         ));
                                     }
                                     Message::Ping(buf) => {
+                                        tracing::debug!("WebSocket received ping, sending pong");
                                         if sndr.lock().await.send(Message::Pong(buf)).await.is_err()
                                         {
                                             return std::ops::ControlFlow::Break(

@@ -123,12 +123,12 @@ fn queue_name_with_env_info(prefix: &str) -> String {
     format!("{prefix}-{os}-{arch}")
 }
 
-fn scheduler_to_any_server_queue() -> String {
-    queue_name_with_env_info("scheduler-to-any-server")
+fn scheduler_to_servers_queue() -> String {
+    queue_name_with_env_info("scheduler-to-servers")
 }
 
-fn server_to_any_scheduler_queue() -> String {
-    queue_name_with_env_info("server-to-any-schedulers")
+fn server_to_schedulers_queue() -> String {
+    queue_name_with_env_info("server-to-schedulers")
 }
 
 fn to_scheduler_queue(id: &str) -> String {
@@ -144,21 +144,19 @@ async fn celery_app(
     to_this_instance: &str,
     prefetch_count: u16,
 ) -> Result<celery::Celery> {
-    let to_any_server = scheduler_to_any_server_queue();
-    let to_any_scheduler = server_to_any_scheduler_queue();
+    let to_servers = scheduler_to_servers_queue();
+    let to_schedulers = server_to_schedulers_queue();
 
     celery::CeleryBuilder::new(to_this_instance, broker_uri)
         .default_queue(to_this_instance)
         .task_content_type(MessageContentType::MsgPack)
         // Register at least one task route for each queue, because that's
         // how celery knows which queues to create in the message broker.
-        .task_route(scheduler_to_servers::run_job::NAME, &to_any_server)
-        .task_route(server_to_schedulers::status::NAME, &to_any_scheduler)
+        .task_route(scheduler_to_servers::run_job::NAME, &to_servers)
+        .task_route(server_to_schedulers::status::NAME, &to_schedulers)
         .prefetch_count(prefetch_count)
         .heartbeat(Some(10))
-        .acks_late(true)
-        .acks_on_failure_or_timeout(false)
-        .nacks_enabled(true)
+        .task_time_limit(10)
         .build()
         .await
         .map_err(|err| {
@@ -208,8 +206,8 @@ fn run(command: Command) -> Result<()> {
                 let broker_uri = message_broker_uri(message_broker)?;
                 tracing::trace!("Message broker URI: {broker_uri}");
 
+                let to_schedulers = server_to_schedulers_queue();
                 let to_this_scheduler = to_scheduler_queue(&scheduler_id);
-                let to_any_scheduler = server_to_any_scheduler_queue();
 
                 let task_queue = Arc::new(
                     celery_app(&broker_uri, &to_this_scheduler, 100 * num_cpus as u16).await?,
@@ -272,7 +270,7 @@ fn run(command: Command) -> Result<()> {
 
                 daemonize()?;
 
-                let queues = [to_this_scheduler.as_str(), to_any_scheduler.as_str()];
+                let queues = [to_this_scheduler.as_str(), to_schedulers.as_str()];
 
                 let celery = task_queue.consume_from(&queues);
                 let server = server.serve(public_addr, enable_web_socket_server, max_body_size);
@@ -331,8 +329,8 @@ fn run(command: Command) -> Result<()> {
                 let broker_uri = message_broker_uri(message_broker)?;
                 tracing::trace!("Message broker URI: {broker_uri}");
 
+                let to_servers = scheduler_to_servers_queue();
                 let to_this_server = to_server_queue(&server_id);
-                let to_any_server = scheduler_to_any_server_queue();
 
                 let task_queue =
                     Arc::new(celery_app(&broker_uri, &to_this_server, prefetch_count).await?);
@@ -399,7 +397,7 @@ fn run(command: Command) -> Result<()> {
 
                 daemonize()?;
 
-                let queues = [to_this_server.as_str(), to_any_server.as_str()];
+                let queues = [to_this_server.as_str(), to_servers.as_str()];
 
                 let celery = task_queue.consume_from(&queues);
                 let status = server.broadcast_status();
@@ -444,7 +442,7 @@ fn init_logging() {
 
 pub struct Scheduler {
     job_time_limit: u32,
-    to_this_scheduler_queue: String,
+    to_this_scheduler: String,
     jobs: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<RunJobResponse>>>>,
     servers: Arc<Mutex<HashMap<String, BuildServerStatus>>>,
     task_queue: Arc<celery::Celery>,
@@ -460,7 +458,7 @@ impl Scheduler {
         toolchains: Arc<dyn sccache::cache::Storage>,
     ) -> Self {
         Self {
-            to_this_scheduler_queue,
+            to_this_scheduler: to_this_scheduler_queue,
             job_time_limit,
             jobs: Arc::new(Mutex::new(HashMap::new())),
             servers: Arc::new(Mutex::new(HashMap::new())),
@@ -547,7 +545,7 @@ impl SchedulerService for Scheduler {
             .send_task(
                 scheduler_to_servers::run_job::new(
                     job_id.clone(),
-                    self.to_this_scheduler_queue.clone(),
+                    self.to_this_scheduler.clone(),
                     toolchain,
                     command,
                     outputs,
@@ -606,7 +604,7 @@ impl SchedulerService for Scheduler {
         tokio::spawn({
             let servers = self.servers.clone();
             let task_queue = self.task_queue.clone();
-            let respond_to = self.to_this_scheduler_queue.clone();
+            let respond_to = self.to_this_scheduler.clone();
             async move {
                 loop {
                     let due_time = {
@@ -614,14 +612,13 @@ impl SchedulerService for Scheduler {
                         if servers.len() == 0 {
                             Duration::from_secs(60)
                         } else {
-                            tracing::trace!("Requesting server statuses");
+                            tracing::trace!("Requesting servers status");
 
                             let report_reqs = futures::future::try_join_all(servers.iter().map(
                                 |(server_id, _)| {
                                     task_queue.send_task(
                                         scheduler_to_servers::report::new(respond_to.clone())
-                                            .with_queue(&to_server_queue(server_id))
-                                            .with_time_limit(10),
+                                            .with_queue(&to_server_queue(server_id)),
                                     )
                                 },
                             ));
@@ -630,11 +627,11 @@ impl SchedulerService for Scheduler {
 
                             match report_reqs.await {
                                 Ok(_) => {
-                                    tracing::trace!("Request server statuses success");
+                                    tracing::trace!("Request servers status success");
                                     Duration::from_secs(60)
                                 }
                                 Err(e) => {
-                                    tracing::error!("Request server statuses failure: {e}");
+                                    tracing::error!("Request servers status failure: {e}");
                                     Duration::from_secs(30)
                                 }
                             }
@@ -943,6 +940,9 @@ mod scheduler_to_servers {
 
     #[celery::task(
         bind = true,
+        acks_late = true,
+        acks_on_failure_or_timeout = false,
+        nacks_enabled = true,
         on_failure = on_run_job_failure,
         on_success = on_run_job_success,
     )]
