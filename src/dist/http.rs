@@ -692,6 +692,7 @@ mod client {
     }
 
     impl Client {
+        #[allow(clippy::too_many_arguments)]
         pub async fn new(
             pool: &tokio::runtime::Handle,
             scheduler_url: reqwest::Url,
@@ -700,6 +701,7 @@ mod client {
             toolchain_configs: &[config::DistToolchainConfig],
             auth_token: String,
             rewrite_includes_only: bool,
+            use_web_socket_connection: bool,
         ) -> Result<Self> {
             let client = new_reqwest_client();
             let client = Arc::new(Mutex::new(client));
@@ -737,7 +739,7 @@ mod client {
                 submit_toolchain_reqs,
                 rewrite_includes_only,
                 ws_client: tokio::sync::OnceCell::new_with(
-                    {
+                    if use_web_socket_connection {
                         let mut connect_req =
                             make_scheduler_ws_uri(&scheduler_url)?.into_client_request()?;
 
@@ -781,6 +783,8 @@ mod client {
                             },
                         )
                         .await
+                    } else {
+                        Err(anyhow!(""))
                     }
                     .ok(),
                 ),

@@ -572,6 +572,7 @@ pub struct DistConfig {
     pub toolchains: Vec<DistToolchainConfig>,
     pub toolchain_cache_size: u64,
     pub rewrite_includes_only: bool,
+    pub use_web_socket_connection: bool,
 }
 
 impl Default for DistConfig {
@@ -583,6 +584,7 @@ impl Default for DistConfig {
             toolchains: Default::default(),
             toolchain_cache_size: default_toolchain_cache_size(),
             rewrite_includes_only: false,
+            use_web_socket_connection: false,
         }
     }
 }
@@ -1922,6 +1924,7 @@ no_credentials = true
                 toolchains: vec![],
                 toolchain_cache_size: 5368709120,
                 rewrite_includes_only: false,
+                use_web_socket_connection: false,
             },
             server_startup_timeout_ms: Some(10000),
         }

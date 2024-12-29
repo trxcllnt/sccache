@@ -155,6 +155,7 @@ pub struct DistClientConfig {
     toolchain_cache_size: u64,
     toolchains: Vec<config::DistToolchainConfig>,
     rewrite_includes_only: bool,
+    use_web_socket_connection: bool,
 }
 
 #[cfg(feature = "dist-client")]
@@ -209,6 +210,7 @@ impl DistClientContainer {
             toolchain_cache_size: config.dist.toolchain_cache_size,
             toolchains: config.dist.toolchains.clone(),
             rewrite_includes_only: config.dist.rewrite_includes_only,
+            use_web_socket_connection: config.dist.use_web_socket_connection,
         };
         let state = Self::create_state(config);
         let state = pool.block_on(state);
@@ -369,6 +371,7 @@ impl DistClientContainer {
                     &config.toolchains,
                     auth_token,
                     config.rewrite_includes_only,
+                    config.use_web_socket_connection,
                 )
                 .await;
                 let dist_client =
@@ -970,6 +973,7 @@ where
                     toolchain_cache_size: 0,
                     toolchains: vec![],
                     rewrite_includes_only: false,
+                    use_web_socket_connection: false,
                 }),
                 dist_client,
             ))),
