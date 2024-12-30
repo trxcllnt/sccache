@@ -29,7 +29,7 @@ mod internal {
     use serde_json::json;
     use tokio_tungstenite::tungstenite::error::ProtocolError;
 
-    use std::{io, net::SocketAddr, sync::Arc};
+    use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 
     use tokio::net::TcpListener;
     use tokio_util::{compat::TokioAsyncReadCompatExt, io::StreamReader};
@@ -371,19 +371,50 @@ mod internal {
                 // Wrap shared sender in a Mutex so the concurrent
                 // `flat_map_unordered` task writes are serialized
                 let sndr = Arc::new(Mutex::new(sndr));
+                let ping_sndr = sndr.clone();
+                let recv_sndr = sndr.clone();
 
                 let service = state.service.clone();
                 let pool = tokio::runtime::Handle::current();
                 let token = tokio_util::sync::CancellationToken::new();
 
+                let ping_timer =
+                    tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(
+                        // Arbitrary, but this is the socket.io default
+                        Duration::from_secs(25),
+                    ));
+
                 // TODO:
                 // Create a span context and ensure its used for each message
                 // (https://docs.rs/tracing/0.1.41/tracing/span/index.html)
 
+                let mut ping_task =
+                    for_all_concurrent(&pool, ping_timer, token.child_token(), move |_| {
+                        // Local clones for this individual task
+                        let sndr = ping_sndr.clone();
+
+                        async move {
+                            trace!("WebSocket sending ping");
+                            // Send the ping. Abort on error.
+                            if sndr
+                                .lock()
+                                .await
+                                .send(Message::Ping(uuid::Uuid::new_v4().as_bytes().into()))
+                                .await
+                                .is_err()
+                            {
+                                return std::ops::ControlFlow::Break(
+                                    "WebSocket send failure".into(),
+                                );
+                            }
+                            std::ops::ControlFlow::Continue(String::new())
+                        }
+                    });
+
                 let mut recv_task =
                     for_all_concurrent(&pool, recv, token.child_token(), move |msg| {
                         // Local clones for this task
-                        let sndr = sndr.clone();
+                        let sndr = recv_sndr.clone();
                         let service = service.clone();
 
                         async move {
@@ -415,14 +446,8 @@ mod internal {
                                             "WebSocket disconnected code={code}, reason=`{reason}`"
                                         ));
                                     }
-                                    Message::Ping(buf) => {
-                                        tracing::debug!("WebSocket received ping, sending pong");
-                                        if sndr.lock().await.send(Message::Pong(buf)).await.is_err()
-                                        {
-                                            return std::ops::ControlFlow::Break(
-                                                "WebSocket failed to respond to client ping".into(),
-                                            );
-                                        }
+                                    Message::Pong(_) => {
+                                        tracing::trace!("WebSocket received pong");
                                         return std::ops::ControlFlow::Continue(String::new());
                                     }
                                     Message::Text(str) => {
@@ -485,13 +510,19 @@ mod internal {
                         }
                     });
 
-                // Wait for either cancel/send/recv to finish
+                // Wait for either cancel/ping/recv to finish
                 tokio::select! {
                     _ = token.cancelled() => {
+                        ping_task.abort();
+                        recv_task.abort();
+                    }
+                    _ = (&mut ping_task) => {
+                        token.cancel();
                         recv_task.abort();
                     }
                     _ = (&mut recv_task) => {
                         token.cancel();
+                        ping_task.abort();
                     }
                 }
 

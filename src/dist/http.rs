@@ -435,36 +435,13 @@ mod client {
                 // Wrap shared sender in a Mutex so the concurrent
                 // `flat_map_unordered` task writes are serialized
                 let sndr = Arc::new(Mutex::new(sndr));
-                let ping_sndr = sndr.clone();
                 let send_sndr = sndr.clone();
 
                 // Clones to move into the futures that need mutable refs
                 let sndr_reqs = reqs_map.clone();
                 let recv_reqs = reqs_map.clone();
 
-                // Create child tokens for the subtasks so we can imperatively
-                // know when the parent token has been canceled
-                let ping_token = token.child_token();
-                let sndr_token = token.child_token();
-                let recv_token = token.child_token();
-
-                let ping_timer = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(Duration::from_secs(10)));
-
-                let mut ping_task = for_all_concurrent(&pool, ping_timer, ping_token, move |_| {
-
-                    // Local clones for this individual task
-                    let sndr = ping_sndr.clone();
-
-                    async move {
-                        // Send the ping. Abort on error.
-                        if sndr.lock().await.send(Message::Ping(uuid::Uuid::new_v4().as_bytes().into())).await.is_err() {
-                            return std::ops::ControlFlow::Break("WebSocket send failure".into());
-                        }
-                        std::ops::ControlFlow::Continue(String::new())
-                    }
-                });
-
-                let mut send_task = for_all_concurrent(&pool, requests, sndr_token, move |(req_id, req, cb): WebSocketRequest<Outgoing, Incoming>| {
+                let mut send_task = for_all_concurrent(&pool, requests, token.child_token(), move |(req_id, req, cb): WebSocketRequest<Outgoing, Incoming>| {
 
                     // Local clones for this individual task
                     let sndr = send_sndr.clone();
@@ -497,7 +474,7 @@ mod client {
                     }
                 });
 
-                let mut recv_task = for_all_concurrent(&pool, recv, recv_token, move |msg| {
+                let mut recv_task = for_all_concurrent(&pool, recv, token.child_token(), move |msg| {
 
                     // Local clones for this individual task
                     let reqs = recv_reqs.clone();
@@ -517,6 +494,10 @@ mod client {
                                     }
                                     Message::Text(str) => {
                                         return std::ops::ControlFlow::Continue(format!("WebSocket received unexpected text response: {str}"));
+                                    }
+                                    Message::Ping(_) => {
+                                        trace!("WebSocket received ping");
+                                        return std::ops::ControlFlow::Continue(String::new());
                                     }
                                     Message::Binary(buf) => {
                                         match bincode_deserialize::<(String, Incoming)>(buf).await {
@@ -542,26 +523,18 @@ mod client {
                     }
                 });
 
-                // Wait for either cancel/ping/send/recv to finish
+                // Wait for either cancel/send/recv to finish
                 tokio::select! {
                     _ = token.cancelled() => {
-                        ping_task.abort();
                         send_task.abort();
                         recv_task.abort();
                     }
-                    _ = (&mut ping_task) => {
-                        token.cancel();
-                        send_task.abort();
-                        recv_task.abort();
-                    },
                     _ = (&mut send_task) => {
                         token.cancel();
-                        ping_task.abort();
                         recv_task.abort();
                     },
                     _ = (&mut recv_task) => {
                         token.cancel();
-                        ping_task.abort();
                         send_task.abort();
                     }
                 }
@@ -762,7 +735,7 @@ mod client {
                                     match tokio_tungstenite::connect_async_with_config(
                                         connect_req,
                                         Some(config),
-                                        false,
+                                        true,
                                     )
                                     .await
                                     {
