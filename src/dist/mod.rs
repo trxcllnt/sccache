@@ -35,6 +35,8 @@ pub mod http;
 pub mod server;
 #[cfg(test)]
 mod test;
+#[cfg(any(feature = "dist-client", feature = "dist-server"))]
+pub mod ws;
 
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 pub use crate::dist::cache::TcCache;

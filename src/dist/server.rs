@@ -9,7 +9,6 @@ mod internal {
     use axum::{
         body::Bytes,
         extract::{
-            ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
             ConnectInfo, DefaultBodyLimit, Extension, FromRequest, FromRequestParts, Path, Request,
         },
         http::{request::Parts, HeaderMap, Method, StatusCode, Uri},
@@ -22,14 +21,13 @@ mod internal {
         TypedHeader,
     };
 
-    use futures::{lock::Mutex, pin_mut, SinkExt, StreamExt, TryStreamExt};
+    use futures::{pin_mut, TryStreamExt};
 
     use hyper_util::rt::{TokioExecutor, TokioIo};
 
     use serde_json::json;
-    use tokio_tungstenite::tungstenite::error::ProtocolError;
 
-    use std::{io, net::SocketAddr, sync::Arc, time::Duration};
+    use std::{io, net::SocketAddr, sync::Arc};
 
     use tokio::net::TcpListener;
     use tokio_util::{compat::TokioAsyncReadCompatExt, io::StreamReader};
@@ -41,9 +39,8 @@ mod internal {
     };
 
     use crate::dist::{
-        http::{bincode_deserialize, bincode_serialize, for_all_concurrent, ClientAuthCheck},
-        ClientIncoming, ClientOutgoing, NewJobRequest, RunJobRequest, SchedulerService,
-        ServerIncoming, Toolchain,
+        http::{bincode_deserialize, ClientAuthCheck},
+        NewJobRequest, RunJobRequest, SchedulerService, Toolchain,
     };
 
     use crate::errors::*;
@@ -154,6 +151,7 @@ mod internal {
     }
 
     // Verify authenticated sccache clients
+    #[allow(dead_code)]
     struct AuthenticatedClient(SocketAddr);
 
     #[async_trait]
@@ -356,210 +354,10 @@ mod internal {
                 )
         }
 
-        fn with_websocket_routes(app: axum::Router) -> axum::Router {
-            async fn handle_socket(
-                state: Arc<SchedulerState>,
-                client_addr: SocketAddr,
-                socket: WebSocket,
-            ) {
-                tracing::debug!(
-                    "[handle_socket({client_addr})]: client websocket upgrade successful"
-                );
-
-                let (sndr, recv) = socket.split();
-
-                // Wrap shared sender in a Mutex so the concurrent
-                // `flat_map_unordered` task writes are serialized
-                let sndr = Arc::new(Mutex::new(sndr));
-                let ping_sndr = sndr.clone();
-                let recv_sndr = sndr.clone();
-
-                let service = state.service.clone();
-                let pool = tokio::runtime::Handle::current();
-                let token = tokio_util::sync::CancellationToken::new();
-
-                let ping_timer =
-                    tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(
-                        // Arbitrary, but this is the socket.io default
-                        Duration::from_secs(25),
-                    ));
-
-                // TODO:
-                // Create a span context and ensure its used for each message
-                // (https://docs.rs/tracing/0.1.41/tracing/span/index.html)
-
-                let mut ping_task =
-                    for_all_concurrent(&pool, ping_timer, token.child_token(), move |_| {
-                        // Local clones for this individual task
-                        let sndr = ping_sndr.clone();
-
-                        async move {
-                            trace!("WebSocket sending ping");
-                            // Send the ping. Abort on error.
-                            if sndr
-                                .lock()
-                                .await
-                                .send(Message::Ping(uuid::Uuid::new_v4().as_bytes().into()))
-                                .await
-                                .is_err()
-                            {
-                                return std::ops::ControlFlow::Break(
-                                    "WebSocket send failure".into(),
-                                );
-                            }
-                            std::ops::ControlFlow::Continue(String::new())
-                        }
-                    });
-
-                let mut recv_task =
-                    for_all_concurrent(&pool, recv, token.child_token(), move |msg| {
-                        // Local clones for this task
-                        let sndr = recv_sndr.clone();
-                        let service = service.clone();
-
-                        async move {
-                            let (req_id, req) = match msg {
-                                Err(err) => {
-                                    let err = err.into_inner();
-                                    return match err.downcast_ref::<ProtocolError>() {
-                                        // TODO: Downcasting the client disconnect error should run
-                                        // this case, but it's always running the `None` case below
-                                        Some(ProtocolError::ResetWithoutClosingHandshake) => {
-                                            std::ops::ControlFlow::Break(String::new())
-                                        }
-                                        Some(err) => std::ops::ControlFlow::Break(format!(
-                                            "WebSocket recv error: {err:?}"
-                                        )),
-                                        None => std::ops::ControlFlow::Break(format!(
-                                            "WebSocket recv error: {err:?}"
-                                        )),
-                                    };
-                                }
-                                Ok(msg) => match msg {
-                                    Message::Close(None) => {
-                                        return std::ops::ControlFlow::Break(
-                                            "WebSocket close without CloseFrame".into(),
-                                        );
-                                    }
-                                    Message::Close(Some(CloseFrame { code, reason })) => {
-                                        return std::ops::ControlFlow::Break(format!(
-                                            "WebSocket disconnected code={code}, reason=`{reason}`"
-                                        ));
-                                    }
-                                    Message::Pong(_) => {
-                                        tracing::trace!("WebSocket received pong");
-                                        return std::ops::ControlFlow::Continue(String::new());
-                                    }
-                                    Message::Text(str) => {
-                                        return std::ops::ControlFlow::Continue(format!(
-                                            "WebSocket received unexpected text response: {str}"
-                                        ));
-                                    }
-                                    Message::Binary(buf) => {
-                                        match bincode_deserialize::<(String, ServerIncoming)>(buf)
-                                            .await
-                                        {
-                                            Ok(res) => res,
-                                            Err(err) => {
-                                                return std::ops::ControlFlow::Continue(format!(
-                                                "WebSocket failed to deserialize response: {err}"
-                                            ));
-                                            }
-                                        }
-                                    }
-                                    _ => return std::ops::ControlFlow::Continue(String::new()),
-                                },
-                            };
-
-                            tracing::debug!("WebSocket received request: id={req_id} req={req}");
-
-                            let res = match req {
-                                ClientOutgoing::NewJob(req) => match service.new_job(req).await {
-                                    Ok(res) => ClientIncoming::NewJob(res),
-                                    Err(err) => ClientIncoming::Error {
-                                        message: err.to_string(),
-                                    },
-                                },
-                                ClientOutgoing::RunJob(req) => match service.run_job(req).await {
-                                    Ok(res) => ClientIncoming::RunJob(res),
-                                    Err(err) => ClientIncoming::Error {
-                                        message: err.to_string(),
-                                    },
-                                },
-                            };
-
-                            tracing::debug!("WebSocket sending response: id={req_id} res={res}");
-
-                            // Serialize the request
-                            let buf = match bincode_serialize((req_id.clone(), res)).await {
-                                Ok(buf) => buf,
-                                Err(err) => {
-                                    return std::ops::ControlFlow::Continue(format!(
-                                        "WebSocket failed to serialize request: {err}"
-                                    ));
-                                }
-                            };
-
-                            if sndr.lock().await.send(Message::Binary(buf)).await.is_err() {
-                                return std::ops::ControlFlow::Break(format!(
-                                    "WebSocket failed to notify client of response with id={req_id}"
-                                ));
-                            }
-
-                            std::ops::ControlFlow::Continue(String::new())
-                        }
-                    });
-
-                // Wait for either cancel/ping/recv to finish
-                tokio::select! {
-                    _ = token.cancelled() => {
-                        ping_task.abort();
-                        recv_task.abort();
-                    }
-                    _ = (&mut ping_task) => {
-                        token.cancel();
-                        recv_task.abort();
-                    }
-                    _ = (&mut recv_task) => {
-                        token.cancel();
-                        ping_task.abort();
-                    }
-                }
-
-                // TODO: Figure out how to cancel in-progress tasks for this client
-
-                tracing::info!("sccache: {client_addr} shutdown");
-            }
-
-            app.route(
-                "/api/v2/client/ws",
-                routing::get(
-                    |// Authenticate the client bearer token first
-                     AuthenticatedClient(client): AuthenticatedClient,
-                     ws: WebSocketUpgrade,
-                     Extension(state): Extension<Arc<SchedulerState>>| async move {
-                        tracing::debug!(
-                            "/api/v2/client/ws incoming websocket connection from {client}"
-                        );
-                        ws.on_upgrade(move |socket| handle_socket(state, client, socket))
-                    },
-                ),
-            )
-        }
-
-        pub async fn serve(
-            self,
-            addr: SocketAddr,
-            enable_web_socket_server: bool,
-            max_body_size: usize,
-        ) -> Result<()> {
+        pub async fn serve(self, addr: SocketAddr, max_body_size: usize) -> Result<()> {
             let state = self.state.clone();
 
             let mut app = Self::make_router();
-
-            if enable_web_socket_server {
-                app = Self::with_websocket_routes(app);
-            }
 
             app = with_request_tracing(
                 app.fallback(|| async move { (StatusCode::NOT_FOUND, "404") })
