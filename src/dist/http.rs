@@ -162,6 +162,7 @@ mod common {
         }
     }
 
+    #[derive(Clone)]
     pub struct ResourceLoaderQueue<K: Eq + Hash, V> {
         fetch: Arc<
             dyn Fn(&K) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<V>> + Send>>

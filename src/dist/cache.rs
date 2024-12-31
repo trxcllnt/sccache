@@ -655,6 +655,7 @@ mod server {
         }
     }
 
+    #[derive(Clone)]
     pub struct ServerToolchains {
         toolchains: Arc<Mutex<LruCache<Toolchain, (PathBuf, u64), RandomState, ToolchainSize>>>,
         toolchains_loader: ResourceLoaderQueue<Toolchain, ()>,

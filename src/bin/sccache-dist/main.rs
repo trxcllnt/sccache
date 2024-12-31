@@ -343,9 +343,9 @@ fn run(command: Command) -> Result<()> {
                     .register_task::<scheduler_to_servers::report>()
                     .await?;
 
-                let builder: Box<dyn BuilderIncoming> = match builder {
+                let builder: Arc<dyn BuilderIncoming> = match builder {
                     #[cfg(not(target_os = "freebsd"))]
-                    sccache::config::server::BuilderType::Docker => Box::new(
+                    sccache::config::server::BuilderType::Docker => Arc::new(
                         build::DockerBuilder::new()
                             .await
                             .context("Docker builder failed to start")?,
@@ -354,7 +354,7 @@ fn run(command: Command) -> Result<()> {
                     sccache::config::server::BuilderType::Overlay {
                         bwrap_path,
                         build_dir,
-                    } => Box::new(
+                    } => Arc::new(
                         build::OverlayBuilder::new(bwrap_path, build_dir)
                             .await
                             .context("Overlay builder failed to start")?,
@@ -365,7 +365,7 @@ fn run(command: Command) -> Result<()> {
                         clone_from,
                         pot_cmd,
                         pot_clone_args,
-                    } => Box::new(
+                    } => Arc::new(
                         build::PotBuilder::new(pot_fs_root, clone_from, pot_cmd, pot_clone_args)
                             .await
                             .context("Pot builder failed to start")?,
@@ -722,11 +722,12 @@ impl SchedulerService for Scheduler {
     }
 }
 
+#[derive(Clone)]
 pub struct Server {
     max_per_core_load: f64,
     num_cpus: usize,
     server_id: String,
-    builder: Box<dyn BuilderIncoming>,
+    builder: Arc<dyn BuilderIncoming>,
     last_report_time: Arc<std::sync::atomic::AtomicU64>,
     jobs: Arc<Mutex<HashMap<String, (String, String)>>>,
     task_queue: Arc<celery::Celery>,
@@ -738,7 +739,7 @@ impl Server {
         max_per_core_load: f64,
         num_cpus: usize,
         server_id: String,
-        builder: Box<dyn BuilderIncoming>,
+        builder: Arc<dyn BuilderIncoming>,
         task_queue: Arc<celery::Celery>,
         toolchains: ServerToolchains,
     ) -> Self {
@@ -874,6 +875,13 @@ impl ServerService for Server {
             task_id.to_owned(),
             (respond_to.to_owned(), job_id.to_owned()),
         );
+
+        // Immediately report status back to the scheduler in the background
+        tokio::spawn({
+            let this = self.clone();
+            let respond_to = respond_to.to_owned();
+            async move { this.report_status(&respond_to).await }
+        });
 
         let toolchain_dir = self.toolchains.acquire(&toolchain).await?;
 
