@@ -61,12 +61,10 @@ pub fn dist_test_sccache_client_cfg(
     sccache_cfg
 }
 
-#[test_case("rabbitmq", true ; "With rabbitmq and web sockets enabled")]
-#[test_case("redis", true ; "With redis and web sockets enabled")]
-#[test_case("rabbitmq", false  ; "With rabbitmq and web sockets disabled")]
-#[test_case("redis", false  ; "With redis and web sockets disabled")]
+#[test_case("rabbitmq" ; "With rabbitmq")]
+#[test_case("redis" ; "With redis")]
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
-fn test_dist_basic(message_broker: &str, enable_web_socket_server: bool) {
+fn test_dist_basic(message_broker: &str) {
     let tmpdir = tempfile::Builder::new()
         .prefix("sccache_dist_test")
         .tempdir()
@@ -76,7 +74,7 @@ fn test_dist_basic(message_broker: &str, enable_web_socket_server: bool) {
 
     let mut system = harness::DistSystem::new(&sccache_dist, tmpdir);
     let message_broker = system.add_message_broker(message_broker);
-    system.add_scheduler(system.scheduler_cfg(message_broker.clone(), enable_web_socket_server));
+    system.add_scheduler(system.scheduler_cfg(message_broker.clone()));
     system.add_server(system.server_cfg(message_broker.clone()));
 
     let sccache_cfg = dist_test_sccache_client_cfg(tmpdir, system.scheduler_url());

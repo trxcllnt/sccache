@@ -173,7 +173,6 @@ fn run(command: Command) -> Result<()> {
 
     match command {
         Command::Scheduler(scheduler_config::Config {
-            enable_web_socket_server: _,
             client_auth,
             job_time_limit,
             max_body_size,
@@ -273,11 +272,7 @@ fn run(command: Command) -> Result<()> {
                 let queues = [to_this_scheduler.as_str(), to_schedulers.as_str()];
 
                 let celery = task_queue.consume_from(&queues);
-                let server = server.serve(
-                    public_addr,
-                    // enable_web_socket_server,
-                    max_body_size,
-                );
+                let server = server.serve(public_addr, max_body_size);
                 let status = scheduler.request_status();
 
                 futures::select_biased! {

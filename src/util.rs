@@ -937,8 +937,6 @@ pub fn daemonize() -> Result<()> {
 #[cfg(any(feature = "dist-server", feature = "dist-client"))]
 pub fn new_reqwest_client() -> reqwest::Client {
     reqwest::Client::builder()
-        // Disable connection pool
-        // .pool_max_idle_per_host(0)
         // Force HTTP/2
         .http2_prior_knowledge()
         .timeout(get_dist_request_timeout())

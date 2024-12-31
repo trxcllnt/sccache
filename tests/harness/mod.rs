@@ -166,7 +166,6 @@ pub fn sccache_client_cfg(
             toolchains: vec![],
             toolchain_cache_size: TC_CACHE_SIZE,
             rewrite_includes_only: false, // TODO
-            use_web_socket_connection: true,
         },
         server_startup_timeout_ms: None,
     }
@@ -176,14 +175,12 @@ pub fn sccache_client_cfg(
 fn sccache_scheduler_cfg(
     tmpdir: &Path,
     message_broker: MessageBroker,
-    enable_web_socket_server: bool,
 ) -> sccache::config::scheduler::Config {
     let toolchains_path = "server-toolchains";
     fs::create_dir(tmpdir.join(toolchains_path)).unwrap();
 
     let mut config = sccache::config::scheduler::Config::load(None).unwrap();
     config.message_broker = Some(message_broker);
-    config.enable_web_socket_server = enable_web_socket_server;
     config.public_addr = SocketAddr::from(([0, 0, 0, 0], SCHEDULER_PORT));
     config.client_auth = sccache::config::scheduler::ClientAuth::Insecure;
     config.toolchains_fallback.dir = Path::new(CONFIGS_CONTAINER_PATH).join(toolchains_path);
@@ -307,9 +304,8 @@ impl DistSystem {
     pub fn scheduler_cfg(
         &self,
         message_broker: MessageBroker,
-        enable_web_socket_server: bool,
     ) -> sccache::config::scheduler::Config {
-        sccache_scheduler_cfg(&self.tmpdir, message_broker, enable_web_socket_server)
+        sccache_scheduler_cfg(&self.tmpdir, message_broker)
     }
 
     pub fn add_scheduler(&mut self, scheduler_cfg: sccache::config::scheduler::Config) {

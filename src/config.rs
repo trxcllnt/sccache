@@ -572,7 +572,6 @@ pub struct DistConfig {
     pub toolchains: Vec<DistToolchainConfig>,
     pub toolchain_cache_size: u64,
     pub rewrite_includes_only: bool,
-    pub use_web_socket_connection: bool,
 }
 
 impl Default for DistConfig {
@@ -584,7 +583,6 @@ impl Default for DistConfig {
             toolchains: Default::default(),
             toolchain_cache_size: default_toolchain_cache_size(),
             rewrite_includes_only: false,
-            use_web_socket_connection: false,
         }
     }
 }
@@ -1138,8 +1136,8 @@ pub mod scheduler {
     use serde::{Deserialize, Serialize};
 
     use super::{
-        bool_from_env_var, config_from_env, number_from_env_var, try_read_config_file,
-        CacheConfigs, CacheModeConfig, CacheType, DiskCacheConfig, MessageBroker,
+        config_from_env, number_from_env_var, try_read_config_file, CacheConfigs, CacheModeConfig,
+        CacheType, DiskCacheConfig, MessageBroker,
     };
 
     // pub fn default_remember_server_error_timeout() -> u64 {
@@ -1189,7 +1187,6 @@ pub mod scheduler {
     #[serde(deny_unknown_fields)]
     pub struct FileConfig {
         pub client_auth: ClientAuth,
-        pub enable_web_socket_server: Option<bool>,
         pub job_time_limit: Option<u32>,
         pub max_body_size: Option<usize>,
         pub message_broker: Option<MessageBroker>,
@@ -1202,7 +1199,6 @@ pub mod scheduler {
         fn default() -> Self {
             Self {
                 client_auth: ClientAuth::Insecure,
-                enable_web_socket_server: None,
                 job_time_limit: None,
                 max_body_size: None,
                 message_broker: None,
@@ -1224,7 +1220,6 @@ pub mod scheduler {
     #[derive(Debug)]
     pub struct Config {
         pub client_auth: ClientAuth,
-        pub enable_web_socket_server: bool,
         pub job_time_limit: u32,
         pub max_body_size: usize,
         pub message_broker: Option<MessageBroker>,
@@ -1240,7 +1235,6 @@ pub mod scheduler {
 
             let FileConfig {
                 client_auth,
-                enable_web_socket_server,
                 job_time_limit,
                 max_body_size,
                 message_broker,
@@ -1266,11 +1260,6 @@ pub mod scheduler {
 
             let (toolchains, toolchains_fallback) = conf_caches.into_fallback();
 
-            let enable_web_socket_server =
-                bool_from_env_var("SCCACHE_DIST_ENABLE_WEB_SOCKET_SERVER")?
-                    .or(enable_web_socket_server)
-                    .unwrap_or(false);
-
             let job_time_limit = number_from_env_var("SCCACHE_DIST_JOB_TIME_LIMIT_SECS")
                 .transpose()?
                 .or(job_time_limit)
@@ -1291,7 +1280,6 @@ pub mod scheduler {
 
             Ok(Self {
                 client_auth,
-                enable_web_socket_server,
                 job_time_limit,
                 max_body_size,
                 message_broker,
@@ -1311,7 +1299,6 @@ pub mod scheduler {
         fn from(scheduler_config: Config) -> Self {
             Self {
                 client_auth: scheduler_config.client_auth.clone(),
-                enable_web_socket_server: Some(scheduler_config.enable_web_socket_server),
                 job_time_limit: Some(scheduler_config.job_time_limit),
                 max_body_size: Some(scheduler_config.max_body_size),
                 message_broker: scheduler_config.message_broker,
@@ -1924,7 +1911,6 @@ no_credentials = true
                 toolchains: vec![],
                 toolchain_cache_size: 5368709120,
                 rewrite_includes_only: false,
-                use_web_socket_connection: false,
             },
             server_startup_timeout_ms: Some(10000),
         }
