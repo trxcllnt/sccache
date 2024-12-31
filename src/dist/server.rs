@@ -372,6 +372,7 @@ mod internal {
             tracing::info!("Scheduler listening for clients on {}", addr);
 
             loop {
+                // let tls_acceptor = tls_acceptor.clone();
                 let (tcp_stream, remote_addr) = listener.accept().await.unwrap();
                 let tower_service = unwrap_infallible(make_service.call(remote_addr).await);
 
@@ -390,7 +391,10 @@ mod internal {
 
                     if let Err(err) =
                         hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-                            .serve_connection_with_upgrades(tok_stream, hyper_service)
+                            .http2()
+                            .serve_connection(tok_stream, hyper_service)
+                            // if using websockets and HTTP/1
+                            // .serve_connection_with_upgrades(tok_stream, hyper_service)
                             .await
                     {
                         tracing::debug!("sccache: failed to serve connection: {err:#}");
