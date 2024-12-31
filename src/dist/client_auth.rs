@@ -85,7 +85,7 @@ mod code_grant_pkce {
         html_response, json_response, query_pairs, MIN_TOKEN_VALIDITY, MIN_TOKEN_VALIDITY_WARNING,
         REDIRECT_WITH_AUTH_JSON,
     };
-    use crate::util::new_reqwest_blocking_client;
+    use crate::util::new_reqwest_client;
     use crate::util::BASE64_URL_SAFE_ENGINE;
     use base64::Engine;
     use bytes::Bytes;
@@ -246,8 +246,9 @@ mod code_grant_pkce {
             grant_type: GRANT_TYPE_PARAM_VALUE,
             redirect_uri,
         };
-        let client = new_reqwest_blocking_client();
-        let res = client.post(token_url).json(&token_request).send()?;
+        let client = new_reqwest_client();
+        let runtime = tokio::runtime::Handle::current();
+        let res = runtime.block_on(client.post(token_url).json(&token_request).send())?;
         if !res.status().is_success() {
             bail!(
                 "Sending code to {} failed, HTTP error: {}",
@@ -257,7 +258,8 @@ mod code_grant_pkce {
         }
 
         let (token, expires_at) = handle_token_response(
-            res.json()
+            runtime
+                .block_on(res.json())
                 .context("Failed to parse token response as JSON")?,
         )?;
         if expires_at - Instant::now() < MIN_TOKEN_VALIDITY {

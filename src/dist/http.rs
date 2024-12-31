@@ -269,6 +269,7 @@ pub mod urls {
 
 #[cfg(feature = "dist-server")]
 mod server {
+    use async_trait::async_trait;
 
     // Messages that are non-sensitive and can be sent to the client
     #[derive(Debug)]
@@ -279,8 +280,9 @@ mod server {
         }
     }
 
+    #[async_trait]
     pub trait ClientAuthCheck: Send + Sync {
-        fn check(&self, token: &str) -> std::result::Result<(), ClientVisibleMsg>;
+        async fn check(&self, token: &str) -> std::result::Result<(), ClientVisibleMsg>;
     }
 }
 

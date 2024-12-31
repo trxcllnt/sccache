@@ -947,27 +947,6 @@ pub fn new_reqwest_client() -> reqwest::Client {
         .expect("http client must build with success")
 }
 
-/// Disable connection pool to avoid broken connection between runtime
-///
-/// # TODO
-///
-/// We should refactor sccache current model to make sure that we only have
-/// one tokio runtime and keep reqwest alive inside it.
-///
-/// ---
-///
-/// More details could be found at https://github.com/mozilla/sccache/pull/1563
-#[cfg(any(feature = "dist-server", feature = "dist-client"))]
-pub fn new_reqwest_blocking_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        // Disable connection pool
-        .pool_max_idle_per_host(0)
-        .timeout(get_dist_request_timeout())
-        .connect_timeout(get_dist_connect_timeout())
-        .build()
-        .expect("http client must build with success")
-}
-
 fn unhex(b: u8) -> std::io::Result<u8> {
     match b {
         b'0'..=b'9' => Ok(b - b'0'),

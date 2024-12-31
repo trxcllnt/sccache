@@ -182,6 +182,7 @@ mod internal {
 
             this.client_auth
                 .check(bearer.token())
+                .await
                 .map(|_| AuthenticatedClient(remote_addr))
                 .map_err(|err| {
                     tracing::warn!(
