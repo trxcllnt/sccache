@@ -438,8 +438,6 @@ impl fmt::Display for OutputDataLens {
     }
 }
 
-// TODO: make fields not public
-
 // BuildResult
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -498,65 +496,6 @@ pub enum RunJobResponse {
         server_id: String,
     },
 }
-
-// ClientOutgoing
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub enum ClientOutgoing {
-    NewJob(NewJobRequest),
-    RunJob(RunJobRequest),
-}
-
-impl fmt::Display for ClientOutgoing {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NewJob(NewJobRequest { toolchain }) => {
-                write!(f, "Request::NewJob(`{}`)", toolchain.archive_id)
-            }
-            Self::RunJob(RunJobRequest { job_id, .. }) => {
-                write!(f, "Request::RunJob(job_id={})", job_id)
-            }
-        }
-    }
-}
-
-// ClientIncoming
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub enum ClientIncoming {
-    Error { message: String },
-    NewJob(NewJobResponse),
-    RunJob(RunJobResponse),
-}
-
-impl fmt::Display for ClientIncoming {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Error { message } => write!(f, "Response::Error(`{message}`)"),
-            Self::NewJob(NewJobResponse {
-                job_id,
-                has_toolchain,
-                ..
-            }) => {
-                write!(
-                    f,
-                    "Response::NewJob(job_id={job_id}, has_toolchain={has_toolchain})"
-                )
-            }
-            Self::RunJob(RunJobResponse::JobFailed { reason }) => {
-                write!(f, "Response::JobFailed(`{reason}`)")
-            }
-            Self::RunJob(RunJobResponse::JobComplete { result, server_id }) => {
-                write!(f, "Response::JobComplete({:?}, {server_id})", result.output)
-            }
-        }
-    }
-}
-
-pub type ServerIncoming = ClientOutgoing;
-pub type ServerOutgoing = ClientIncoming;
 
 // Toolchain
 
@@ -621,21 +560,6 @@ pub enum SubmitToolchainResult {
 
 ///////////////////
 
-// TODO: it's unfortunate all these are public, but in order to describe the trait
-// bound on the instance (e.g. scheduler) we pass to the actual communication (e.g.
-// http implementation) they need to be public, which has knock-on effects for private
-// structs
-
-#[cfg(feature = "dist-server")]
-type ExtResult<T, E> = ::std::result::Result<T, E>;
-
-#[cfg(feature = "dist-server")]
-pub type WebSocketSend =
-    futures::stream::SplitSink<axum::extract::ws::WebSocket, axum::extract::ws::Message>;
-
-#[cfg(feature = "dist-server")]
-pub type WebSocketRecv = futures::stream::SplitStream<axum::extract::ws::WebSocket>;
-
 #[cfg(feature = "dist-server")]
 #[async_trait]
 pub trait SchedulerService: Send + Sync {
@@ -698,7 +622,7 @@ pub trait BuilderIncoming: Send + Sync {
         command: CompileCommand,
         outputs: Vec<String>,
         inputs: Vec<u8>,
-    ) -> ExtResult<BuildResult, Error>;
+    ) -> std::result::Result<BuildResult, Error>;
 }
 
 /////////
