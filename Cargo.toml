@@ -208,6 +208,7 @@ webdav = ["opendal/services-webdav", "reqwest"]
 # dynamically or statically.
 vendored-openssl = [
   "openssl?/vendored",
+  "reqwest?/native-tls-alpn",
   "reqwest?/native-tls-vendored",
   "tokio-tungstenite?/native-tls-vendored",
 ]
