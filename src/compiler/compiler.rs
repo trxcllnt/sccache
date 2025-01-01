@@ -929,10 +929,10 @@ where
             (result, server_id, path_transformer)
         }
         Ok((dist::RunJobResponse::JobFailed { reason }, _)) => {
-            bail!("[{out_pretty}, {job_id}]: Could not run distributed compilation job: {reason}")
+            bail!("[{out_pretty}, {job_id}]: Distributed compilation job failed: {reason}")
         }
         Err(err) => {
-            bail!("[{out_pretty}, {job_id}]: Could not run distributed compilation job: {err}")
+            bail!("[{out_pretty}, {job_id}]: Could not run distributed compilation job: {err:#}")
         }
     };
 

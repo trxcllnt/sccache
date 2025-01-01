@@ -876,12 +876,12 @@ impl ServerService for Server {
             (respond_to.to_owned(), job_id.to_owned()),
         );
 
-        // Immediately report status back to the scheduler in the background
-        tokio::spawn({
-            let this = self.clone();
-            let respond_to = respond_to.to_owned();
-            async move { this.report_status(&respond_to).await }
-        });
+        // Report back to the scheduler that we picked up the job
+        // tokio::spawn({
+        //     let this = self.clone();
+        //     let respond_to = respond_to.to_owned();
+        //     async move { this.report_status(&respond_to).await }
+        // });
 
         let toolchain_dir = self.toolchains.acquire(&toolchain).await?;
 
