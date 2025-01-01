@@ -767,6 +767,28 @@ impl Server {
             |_| Self::now().map(|d| d.as_secs()),
         );
     }
+
+    async fn send_status(&self, respond_to: &str, num_jobs: usize) -> Result<()> {
+        let info = BuildServerInfo {
+            max_per_core_load: self.max_per_core_load,
+            num_cpus: self.num_cpus,
+            num_jobs,
+            server_id: self.server_id.clone(),
+        };
+
+        tracing::trace!("Reporting server status: {info:?}");
+
+        self.task_queue
+            .send_task(server_to_schedulers::status::new(info).with_queue(respond_to))
+            .await
+            .map_err(anyhow::Error::new)
+            .map(|_| ())?;
+
+        // Update last_report_time
+        Self::update_last_report_time(&self.last_report_time);
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -839,25 +861,8 @@ impl ServerService for Server {
     }
 
     async fn report_status(&self, respond_to: &str) -> Result<()> {
-        let info = BuildServerInfo {
-            max_per_core_load: self.max_per_core_load,
-            num_cpus: self.num_cpus,
-            num_jobs: self.jobs.lock().await.len(),
-            server_id: self.server_id.clone(),
-        };
-
-        tracing::trace!("Reporting server status: {info:?}");
-
-        self.task_queue
-            .send_task(server_to_schedulers::status::new(info).with_queue(respond_to))
-            .await
-            .map_err(anyhow::Error::new)
-            .map(|_| ())?;
-
-        // Update last_report_time
-        Self::update_last_report_time(&self.last_report_time);
-
-        Ok(())
+        let num_jobs = self.jobs.lock().await.len();
+        self.send_status(respond_to, num_jobs).await
     }
 
     async fn run_job(
@@ -870,20 +875,22 @@ impl ServerService for Server {
         outputs: Vec<String>,
         inputs: Vec<u8>,
     ) -> Result<BuildResult> {
-        // Associate the task with the scheduler and job so we can report success or failure
-        self.jobs.lock().await.insert(
-            task_id.to_owned(),
-            (respond_to.to_owned(), job_id.to_owned()),
-        );
+        let num_jobs = {
+            let mut jobs = self.jobs.lock().await;
+            // Associate the task with the scheduler and job so we can report success or failure
+            jobs.insert(
+                task_id.to_owned(),
+                (respond_to.to_owned(), job_id.to_owned()),
+            );
+            jobs.len()
+        };
 
-        // Report back to the scheduler that we picked up the job
-        // tokio::spawn({
-        //     let this = self.clone();
-        //     let respond_to = respond_to.to_owned();
-        //     async move { this.report_status(&respond_to).await }
-        // });
-
-        let toolchain_dir = self.toolchains.acquire(&toolchain).await?;
+        // Load the toolchain and report status in parallel
+        let (toolchain_dir, _) = futures::future::try_join(
+            self.toolchains.acquire(&toolchain),
+            self.send_status(respond_to, num_jobs),
+        )
+        .await?;
 
         self.builder
             .run_build(job_id, &toolchain_dir, command, outputs, inputs)

@@ -389,7 +389,6 @@ mod internal {
                     if let Err(err) =
                         hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
                             .http2()
-                            .adaptive_window(true)
                             .serve_connection(tok_stream, hyper_service)
                             .await
                     {

@@ -939,11 +939,11 @@ pub fn new_reqwest_client() -> reqwest::Client {
     reqwest::Client::builder()
         // Force HTTP/2
         .http2_prior_knowledge()
-        .http2_adaptive_window(true)
         .timeout(get_dist_request_timeout())
         .connect_timeout(get_dist_connect_timeout())
         .pool_idle_timeout(get_dist_request_timeout())
-        .http2_keep_alive_timeout(Duration::from_secs(25))
+        .http2_keep_alive_interval(Some(Duration::from_secs(15)))
+        .http2_keep_alive_timeout(Duration::from_secs(20))
         .build()
         .expect("http client must build with success")
 }
