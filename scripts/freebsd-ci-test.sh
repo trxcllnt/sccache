@@ -46,6 +46,8 @@ init()
 	export XDG_CONFIG_HOME="$TEST_TMPDIR/.config"
 	mkdir -p "$XDG_CONFIG_HOME"
 	export SCCACHE_DIR="$TEST_TMPDIR/.cache"
+	export SCCACHE_DIST_JOBS_DIR="$TEST_TMPDIR/.cache/jobs"
+	export SCCACHE_DIST_TOOLCHAINS_DIR="$TEST_TMPDIR/.cache/toolchains"
 	killall sccache 2>/dev/null || true
 	killall sccache-dist 2>/dev/null || true
 	export RUST_LOG_STYLE=never
@@ -201,6 +203,8 @@ start_build_server()
 		NO_COLOR=1 \
 		SCCACHE_NO_DAEMON=1 \
 		SCCACHE_DIR="$SCCACHE_DIR" \
+        SCCACHE_DIST_JOBS_DIR="$SCCACHE_DIST_JOBS_DIR" \
+        SCCACHE_DIST_TOOLCHAINS_DIR="$SCCACHE_DIST_TOOLCHAINS_DIR" \
 		SCCACHE_LOG="sccache=debug" \
 		SCCACHE_DIST_SERVER_ID="build-server" \
 		AMQP_ADDR="amqp://127.0.0.1:5672//" \
