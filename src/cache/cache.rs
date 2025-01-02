@@ -354,6 +354,9 @@ pub trait Storage: Send + Sync {
 
     async fn get_stream(&self, key: &str) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>>;
 
+    /// Delete the cache entry for `key`.
+    async fn del(&self, key: &str) -> Result<()>;
+
     /// Check if the cache has an entry for `key`.
     ///
     /// If the entry is successfully found in the cache, return true.
@@ -508,6 +511,12 @@ impl Storage for opendal::Operator {
                 .into_futures_async_read(..)
                 .await?,
         ) as Box<dyn futures::AsyncRead + Send + Unpin>)
+    }
+
+    async fn del(&self, key: &str) -> Result<()> {
+        self.delete(&normalize_key(key))
+            .await
+            .map_err(anyhow::Error::new)
     }
 
     async fn has(&self, key: &str) -> bool {

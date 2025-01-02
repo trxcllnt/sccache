@@ -293,8 +293,8 @@ mod client {
     use crate::config;
     use crate::dist::pkg::{InputsPackager, ToolchainPackager};
     use crate::dist::{
-        self, CompileCommand, NewJobResponse, PathTransformer, RunJobRequest, RunJobResponse,
-        SchedulerStatusResult, SubmitToolchainResult, Toolchain,
+        self, CompileCommand, NewJobRequest, NewJobResponse, PathTransformer, RunJobRequest,
+        RunJobResponse, SchedulerStatusResult, SubmitToolchainResult, Toolchain,
     };
     use crate::util::new_reqwest_client;
 
@@ -376,27 +376,11 @@ mod client {
 
     #[async_trait]
     impl dist::Client for Client {
-        async fn new_job(&self, toolchain: Toolchain) -> Result<NewJobResponse> {
-            let req = self
-                .client
-                .lock()
-                .await
-                .post(urls::scheduler_new_job(&self.scheduler_url))
-                .bearer_auth(self.auth_token.clone())
-                .bincode(&toolchain)?;
-            bincode_req_fut(req).await
-        }
-
-        async fn run_job(
+        async fn new_job(
             &self,
-            job_id: &str,
-            timeout: Duration,
             toolchain: Toolchain,
-            command: CompileCommand,
-            outputs: Vec<String>,
             inputs_packager: Box<dyn InputsPackager>,
-        ) -> Result<(RunJobResponse, PathTransformer)> {
-            let job_id = job_id.to_owned();
+        ) -> Result<(NewJobResponse, PathTransformer)> {
             let (req, path_transformer) = self
                 .pool
                 .spawn_blocking(move || -> Result<_> {
@@ -416,16 +400,7 @@ mod client {
                         );
                         compressor.finish().context("failed to finish compressor")?;
                     }
-                    Ok((
-                        RunJobRequest {
-                            job_id,
-                            command,
-                            inputs,
-                            outputs,
-                            toolchain,
-                        },
-                        path_transformer,
-                    ))
+                    Ok((NewJobRequest { inputs, toolchain }, path_transformer))
                 })
                 .await??;
 
@@ -433,14 +408,38 @@ mod client {
                 .client
                 .lock()
                 .await
-                .post(urls::scheduler_run_job(&self.scheduler_url, &req.job_id))
+                .post(urls::scheduler_new_job(&self.scheduler_url))
                 .bearer_auth(self.auth_token.clone())
-                .timeout(timeout)
                 .bincode(&req)?;
 
             bincode_req_fut(req)
                 .await
                 .map(|res| (res, path_transformer))
+        }
+
+        async fn run_job(
+            &self,
+            job_id: &str,
+            timeout: Duration,
+            toolchain: Toolchain,
+            command: CompileCommand,
+            outputs: Vec<String>,
+        ) -> Result<RunJobResponse> {
+            let req = self
+                .client
+                .lock()
+                .await
+                .post(urls::scheduler_run_job(&self.scheduler_url, job_id))
+                .bearer_auth(self.auth_token.clone())
+                .timeout(timeout)
+                .bincode(&RunJobRequest {
+                    job_id: job_id.to_owned(),
+                    command,
+                    outputs,
+                    toolchain,
+                })?;
+
+            bincode_req_fut(req).await
         }
 
         async fn do_get_status(&self) -> Result<SchedulerStatusResult> {

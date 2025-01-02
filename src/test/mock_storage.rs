@@ -73,6 +73,12 @@ impl Storage for MockStorage {
             _ => Err(anyhow!("No cache entry for key `{key}`")),
         }
     }
+    async fn del(&self, _key: &str) -> Result<()> {
+        if let Some(delay) = self.delay {
+            sleep(delay).await;
+        }
+        Ok(())
+    }
     async fn has(&self, _key: &str) -> bool {
         false
     }

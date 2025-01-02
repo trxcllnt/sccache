@@ -149,6 +149,19 @@ impl Storage for DiskCache {
         Ok(Box::new(file.compat()) as Box<dyn futures::AsyncRead + Unpin + Send>)
     }
 
+    async fn del(&self, key: &str) -> Result<()> {
+        let path = make_key_path(key);
+        let lru = self.lru.clone();
+        self.pool
+            .spawn_blocking(move || {
+                lru.lock()
+                    .unwrap()
+                    .get_or_init()
+                    .and_then(|lru| lru.remove(&path).map_err(|e| e.into()))
+            })
+            .await?
+    }
+
     async fn has(&self, key: &str) -> bool {
         let path = make_key_path(key);
         let lru = self.lru.clone();

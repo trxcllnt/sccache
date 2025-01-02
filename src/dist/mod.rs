@@ -463,6 +463,7 @@ pub struct CompileCommand {
 #[serde(deny_unknown_fields)]
 pub struct NewJobRequest {
     pub toolchain: Toolchain,
+    pub inputs: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -480,7 +481,6 @@ pub struct NewJobResponse {
 pub struct RunJobRequest {
     pub job_id: String,
     pub command: CompileCommand,
-    pub inputs: Vec<u8>,
     pub outputs: Vec<String>,
     pub toolchain: Toolchain,
 }
@@ -576,12 +576,7 @@ pub trait SchedulerService: Send + Sync {
     async fn new_job(&self, request: NewJobRequest) -> Result<NewJobResponse>;
     async fn run_job(&self, request: RunJobRequest) -> Result<RunJobResponse>;
     async fn job_failure(&self, job_id: &str, reason: &str, info: BuildServerInfo) -> Result<()>;
-    async fn job_success(
-        &self,
-        job_id: &str,
-        result: BuildResult,
-        info: BuildServerInfo,
-    ) -> Result<()>;
+    async fn job_success(&self, job_id: &str, info: BuildServerInfo) -> Result<()>;
 
     async fn request_status(&self) -> Result<()>;
     async fn receive_status(&self, info: BuildServerInfo, status: Option<bool>) -> Result<()>;
@@ -603,12 +598,11 @@ pub trait ServerService: Send + Sync {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs: Vec<u8>,
-    ) -> Result<BuildResult>;
+    ) -> Result<()>;
 
     async fn job_failure(&self, task_id: &str, reason: &str) -> Result<()>;
 
-    async fn job_success(&self, task_id: &str, result: &BuildResult) -> Result<()>;
+    async fn job_success(&self, task_id: &str) -> Result<()>;
 }
 
 #[cfg(feature = "dist-server")]
@@ -629,7 +623,11 @@ pub trait BuilderIncoming: Send + Sync {
 #[async_trait]
 pub trait Client: Send + Sync {
     // To Scheduler
-    async fn new_job(&self, toolchain: Toolchain) -> Result<NewJobResponse>;
+    async fn new_job(
+        &self,
+        toolchain: Toolchain,
+        inputs_packager: Box<dyn pkg::InputsPackager>,
+    ) -> Result<(NewJobResponse, PathTransformer)>;
     // To Scheduler
     async fn run_job(
         &self,
@@ -638,8 +636,7 @@ pub trait Client: Send + Sync {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs_packager: Box<dyn pkg::InputsPackager>,
-    ) -> Result<(RunJobResponse, PathTransformer)>;
+    ) -> Result<RunJobResponse>;
     // To Scheduler
     async fn do_get_status(&self) -> Result<SchedulerStatusResult>;
     // To Scheduler

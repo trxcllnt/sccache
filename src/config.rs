@@ -670,15 +670,17 @@ fn bool_from_env_var(env_var_name: &str) -> Result<Option<bool>> {
         .transpose()
 }
 
-fn config_from_env() -> Result<EnvConfig> {
+fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvConfig> {
+    let envvar_prefix = envvar_prefix.into().unwrap_or("SCCACHE_").to_owned();
+    let envvar = |key: &str| envvar_prefix.clone() + key;
     // ======= AWS =======
-    let s3 = if let Ok(bucket) = env::var("SCCACHE_BUCKET") {
-        let region = env::var("SCCACHE_REGION").ok();
-        let no_credentials = bool_from_env_var("SCCACHE_S3_NO_CREDENTIALS")?.unwrap_or(false);
-        let use_ssl = bool_from_env_var("SCCACHE_S3_USE_SSL")?;
-        let server_side_encryption = bool_from_env_var("SCCACHE_S3_SERVER_SIDE_ENCRYPTION")?;
-        let endpoint = env::var("SCCACHE_ENDPOINT").ok();
-        let key_prefix = key_prefix_from_env_var("SCCACHE_S3_KEY_PREFIX");
+    let s3 = if let Ok(bucket) = env::var(envvar("BUCKET")) {
+        let region = env::var(envvar("REGION")).ok();
+        let no_credentials = bool_from_env_var(&envvar("S3_NO_CREDENTIALS"))?.unwrap_or(false);
+        let use_ssl = bool_from_env_var(&envvar("S3_USE_SSL"))?;
+        let server_side_encryption = bool_from_env_var(&envvar("S3_SERVER_SIDE_ENCRYPTION"))?;
+        let endpoint = env::var(envvar("ENDPOINT")).ok();
+        let key_prefix = key_prefix_from_env_var(&envvar("S3_KEY_PREFIX"));
 
         Some(S3CacheConfig {
             bucket,
@@ -697,30 +699,33 @@ fn config_from_env() -> Result<EnvConfig> {
         && (env::var_os("AWS_ACCESS_KEY_ID").is_some()
             || env::var_os("AWS_SECRET_ACCESS_KEY").is_some())
     {
-        bail!("If setting S3 credentials, SCCACHE_S3_NO_CREDENTIALS must not be set.");
+        bail!(
+            "If setting S3 credentials, {} must not be set.",
+            envvar("S3_NO_CREDENTIALS")
+        );
     }
 
     // ======= redis =======
     let redis = match (
-        env::var("SCCACHE_REDIS").ok(),
-        env::var("SCCACHE_REDIS_ENDPOINT").ok(),
-        env::var("SCCACHE_REDIS_CLUSTER_ENDPOINTS").ok(),
+        env::var(envvar("REDIS")).ok(),
+        env::var(envvar("REDIS_ENDPOINT")).ok(),
+        env::var(envvar("REDIS_CLUSTER_ENDPOINTS")).ok(),
     ) {
         (None, None, None) => None,
         (url, endpoint, cluster_endpoints) => {
-            let db = number_from_env_var("SCCACHE_REDIS_DB")
+            let db = number_from_env_var(&envvar("REDIS_DB"))
                 .transpose()?
                 .unwrap_or(DEFAULT_REDIS_DB);
 
-            let username = env::var("SCCACHE_REDIS_USERNAME").ok();
-            let password = env::var("SCCACHE_REDIS_PASSWORD").ok();
+            let username = env::var(envvar("REDIS_USERNAME")).ok();
+            let password = env::var(envvar("REDIS_PASSWORD")).ok();
 
-            let ttl = number_from_env_var("SCCACHE_REDIS_EXPIRATION")
-                .or_else(|| number_from_env_var("SCCACHE_REDIS_TTL"))
+            let ttl = number_from_env_var(&envvar("REDIS_EXPIRATION"))
+                .or_else(|| number_from_env_var(&envvar("REDIS_TTL")))
                 .transpose()?
                 .unwrap_or(DEFAULT_REDIS_CACHE_TTL);
 
-            let key_prefix = key_prefix_from_env_var("SCCACHE_REDIS_KEY_PREFIX");
+            let key_prefix = key_prefix_from_env_var(&envvar("REDIS_KEY_PREFIX"));
 
             Some(RedisCacheConfig {
                 url,
@@ -735,24 +740,28 @@ fn config_from_env() -> Result<EnvConfig> {
         }
     };
 
-    if env::var_os("SCCACHE_REDIS_EXPIRATION").is_some()
-        && env::var_os("SCCACHE_REDIS_TTL").is_some()
+    if env::var_os(envvar("REDIS_EXPIRATION")).is_some()
+        && env::var_os(envvar("REDIS_TTL")).is_some()
     {
-        bail!("You mustn't set both SCCACHE_REDIS_EXPIRATION and SCCACHE_REDIS_TTL. Use only one.");
+        bail!(
+            "You mustn't set both {} and {}. Use only one.",
+            envvar("REDIS_EXPIRATION"),
+            envvar("REDIS_TTL")
+        );
     }
 
     // ======= memcached =======
     let memcached = if let Ok(url) =
-        env::var("SCCACHE_MEMCACHED").or_else(|_| env::var("SCCACHE_MEMCACHED_ENDPOINT"))
+        env::var(envvar("MEMCACHED")).or_else(|_| env::var(envvar("MEMCACHED_ENDPOINT")))
     {
-        let username = env::var("SCCACHE_MEMCACHED_USERNAME").ok();
-        let password = env::var("SCCACHE_MEMCACHED_PASSWORD").ok();
+        let username = env::var(envvar("MEMCACHED_USERNAME")).ok();
+        let password = env::var(envvar("MEMCACHED_PASSWORD")).ok();
 
-        let expiration = number_from_env_var("SCCACHE_MEMCACHED_EXPIRATION")
+        let expiration = number_from_env_var(&envvar("MEMCACHED_EXPIRATION"))
             .transpose()?
             .unwrap_or(DEFAULT_MEMCACHED_CACHE_EXPIRATION);
 
-        let key_prefix = key_prefix_from_env_var("SCCACHE_MEMCACHED_KEY_PREFIX");
+        let key_prefix = key_prefix_from_env_var(&envvar("MEMCACHED_KEY_PREFIX"));
 
         Some(MemcachedCacheConfig {
             url,
@@ -765,47 +774,54 @@ fn config_from_env() -> Result<EnvConfig> {
         None
     };
 
-    if env::var_os("SCCACHE_MEMCACHED").is_some()
-        && env::var_os("SCCACHE_MEMCACHED_ENDPOINT").is_some()
-    {
-        bail!("You mustn't set both SCCACHE_MEMCACHED and SCCACHE_MEMCACHED_ENDPOINT. Please, use only SCCACHE_MEMCACHED_ENDPOINT.");
-    }
-
-    // ======= GCP/GCS =======
-    if (env::var("SCCACHE_GCS_CREDENTIALS_URL").is_ok()
-        || env::var("SCCACHE_GCS_OAUTH_URL").is_ok()
-        || env::var("SCCACHE_GCS_KEY_PATH").is_ok())
-        && env::var("SCCACHE_GCS_BUCKET").is_err()
+    if env::var_os(envvar("MEMCACHED")).is_some()
+        && env::var_os(envvar("MEMCACHED_ENDPOINT")).is_some()
     {
         bail!(
-            "If setting GCS credentials, SCCACHE_GCS_BUCKET and an auth mechanism need to be set."
+            "You mustn't set both {} and {}. Please, use only {}.",
+            envvar("MEMCACHED"),
+            envvar("MEMCACHED_ENDPOINT"),
+            envvar("MEMCACHED_ENDPOINT")
         );
     }
 
-    let gcs = env::var("SCCACHE_GCS_BUCKET").ok().map(|bucket| {
-        let key_prefix = key_prefix_from_env_var("SCCACHE_GCS_KEY_PREFIX");
+    // ======= GCP/GCS =======
+    if (env::var(envvar("GCS_CREDENTIALS_URL")).is_ok()
+        || env::var(envvar("GCS_OAUTH_URL")).is_ok()
+        || env::var(envvar("GCS_KEY_PATH")).is_ok())
+        && env::var(envvar("GCS_BUCKET")).is_err()
+    {
+        bail!(
+            "If setting GCS credentials, {} and an auth mechanism need to be set.",
+            envvar("GCS_BUCKET")
+        );
+    }
 
-        if env::var("SCCACHE_GCS_OAUTH_URL").is_ok() {
-            eprintln!("SCCACHE_GCS_OAUTH_URL has been deprecated");
+    let gcs = env::var(envvar("GCS_BUCKET")).ok().map(|bucket| {
+        let key_prefix = key_prefix_from_env_var(&envvar("GCS_KEY_PREFIX"));
+
+        if env::var(envvar("GCS_OAUTH_URL")).is_ok() {
+            eprintln!("{} has been deprecated", envvar("GCS_OAUTH_URL"));
             eprintln!("if you intend to use vm metadata for auth, please set correct service account instead");
         }
 
-        let credential_url = env::var("SCCACHE_GCS_CREDENTIALS_URL").ok();
+        let credential_url = env::var(envvar("GCS_CREDENTIALS_URL")).ok();
 
-        let cred_path = env::var("SCCACHE_GCS_KEY_PATH").ok();
-        let service_account = env::var("SCCACHE_GCS_SERVICE_ACCOUNT").ok();
+        let cred_path = env::var(envvar("GCS_KEY_PATH")).ok();
+        let service_account = env::var(envvar("GCS_SERVICE_ACCOUNT")).ok();
 
-        let rw_mode = match env::var("SCCACHE_GCS_RW_MODE").as_ref().map(String::as_str) {
+        let rw_mode = match env::var(envvar("GCS_RW_MODE")).as_ref().map(String::as_str) {
             Ok("READ_ONLY") => CacheModeConfig::ReadOnly,
             Ok("READ_WRITE") => CacheModeConfig::ReadWrite,
             // TODO: unsure if these should warn during the configuration loading
             // or at the time when they're actually used to connect to GCS
             Ok(_) => {
-                warn!("Invalid SCCACHE_GCS_RW_MODE -- defaulting to READ_ONLY.");
+                warn!("Invalid {} -- defaulting to READ_ONLY.",
+                envvar("GCS_RW_MODE"));
                 CacheModeConfig::ReadOnly
             }
             _ => {
-                warn!("No SCCACHE_GCS_RW_MODE specified -- defaulting to READ_ONLY.");
+                warn!("No {} specified -- defaulting to READ_ONLY.", envvar("GCS_RW_MODE"));
                 CacheModeConfig::ReadOnly
             }
         };
@@ -821,14 +837,14 @@ fn config_from_env() -> Result<EnvConfig> {
     });
 
     // ======= GHA =======
-    let gha = if let Ok(version) = env::var("SCCACHE_GHA_VERSION") {
+    let gha = if let Ok(version) = env::var(envvar("GHA_VERSION")) {
         // If SCCACHE_GHA_VERSION has been set, we don't need to check
         // SCCACHE_GHA_ENABLED's value anymore.
         Some(GHACacheConfig {
             enabled: true,
             version,
         })
-    } else if bool_from_env_var("SCCACHE_GHA_ENABLED")?.unwrap_or(false) {
+    } else if bool_from_env_var(&envvar("GHA_ENABLED"))?.unwrap_or(false) {
         // If only SCCACHE_GHA_ENABLED has been set to the true value, enable with
         // default version.
         Some(GHACacheConfig {
@@ -841,10 +857,10 @@ fn config_from_env() -> Result<EnvConfig> {
 
     // ======= Azure =======
     let azure = if let (Ok(connection_string), Ok(container)) = (
-        env::var("SCCACHE_AZURE_CONNECTION_STRING"),
-        env::var("SCCACHE_AZURE_BLOB_CONTAINER"),
+        env::var(envvar("AZURE_CONNECTION_STRING")),
+        env::var(envvar("AZURE_BLOB_CONTAINER")),
     ) {
-        let key_prefix = key_prefix_from_env_var("SCCACHE_AZURE_KEY_PREFIX");
+        let key_prefix = key_prefix_from_env_var(&envvar("AZURE_KEY_PREFIX"));
         Some(AzureCacheConfig {
             connection_string,
             container,
@@ -855,11 +871,11 @@ fn config_from_env() -> Result<EnvConfig> {
     };
 
     // ======= WebDAV =======
-    let webdav = if let Ok(endpoint) = env::var("SCCACHE_WEBDAV_ENDPOINT") {
-        let key_prefix = key_prefix_from_env_var("SCCACHE_WEBDAV_KEY_PREFIX");
-        let username = env::var("SCCACHE_WEBDAV_USERNAME").ok();
-        let password = env::var("SCCACHE_WEBDAV_PASSWORD").ok();
-        let token = env::var("SCCACHE_WEBDAV_TOKEN").ok();
+    let webdav = if let Ok(endpoint) = env::var(envvar("WEBDAV_ENDPOINT")) {
+        let key_prefix = key_prefix_from_env_var(&envvar("WEBDAV_KEY_PREFIX"));
+        let username = env::var(envvar("WEBDAV_USERNAME")).ok();
+        let password = env::var(envvar("WEBDAV_PASSWORD")).ok();
+        let token = env::var(envvar("WEBDAV_TOKEN")).ok();
 
         Some(WebdavCacheConfig {
             endpoint,
@@ -873,11 +889,11 @@ fn config_from_env() -> Result<EnvConfig> {
     };
 
     // ======= OSS =======
-    let oss = if let Ok(bucket) = env::var("SCCACHE_OSS_BUCKET") {
-        let endpoint = env::var("SCCACHE_OSS_ENDPOINT").ok();
-        let key_prefix = key_prefix_from_env_var("SCCACHE_OSS_KEY_PREFIX");
+    let oss = if let Ok(bucket) = env::var(envvar("OSS_BUCKET")) {
+        let endpoint = env::var(envvar("OSS_ENDPOINT")).ok();
+        let key_prefix = key_prefix_from_env_var(&envvar("OSS_KEY_PREFIX"));
 
-        let no_credentials = bool_from_env_var("SCCACHE_OSS_NO_CREDENTIALS")?.unwrap_or(false);
+        let no_credentials = bool_from_env_var(&envvar("OSS_NO_CREDENTIALS"))?.unwrap_or(false);
 
         Some(OSSCacheConfig {
             bucket,
@@ -896,31 +912,37 @@ fn config_from_env() -> Result<EnvConfig> {
         && (env::var_os("ALIBABA_CLOUD_ACCESS_KEY_ID").is_some()
             || env::var_os("ALIBABA_CLOUD_ACCESS_KEY_SECRET").is_some())
     {
-        bail!("If setting OSS credentials, SCCACHE_OSS_NO_CREDENTIALS must not be set.");
+        bail!(
+            "If setting OSS credentials, {} must not be set.",
+            envvar("OSS_NO_CREDENTIALS")
+        );
     }
 
     // ======= Local =======
-    let disk_dir = env::var_os("SCCACHE_DIR").map(PathBuf::from);
-    let disk_sz = env::var("SCCACHE_CACHE_SIZE")
+    let disk_dir = env::var_os(envvar("DIR")).map(PathBuf::from);
+    let disk_sz = env::var(envvar("CACHE_SIZE"))
         .ok()
         .and_then(|v| parse_size(&v));
 
     let mut preprocessor_mode_config = PreprocessorCacheModeConfig::activated();
-    let preprocessor_mode_overridden = if let Some(value) = bool_from_env_var("SCCACHE_DIRECT")? {
+    let preprocessor_mode_overridden = if let Some(value) = bool_from_env_var(&envvar("DIRECT"))? {
         preprocessor_mode_config.use_preprocessor_cache_mode = value;
         true
     } else {
         false
     };
 
-    let (disk_rw_mode, disk_rw_mode_overridden) = match env::var("SCCACHE_LOCAL_RW_MODE")
+    let (disk_rw_mode, disk_rw_mode_overridden) = match env::var(envvar("LOCAL_RW_MODE"))
         .as_ref()
         .map(String::as_str)
     {
         Ok("READ_ONLY") => (CacheModeConfig::ReadOnly, true),
         Ok("READ_WRITE") => (CacheModeConfig::ReadWrite, true),
         Ok(_) => {
-            warn!("Invalid SCCACHE_LOCAL_RW_MODE -- defaulting to READ_WRITE.");
+            warn!(
+                "Invalid {} -- defaulting to READ_WRITE.",
+                envvar("LOCAL_RW_MODE")
+            );
             (CacheModeConfig::ReadWrite, false)
         }
         _ => (CacheModeConfig::ReadWrite, false),
@@ -989,7 +1011,7 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let env_conf = config_from_env()?;
+        let env_conf = config_from_env("SCCACHE_")?;
 
         let file_conf_path = config_file("SCCACHE_CONF", "config");
         let file_conf = try_read_config_file(&file_conf_path)
@@ -1119,9 +1141,38 @@ pub enum MessageBroker {
 }
 
 #[cfg(feature = "dist-server")]
-fn message_broker_from_env() -> Option<MessageBroker> {
-    None.or(std::env::var("AMQP_ADDR").ok().map(MessageBroker::AMQP))
-        .or(std::env::var("REDIS_ADDR").ok().map(MessageBroker::Redis))
+impl MessageBroker {
+    fn from_env() -> Option<MessageBroker> {
+        None.or(std::env::var("AMQP_ADDR").ok().map(MessageBroker::AMQP))
+            .or(std::env::var("REDIS_ADDR").ok().map(MessageBroker::Redis))
+    }
+}
+
+#[cfg(feature = "dist-server")]
+#[derive(Debug)]
+pub struct StorageConfig {
+    pub storage: Option<CacheType>,
+    pub fallback: DiskCacheConfig,
+}
+
+#[cfg(feature = "dist-server")]
+impl From<CacheConfigs> for StorageConfig {
+    fn from(conf: CacheConfigs) -> Self {
+        let (storage, fallback) = conf.into_fallback();
+        Self { storage, fallback }
+    }
+}
+
+#[cfg(feature = "dist-server")]
+impl From<StorageConfig> for CacheConfigs {
+    fn from(conf: StorageConfig) -> Self {
+        conf.storage
+            .map(|x| x.clone().into())
+            .unwrap_or_else(|| Self {
+                disk: Some(conf.fallback),
+                ..Default::default()
+            })
+    }
 }
 
 #[cfg(feature = "dist-server")]
@@ -1130,14 +1181,14 @@ pub mod scheduler {
     use std::path::PathBuf;
     use std::{net::SocketAddr, str::FromStr};
 
-    use crate::config::message_broker_from_env;
     use crate::errors::*;
 
     use serde::{Deserialize, Serialize};
 
     use super::{
-        config_from_env, number_from_env_var, try_read_config_file, CacheConfigs, CacheModeConfig,
-        CacheType, DiskCacheConfig, MessageBroker,
+        config_from_env, default_disk_cache_dir, default_disk_cache_size, number_from_env_var,
+        try_read_config_file, CacheConfigs, CacheModeConfig, DiskCacheConfig, MessageBroker,
+        StorageConfig,
     };
 
     // pub fn default_remember_server_error_timeout() -> u64 {
@@ -1171,23 +1222,12 @@ pub mod scheduler {
     }
 
     #[derive(Debug, Serialize, Deserialize)]
-    #[serde(tag = "type")]
-    #[serde(deny_unknown_fields)]
-    pub enum ServerAuth {
-        #[serde(rename = "DANGEROUSLY_INSECURE")]
-        Insecure,
-        #[serde(rename = "jwt_hs256")]
-        JwtHS256 { secret_key: String },
-        #[serde(rename = "token")]
-        Token { token: String },
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
     #[serde(default)]
     #[serde(deny_unknown_fields)]
     pub struct FileConfig {
         pub client_auth: ClientAuth,
         pub job_time_limit: Option<u32>,
+        pub jobs: CacheConfigs,
         pub max_body_size: Option<usize>,
         pub message_broker: Option<MessageBroker>,
         pub public_addr: SocketAddr,
@@ -1200,16 +1240,25 @@ pub mod scheduler {
             Self {
                 client_auth: ClientAuth::Insecure,
                 job_time_limit: None,
+                jobs: CacheConfigs {
+                    disk: Some(DiskCacheConfig {
+                        dir: default_disk_cache_dir().join("jobs"),
+                        preprocessor_cache_mode: Default::default(),
+                        rw_mode: CacheModeConfig::ReadWrite,
+                        size: default_disk_cache_size(),
+                    }),
+                    ..Default::default()
+                },
                 max_body_size: None,
                 message_broker: None,
                 public_addr: SocketAddr::from_str("0.0.0.0:10500").unwrap(),
                 scheduler_id: None,
                 toolchains: CacheConfigs {
                     disk: Some(DiskCacheConfig {
-                        dir: PathBuf::from_str("/tmp/sccache/toolchains").unwrap(),
+                        dir: default_disk_cache_dir().join("toolchains"),
                         preprocessor_cache_mode: Default::default(),
                         rw_mode: CacheModeConfig::ReadWrite,
-                        size: u64::MAX,
+                        size: default_disk_cache_size(),
                     }),
                     ..Default::default()
                 },
@@ -1221,21 +1270,20 @@ pub mod scheduler {
     pub struct Config {
         pub client_auth: ClientAuth,
         pub job_time_limit: u32,
+        pub jobs: StorageConfig,
         pub max_body_size: usize,
         pub message_broker: Option<MessageBroker>,
         pub public_addr: SocketAddr,
         pub scheduler_id: String,
-        pub toolchains_fallback: DiskCacheConfig,
-        pub toolchains: Option<CacheType>,
+        pub toolchains: StorageConfig,
     }
 
     impl Config {
         pub fn load(conf_path: Option<PathBuf>) -> Result<Self> {
-            let mut conf_caches: CacheConfigs = Default::default();
-
             let FileConfig {
                 client_auth,
                 job_time_limit,
+                jobs,
                 max_body_size,
                 message_broker,
                 public_addr,
@@ -1255,10 +1303,13 @@ pub mod scheduler {
                 })
                 .unwrap_or_default();
 
-            conf_caches.merge(toolchains);
-            conf_caches.merge(config_from_env()?.cache);
+            let mut jobs_storage = CacheConfigs::default();
+            jobs_storage.merge(jobs);
+            jobs_storage.merge(config_from_env("SCCACHE_DIST_JOBS_")?.cache);
 
-            let (toolchains, toolchains_fallback) = conf_caches.into_fallback();
+            let mut toolchains_storage = CacheConfigs::default();
+            toolchains_storage.merge(toolchains);
+            toolchains_storage.merge(config_from_env("SCCACHE_DIST_TOOLCHAINS_")?.cache);
 
             let job_time_limit = number_from_env_var("SCCACHE_DIST_JOB_TIME_LIMIT_SECS")
                 .transpose()?
@@ -1271,7 +1322,7 @@ pub mod scheduler {
                 // 1GiB should be enough for toolchains and compile inputs, right?
                 .unwrap_or(1024 * 1024 * 1024);
 
-            let message_broker = message_broker_from_env().or(message_broker);
+            let message_broker = MessageBroker::from_env().or(message_broker);
 
             let scheduler_id = env::var("SCCACHE_DIST_SCHEDULER_ID")
                 .ok()
@@ -1281,12 +1332,12 @@ pub mod scheduler {
             Ok(Self {
                 client_auth,
                 job_time_limit,
+                jobs: jobs_storage.into(),
                 max_body_size,
                 message_broker,
                 public_addr,
                 scheduler_id,
-                toolchains_fallback,
-                toolchains,
+                toolchains: toolchains_storage.into(),
             })
         }
 
@@ -1300,17 +1351,12 @@ pub mod scheduler {
             Self {
                 client_auth: scheduler_config.client_auth.clone(),
                 job_time_limit: Some(scheduler_config.job_time_limit),
+                jobs: scheduler_config.jobs.into(),
                 max_body_size: Some(scheduler_config.max_body_size),
                 message_broker: scheduler_config.message_broker,
                 public_addr: scheduler_config.public_addr,
                 scheduler_id: Some(scheduler_config.scheduler_id),
-                toolchains: scheduler_config
-                    .toolchains
-                    .map(|x| x.clone().into())
-                    .unwrap_or(CacheConfigs {
-                        disk: Some(scheduler_config.toolchains_fallback),
-                        ..Default::default()
-                    }),
+                toolchains: scheduler_config.toolchains.into(),
             }
         }
     }
@@ -1319,13 +1365,13 @@ pub mod scheduler {
 #[cfg(feature = "dist-server")]
 pub mod server {
     use super::{
-        config_from_env, message_broker_from_env, number_from_env_var, try_read_config_file,
-        CacheConfigs, CacheModeConfig, CacheType, DiskCacheConfig, MessageBroker,
+        config_from_env, default_disk_cache_dir, default_disk_cache_size, number_from_env_var,
+        try_read_config_file, CacheConfigs, CacheModeConfig, DiskCacheConfig, MessageBroker,
+        StorageConfig,
     };
     use serde::{Deserialize, Serialize};
     use std::env;
     use std::path::PathBuf;
-    use std::str::FromStr;
 
     use crate::errors::*;
 
@@ -1400,6 +1446,7 @@ pub mod server {
     pub struct FileConfig {
         pub builder: BuilderType,
         pub cache_dir: PathBuf,
+        pub jobs: CacheConfigs,
         pub max_per_core_load: Option<f64>,
         pub message_broker: Option<MessageBroker>,
         pub num_cpus_to_ignore: Option<usize>,
@@ -1413,6 +1460,15 @@ pub mod server {
             Self {
                 builder: BuilderType::Docker,
                 cache_dir: Default::default(),
+                jobs: CacheConfigs {
+                    disk: Some(DiskCacheConfig {
+                        dir: default_disk_cache_dir().join("jobs"),
+                        preprocessor_cache_mode: Default::default(),
+                        rw_mode: CacheModeConfig::ReadWrite,
+                        size: default_disk_cache_size(),
+                    }),
+                    ..Default::default()
+                },
                 max_per_core_load: None,
                 message_broker: None,
                 num_cpus_to_ignore: None,
@@ -1420,10 +1476,10 @@ pub mod server {
                 toolchain_cache_size: None,
                 toolchains: CacheConfigs {
                     disk: Some(DiskCacheConfig {
-                        dir: PathBuf::from_str("/tmp/sccache/toolchains").unwrap(),
+                        dir: default_disk_cache_dir().join("toolchains"),
                         preprocessor_cache_mode: Default::default(),
                         rw_mode: CacheModeConfig::ReadWrite,
-                        size: u64::MAX,
+                        size: default_disk_cache_size(),
                     }),
                     ..Default::default()
                 },
@@ -1435,23 +1491,22 @@ pub mod server {
     pub struct Config {
         pub builder: BuilderType,
         pub cache_dir: PathBuf,
+        pub jobs: StorageConfig,
         pub max_per_core_load: f64,
         pub message_broker: Option<MessageBroker>,
         pub num_cpus_to_ignore: usize,
         pub server_id: String,
         pub toolchain_cache_size: u64,
-        pub toolchains: Option<CacheType>,
-        pub toolchains_fallback: DiskCacheConfig,
+        pub toolchains: StorageConfig,
     }
 
     impl Config {
         pub fn load(conf_path: Option<PathBuf>) -> Result<Self> {
-            let mut conf_caches: CacheConfigs = Default::default();
-
             let FileConfig {
                 message_broker,
                 builder,
                 cache_dir,
+                jobs,
                 max_per_core_load,
                 num_cpus_to_ignore,
                 server_id,
@@ -1471,10 +1526,13 @@ pub mod server {
                 })
                 .unwrap_or_default();
 
-            conf_caches.merge(toolchains);
-            conf_caches.merge(config_from_env()?.cache);
+            let mut jobs_storage = CacheConfigs::default();
+            jobs_storage.merge(jobs);
+            jobs_storage.merge(config_from_env("SCCACHE_DIST_JOBS_")?.cache);
 
-            let (toolchains, toolchains_fallback) = conf_caches.into_fallback();
+            let mut toolchains_storage = CacheConfigs::default();
+            toolchains_storage.merge(toolchains);
+            toolchains_storage.merge(config_from_env("SCCACHE_DIST_TOOLCHAINS_")?.cache);
 
             let max_per_core_load = number_from_env_var("SCCACHE_DIST_MAX_PER_CORE_LOAD")
                 .transpose()?
@@ -1487,7 +1545,7 @@ pub mod server {
                 .or(num_cpus_to_ignore)
                 .unwrap_or(0);
 
-            let message_broker = message_broker_from_env().or(message_broker);
+            let message_broker = MessageBroker::from_env().or(message_broker);
 
             let server_id = env::var("SCCACHE_DIST_SERVER_ID")
                 .ok()
@@ -1502,13 +1560,13 @@ pub mod server {
             Ok(Self {
                 builder,
                 cache_dir,
+                jobs: jobs_storage.into(),
                 max_per_core_load,
                 message_broker,
                 num_cpus_to_ignore,
                 server_id,
                 toolchain_cache_size,
-                toolchains,
-                toolchains_fallback,
+                toolchains: toolchains_storage.into(),
             })
         }
 
@@ -1522,18 +1580,13 @@ pub mod server {
             Self {
                 builder: server_config.builder.clone(),
                 cache_dir: server_config.cache_dir.clone(),
+                jobs: server_config.jobs.into(),
                 max_per_core_load: Some(server_config.max_per_core_load),
                 message_broker: server_config.message_broker,
                 num_cpus_to_ignore: Some(server_config.num_cpus_to_ignore),
                 server_id: Some(server_config.server_id),
                 toolchain_cache_size: Some(server_config.toolchain_cache_size),
-                toolchains: server_config
-                    .toolchains
-                    .map(|x| x.clone().into())
-                    .unwrap_or(CacheConfigs {
-                        disk: Some(server_config.toolchains_fallback),
-                        ..Default::default()
-                    }),
+                toolchains: server_config.toolchains.into(),
             }
         }
     }
@@ -1637,7 +1690,7 @@ fn test_s3_no_credentials_conflict() {
     env::set_var("AWS_ACCESS_KEY_ID", "aws-access-key-id");
     env::set_var("AWS_SECRET_ACCESS_KEY", "aws-secret-access-key");
 
-    let cfg = config_from_env();
+    let cfg = config_from_env("SCCACHE_");
 
     env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
     env::remove_var("SCCACHE_BUCKET");
@@ -1657,7 +1710,7 @@ fn test_s3_no_credentials_invalid() {
     env::set_var("SCCACHE_S3_NO_CREDENTIALS", "yes");
     env::set_var("SCCACHE_BUCKET", "my-bucket");
 
-    let cfg = config_from_env();
+    let cfg = config_from_env("SCCACHE_");
 
     env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
     env::remove_var("SCCACHE_BUCKET");
@@ -1675,7 +1728,7 @@ fn test_s3_no_credentials_valid_true() {
     env::set_var("SCCACHE_S3_NO_CREDENTIALS", "true");
     env::set_var("SCCACHE_BUCKET", "my-bucket");
 
-    let cfg = config_from_env();
+    let cfg = config_from_env("SCCACHE_");
 
     env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
     env::remove_var("SCCACHE_BUCKET");
@@ -1700,7 +1753,7 @@ fn test_s3_no_credentials_valid_false() {
     env::set_var("SCCACHE_S3_NO_CREDENTIALS", "false");
     env::set_var("SCCACHE_BUCKET", "my-bucket");
 
-    let cfg = config_from_env();
+    let cfg = config_from_env("SCCACHE_");
 
     env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
     env::remove_var("SCCACHE_BUCKET");
@@ -1728,7 +1781,7 @@ fn test_gcs_service_account() {
     env::set_var("SCCACHE_GCS_SERVICE_ACCOUNT", "my@example.com");
     env::set_var("SCCACHE_GCS_RW_MODE", "READ_WRITE");
 
-    let cfg = config_from_env();
+    let cfg = config_from_env("SCCACHE_");
 
     env::remove_var("SCCACHE_GCS_BUCKET");
     env::remove_var("SCCACHE_GCS_SERVICE_ACCOUNT");

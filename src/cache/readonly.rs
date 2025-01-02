@@ -34,6 +34,10 @@ impl Storage for ReadOnlyStorage {
         self.0.get_stream(key).await
     }
 
+    async fn del(&self, _key: &str) -> Result<()> {
+        Err(anyhow!("Cannot write to read-only storage"))
+    }
+
     async fn has(&self, key: &str) -> bool {
         self.0.has(key).await
     }

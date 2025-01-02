@@ -176,6 +176,7 @@ fn sccache_scheduler_cfg(
     tmpdir: &Path,
     message_broker: MessageBroker,
 ) -> sccache::config::scheduler::Config {
+    let jobs_path = "server-jobs";
     let toolchains_path = "server-toolchains";
     fs::create_dir(tmpdir.join(toolchains_path)).unwrap();
 
@@ -183,7 +184,8 @@ fn sccache_scheduler_cfg(
     config.message_broker = Some(message_broker);
     config.public_addr = SocketAddr::from(([0, 0, 0, 0], SCHEDULER_PORT));
     config.client_auth = sccache::config::scheduler::ClientAuth::Insecure;
-    config.toolchains_fallback.dir = Path::new(CONFIGS_CONTAINER_PATH).join(toolchains_path);
+    config.jobs.fallback.dir = Path::new(CONFIGS_CONTAINER_PATH).join(jobs_path);
+    config.toolchains.fallback.dir = Path::new(CONFIGS_CONTAINER_PATH).join(toolchains_path);
     config
 }
 
@@ -194,6 +196,7 @@ fn sccache_server_cfg(
     // server_ip: IpAddr,
 ) -> sccache::config::server::Config {
     let relpath = "server-cache";
+    let jobs_path = "server-jobs";
     let toolchains_path = "server-toolchains";
     fs::create_dir(tmpdir.join(relpath)).unwrap();
     fs::create_dir(tmpdir.join(toolchains_path)).unwrap_or_default();
@@ -205,7 +208,8 @@ fn sccache_server_cfg(
         bwrap_path: DIST_IMAGE_BWRAP_PATH.into(),
     };
     config.cache_dir = Path::new(CONFIGS_CONTAINER_PATH).join(relpath);
-    config.toolchains_fallback.dir = Path::new(CONFIGS_CONTAINER_PATH).join(toolchains_path);
+    config.jobs.fallback.dir = Path::new(CONFIGS_CONTAINER_PATH).join(jobs_path);
+    config.toolchains.fallback.dir = Path::new(CONFIGS_CONTAINER_PATH).join(toolchains_path);
     config.toolchain_cache_size = TC_CACHE_SIZE;
     config
 }

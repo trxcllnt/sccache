@@ -729,8 +729,6 @@ async fn dist_or_local_compile<T>(
 where
     T: CommandCreatorSync,
 {
-    // use std::io;
-
     let rewrite_includes_only = match dist_client {
         Some(ref client) => client.rewrite_includes_only(),
         _ => false,
@@ -751,52 +749,18 @@ where
         }
     };
 
-    let dist_retry_limit = get_dist_retry_limit() + 1;
-    let mut num_dist_attempts = 1;
-
-    let dist_compile_attempts = loop {
-        trace!(
-            "[{}]: Running distributed compilation (attempt {} of {})",
-            out_pretty,
-            num_dist_attempts,
-            dist_retry_limit
-        );
-
-        match dist_compile(
-            path_transformer.clone(),
-            dist_client.clone(),
-            cwd.clone(),
-            compilation.clone(),
-            weak_toolchain_key.clone(),
-            compile_cmd.clone(),
-            dist_compile_cmd.clone(),
-            out_pretty.clone(),
-        )
-        .await
-        {
-            Ok((dt, output)) => {
-                if !output.status.success() {
-                    break Err(anyhow!("Distributed compilation failed: {:?}", output));
-                }
-                break Ok((dt, output));
-            }
-            Err(err) => {
-                if num_dist_attempts < dist_retry_limit
-                    && err.downcast_ref::<lru_disk_cache::Error>().is_none()
-                {
-                    warn!(
-                        "[{}]: Distributed compilation error (attempt {} of {}), retrying: {:#}",
-                        out_pretty, num_dist_attempts, dist_retry_limit, err
-                    );
-                    num_dist_attempts += 1;
-                    continue;
-                }
-                break Err(err);
-            }
-        }
-    };
-
-    match dist_compile_attempts {
+    match dist_compile(
+        path_transformer.clone(),
+        dist_client.clone(),
+        cwd.clone(),
+        compilation.clone(),
+        weak_toolchain_key.clone(),
+        compile_cmd.clone(),
+        dist_compile_cmd.clone(),
+        out_pretty.clone(),
+    )
+    .await
+    {
         Ok((dt, o)) => Ok((cacheable, dt, o)),
         Err(e) => {
             if let Some(HttpClientError(_)) = e.downcast_ref::<HttpClientError>() {
@@ -850,7 +814,7 @@ where
 
     trace!("[{out_pretty}]: Creating distributed compile request");
 
-    let dist_output_paths = compilation
+    let dist_output_paths: Vec<String> = compilation
         .outputs()
         .map(|output| path_transformer.as_dist_abs(&cwd.join(output.path)))
         .collect::<Option<_>>()
@@ -878,11 +842,16 @@ where
         tc_archive = Some(archive_path);
     }
 
-    let NewJobResponse {
-        has_toolchain,
-        job_id,
-        timeout,
-    } = dist_client.new_job(dist_toolchain.clone()).await?;
+    let (
+        NewJobResponse {
+            has_toolchain,
+            job_id,
+            timeout,
+        },
+        path_transformer,
+    ) = dist_client
+        .new_job(dist_toolchain.clone(), inputs_packager)
+        .await?;
 
     if !has_toolchain {
         trace!(
@@ -911,30 +880,47 @@ where
         }
     }
 
-    debug!("[{out_pretty}, {job_id}]: Running job");
+    let dist_retry_limit = get_dist_retry_limit() + 1;
+    let mut num_dist_attempts = 1;
 
-    let job_result = dist_client
-        .run_job(
-            &job_id,
-            Duration::from_secs(timeout as u64),
-            dist_toolchain,
-            dist_compile_cmd,
-            dist_output_paths,
-            inputs_packager,
-        )
-        .await;
+    let (jc, server_id) = loop {
+        debug!("[{out_pretty}, {job_id}]: Running job");
 
-    let (jc, server_id, path_transformer) = match job_result {
-        Ok((dist::RunJobResponse::JobComplete { result, server_id }, path_transformer)) => {
-            (result, server_id, path_transformer)
+        let job_result = dist_client
+            .run_job(
+                &job_id,
+                Duration::from_secs(timeout as u64),
+                dist_toolchain.clone(),
+                dist_compile_cmd.clone(),
+                dist_output_paths.clone(),
+            )
+            .await;
+
+        let err = match job_result {
+            Ok(dist::RunJobResponse::JobComplete { result, server_id }) => {
+                break Ok((result, server_id));
+            }
+            Ok(dist::RunJobResponse::JobFailed { reason }) => {
+                warn!("[{out_pretty}, {job_id}]: Distributed compilation job failed");
+                // JobFailed responses are not retry-able
+                break Err(anyhow!(reason));
+            }
+            Err(err) => {
+                warn!("[{out_pretty}, {job_id}]: Could not run distributed compilation job:");
+                err
+            }
+        };
+
+        if num_dist_attempts < dist_retry_limit {
+            warn!(
+                "[{out_pretty}]: Distributed compilation error (attempt {num_dist_attempts} of {dist_retry_limit}), retrying: {err:#}"
+            );
+            num_dist_attempts += 1;
+            continue;
         }
-        Ok((dist::RunJobResponse::JobFailed { reason }, _)) => {
-            bail!("[{out_pretty}, {job_id}]: Distributed compilation job failed: {reason}")
-        }
-        Err(err) => {
-            bail!("[{out_pretty}, {job_id}]: Could not run distributed compilation job: {err:#}")
-        }
-    };
+
+        break Err(err);
+    }?;
 
     debug!(
         "[{out_pretty}, {job_id}]: Fetched {:?}",
@@ -989,7 +975,10 @@ where
         .handle_outputs(&path_transformer, &output_paths, &extra_inputs)
         .with_context(|| "Failed to rewrite outputs from compile"));
 
-    Ok((DistType::Ok(server_id), jc.output.into()))
+    Ok((
+        DistType::Ok(server_id),
+        std::process::Output::from(jc.output),
+    ))
 }
 
 impl<T: CommandCreatorSync> Clone for Box<dyn CompilerHasher<T>> {
@@ -3091,7 +3080,11 @@ mod test_dist {
     }
     #[async_trait]
     impl dist::Client for ErrorPutToolchainClient {
-        async fn new_job(&self, _: Toolchain) -> Result<NewJobResponse> {
+        async fn new_job(
+            &self,
+            _: Toolchain,
+            _: Box<dyn pkg::InputsPackager>,
+        ) -> Result<(NewJobResponse, PathTransformer)> {
             unreachable!()
         }
         async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
@@ -3107,8 +3100,7 @@ mod test_dist {
             _: Toolchain,
             _: CompileCommand,
             _: Vec<String>,
-            _: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(RunJobResponse, PathTransformer)> {
+        ) -> Result<RunJobResponse> {
             unreachable!()
         }
         async fn put_toolchain(
@@ -3142,7 +3134,11 @@ mod test_dist {
     }
     #[async_trait]
     impl dist::Client for ErrorAllocJobClient {
-        async fn new_job(&self, tc: Toolchain) -> Result<NewJobResponse> {
+        async fn new_job(
+            &self,
+            tc: Toolchain,
+            _: Box<dyn pkg::InputsPackager>,
+        ) -> Result<(NewJobResponse, PathTransformer)> {
             assert_eq!(self.tc, tc);
             Err(anyhow!("MOCK: alloc job failure"))
         }
@@ -3159,8 +3155,7 @@ mod test_dist {
             _: Toolchain,
             _: CompileCommand,
             _: Vec<String>,
-            _: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(RunJobResponse, PathTransformer)> {
+        ) -> Result<RunJobResponse> {
             unreachable!()
         }
         async fn put_toolchain(
@@ -3197,16 +3192,27 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for ErrorSubmitToolchainClient {
-        async fn new_job(&self, tc: Toolchain) -> Result<NewJobResponse> {
+        async fn new_job(
+            &self,
+            tc: Toolchain,
+            inputs_packager: Box<dyn pkg::InputsPackager>,
+        ) -> Result<(NewJobResponse, PathTransformer)> {
             assert!(!self
                 .has_started
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
             assert_eq!(self.tc, tc);
-            Ok(NewJobResponse {
-                has_toolchain: false,
-                job_id: "job_id".into(),
-                timeout: 10,
-            })
+
+            let mut inputs = vec![];
+            let path_transformer = inputs_packager.write_inputs(&mut inputs).unwrap();
+
+            Ok((
+                NewJobResponse {
+                    has_toolchain: false,
+                    job_id: "job_id".into(),
+                    timeout: 10,
+                },
+                path_transformer,
+            ))
         }
         async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
             unreachable!("fn do_get_status is not used for this test. qed")
@@ -3222,8 +3228,7 @@ mod test_dist {
             _: Toolchain,
             _: CompileCommand,
             _: Vec<String>,
-            _: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(RunJobResponse, PathTransformer)> {
+        ) -> Result<RunJobResponse> {
             unreachable!("fn run_job is not used for this test. qed")
         }
         async fn put_toolchain(
@@ -3260,16 +3265,27 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for ErrorRunJobClient {
-        async fn new_job(&self, tc: Toolchain) -> Result<NewJobResponse> {
+        async fn new_job(
+            &self,
+            tc: Toolchain,
+            inputs_packager: Box<dyn pkg::InputsPackager>,
+        ) -> Result<(NewJobResponse, PathTransformer)> {
             assert!(!self
                 .has_started
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
             assert_eq!(self.tc, tc);
-            Ok(NewJobResponse {
-                has_toolchain: false,
-                job_id: "job_id".into(),
-                timeout: 10,
-            })
+
+            let mut inputs = vec![];
+            let path_transformer = inputs_packager.write_inputs(&mut inputs).unwrap();
+
+            Ok((
+                NewJobResponse {
+                    has_toolchain: false,
+                    job_id: "job_id".into(),
+                    timeout: 10,
+                },
+                path_transformer,
+            ))
         }
         async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
             unreachable!()
@@ -3285,8 +3301,7 @@ mod test_dist {
             tc: Toolchain,
             command: CompileCommand,
             _: Vec<String>,
-            _: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(RunJobResponse, PathTransformer)> {
+        ) -> Result<RunJobResponse> {
             assert_eq!(job_id, "job_id");
             assert_eq!(timeout, Duration::from_secs(10));
             assert_eq!(self.tc, tc);
@@ -3336,16 +3351,27 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for OneshotClient {
-        async fn new_job(&self, tc: Toolchain) -> Result<NewJobResponse> {
+        async fn new_job(
+            &self,
+            tc: Toolchain,
+            inputs_packager: Box<dyn pkg::InputsPackager>,
+        ) -> Result<(NewJobResponse, PathTransformer)> {
             assert!(!self
                 .has_started
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
             assert_eq!(self.tc, tc);
-            Ok(NewJobResponse {
-                has_toolchain: false,
-                job_id: "job_id".into(),
-                timeout: 10,
-            })
+
+            let mut inputs = vec![];
+            let path_transformer = inputs_packager.write_inputs(&mut inputs).unwrap();
+
+            Ok((
+                NewJobResponse {
+                    has_toolchain: false,
+                    job_id: "job_id".into(),
+                    timeout: 10,
+                },
+                path_transformer,
+            ))
         }
         async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
             unreachable!("fn do_get_status is not used for this test. qed")
@@ -3362,15 +3388,12 @@ mod test_dist {
             tc: Toolchain,
             command: CompileCommand,
             outputs: Vec<String>,
-            inputs_packager: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(RunJobResponse, PathTransformer)> {
+        ) -> Result<RunJobResponse> {
             assert_eq!(job_id, "job_id");
             assert_eq!(timeout, Duration::from_secs(10));
             assert_eq!(self.tc, tc);
             assert_eq!(command.executable, "/overridden/compiler");
 
-            let mut inputs = vec![];
-            let path_transformer = inputs_packager.write_inputs(&mut inputs).unwrap();
             let outputs = outputs
                 .into_iter()
                 .map(|name| {
@@ -3386,7 +3409,7 @@ mod test_dist {
                     outputs,
                 },
             };
-            Ok((result, path_transformer))
+            Ok(result)
         }
         async fn put_toolchain(
             &self,

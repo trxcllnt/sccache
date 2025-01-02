@@ -3,10 +3,12 @@
 
 use async_trait::async_trait;
 
+use bytes::Buf;
 use celery::prelude::*;
 use celery::protocol::MessageContentType;
 use futures::lock::Mutex;
-use futures::FutureExt;
+use futures::{pin_mut, AsyncReadExt, FutureExt};
+use sccache::dist::http::{bincode_deserialize, bincode_serialize};
 
 use std::collections::HashMap;
 use std::env;
@@ -31,10 +33,9 @@ use sccache::{
         INSECURE_DIST_CLIENT_TOKEN,
     },
     dist::{
-        self, BuildResult, BuildServerInfo, BuildServerStatus, BuilderIncoming, CompileCommand,
-        NewJobRequest, NewJobResponse, RunJobRequest, RunJobResponse, SchedulerService,
-        SchedulerStatusResult, ServerService, ServerStatusResult, ServerToolchains,
-        SubmitToolchainResult, Toolchain,
+        self, BuildServerInfo, BuildServerStatus, BuilderIncoming, CompileCommand, NewJobRequest,
+        NewJobResponse, RunJobRequest, RunJobResponse, SchedulerService, SchedulerStatusResult,
+        ServerService, ServerStatusResult, ServerToolchains, SubmitToolchainResult, Toolchain,
     },
     errors::*,
     util::daemonize,
@@ -157,6 +158,13 @@ async fn celery_app(
         .prefetch_count(prefetch_count)
         .heartbeat(Some(10))
         .task_time_limit(10)
+        .task_max_retries(0)
+        // Wait at most 10s before retrying failed tasks
+        .task_max_retry_delay(10)
+        // Retry tasks that fail with unexpected errors
+        .task_retry_for_unexpected(true)
+        // Indefinitely retry connecting to the broker
+        .broker_connection_max_retries(u32::MAX)
         .build()
         .await
         .map_err(|err| {
@@ -175,27 +183,42 @@ fn run(command: Command) -> Result<()> {
         Command::Scheduler(scheduler_config::Config {
             client_auth,
             job_time_limit,
+            jobs,
             max_body_size,
             message_broker,
             public_addr,
             scheduler_id,
-            toolchains_fallback,
             toolchains,
         }) => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
 
-            let toolchain_storage = sccache::cache::cache::storage_from_config(
-                &toolchains,
-                &toolchains_fallback,
+            let jobs_storage = sccache::cache::cache::storage_from_config(
+                &jobs.storage,
+                &jobs.fallback,
+                runtime.handle(),
+            )
+            .context("Failed to initialize jobs storage")?;
+
+            let toolchains_storage = sccache::cache::cache::storage_from_config(
+                &toolchains.storage,
+                &toolchains.fallback,
                 runtime.handle(),
             )
             .context("Failed to initialize toolchain storage")?;
 
             runtime.block_on(async move {
+                // Verify read/write access to jobs storage
+                match jobs_storage.check().await {
+                    Ok(sccache::cache::CacheMode::ReadWrite) => {}
+                    _ => {
+                        bail!("Scheduler jobs storage must be read/write")
+                    }
+                }
+
                 // Verify read/write access to toolchain storage
-                match toolchain_storage.check().await {
+                match toolchains_storage.check().await {
                     Ok(sccache::cache::CacheMode::ReadWrite) => {}
                     _ => {
                         bail!("Scheduler toolchain storage must be read/write")
@@ -232,7 +255,8 @@ fn run(command: Command) -> Result<()> {
                     job_time_limit,
                     to_this_scheduler.clone(),
                     task_queue.clone(),
-                    toolchain_storage,
+                    jobs_storage,
+                    toolchains_storage,
                 ));
 
                 SCHEDULER
@@ -291,27 +315,42 @@ fn run(command: Command) -> Result<()> {
             message_broker,
             builder,
             cache_dir,
+            jobs,
             max_per_core_load,
             num_cpus_to_ignore,
             server_id,
             toolchain_cache_size,
             toolchains,
-            toolchains_fallback,
         }) => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
 
-            let toolchain_storage = sccache::cache::cache::storage_from_config(
-                &toolchains,
-                &toolchains_fallback,
+            let jobs_storage = sccache::cache::cache::storage_from_config(
+                &jobs.storage,
+                &jobs.fallback,
+                runtime.handle(),
+            )
+            .context("Failed to initialize jobs storage")?;
+
+            let toolchains_storage = sccache::cache::cache::storage_from_config(
+                &toolchains.storage,
+                &toolchains.fallback,
                 runtime.handle(),
             )
             .context("Failed to initialize toolchain storage")?;
 
             runtime.block_on(async move {
+                // Verify read/write access to jobs storage
+                match jobs_storage.check().await {
+                    Ok(sccache::cache::CacheMode::ReadWrite) => {}
+                    _ => {
+                        bail!("Server jobs storage must be read/write")
+                    }
+                }
+
                 // Verify toolchain storage
-                toolchain_storage
+                toolchains_storage
                     .check()
                     .await
                     .context("Failed to initialize toolchain storage")?;
@@ -319,7 +358,7 @@ fn run(command: Command) -> Result<()> {
                 let server_toolchains = ServerToolchains::new(
                     &cache_dir.join("tc"),
                     toolchain_cache_size,
-                    toolchain_storage,
+                    toolchains_storage,
                 );
 
                 let num_cpus = (num_cpus - num_cpus_to_ignore).max(1) as f64;
@@ -385,6 +424,7 @@ fn run(command: Command) -> Result<()> {
                     server_id,
                     builder,
                     task_queue.clone(),
+                    jobs_storage,
                     server_toolchains,
                 ));
 
@@ -439,10 +479,65 @@ fn init_logging() {
     }
 }
 
+async fn has_job_inputs(jobs: &dyn sccache::cache::Storage, job_id: &str) -> bool {
+    jobs.has(&format!("{job_id}-inputs")).await
+}
+
+async fn get_job_inputs(jobs: &dyn sccache::cache::Storage, job_id: &str) -> Result<Vec<u8>> {
+    let mut reader = jobs.get_stream(&format!("{job_id}-inputs")).await?;
+    let mut inputs = vec![];
+    reader.read_to_end(&mut inputs).await?;
+    Ok(inputs)
+}
+
+async fn put_job_inputs(
+    jobs: &dyn sccache::cache::Storage,
+    job_id: &str,
+    inputs: &[u8],
+) -> Result<()> {
+    let reader = futures::io::AllowStdIo::new(inputs.reader());
+    pin_mut!(reader);
+    jobs.put_stream(&format!("{job_id}-inputs"), reader).await
+}
+
+async fn has_job_result(jobs: &dyn sccache::cache::Storage, job_id: &str) -> bool {
+    jobs.has(&format!("{job_id}-result")).await
+}
+
+async fn get_job_result(
+    jobs: &dyn sccache::cache::Storage,
+    job_id: &str,
+) -> Result<RunJobResponse> {
+    let mut reader = jobs.get_stream(&format!("{job_id}-result")).await?;
+    let mut result = vec![];
+    reader.read_to_end(&mut result).await?;
+    // Retrieve the result
+    let result = bincode_deserialize(result).await?;
+    // Delete the inputs and result
+    let _ = futures::future::try_join(
+        jobs.del(&format!("{job_id}-inputs")),
+        jobs.del(&format!("{job_id}-result")),
+    )
+    .await?;
+    Ok(result)
+}
+
+async fn put_job_result(
+    jobs: &dyn sccache::cache::Storage,
+    job_id: &str,
+    result: RunJobResponse,
+) -> Result<()> {
+    let result = bincode_serialize(result).await?;
+    let reader = futures::io::AllowStdIo::new(result.reader());
+    pin_mut!(reader);
+    jobs.put_stream(&format!("{job_id}-result"), reader).await
+}
+
 pub struct Scheduler {
     job_time_limit: u32,
-    to_this_scheduler: String,
-    jobs: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<RunJobResponse>>>>,
+    jobs_storage: Arc<dyn sccache::cache::Storage>,
+    pending_jobs: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<RunJobResponse>>>>,
+    queue_name: String,
     servers: Arc<Mutex<HashMap<String, BuildServerStatus>>>,
     task_queue: Arc<celery::Celery>,
     toolchains: Arc<dyn sccache::cache::Storage>,
@@ -454,14 +549,16 @@ impl Scheduler {
         job_time_limit: u32,
         to_this_scheduler_queue: String,
         task_queue: Arc<celery::Celery>,
+        jobs_storage: Arc<dyn sccache::cache::Storage>,
         toolchains: Arc<dyn sccache::cache::Storage>,
     ) -> Self {
         Self {
-            to_this_scheduler: to_this_scheduler_queue,
             job_time_limit,
-            jobs: Arc::new(Mutex::new(HashMap::new())),
+            jobs_storage,
+            pending_jobs: Arc::new(Mutex::new(HashMap::new())),
             servers: Arc::new(Mutex::new(HashMap::new())),
             task_queue,
+            queue_name: to_this_scheduler_queue,
             toolchains,
             remember_server_error_timeout: Duration::from_secs(30),
         }
@@ -554,9 +651,17 @@ impl SchedulerService for Scheduler {
     }
 
     async fn new_job(&self, request: NewJobRequest) -> Result<NewJobResponse> {
+        let job_id = uuid::Uuid::new_v4().simple().to_string();
+
+        let (has_toolchain, _) = futures::future::try_join(
+            async { Ok(self.has_toolchain(request.toolchain).await) },
+            put_job_inputs(self.jobs_storage.as_ref(), &job_id, &request.inputs),
+        )
+        .await?;
+
         Ok(NewJobResponse {
-            has_toolchain: self.has_toolchain(request.toolchain).await,
-            job_id: uuid::Uuid::new_v4().simple().to_string(),
+            has_toolchain,
+            job_id,
             timeout: self.job_time_limit,
         })
     }
@@ -568,30 +673,41 @@ impl SchedulerService for Scheduler {
             toolchain,
             command,
             outputs,
-            inputs,
         }: RunJobRequest,
     ) -> Result<RunJobResponse> {
+        let jobs_storage = self.jobs_storage.as_ref();
+
+        if has_job_result(jobs_storage, &job_id).await {
+            return get_job_result(jobs_storage, &job_id).await;
+        }
+
+        if !has_job_inputs(jobs_storage, &job_id).await {
+            return Ok(RunJobResponse::JobFailed {
+                reason: "Missing inputs".into(),
+            });
+        }
+
         let (tx, rx) = tokio::sync::oneshot::channel::<RunJobResponse>();
-        self.jobs.lock().await.insert(job_id.clone(), tx);
+        self.pending_jobs.lock().await.insert(job_id.clone(), tx);
 
         let res = self
             .task_queue
             .send_task(
                 scheduler_to_servers::run_job::new(
                     job_id.clone(),
-                    self.to_this_scheduler.clone(),
+                    self.queue_name.clone(),
                     toolchain,
                     command,
                     outputs,
-                    inputs,
                 )
-                .with_time_limit(self.job_time_limit),
+                .with_time_limit(self.job_time_limit)
+                .with_expires_in(self.job_time_limit),
             )
             .await
             .map_err(anyhow::Error::new);
 
         if let Err(err) = res {
-            self.jobs.lock().await.remove(&job_id);
+            self.pending_jobs.lock().await.remove(&job_id);
             Err(err)
         } else {
             rx.await.map_err(anyhow::Error::new)
@@ -599,7 +715,7 @@ impl SchedulerService for Scheduler {
     }
 
     async fn job_failure(&self, job_id: &str, reason: &str, info: BuildServerInfo) -> Result<()> {
-        let send_res = if let Some(sndr) = self.jobs.lock().await.remove(job_id) {
+        let send_res = if let Some(sndr) = self.pending_jobs.lock().await.remove(job_id) {
             sndr.send(RunJobResponse::JobFailed {
                 reason: reason.to_owned(),
             })
@@ -609,36 +725,32 @@ impl SchedulerService for Scheduler {
                 "[job_failed({job_id})]: Failed to send response for unknown job"
             ))
         };
-        let info_res = self.receive_status(info, Some(false)).await;
-        send_res.and(info_res)
+        send_res.and(self.receive_status(info, Some(false)).await)
     }
 
-    async fn job_success(
-        &self,
-        job_id: &str,
-        result: BuildResult,
-        info: BuildServerInfo,
-    ) -> Result<()> {
-        let send_res = if let Some(sndr) = self.jobs.lock().await.remove(job_id) {
-            sndr.send(RunJobResponse::JobComplete {
-                result,
-                server_id: info.server_id.clone(),
-            })
-            .map_err(|_| anyhow!("Failed to send job result"))
+    async fn job_success(&self, job_id: &str, info: BuildServerInfo) -> Result<()> {
+        let send_res = if let Some(sndr) = self.pending_jobs.lock().await.remove(job_id) {
+            get_job_result(self.jobs_storage.as_ref(), job_id)
+                .await
+                .context(format!("Failed to retrieve result for job {job_id}"))
+                .and_then(|result| {
+                    sndr.send(result)
+                        .map_err(|_| anyhow!("Failed to send job result"))
+                })
         } else {
             Err(anyhow!(
                 "[job_complete({job_id})]: Failed to send response for unknown job"
             ))
         };
-        let info_res = self.receive_status(info, Some(true)).await;
-        send_res.and(info_res)
+        let success = send_res.is_ok();
+        send_res.and(self.receive_status(info, Some(success)).await)
     }
 
     async fn request_status(&self) -> Result<()> {
         tokio::spawn({
             let servers = self.servers.clone();
             let task_queue = self.task_queue.clone();
-            let respond_to = self.to_this_scheduler.clone();
+            let respond_to = self.queue_name.clone();
             let error_timeout = self.remember_server_error_timeout;
             // Report status at least every 60s (1min)
             let request_interval = Duration::from_secs(60);
@@ -656,18 +768,19 @@ impl SchedulerService for Scheduler {
                         } else {
                             tracing::trace!("Requesting servers status");
 
-                            let report_reqs = futures::future::try_join_all(servers.iter().map(
+                            let requests = futures::future::try_join_all(servers.iter().map(
                                 |(server_id, _)| {
                                     task_queue.send_task(
                                         scheduler_to_servers::report::new(respond_to.clone())
-                                            .with_queue(&to_server_queue(server_id)),
+                                            .with_queue(&to_server_queue(server_id))
+                                            .with_expires_in(10),
                                     )
                                 },
                             ));
 
                             drop(servers);
 
-                            match report_reqs.await {
+                            match requests.await {
                                 Ok(_) => {
                                     tracing::trace!("Request servers status success");
                                     request_interval
@@ -730,6 +843,7 @@ pub struct Server {
     builder: Arc<dyn BuilderIncoming>,
     last_report_time: Arc<std::sync::atomic::AtomicU64>,
     jobs: Arc<Mutex<HashMap<String, (String, String)>>>,
+    jobs_storage: Arc<dyn sccache::cache::Storage>,
     task_queue: Arc<celery::Celery>,
     toolchains: ServerToolchains,
 }
@@ -741,6 +855,7 @@ impl Server {
         server_id: String,
         builder: Arc<dyn BuilderIncoming>,
         task_queue: Arc<celery::Celery>,
+        jobs_storage: Arc<dyn sccache::cache::Storage>,
         toolchains: ServerToolchains,
     ) -> Self {
         Self {
@@ -751,6 +866,7 @@ impl Server {
             num_cpus,
             server_id,
             task_queue,
+            jobs_storage,
             toolchains,
         }
     }
@@ -779,7 +895,11 @@ impl Server {
         tracing::trace!("Reporting server status: {info:?}");
 
         self.task_queue
-            .send_task(server_to_schedulers::status::new(info).with_queue(respond_to))
+            .send_task(
+                server_to_schedulers::status::new(info)
+                    .with_queue(respond_to)
+                    .with_expires_in(10),
+            )
             .await
             .map_err(anyhow::Error::new)
             .map(|_| ())?;
@@ -833,7 +953,9 @@ impl ServerService for Server {
                             tracing::trace!("Sending heartbeat: {info:?}");
 
                             match task_queue
-                                .send_task(server_to_schedulers::status::new(info))
+                                .send_task(
+                                    server_to_schedulers::status::new(info).with_expires_in(10),
+                                )
                                 .await
                             {
                                 Ok(_) => {
@@ -873,8 +995,7 @@ impl ServerService for Server {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs: Vec<u8>,
-    ) -> Result<BuildResult> {
+    ) -> Result<()> {
         let num_jobs = {
             let mut jobs = self.jobs.lock().await;
             // Associate the task with the scheduler and job so we can report success or failure
@@ -885,16 +1006,34 @@ impl ServerService for Server {
             jobs.len()
         };
 
+        let jobs_storage = self.jobs_storage.as_ref();
+
         // Load the toolchain and report status in parallel
-        let (toolchain_dir, _) = futures::future::try_join(
+        let (toolchain_dir, inputs, _) = futures::future::try_join3(
             self.toolchains.acquire(&toolchain),
+            get_job_inputs(jobs_storage, job_id),
             self.send_status(respond_to, num_jobs),
         )
         .await?;
 
-        self.builder
+        match self
+            .builder
             .run_build(job_id, &toolchain_dir, command, outputs, inputs)
             .await
+        {
+            Ok(result) => {
+                put_job_result(
+                    jobs_storage,
+                    job_id,
+                    RunJobResponse::JobComplete {
+                        result,
+                        server_id: self.server_id.clone(),
+                    },
+                )
+                .await
+            }
+            Err(err) => Err(err),
+        }
     }
 
     async fn job_failure(&self, task_id: &str, reason: &str) -> Result<()> {
@@ -912,7 +1051,8 @@ impl ServerService for Server {
             self.task_queue
                 .send_task(
                     server_to_schedulers::job_failure::new(job_id, reason.to_owned(), info)
-                        .with_queue(&respond_to),
+                        .with_queue(&respond_to)
+                        .with_expires_in(10),
                 )
                 .await
                 .map_err(anyhow::Error::new)
@@ -928,7 +1068,7 @@ impl ServerService for Server {
         }
     }
 
-    async fn job_success(&self, task_id: &str, result: &BuildResult) -> Result<()> {
+    async fn job_success(&self, task_id: &str) -> Result<()> {
         let mut jobs = self.jobs.lock().await;
         if let Some((respond_to, job_id)) = jobs.remove(task_id) {
             let info = BuildServerInfo {
@@ -942,8 +1082,9 @@ impl ServerService for Server {
 
             self.task_queue
                 .send_task(
-                    server_to_schedulers::job_success::new(job_id, result.to_owned(), info)
-                        .with_queue(&respond_to),
+                    server_to_schedulers::job_success::new(job_id, info)
+                        .with_queue(&respond_to)
+                        .with_expires_in(10),
                 )
                 .await
                 .map_err(anyhow::Error::new)
@@ -966,12 +1107,13 @@ mod scheduler_to_servers {
     use celery::prelude::*;
 
     use futures::FutureExt;
-    use sccache::dist::{BuildResult, CompileCommand, Toolchain};
+    use sccache::dist::{CompileCommand, Toolchain};
 
     #[celery::task(
         bind = true,
         acks_late = true,
         acks_on_failure_or_timeout = false,
+        max_retries = 3,
         nacks_enabled = true,
         on_failure = on_run_job_failure,
         on_success = on_run_job_success,
@@ -983,8 +1125,7 @@ mod scheduler_to_servers {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs: Vec<u8>,
-    ) -> TaskResult<BuildResult> {
+    ) -> TaskResult<()> {
         let task_id = task.request.id.clone();
 
         tracing::debug!(
@@ -996,15 +1137,7 @@ mod scheduler_to_servers {
 
         if let Some(server) = super::SERVER.get() {
             server
-                .run_job(
-                    &task_id,
-                    &job_id,
-                    &respond_to,
-                    toolchain,
-                    command,
-                    outputs,
-                    inputs,
-                )
+                .run_job(&task_id, &job_id, &respond_to, toolchain, command, outputs)
                 .await
                 .map_err(|e| {
                     tracing::error!("[run_build({job_id})]: run_job failed with: {e:?}");
@@ -1021,10 +1154,10 @@ mod scheduler_to_servers {
         let task_id = task.request().id.clone();
         let reason = match err {
             TaskError::TimeoutError => {
-                format!("[run_build({task_id})]: Timed out")
+                format!("[run_build({task_id})]: run_build timed out")
             }
             _ => {
-                format!("[run_build({task_id})]: Failed with `{err}`")
+                format!("[run_build({task_id})]: {err}")
             }
         };
         if let Err(err) = super::SERVER
@@ -1039,11 +1172,11 @@ mod scheduler_to_servers {
         }
     }
 
-    async fn on_run_job_success(task: &run_job, result: &BuildResult) {
+    async fn on_run_job_success(task: &run_job, _: &()) {
         let task_id = task.request().id.clone();
         if let Err(err) = super::SERVER
             .get()
-            .map(|server| server.job_success(&task_id, result))
+            .map(|server| server.job_success(&task_id))
             .unwrap_or_else(|| {
                 futures::future::err(anyhow!("sccache-dist server is not initialized")).boxed()
             })
@@ -1073,7 +1206,7 @@ mod scheduler_to_servers {
 mod server_to_schedulers {
     use celery::prelude::*;
 
-    use sccache::dist::{BuildResult, BuildServerInfo};
+    use sccache::dist::BuildServerInfo;
 
     // Runs on scheduler to handle heartbeats from servers
     #[celery::task]
@@ -1103,15 +1236,11 @@ mod server_to_schedulers {
 
     // Runs on the scheduler
     #[celery::task]
-    pub async fn job_success(
-        job_id: String,
-        result: BuildResult,
-        info: BuildServerInfo,
-    ) -> TaskResult<()> {
+    pub async fn job_success(job_id: String, info: BuildServerInfo) -> TaskResult<()> {
         super::SCHEDULER
             .get()
             .unwrap()
-            .job_success(&job_id, result, info)
+            .job_success(&job_id, info)
             .await
             .map_err(|e| TaskError::UnexpectedError(e.to_string()))
     }
