@@ -186,11 +186,16 @@ prepare_pot()
 start_scheduler()
 {
 	echo "#### starting scheduler"
-	NO_COLOR=1 \
-	SCCACHE_NO_DAEMON=1 \
-	AMQP_ADDR="amqp://127.0.0.1:5672//" \
-	SCCACHE_LOG="sccache=debug,tower_http=debug,axum::rejection=trace" \
-	sccache-dist scheduler \
+	# sudo so the scheduler can access the server job results
+	sudo \
+		AMQP_ADDR="amqp://127.0.0.1:5672//" \
+		NO_COLOR=1 \
+		SCCACHE_DIR="$SCCACHE_DIR" \
+		SCCACHE_DIST_JOBS_DIR="$SCCACHE_DIST_JOBS_DIR" \
+		SCCACHE_DIST_TOOLCHAINS_DIR="$SCCACHE_DIST_TOOLCHAINS_DIR" \
+		SCCACHE_LOG="sccache=debug,tower_http=debug,axum::rejection=trace" \
+		SCCACHE_NO_DAEMON=1 \
+		"$HOME"/.cargo/bin/sccache-dist scheduler \
 		--config "$TEST_TMPDIR"/scheduler.conf \
 		1>"$TEST_TMPDIR"/sccache_scheduler_log.txt 2>&1 &
 	sleep 1
@@ -200,14 +205,14 @@ start_build_server()
 {
 	echo "#### starting build-server (as root)"
 	sudo \
-		NO_COLOR=1 \
-		SCCACHE_NO_DAEMON=1 \
-		SCCACHE_DIR="$SCCACHE_DIR" \
-        SCCACHE_DIST_JOBS_DIR="$SCCACHE_DIST_JOBS_DIR" \
-        SCCACHE_DIST_TOOLCHAINS_DIR="$SCCACHE_DIST_TOOLCHAINS_DIR" \
-		SCCACHE_LOG="sccache=debug" \
-		SCCACHE_DIST_SERVER_ID="build-server" \
 		AMQP_ADDR="amqp://127.0.0.1:5672//" \
+		NO_COLOR=1 \
+		SCCACHE_DIR="$SCCACHE_DIR" \
+		SCCACHE_DIST_JOBS_DIR="$SCCACHE_DIST_JOBS_DIR" \
+		SCCACHE_DIST_SERVER_ID="build-server" \
+		SCCACHE_DIST_TOOLCHAINS_DIR="$SCCACHE_DIST_TOOLCHAINS_DIR" \
+		SCCACHE_LOG="sccache=debug" \
+		SCCACHE_NO_DAEMON=1 \
 		"$HOME"/.cargo/bin/sccache-dist server \
 			--config "$TEST_TMPDIR"/server.conf \
 			1>"$TEST_TMPDIR"/sccache_server_log.txt 2>&1 &
