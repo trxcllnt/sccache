@@ -7,7 +7,7 @@ use bytes::Buf;
 use celery::prelude::*;
 use celery::protocol::MessageContentType;
 use futures::lock::Mutex;
-use futures::{pin_mut, AsyncReadExt, FutureExt};
+use futures::{pin_mut, AsyncReadExt, FutureExt, TryFutureExt};
 use sccache::dist::http::{bincode_deserialize, bincode_serialize};
 
 use std::collections::HashMap;
@@ -33,9 +33,9 @@ use sccache::{
         INSECURE_DIST_CLIENT_TOKEN,
     },
     dist::{
-        self, BuildServerInfo, BuildServerStatus, BuilderIncoming, CompileCommand, NewJobRequest,
-        NewJobResponse, RunJobRequest, RunJobResponse, SchedulerService, SchedulerStatusResult,
-        ServerService, ServerStatusResult, ServerToolchains, SubmitToolchainResult, Toolchain,
+        self, BuilderIncoming, CompileCommand, NewJobRequest, NewJobResponse, RunJobRequest,
+        RunJobResponse, SchedulerService, SchedulerStatusResult, ServerDetails, ServerService,
+        ServerStatusResult, ServerToolchains, SubmitToolchainResult, Toolchain,
     },
     errors::*,
     util::daemonize,
@@ -142,14 +142,14 @@ fn to_server_queue(id: &str) -> String {
 
 async fn celery_app(
     broker_uri: &str,
-    to_this_instance: &str,
+    self_queue: &str,
     prefetch_count: u16,
 ) -> Result<celery::Celery> {
     let to_servers = scheduler_to_servers_queue();
     let to_schedulers = server_to_schedulers_queue();
 
-    celery::CeleryBuilder::new(to_this_instance, broker_uri)
-        .default_queue(to_this_instance)
+    celery::CeleryBuilder::new(self_queue, broker_uri)
+        .default_queue(self_queue)
         .task_content_type(MessageContentType::MsgPack)
         // Register at least one task route for each queue, because that's
         // how celery knows which queues to create in the message broker.
@@ -157,12 +157,10 @@ async fn celery_app(
         .task_route(server_to_schedulers::status::NAME, &to_schedulers)
         .prefetch_count(prefetch_count)
         .heartbeat(Some(10))
-        .task_time_limit(10)
-        .task_max_retries(0)
         // Wait at most 10s before retrying failed tasks
         .task_max_retry_delay(10)
-        // Retry tasks that fail with unexpected errors
-        .task_retry_for_unexpected(true)
+        // Don't retry tasks that fail with unexpected errors
+        .task_retry_for_unexpected(false)
         // Indefinitely retry connecting to the broker
         .broker_connection_max_retries(u32::MAX)
         .build()
@@ -297,12 +295,10 @@ fn run(command: Command) -> Result<()> {
 
                 let celery = task_queue.consume_from(&queues);
                 let server = server.serve(public_addr, max_body_size);
-                let status = scheduler.request_status();
 
                 futures::select_biased! {
                     res = celery.fuse() => res?,
                     res = server.fuse() => res?,
-                    res = status.fuse() => res?,
                 };
 
                 task_queue.close().await?;
@@ -378,10 +374,6 @@ fn run(command: Command) -> Result<()> {
                     .register_task::<scheduler_to_servers::run_job>()
                     .await?;
 
-                task_queue
-                    .register_task::<scheduler_to_servers::report>()
-                    .await?;
-
                 let builder: Arc<dyn BuilderIncoming> = match builder {
                     #[cfg(not(target_os = "freebsd"))]
                     sccache::config::server::BuilderType::Docker => Arc::new(
@@ -439,7 +431,7 @@ fn run(command: Command) -> Result<()> {
                 let queues = [to_this_server.as_str(), to_servers.as_str()];
 
                 let celery = task_queue.consume_from(&queues);
-                let status = server.broadcast_status();
+                let status = server.report_status();
 
                 futures::select_biased! {
                     res = celery.fuse() => res?,
@@ -479,14 +471,31 @@ fn init_logging() {
     }
 }
 
+fn job_inputs_key(job_id: &str) -> String {
+    format!("{job_id}-inputs")
+}
+
+fn job_result_key(job_id: &str) -> String {
+    format!("{job_id}-result")
+}
+
 async fn has_job_inputs(jobs: &dyn sccache::cache::Storage, job_id: &str) -> bool {
-    jobs.has(&format!("{job_id}-inputs")).await
+    jobs.has(&job_inputs_key(job_id)).await
 }
 
 async fn get_job_inputs(jobs: &dyn sccache::cache::Storage, job_id: &str) -> Result<Vec<u8>> {
-    let mut reader = jobs.get_stream(&format!("{job_id}-inputs")).await?;
+    let mut reader = jobs
+        .get_stream(&job_inputs_key(job_id))
+        .await
+        .map_err(|err| {
+            tracing::warn!("[get_job_inputs({job_id})]: Error loading stream: {err:?}");
+            err
+        })?;
     let mut inputs = vec![];
-    reader.read_to_end(&mut inputs).await?;
+    reader.read_to_end(&mut inputs).await.map_err(|err| {
+        tracing::warn!("[get_job_inputs({job_id})]: Error reading stream: {err:?}");
+        err
+    })?;
     Ok(inputs)
 }
 
@@ -497,28 +506,51 @@ async fn put_job_inputs(
 ) -> Result<()> {
     let reader = futures::io::AllowStdIo::new(inputs.reader());
     pin_mut!(reader);
-    jobs.put_stream(&format!("{job_id}-inputs"), reader).await
+    jobs.put_stream(&job_inputs_key(job_id), reader)
+        .await
+        .map_err(|err| {
+            tracing::warn!("[put_job_inputs({job_id})]: Error writing stream: {err:?}");
+            err
+        })
 }
 
 async fn has_job_result(jobs: &dyn sccache::cache::Storage, job_id: &str) -> bool {
-    jobs.has(&format!("{job_id}-result")).await
+    jobs.has(&job_result_key(job_id)).await
 }
 
 async fn get_job_result(
     jobs: &dyn sccache::cache::Storage,
     job_id: &str,
 ) -> Result<RunJobResponse> {
-    let mut reader = jobs.get_stream(&format!("{job_id}-result")).await?;
+    let mut reader = jobs
+        .get_stream(&job_result_key(job_id))
+        .await
+        .map_err(|err| {
+            tracing::warn!("[get_job_result({job_id})]: Error loading stream: {err:?}");
+            err
+        })?;
     let mut result = vec![];
-    reader.read_to_end(&mut result).await?;
+    reader.read_to_end(&mut result).await.map_err(|err| {
+        tracing::warn!("[get_job_result({job_id})]: Error reading stream: {err:?}");
+        err
+    })?;
     // Retrieve the result
-    let result = bincode_deserialize(result).await?;
+    let result = bincode_deserialize(result).await.map_err(|err| {
+        tracing::warn!("[get_job_result({job_id})]: Error reading result: {err:?}");
+        err
+    })?;
     // Delete the inputs and result
-    let _ = futures::future::try_join(
-        jobs.del(&format!("{job_id}-inputs")),
-        jobs.del(&format!("{job_id}-result")),
+    let _ = futures::future::join(
+        jobs.del(&job_inputs_key(job_id)).map_err(|e| {
+            tracing::warn!("[get_job_result({job_id})]: Error deleting job inputs: {e:?}");
+            e
+        }),
+        jobs.del(&job_result_key(job_id)).map_err(|e| {
+            tracing::warn!("[get_job_result({job_id})]: Error deleting job result: {e:?}");
+            e
+        }),
     )
-    .await?;
+    .await;
     Ok(result)
 }
 
@@ -530,7 +562,20 @@ async fn put_job_result(
     let result = bincode_serialize(result).await?;
     let reader = futures::io::AllowStdIo::new(result.reader());
     pin_mut!(reader);
-    jobs.put_stream(&format!("{job_id}-result"), reader).await
+    jobs.put_stream(&job_result_key(job_id), reader)
+        .await
+        .map_err(|err| {
+            tracing::warn!("[put_job_result({job_id})]: Error writing stream: {err:?}");
+            err
+        })
+}
+
+#[derive(Clone, Debug)]
+struct ServerStatus {
+    pub max_per_core_load: f64,
+    pub mtime: Instant,
+    pub num_cpus: usize,
+    pub num_jobs: usize,
 }
 
 pub struct Scheduler {
@@ -538,10 +583,9 @@ pub struct Scheduler {
     jobs_storage: Arc<dyn sccache::cache::Storage>,
     pending_jobs: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<RunJobResponse>>>>,
     queue_name: String,
-    servers: Arc<Mutex<HashMap<String, BuildServerStatus>>>,
+    servers: Arc<Mutex<HashMap<String, ServerStatus>>>,
     task_queue: Arc<celery::Celery>,
     toolchains: Arc<dyn sccache::cache::Storage>,
-    remember_server_error_timeout: Duration,
 }
 
 impl Scheduler {
@@ -560,43 +604,14 @@ impl Scheduler {
             task_queue,
             queue_name: to_this_scheduler_queue,
             toolchains,
-            remember_server_error_timeout: Duration::from_secs(30),
         }
     }
 
-    fn prune_servers(
-        servers: &mut HashMap<String, BuildServerStatus>,
-        remember_server_error_timeout: &Duration,
-    ) {
+    fn prune_servers(servers: &mut HashMap<String, ServerStatus>) {
         let now = Instant::now();
-
-        fn prune_servers(
-            now: Instant,
-            remember_server_error_timeout: Duration,
-            servers: &mut HashMap<String, BuildServerStatus>,
-        ) -> Vec<String> {
-            let mut to_remove = vec![];
-            // Remove servers we haven't seen in 5 minutes
-            for (server_id, server) in servers.iter_mut() {
-                let last_seen = now - server.last_success;
-                let last_seen = if let Some(last_failure) = server.last_failure {
-                    if now.duration_since(last_failure) >= remember_server_error_timeout {
-                        server.last_failure = None;
-                    }
-                    last_seen.min(now - last_failure)
-                } else {
-                    last_seen
-                };
-                if last_seen > Duration::from_secs(180) {
-                    to_remove.push(server_id.clone());
-                }
-            }
-            to_remove
-        }
-
-        for server_id in prune_servers(now, *remember_server_error_timeout, servers) {
-            servers.remove(&server_id);
-        }
+        // Prune servers we haven't seen in 90s
+        let timeout = Duration::from_secs(90);
+        servers.retain(|_, server| now.duration_since(server.mtime) <= timeout);
     }
 }
 
@@ -612,11 +627,7 @@ impl SchedulerService for Scheduler {
                     max_per_core_load: server.max_per_core_load,
                     num_cpus: server.num_cpus,
                     num_jobs: server.num_jobs,
-                    last_success: server.last_success.elapsed().as_secs(),
-                    last_failure: server
-                        .last_failure
-                        .map(|last_failure| last_failure.elapsed().as_secs())
-                        .unwrap_or(0),
+                    last_seen: server.mtime.elapsed().as_secs(),
                 },
             );
         }
@@ -714,7 +725,7 @@ impl SchedulerService for Scheduler {
         }
     }
 
-    async fn job_failure(&self, job_id: &str, reason: &str, info: BuildServerInfo) -> Result<()> {
+    async fn job_failure(&self, job_id: &str, reason: &str, info: ServerDetails) -> Result<()> {
         let send_res = if let Some(sndr) = self.pending_jobs.lock().await.remove(job_id) {
             sndr.send(RunJobResponse::JobFailed {
                 reason: reason.to_owned(),
@@ -728,7 +739,7 @@ impl SchedulerService for Scheduler {
         send_res.and(self.receive_status(info, Some(false)).await)
     }
 
-    async fn job_success(&self, job_id: &str, info: BuildServerInfo) -> Result<()> {
+    async fn job_success(&self, job_id: &str, info: ServerDetails) -> Result<()> {
         let send_res = if let Some(sndr) = self.pending_jobs.lock().await.remove(job_id) {
             get_job_result(self.jobs_storage.as_ref(), job_id)
                 .await
@@ -746,63 +757,16 @@ impl SchedulerService for Scheduler {
         send_res.and(self.receive_status(info, Some(success)).await)
     }
 
-    async fn request_status(&self) -> Result<()> {
-        tokio::spawn({
-            let servers = self.servers.clone();
-            let task_queue = self.task_queue.clone();
-            let respond_to = self.queue_name.clone();
-            let error_timeout = self.remember_server_error_timeout;
-            // Report status at least every 60s (1min)
-            let request_interval = Duration::from_secs(60);
-
-            async move {
-                loop {
-                    let due_time = {
-                        let mut servers = servers.lock().await;
-
-                        // Prune servers before requesting status
-                        Self::prune_servers(&mut servers, &error_timeout);
-
-                        if servers.len() == 0 {
-                            request_interval
-                        } else {
-                            tracing::trace!("Requesting servers status");
-
-                            let requests = futures::future::try_join_all(servers.iter().map(
-                                |(server_id, _)| {
-                                    task_queue.send_task(
-                                        scheduler_to_servers::report::new(respond_to.clone())
-                                            .with_queue(&to_server_queue(server_id))
-                                            .with_expires_in(10),
-                                    )
-                                },
-                            ));
-
-                            drop(servers);
-
-                            match requests.await {
-                                Ok(_) => {
-                                    tracing::trace!("Request servers status success");
-                                    request_interval
-                                }
-                                Err(e) => {
-                                    tracing::error!("Request servers status failure: {e}");
-                                    request_interval / 2
-                                }
-                            }
-                        }
-                    };
-
-                    tokio::time::sleep(due_time).await;
-                }
+    async fn receive_status(&self, info: ServerDetails, job_status: Option<bool>) -> Result<()> {
+        if let Some(success) = job_status {
+            if success {
+                tracing::trace!("Received server success: {info:?}");
+            } else {
+                tracing::trace!("Received server failure: {info:?}");
             }
-        })
-        .await
-        .map_err(anyhow::Error::new)
-    }
-
-    async fn receive_status(&self, info: BuildServerInfo, job_status: Option<bool>) -> Result<()> {
-        tracing::trace!("Received server status: {info:?}");
+        } else {
+            tracing::trace!("Received server status: {info:?}");
+        }
 
         let mut servers = self.servers.lock().await;
 
@@ -810,26 +774,19 @@ impl SchedulerService for Scheduler {
         servers
             .entry(info.server_id.clone())
             .and_modify(|server| {
-                if let Some(success) = job_status {
-                    if success {
-                        server.last_success = Instant::now();
-                    } else {
-                        server.last_failure = Some(Instant::now());
-                    }
-                }
                 server.max_per_core_load = info.max_per_core_load;
+                server.mtime = Instant::now();
                 server.num_cpus = info.num_cpus;
                 server.num_jobs = info.num_jobs;
             })
-            .or_insert_with(|| BuildServerStatus {
-                last_success: Instant::now(),
-                last_failure: None,
+            .or_insert_with(|| ServerStatus {
                 max_per_core_load: info.max_per_core_load,
+                mtime: Instant::now(),
                 num_cpus: info.num_cpus,
                 num_jobs: info.num_jobs,
             });
 
-        Self::prune_servers(&mut servers, &self.remember_server_error_timeout);
+        Self::prune_servers(&mut servers);
 
         Ok(())
     }
@@ -837,13 +794,14 @@ impl SchedulerService for Scheduler {
 
 #[derive(Clone)]
 pub struct Server {
+    builder: Arc<dyn BuilderIncoming>,
+    jobs_storage: Arc<dyn sccache::cache::Storage>,
+    jobs: Arc<Mutex<HashMap<String, (String, String)>>>,
     max_per_core_load: f64,
     num_cpus: usize,
+    report_interval: Duration,
+    schedulers: Arc<Mutex<HashMap<String, Instant>>>,
     server_id: String,
-    builder: Arc<dyn BuilderIncoming>,
-    last_report_time: Arc<std::sync::atomic::AtomicU64>,
-    jobs: Arc<Mutex<HashMap<String, (String, String)>>>,
-    jobs_storage: Arc<dyn sccache::cache::Storage>,
     task_queue: Arc<celery::Celery>,
     toolchains: ServerToolchains,
 }
@@ -860,32 +818,36 @@ impl Server {
     ) -> Self {
         Self {
             builder,
+            jobs_storage,
             jobs: Default::default(),
-            last_report_time: Default::default(),
             max_per_core_load,
             num_cpus,
+            // Report status at least every 30s
+            report_interval: Duration::from_secs(30),
+            schedulers: Default::default(),
             server_id,
             task_queue,
-            jobs_storage,
             toolchains,
         }
     }
 
-    fn now() -> Option<Duration> {
-        // Now as the duration since unix epoch
-        std::time::UNIX_EPOCH.elapsed().ok()
+    async fn update_last_report_time(&self, scheduler: &str) {
+        self.schedulers
+            .lock()
+            .await
+            .entry(scheduler.to_owned())
+            .and_modify(|t| *t = Instant::now())
+            .or_insert_with(Instant::now);
     }
 
-    fn update_last_report_time(last_report_time: &std::sync::atomic::AtomicU64) {
-        let _ = last_report_time.fetch_update(
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst,
-            |_| Self::now().map(|d| d.as_secs()),
-        );
-    }
+    async fn send_status(
+        &self,
+        respond_to: impl Into<Option<String>>,
+        num_jobs: usize,
+    ) -> Result<()> {
+        let respond_to = respond_to.into();
 
-    async fn send_status(&self, respond_to: &str, num_jobs: usize) -> Result<()> {
-        let info = BuildServerInfo {
+        let info = ServerDetails {
             max_per_core_load: self.max_per_core_load,
             num_cpus: self.num_cpus,
             num_jobs,
@@ -894,97 +856,101 @@ impl Server {
 
         tracing::trace!("Reporting server status: {info:?}");
 
+        let task = server_to_schedulers::status::new(info);
+        let task = task.with_expires_in(60);
+        let task = if let Some(ref respond_to) = respond_to {
+            task.with_queue(respond_to)
+        } else {
+            task
+        };
+
         self.task_queue
-            .send_task(
-                server_to_schedulers::status::new(info)
-                    .with_queue(respond_to)
-                    .with_expires_in(10),
-            )
+            .send_task(task)
             .await
             .map_err(anyhow::Error::new)
             .map(|_| ())?;
 
         // Update last_report_time
-        Self::update_last_report_time(&self.last_report_time);
+        if let Some(ref respond_to) = respond_to {
+            self.update_last_report_time(respond_to).await;
+        }
 
         Ok(())
+    }
+
+    async fn broadcast_status(&self, num_jobs: usize) -> Vec<Result<()>> {
+        let ids = {
+            let report_interval = self.report_interval;
+            let mut schedulers = self.schedulers.lock().await;
+            Self::prune_schedulers(&mut schedulers);
+            let now = Instant::now();
+            schedulers
+                .iter()
+                .filter(|&(_, &last_ack_time)| now.duration_since(last_ack_time) > report_interval)
+                .map(|(scheduler_id, _)| scheduler_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        // Send status updates to all schedulers we know about and haven't notified recently.
+        // If there are no schedulers to update, send the status to any scheduler.
+        //
+        // This would be simpler if rusty-celery supported Broadcast queues[1], so
+        // a copy of the same message is delivered to to all interested schedulers.
+        //
+        // As it stands, we have to manually track and notify schedulers that we know about,
+        // and periodically send general status updates that might or might not be handled
+        // by schedulers we don't yet know about.
+        //
+        // 1. https://docs.celeryq.dev/en/stable/userguide/routing.html#broadcast
+
+        let requests = ids.into_iter().fold(vec![], |mut futs, id| {
+            futs.push(self.send_status(Some(id), num_jobs));
+            futs
+        });
+
+        futures::future::join_all({
+            if !requests.is_empty() {
+                requests
+            } else {
+                // If no schedulers to update, send status to any scheduler
+                vec![self.send_status(None, num_jobs)]
+            }
+        })
+        .await
+    }
+
+    // Prune schedulers that haven't ack'd our status updates in 90s
+    fn prune_schedulers(schedulers: &mut HashMap<String, Instant>) {
+        let now = Instant::now();
+        // Prune schedulers we haven't seen in 90s
+        let timeout = Duration::from_secs(90);
+        schedulers.retain(|_, &mut last_ack_time| now.duration_since(last_ack_time) <= timeout);
     }
 }
 
 #[async_trait]
 impl ServerService for Server {
-    async fn broadcast_status(&self) -> Result<()> {
+    async fn report_status(&self) -> Result<()> {
         tokio::spawn({
-            let task_queue = self.task_queue.clone();
-            let last_report_time = self.last_report_time.clone();
-            let max_per_core_load = self.max_per_core_load;
-            let num_cpus = self.num_cpus;
-            let jobs = self.jobs.clone();
-            let server_id = self.server_id.clone();
-            // Report status at least every 180s (3min)
-            let report_interval = Duration::from_secs(180);
-
+            let this = Arc::new(self.clone());
             async move {
                 loop {
-                    let due_time = {
-                        let time_since_last_report =
-                            // Now as the duration since the unix epoch
-                            Self::now().unwrap()
-                            // Last update as duration since the unix epoch
-                            - Duration::from_secs(
-                                last_report_time.load(std::sync::atomic::Ordering::SeqCst),
-                            );
-                        if time_since_last_report < report_interval {
-                            tracing::trace!(
-                                "Not sending heartbeat due to {} < {}",
-                                time_since_last_report.as_secs(),
-                                report_interval.as_secs()
-                            );
-                            // due time to next report
-                            report_interval - time_since_last_report
-                        } else {
-                            let info = BuildServerInfo {
-                                max_per_core_load,
-                                num_cpus,
-                                num_jobs: jobs.lock().await.len(),
-                                server_id: server_id.clone(),
-                            };
-
-                            tracing::trace!("Sending heartbeat: {info:?}");
-
-                            match task_queue
-                                .send_task(
-                                    server_to_schedulers::status::new(info).with_expires_in(10),
-                                )
-                                .await
-                            {
-                                Ok(_) => {
-                                    tracing::trace!("Heartbeat success");
-
-                                    // Update last_report_time
-                                    Self::update_last_report_time(&last_report_time);
-
-                                    report_interval
-                                }
-                                Err(e) => {
-                                    tracing::error!("Failed to send heartbeat to scheduler: {e}");
-                                    Duration::from_secs(30)
-                                }
-                            }
-                        }
-                    };
-
-                    tokio::time::sleep(due_time).await;
+                    let num_jobs = this.jobs.lock().await.len();
+                    tokio::time::sleep(
+                        this.broadcast_status(num_jobs)
+                            .await
+                            .iter()
+                            .any(|res| res.is_err())
+                            .then(|| this.report_interval / 2)
+                            .unwrap_or(this.report_interval),
+                    )
+                    .await;
                 }
             }
         })
         .await
         .map_err(anyhow::Error::new)
-    }
-
-    async fn report_status(&self, respond_to: &str) -> Result<()> {
-        let num_jobs = self.jobs.lock().await.len();
-        self.send_status(respond_to, num_jobs).await
     }
 
     async fn run_job(
@@ -1008,11 +974,17 @@ impl ServerService for Server {
 
         let jobs_storage = self.jobs_storage.as_ref();
 
-        // Load the toolchain and report status in parallel
-        let (toolchain_dir, inputs, _) = futures::future::try_join3(
-            self.toolchains.acquire(&toolchain),
+        // Report status and load toolchain + inputs in parallel
+        let (_, inputs, toolchain_dir) = futures::future::try_join3(
+            // Report status
+            async { Ok(self.broadcast_status(num_jobs).await) },
+            // Load inputs
             get_job_inputs(jobs_storage, job_id),
-            self.send_status(respond_to, num_jobs),
+            // Load and unpack toolchain
+            self.toolchains.acquire(&toolchain).map_err(|err| {
+                tracing::warn!("[run_job({job_id})]: Error loading toolchain: {err:?}");
+                err
+            }),
         )
         .await?;
 
@@ -1032,14 +1004,17 @@ impl ServerService for Server {
                 )
                 .await
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                tracing::warn!("[run_job({job_id})]: Error running build: {err:?}");
+                Err(err)
+            }
         }
     }
 
     async fn job_failure(&self, task_id: &str, reason: &str) -> Result<()> {
         let mut jobs = self.jobs.lock().await;
         if let Some((respond_to, job_id)) = jobs.remove(task_id) {
-            let info = BuildServerInfo {
+            let info = ServerDetails {
                 max_per_core_load: self.max_per_core_load,
                 num_cpus: self.num_cpus,
                 num_jobs: jobs.len(),
@@ -1052,14 +1027,14 @@ impl ServerService for Server {
                 .send_task(
                     server_to_schedulers::job_failure::new(job_id, reason.to_owned(), info)
                         .with_queue(&respond_to)
-                        .with_expires_in(10),
+                        .with_expires_in(60),
                 )
                 .await
                 .map_err(anyhow::Error::new)
                 .map(|_| ())?;
 
-            // Update last_report_time on success
-            Self::update_last_report_time(&self.last_report_time);
+            // Update last_report_time on failure
+            self.update_last_report_time(&respond_to).await;
 
             Ok(())
         } else {
@@ -1071,7 +1046,7 @@ impl ServerService for Server {
     async fn job_success(&self, task_id: &str) -> Result<()> {
         let mut jobs = self.jobs.lock().await;
         if let Some((respond_to, job_id)) = jobs.remove(task_id) {
-            let info = BuildServerInfo {
+            let info = ServerDetails {
                 max_per_core_load: self.max_per_core_load,
                 num_cpus: self.num_cpus,
                 num_jobs: jobs.len(),
@@ -1084,14 +1059,14 @@ impl ServerService for Server {
                 .send_task(
                     server_to_schedulers::job_success::new(job_id, info)
                         .with_queue(&respond_to)
-                        .with_expires_in(10),
+                        .with_expires_in(60),
                 )
                 .await
                 .map_err(anyhow::Error::new)
                 .map(|_| ())?;
 
             // Update last_report_time on success
-            Self::update_last_report_time(&self.last_report_time);
+            self.update_last_report_time(&respond_to).await;
 
             Ok(())
         } else {
@@ -1111,10 +1086,10 @@ mod scheduler_to_servers {
 
     #[celery::task(
         bind = true,
-        acks_late = true,
-        acks_on_failure_or_timeout = false,
-        max_retries = 3,
-        nacks_enabled = true,
+        // acks_late = true,
+        // acks_on_failure_or_timeout = false,
+        max_retries = 0,
+        // nacks_enabled = true,
         on_failure = on_run_job_failure,
         on_success = on_run_job_success,
     )]
@@ -1135,19 +1110,20 @@ mod scheduler_to_servers {
             command.arguments,
         );
 
-        if let Some(server) = super::SERVER.get() {
-            server
-                .run_job(&task_id, &job_id, &respond_to, toolchain, command, outputs)
-                .await
-                .map_err(|e| {
-                    tracing::error!("[run_build({job_id})]: run_job failed with: {e:?}");
-                    TaskError::UnexpectedError(e.to_string())
-                })
-        } else {
-            Err(TaskError::UnexpectedError(
-                "sccache-dist server is not initialized".into(),
-            ))
-        }
+        super::SERVER
+            .get()
+            .map(|server| {
+                server.run_job(&task_id, &job_id, &respond_to, toolchain, command, outputs)
+            })
+            .unwrap_or_else(|| {
+                futures::future::err(anyhow!("sccache-dist server is not initialized")).boxed()
+            })
+            .await
+            .map_err(|e| {
+                let msg = format!("run_job failed with error: {e:?}");
+                tracing::error!("[run_build({job_id})]: {msg}");
+                TaskError::UnexpectedError(msg)
+            })
     }
 
     async fn on_run_job_failure(task: &run_job, err: &TaskError) {
@@ -1185,32 +1161,17 @@ mod scheduler_to_servers {
             tracing::error!("[on_run_job_success({task_id})]: {err}");
         }
     }
-
-    // Sent by schedulers to check the status of servers they've seen
-    #[celery::task]
-    pub async fn report(respond_to: String) {
-        if let Err(err) = super::SERVER
-            .get()
-            .map(|server| server.report_status(&respond_to))
-            .unwrap_or_else(|| {
-                futures::future::err(anyhow!("sccache-dist server is not initialized")).boxed()
-            })
-            .await
-        {
-            tracing::error!("[report_status({respond_to})]: {err}");
-        }
-    }
 }
 
 // Sent by servers, runs on schedulers
 mod server_to_schedulers {
     use celery::prelude::*;
 
-    use sccache::dist::BuildServerInfo;
+    use sccache::dist::ServerDetails;
 
     // Runs on scheduler to handle heartbeats from servers
     #[celery::task]
-    pub async fn status(info: BuildServerInfo) -> TaskResult<()> {
+    pub async fn status(info: ServerDetails) -> TaskResult<()> {
         super::SCHEDULER
             .get()
             .unwrap()
@@ -1224,7 +1185,7 @@ mod server_to_schedulers {
     pub async fn job_failure(
         job_id: String,
         reason: String,
-        info: BuildServerInfo,
+        info: ServerDetails,
     ) -> TaskResult<()> {
         super::SCHEDULER
             .get()
@@ -1236,7 +1197,7 @@ mod server_to_schedulers {
 
     // Runs on the scheduler
     #[celery::task]
-    pub async fn job_success(job_id: String, info: BuildServerInfo) -> TaskResult<()> {
+    pub async fn job_success(job_id: String, info: ServerDetails) -> TaskResult<()> {
         super::SCHEDULER
             .get()
             .unwrap()

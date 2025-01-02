@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "dist-server")]
 use std::pin::Pin;
 use std::process;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::errors::*;
 
@@ -522,17 +522,7 @@ pub struct SchedulerStatusResult {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerStatusResult {
-    pub last_success: u64,
-    pub last_failure: u64,
-    pub max_per_core_load: f64,
-    pub num_cpus: usize,
-    pub num_jobs: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct BuildServerStatus {
-    pub last_success: Instant,
-    pub last_failure: Option<Instant>,
+    pub last_seen: u64,
     pub max_per_core_load: f64,
     pub num_cpus: usize,
     pub num_jobs: usize,
@@ -540,7 +530,7 @@ pub struct BuildServerStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BuildServerInfo {
+pub struct ServerDetails {
     pub max_per_core_load: f64,
     pub num_cpus: usize,
     pub num_jobs: usize,
@@ -575,19 +565,16 @@ pub trait SchedulerService: Send + Sync {
 
     async fn new_job(&self, request: NewJobRequest) -> Result<NewJobResponse>;
     async fn run_job(&self, request: RunJobRequest) -> Result<RunJobResponse>;
-    async fn job_failure(&self, job_id: &str, reason: &str, info: BuildServerInfo) -> Result<()>;
-    async fn job_success(&self, job_id: &str, info: BuildServerInfo) -> Result<()>;
+    async fn job_failure(&self, job_id: &str, reason: &str, info: ServerDetails) -> Result<()>;
+    async fn job_success(&self, job_id: &str, info: ServerDetails) -> Result<()>;
 
-    async fn request_status(&self) -> Result<()>;
-    async fn receive_status(&self, info: BuildServerInfo, status: Option<bool>) -> Result<()>;
+    async fn receive_status(&self, info: ServerDetails, job_status: Option<bool>) -> Result<()>;
 }
 
 #[cfg(feature = "dist-server")]
 #[async_trait]
 pub trait ServerService: Send + Sync {
-    async fn broadcast_status(&self) -> Result<()>;
-
-    async fn report_status(&self, respond_to: &str) -> Result<()>;
+    async fn report_status(&self) -> Result<()>;
 
     #[allow(clippy::too_many_arguments)]
     async fn run_job(
