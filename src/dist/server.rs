@@ -111,8 +111,8 @@ mod internal {
         uri: Uri,
     ) -> impl FnOnce(anyhow::Error) -> std::result::Result<Response, Response> {
         move |err: anyhow::Error| {
-            let msg = format!("sccache: `{method} {uri}` failed with {err}");
-            tracing::error!("{}", msg);
+            tracing::error!("{}", format!("sccache: `{method} {uri}` failed with: {err:?}"));
+            let msg = format!("sccache: `{method} {uri}` failed with: `{err}`");
             Err((StatusCode::INTERNAL_SERVER_ERROR, msg.into_bytes()).into_response())
         }
     }
