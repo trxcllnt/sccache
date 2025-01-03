@@ -24,6 +24,7 @@ use sccache::dist::{BuildResult, BuilderIncoming, CompileCommand, OutputData, Pr
 use std::io;
 use std::path::{self, Path, PathBuf};
 use std::process::Output;
+use std::sync::Arc;
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use version_compare::Version;
 
@@ -89,10 +90,15 @@ struct OverlaySpec {
 pub struct OverlayBuilder {
     bubblewrap: PathBuf,
     dir: PathBuf,
+    job_queue: Arc<tokio::sync::Semaphore>,
 }
 
 impl OverlayBuilder {
-    pub async fn new(bubblewrap: PathBuf, dir: PathBuf) -> Result<Self> {
+    pub async fn new(
+        bubblewrap: PathBuf,
+        dir: PathBuf,
+        job_queue: Arc<tokio::sync::Semaphore>,
+    ) -> Result<Self> {
         tracing::info!("Creating overlay builder");
 
         if !nix::unistd::getuid().is_root() || !nix::unistd::geteuid().is_root() {
@@ -133,7 +139,11 @@ impl OverlayBuilder {
         }
 
         // TODO: pidfile
-        let ret = Self { bubblewrap, dir };
+        let ret = Self {
+            bubblewrap,
+            dir,
+            job_queue,
+        };
         ret.cleanup().await?;
         fs::create_dir_all(&ret.dir).context("Failed to create base directory for builder")?;
         fs::create_dir_all(ret.dir.join("builds"))
@@ -161,7 +171,8 @@ impl OverlayBuilder {
             "[prepare_overlay_dirs({job_id})]: Creating build directory: {build_dir:?}"
         );
 
-        fs::create_dir_all(&build_dir)
+        tokio::fs::create_dir_all(&build_dir)
+            .await
             .context("Failed to create build dir")
             .unwrap_or_else(|err| tracing::warn!("[prepare_overlay_dirs({job_id})]: {err:?}"));
 
@@ -183,12 +194,16 @@ impl OverlayBuilder {
         inputs: Vec<u8>,
         output_paths: Vec<String>,
         overlay: OverlaySpec,
+        job_queue: &tokio::sync::Semaphore,
     ) -> Result<BuildResult> {
         tracing::trace!("[perform_build({job_id})]: Compile environment: {env_vars:?}");
         tracing::trace!("[perform_build({job_id})]: Compile command: {executable:?} {arguments:?}");
         tracing::trace!("[perform_build({job_id})]: Output paths: {output_paths:?}");
 
         let job_id = job_id.to_owned();
+
+        // Guard compiling until we get a token from the job queue
+        let job_slot = job_queue.acquire().await?;
 
         let build_in_overlay = move || {
             // Now mounted filesystems will be automatically unmounted when this thread dies
@@ -267,7 +282,8 @@ impl OverlayBuilder {
                 }
             }
 
-            tracing::trace!("[perform_build({job_id})]: performing compile");
+            tracing::trace!("[perform_build({job_id})]: creating compile command");
+
             // Bubblewrap notes:
             // - We're running as uid 0 (to do the mounts above), and so bubblewrap is run as uid 0
             // - There's special handling in bubblewrap to compare uid and euid - of interest to us,
@@ -313,11 +329,15 @@ impl OverlayBuilder {
             cmd.arg(executable);
             cmd.args(arguments);
 
+            tracing::trace!("[perform_build({job_id})]: performing compile");
             tracing::trace!("[perform_build({job_id})]: bubblewrap command: {:?}", cmd);
 
             let compile_output = cmd
                 .output()
                 .context("Failed to retrieve output from compile")?;
+
+            // Drop the job slot once compile is finished
+            drop(job_slot);
 
             if !compile_output.status.success() {
                 tracing::warn!(
@@ -424,6 +444,7 @@ impl BuilderIncoming for OverlayBuilder {
             inputs,
             outputs,
             overlay.clone(),
+            self.job_queue.as_ref(),
         )
         .await;
 
@@ -439,15 +460,17 @@ impl BuilderIncoming for OverlayBuilder {
 
 const BUSYBOX_DOCKER_IMAGE: &str = "busybox:stable-musl";
 
-pub struct DockerBuilder {}
+pub struct DockerBuilder {
+    job_queue: Arc<tokio::sync::Semaphore>,
+}
 
 impl DockerBuilder {
     // TODO: this should accept a unique string, e.g. inode of the tccache directory
     // having locked a pidfile, or at minimum should loudly detect other running
     // instances - pidfile in /tmp
-    pub async fn new() -> Result<Self> {
+    pub async fn new(job_queue: Arc<tokio::sync::Semaphore>) -> Result<Self> {
         tracing::info!("Creating docker builder");
-        Ok(Self {})
+        Ok(Self { job_queue })
     }
 
     async fn perform_build(
@@ -461,6 +484,7 @@ impl DockerBuilder {
         }: CompileCommand,
         output_paths: Vec<String>,
         inputs: Vec<u8>,
+        job_queue: &tokio::sync::Semaphore,
     ) -> Result<BuildResult> {
         tracing::trace!("[perform_build({job_id})]: Compile environment: {env_vars:?}");
         tracing::trace!("[perform_build({job_id})]: Compile command: {executable:?} {arguments:?}");
@@ -469,6 +493,8 @@ impl DockerBuilder {
         if output_paths.is_empty() {
             bail!("Output paths is empty");
         }
+
+        // Do as much asyncio work as possible before acquiring a job slot
 
         // Should automatically get deleted when host_temp goes out of scope
         let host_temp = tempfile::Builder::new().prefix("sccache_dist").tempdir()?;
@@ -553,7 +579,7 @@ impl DockerBuilder {
             }
         }
 
-        tracing::trace!("[perform_build({job_id})]: performing compile");
+        tracing::trace!("[perform_build({job_id})]: creating compile command");
 
         // TODO: likely shouldn't perform the compile as root in the container
         let mut cmd = tokio::process::Command::new("docker");
@@ -593,9 +619,16 @@ impl DockerBuilder {
             .arg(executable)
             .args(arguments);
 
+        // Guard compiling until we get a token from the job queue
+        let job_slot = job_queue.acquire().await?;
+
+        tracing::trace!("[perform_build({job_id})]: performing compile");
         tracing::trace!("[perform_build({job_id})]: {:?}", cmd.as_std());
 
         let compile_output = cmd.output().await.context("Failed to compile")?;
+
+        // Drop the job slot once compile is finished
+        drop(job_slot);
 
         if !compile_output.status.success() {
             tracing::warn!(
@@ -657,7 +690,15 @@ impl BuilderIncoming for DockerBuilder {
     ) -> Result<BuildResult> {
         tracing::debug!("[run_build({})]: Performing build in container", job_id);
 
-        let res = Self::perform_build(job_id, toolchain_dir, command, outputs, inputs).await;
+        let res = Self::perform_build(
+            job_id,
+            toolchain_dir,
+            command,
+            outputs,
+            inputs,
+            self.job_queue.as_ref(),
+        )
+        .await;
 
         tracing::debug!("[run_build({})]: Returning result", job_id);
 

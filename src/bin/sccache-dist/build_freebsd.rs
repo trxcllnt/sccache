@@ -107,6 +107,7 @@ pub struct PotBuilder {
     pot_clone_args: Vec<String>,
     image_map: Arc<Mutex<HashMap<PathBuf, String>>>,
     container_lists: Arc<Mutex<HashMap<PathBuf, Vec<String>>>>,
+    job_queue: Arc<tokio::sync::Semaphore>,
 }
 
 impl PotBuilder {
@@ -115,6 +116,7 @@ impl PotBuilder {
         clone_from: String,
         pot_cmd: PathBuf,
         pot_clone_args: Vec<String>,
+        job_queue: Arc<tokio::sync::Semaphore>,
     ) -> Result<Self> {
         tracing::info!("Creating pot builder");
 
@@ -125,6 +127,7 @@ impl PotBuilder {
             pot_clone_args,
             image_map: Arc::new(Mutex::new(HashMap::new())),
             container_lists: Arc::new(Mutex::new(HashMap::new())),
+            job_queue,
         };
         ret.cleanup().await?;
         Ok(ret)
@@ -364,6 +367,7 @@ impl PotBuilder {
         inputs: Vec<u8>,
         cid: &str,
         pot_fs_root: &Path,
+        job_queue: &tokio::sync::Semaphore,
     ) -> Result<BuildResult> {
         tracing::trace!("[perform_build({job_id})]: Compile environment: {env_vars:?}");
         tracing::trace!("[perform_build({job_id})]: Compile command: {executable:?} {arguments:?}");
@@ -372,6 +376,8 @@ impl PotBuilder {
         if output_paths.is_empty() {
             bail!("output_paths is empty");
         }
+
+        // Do as much asyncio work as possible before acquiring a job slot
 
         tracing::trace!("[perform_build({job_id})]: copying in inputs");
 
@@ -425,7 +431,7 @@ impl PotBuilder {
             .await
             .context("Failed to create directories required for compiling in container")?;
 
-        tracing::trace!("[perform_build({job_id})]: performing compile");
+        tracing::trace!("[perform_build({job_id})]: creating compile command");
 
         // TODO: likely shouldn't perform the compile as root in the container
         let mut cmd = tokio::process::Command::new("jexec");
@@ -448,12 +454,19 @@ impl PotBuilder {
         cmd.arg(executable);
         cmd.args(&arguments);
 
+        // Guard compiling until we get a token from the job queue
+        let job_slot = job_queue.acquire().await?;
+
+        tracing::trace!("[perform_build({job_id})]: performing compile");
         tracing::trace!("[perform_build({job_id})]: {:?}", cmd.as_std());
 
         let compile_output = cmd
             .output()
             .await
             .context("Failed to start executing compile")?;
+
+        // Drop the job slot once compile is finished
+        drop(job_slot);
 
         if !compile_output.status.success() {
             tracing::warn!(
@@ -524,8 +537,16 @@ impl BuilderIncoming for PotBuilder {
 
         tracing::debug!("[run_build({job_id})]: Performing build in container {cid}");
 
-        let res =
-            Self::perform_build(job_id, command, outputs, inputs, &cid, &self.pot_fs_root).await;
+        let res = Self::perform_build(
+            job_id,
+            command,
+            outputs,
+            inputs,
+            &cid,
+            &self.pot_fs_root,
+            self.job_queue.as_ref(),
+        )
+        .await;
 
         // Unwrap the result
         let res = res.context("Failed to perform build")?;

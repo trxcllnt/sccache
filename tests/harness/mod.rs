@@ -373,7 +373,8 @@ impl DistSystem {
                     status,
                     SchedulerStatusResult {
                         num_cpus: _,
-                        num_jobs: 0,
+                        num_jobs_pending: 0,
+                        num_jobs_running: 0,
                         num_servers: 0,
                         servers: _
                     }

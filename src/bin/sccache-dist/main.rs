@@ -136,20 +136,17 @@ fn to_scheduler_queue(id: &str) -> String {
     queue_name_with_env_info(&format!("scheduler-{id}"))
 }
 
-fn to_server_queue(id: &str) -> String {
-    queue_name_with_env_info(&format!("server-{id}"))
-}
-
 async fn celery_app(
+    app_name: &str,
     broker_uri: &str,
-    self_queue: &str,
+    default_queue: &str,
     prefetch_count: u16,
 ) -> Result<celery::Celery> {
     let to_servers = scheduler_to_servers_queue();
     let to_schedulers = server_to_schedulers_queue();
 
-    celery::CeleryBuilder::new(self_queue, broker_uri)
-        .default_queue(self_queue)
+    celery::CeleryBuilder::new(app_name, broker_uri)
+        .default_queue(default_queue)
         .task_content_type(MessageContentType::MsgPack)
         // Register at least one task route for each queue, because that's
         // how celery knows which queues to create in the message broker.
@@ -230,7 +227,13 @@ fn run(command: Command) -> Result<()> {
                 let to_this_scheduler = to_scheduler_queue(&scheduler_id);
 
                 let task_queue = Arc::new(
-                    celery_app(&broker_uri, &to_this_scheduler, 100 * num_cpus as u16).await?,
+                    celery_app(
+                        &scheduler_id,
+                        &broker_uri,
+                        &to_this_scheduler,
+                        100 * num_cpus as u16,
+                    )
+                    .await?,
                 );
 
                 // Tasks this scheduler receives
@@ -313,7 +316,6 @@ fn run(command: Command) -> Result<()> {
             cache_dir,
             jobs,
             max_per_core_load,
-            num_cpus_to_ignore,
             server_id,
             toolchain_cache_size,
             toolchains,
@@ -357,27 +359,29 @@ fn run(command: Command) -> Result<()> {
                     toolchains_storage,
                 );
 
-                let num_cpus = (num_cpus - num_cpus_to_ignore).max(1) as f64;
-                let prefetch_count = (num_cpus * max_per_core_load).floor().max(1f64) as u16;
+                let occupancy = (num_cpus as f64 * max_per_core_load.max(0.0)).floor().max(1.0);
+                let pre_fetch = (occupancy - num_cpus as f64).abs().floor() as usize;
+                let occupancy = occupancy.min(num_cpus as f64) as usize;
 
                 let broker_uri = message_broker_uri(message_broker)?;
                 tracing::trace!("Message broker URI: {broker_uri}");
 
                 let to_servers = scheduler_to_servers_queue();
-                let to_this_server = to_server_queue(&server_id);
 
                 let task_queue =
-                    Arc::new(celery_app(&broker_uri, &to_this_server, prefetch_count).await?);
+                    Arc::new(celery_app(&server_id, &broker_uri, &to_servers, (occupancy + pre_fetch) as u16).await?);
 
                 // Tasks this server receives
                 task_queue
                     .register_task::<scheduler_to_servers::run_job>()
                     .await?;
 
+                let job_queue = Arc::new(tokio::sync::Semaphore::new(occupancy));
+
                 let builder: Arc<dyn BuilderIncoming> = match builder {
                     #[cfg(not(target_os = "freebsd"))]
                     sccache::config::server::BuilderType::Docker => Arc::new(
-                        build::DockerBuilder::new()
+                        build::DockerBuilder::new(job_queue.clone())
                             .await
                             .context("Docker builder failed to start")?,
                     ),
@@ -386,7 +390,7 @@ fn run(command: Command) -> Result<()> {
                         bwrap_path,
                         build_dir,
                     } => Arc::new(
-                        build::OverlayBuilder::new(bwrap_path, build_dir)
+                        build::OverlayBuilder::new(bwrap_path, build_dir, job_queue.clone())
                             .await
                             .context("Overlay builder failed to start")?,
                     ),
@@ -397,7 +401,7 @@ fn run(command: Command) -> Result<()> {
                         pot_cmd,
                         pot_clone_args,
                     } => Arc::new(
-                        build::PotBuilder::new(pot_fs_root, clone_from, pot_cmd, pot_clone_args)
+                        build::PotBuilder::new(pot_fs_root, clone_from, pot_cmd, pot_clone_args, job_queue.clone())
                             .await
                             .context("Pot builder failed to start")?,
                     ),
@@ -411,9 +415,10 @@ fn run(command: Command) -> Result<()> {
                 };
 
                 let server = Arc::new(Server::new(
-                    max_per_core_load,
-                    num_cpus.floor() as usize,
                     server_id,
+                    max_per_core_load,
+                    occupancy,
+                    job_queue.clone(),
                     builder,
                     task_queue.clone(),
                     jobs_storage,
@@ -422,13 +427,13 @@ fn run(command: Command) -> Result<()> {
 
                 SERVER.set(server.clone()).map_err(|err| anyhow!("{err}"))?;
 
-                tracing::info!("sccache: Server initialized to run {num_cpus} parallel build jobs");
+                tracing::info!("sccache: Server initialized to run {occupancy} parallel build jobs and prefetch up to {pre_fetch} job(s) in the background");
 
                 task_queue.display_pretty().await;
 
                 daemonize()?;
 
-                let queues = [to_this_server.as_str(), to_servers.as_str()];
+                let queues = [to_servers.as_str()];
 
                 let celery = task_queue.consume_from(&queues);
                 let status = server.report_status();
@@ -575,7 +580,8 @@ struct ServerStatus {
     pub max_per_core_load: f64,
     pub mtime: Instant,
     pub num_cpus: usize,
-    pub num_jobs: usize,
+    pub num_jobs_pending: usize,
+    pub num_jobs_running: usize,
 }
 
 pub struct Scheduler {
@@ -626,7 +632,8 @@ impl SchedulerService for Scheduler {
                 ServerStatusResult {
                     max_per_core_load: server.max_per_core_load,
                     num_cpus: server.num_cpus,
-                    num_jobs: server.num_jobs,
+                    num_jobs_pending: server.num_jobs_pending,
+                    num_jobs_running: server.num_jobs_running,
                     last_seen: server.mtime.elapsed().as_secs(),
                 },
             );
@@ -634,7 +641,8 @@ impl SchedulerService for Scheduler {
 
         Ok(SchedulerStatusResult {
             num_cpus: servers.values().map(|v| v.num_cpus).sum(),
-            num_jobs: servers.values().map(|v| v.num_jobs).sum(),
+            num_jobs_pending: servers.values().map(|v| v.num_jobs_pending).sum(),
+            num_jobs_running: servers.values().map(|v| v.num_jobs_running).sum(),
             num_servers: servers.len(),
             servers,
         })
@@ -777,13 +785,15 @@ impl SchedulerService for Scheduler {
                 server.max_per_core_load = info.max_per_core_load;
                 server.mtime = Instant::now();
                 server.num_cpus = info.num_cpus;
-                server.num_jobs = info.num_jobs;
+                server.num_jobs_pending = info.num_jobs_pending;
+                server.num_jobs_running = info.num_jobs_running;
             })
             .or_insert_with(|| ServerStatus {
                 max_per_core_load: info.max_per_core_load,
                 mtime: Instant::now(),
                 num_cpus: info.num_cpus,
-                num_jobs: info.num_jobs,
+                num_jobs_pending: info.num_jobs_pending,
+                num_jobs_running: info.num_jobs_running,
             });
 
         Self::prune_servers(&mut servers);
@@ -797,6 +807,7 @@ pub struct Server {
     builder: Arc<dyn BuilderIncoming>,
     jobs_storage: Arc<dyn sccache::cache::Storage>,
     jobs: Arc<Mutex<HashMap<String, (String, String)>>>,
+    job_queue: Arc<tokio::sync::Semaphore>,
     max_per_core_load: f64,
     num_cpus: usize,
     report_interval: Duration,
@@ -807,10 +818,12 @@ pub struct Server {
 }
 
 impl Server {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        server_id: String,
         max_per_core_load: f64,
         num_cpus: usize,
-        server_id: String,
+        job_queue: Arc<tokio::sync::Semaphore>,
         builder: Arc<dyn BuilderIncoming>,
         task_queue: Arc<celery::Celery>,
         jobs_storage: Arc<dyn sccache::cache::Storage>,
@@ -820,6 +833,7 @@ impl Server {
             builder,
             jobs_storage,
             jobs: Default::default(),
+            job_queue,
             max_per_core_load,
             num_cpus,
             // Report status at least every 30s
@@ -843,14 +857,16 @@ impl Server {
     async fn send_status(
         &self,
         respond_to: impl Into<Option<String>>,
-        num_jobs: usize,
+        num_jobs_pending: usize,
+        num_jobs_running: usize,
     ) -> Result<()> {
         let respond_to = respond_to.into();
 
         let info = ServerDetails {
             max_per_core_load: self.max_per_core_load,
             num_cpus: self.num_cpus,
-            num_jobs,
+            num_jobs_pending,
+            num_jobs_running,
             server_id: self.server_id.clone(),
         };
 
@@ -878,7 +894,11 @@ impl Server {
         Ok(())
     }
 
-    async fn broadcast_status(&self, num_jobs: usize) -> Vec<Result<()>> {
+    async fn broadcast_status(
+        &self,
+        num_jobs_pending: usize,
+        num_jobs_running: usize,
+    ) -> Vec<Result<()>> {
         let ids = {
             let report_interval = self.report_interval;
             let mut schedulers = self.schedulers.lock().await;
@@ -905,7 +925,7 @@ impl Server {
         // 1. https://docs.celeryq.dev/en/stable/userguide/routing.html#broadcast
 
         let requests = ids.into_iter().fold(vec![], |mut futs, id| {
-            futs.push(self.send_status(Some(id), num_jobs));
+            futs.push(self.send_status(Some(id), num_jobs_pending, num_jobs_running));
             futs
         });
 
@@ -914,7 +934,7 @@ impl Server {
                 requests
             } else {
                 // If no schedulers to update, send status to any scheduler
-                vec![self.send_status(None, num_jobs)]
+                vec![self.send_status(None, num_jobs_pending, num_jobs_running)]
             }
         })
         .await
@@ -936,9 +956,12 @@ impl ServerService for Server {
             let this = Arc::new(self.clone());
             async move {
                 loop {
-                    let num_jobs = this.jobs.lock().await.len();
+                    let num_all_jobs = this.jobs.lock().await.len();
+                    let num_free_cpus = this.job_queue.available_permits();
+                    let num_jobs_running = this.num_cpus - num_free_cpus;
+                    let num_jobs_pending = num_all_jobs - num_jobs_running;
                     tokio::time::sleep(
-                        this.broadcast_status(num_jobs)
+                        this.broadcast_status(num_jobs_pending, num_jobs_running)
                             .await
                             .iter()
                             .any(|res| res.is_err())
@@ -962,7 +985,7 @@ impl ServerService for Server {
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> Result<()> {
-        let num_jobs = {
+        let num_all_jobs = {
             let mut jobs = self.jobs.lock().await;
             // Associate the task with the scheduler and job so we can report success or failure
             jobs.insert(
@@ -973,11 +996,11 @@ impl ServerService for Server {
         };
 
         let jobs_storage = self.jobs_storage.as_ref();
+        let num_jobs_running = self.num_cpus - self.job_queue.available_permits();
+        let num_jobs_pending = num_all_jobs - num_jobs_running;
 
         // Report status and load toolchain + inputs in parallel
-        let (_, inputs, toolchain_dir) = futures::future::try_join3(
-            // Report status
-            async { Ok(self.broadcast_status(num_jobs).await) },
+        let (inputs, toolchain_dir, _) = futures::future::try_join3(
             // Load inputs
             get_job_inputs(jobs_storage, job_id),
             // Load and unpack toolchain
@@ -985,6 +1008,12 @@ impl ServerService for Server {
                 tracing::warn!("[run_job({job_id})]: Error loading toolchain: {err:?}");
                 err
             }),
+            // Report status
+            async {
+                Ok(self
+                    .broadcast_status(num_jobs_pending, num_jobs_running)
+                    .await)
+            },
         )
         .await?;
 
@@ -1014,10 +1043,16 @@ impl ServerService for Server {
     async fn job_failure(&self, task_id: &str, reason: &str) -> Result<()> {
         let mut jobs = self.jobs.lock().await;
         if let Some((respond_to, job_id)) = jobs.remove(task_id) {
+            let num_all_jobs = jobs.len();
+            let num_free_cpus = self.job_queue.available_permits();
+            let num_jobs_running = self.num_cpus - num_free_cpus;
+            let num_jobs_pending = num_all_jobs - num_jobs_running;
+
             let info = ServerDetails {
                 max_per_core_load: self.max_per_core_load,
                 num_cpus: self.num_cpus,
-                num_jobs: jobs.len(),
+                num_jobs_pending,
+                num_jobs_running,
                 server_id: self.server_id.clone(),
             };
 
@@ -1046,10 +1081,16 @@ impl ServerService for Server {
     async fn job_success(&self, task_id: &str) -> Result<()> {
         let mut jobs = self.jobs.lock().await;
         if let Some((respond_to, job_id)) = jobs.remove(task_id) {
+            let num_all_jobs = jobs.len();
+            let num_free_cpus = self.job_queue.available_permits();
+            let num_jobs_running = self.num_cpus - num_free_cpus;
+            let num_jobs_pending = num_all_jobs - num_jobs_running;
+
             let info = ServerDetails {
                 max_per_core_load: self.max_per_core_load,
                 num_cpus: self.num_cpus,
-                num_jobs: jobs.len(),
+                num_jobs_pending,
+                num_jobs_running,
                 server_id: self.server_id.clone(),
             };
 
@@ -1086,10 +1127,10 @@ mod scheduler_to_servers {
 
     #[celery::task(
         bind = true,
-        // acks_late = true,
-        // acks_on_failure_or_timeout = false,
-        max_retries = 0,
-        // nacks_enabled = true,
+        acks_late = true,
+        acks_on_failure_or_timeout = false,
+        max_retries = 1,
+        nacks_enabled = true,
         on_failure = on_run_job_failure,
         on_success = on_run_job_success,
     )]

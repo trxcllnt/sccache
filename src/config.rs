@@ -1449,7 +1449,6 @@ pub mod server {
         pub jobs: CacheConfigs,
         pub max_per_core_load: Option<f64>,
         pub message_broker: Option<MessageBroker>,
-        pub num_cpus_to_ignore: Option<usize>,
         pub server_id: Option<String>,
         pub toolchain_cache_size: Option<u64>,
         pub toolchains: CacheConfigs,
@@ -1471,7 +1470,6 @@ pub mod server {
                 },
                 max_per_core_load: None,
                 message_broker: None,
-                num_cpus_to_ignore: None,
                 server_id: None,
                 toolchain_cache_size: None,
                 toolchains: CacheConfigs {
@@ -1494,7 +1492,6 @@ pub mod server {
         pub jobs: StorageConfig,
         pub max_per_core_load: f64,
         pub message_broker: Option<MessageBroker>,
-        pub num_cpus_to_ignore: usize,
         pub server_id: String,
         pub toolchain_cache_size: u64,
         pub toolchains: StorageConfig,
@@ -1508,7 +1505,6 @@ pub mod server {
                 cache_dir,
                 jobs,
                 max_per_core_load,
-                num_cpus_to_ignore,
                 server_id,
                 toolchain_cache_size,
                 toolchains,
@@ -1540,11 +1536,6 @@ pub mod server {
                 // Default to 2
                 .unwrap_or(2f64);
 
-            let num_cpus_to_ignore = number_from_env_var("SCCACHE_DIST_NUM_CPUS_TO_IGNORE")
-                .transpose()?
-                .or(num_cpus_to_ignore)
-                .unwrap_or(0);
-
             let message_broker = MessageBroker::from_env().or(message_broker);
 
             let server_id = env::var("SCCACHE_DIST_SERVER_ID")
@@ -1563,7 +1554,6 @@ pub mod server {
                 jobs: jobs_storage.into(),
                 max_per_core_load,
                 message_broker,
-                num_cpus_to_ignore,
                 server_id,
                 toolchain_cache_size,
                 toolchains: toolchains_storage.into(),
@@ -1583,7 +1573,6 @@ pub mod server {
                 jobs: server_config.jobs.into(),
                 max_per_core_load: Some(server_config.max_per_core_load),
                 message_broker: server_config.message_broker,
-                num_cpus_to_ignore: Some(server_config.num_cpus_to_ignore),
                 server_id: Some(server_config.server_id),
                 toolchain_cache_size: Some(server_config.toolchain_cache_size),
                 toolchains: server_config.toolchains.into(),

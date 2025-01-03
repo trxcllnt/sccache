@@ -514,7 +514,8 @@ pub struct Toolchain {
 #[serde(deny_unknown_fields)]
 pub struct SchedulerStatusResult {
     pub num_cpus: usize,
-    pub num_jobs: usize,
+    pub num_jobs_pending: usize,
+    pub num_jobs_running: usize,
     pub num_servers: usize,
     pub servers: std::collections::HashMap<String, ServerStatusResult>,
 }
@@ -525,7 +526,8 @@ pub struct ServerStatusResult {
     pub last_seen: u64,
     pub max_per_core_load: f64,
     pub num_cpus: usize,
-    pub num_jobs: usize,
+    pub num_jobs_pending: usize,
+    pub num_jobs_running: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -533,7 +535,8 @@ pub struct ServerStatusResult {
 pub struct ServerDetails {
     pub max_per_core_load: f64,
     pub num_cpus: usize,
-    pub num_jobs: usize,
+    pub num_jobs_pending: usize,
+    pub num_jobs_running: usize,
     pub server_id: String,
 }
 

@@ -185,7 +185,7 @@ prepare_pot()
 
 start_scheduler()
 {
-	echo "#### starting scheduler"
+	echo "#### starting sccache-dist scheduler (as root)"
 	# sudo so the scheduler can access the server job results
 	sudo \
 		AMQP_ADDR="amqp://127.0.0.1:5672//" \
@@ -203,7 +203,7 @@ start_scheduler()
 
 start_build_server()
 {
-	echo "#### starting build-server (as root)"
+	echo "#### starting sccache-dist server (as root)"
 	sudo \
 		AMQP_ADDR="amqp://127.0.0.1:5672//" \
 		NO_COLOR=1 \
