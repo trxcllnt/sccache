@@ -939,11 +939,13 @@ pub fn new_reqwest_client() -> reqwest::Client {
     reqwest::Client::builder()
         // Force HTTP/2
         .http2_prior_knowledge()
+        // Disable connection pool
+        .pool_max_idle_per_host(0)
         .timeout(get_dist_request_timeout())
         .connect_timeout(get_dist_connect_timeout())
-        .pool_idle_timeout(get_dist_request_timeout())
-        .http2_keep_alive_interval(Some(Duration::from_secs(15)))
-        .http2_keep_alive_timeout(Duration::from_secs(20))
+        // .pool_idle_timeout(get_dist_request_timeout())
+        // .http2_keep_alive_timeout(Duration::from_secs(20))
+        // .http2_keep_alive_interval(Some(Duration::from_secs(15)))
         .build()
         .expect("http client must build with success")
 }
