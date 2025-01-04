@@ -510,34 +510,55 @@ pub struct Toolchain {
 
 // Status
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+// Unfortunately bincode doesn't support #[serde(flatten)] :(
+// https://github.com/bincode-org/bincode/issues/245
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SchedulerStatusResult {
-    pub num_cpus: usize,
-    pub num_jobs_pending: usize,
-    pub num_jobs_running: usize,
-    pub num_servers: usize,
-    pub servers: std::collections::HashMap<String, ServerStatusResult>,
+pub struct SchedulerStatus {
+    // #[serde(flatten)]
+    pub info: ServerStats,
+    pub jobs: JobStats,
+    pub servers: Vec<ServerStatus>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ServerStatusResult {
-    pub last_seen: u64,
-    pub max_per_core_load: f64,
-    pub num_cpus: usize,
-    pub num_jobs_pending: usize,
-    pub num_jobs_running: usize,
+pub struct ServerStatus {
+    // #[serde(flatten)]
+    // pub details: ServerDetails,
+    pub id: String,
+    // #[serde(flatten)]
+    pub info: ServerStats,
+    pub jobs: JobStats,
+    pub u_time: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerDetails {
-    pub max_per_core_load: f64,
+    pub id: String,
+    // #[serde(flatten)]
+    pub info: ServerStats,
+    pub jobs: JobStats,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerStats {
+    pub cpu_usage: f32,
+    pub mem_avail: u64,
+    pub mem_total: u64,
     pub num_cpus: usize,
-    pub num_jobs_pending: usize,
-    pub num_jobs_running: usize,
-    pub server_id: String,
+    pub occupancy: usize,
+    pub pre_fetch: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobStats {
+    pub fetched: usize,
+    pub running: usize,
 }
 
 // SubmitToolchain
@@ -556,7 +577,7 @@ pub enum SubmitToolchainResult {
 #[cfg(feature = "dist-server")]
 #[async_trait]
 pub trait SchedulerService: Send + Sync {
-    async fn get_status(&self) -> Result<SchedulerStatusResult>;
+    async fn get_status(&self) -> Result<SchedulerStatus>;
 
     async fn has_toolchain(&self, toolchain: Toolchain) -> bool;
 
@@ -628,7 +649,7 @@ pub trait Client: Send + Sync {
         outputs: Vec<String>,
     ) -> Result<RunJobResponse>;
     // To Scheduler
-    async fn do_get_status(&self) -> Result<SchedulerStatusResult>;
+    async fn do_get_status(&self) -> Result<SchedulerStatus>;
     // To Scheduler
     async fn do_submit_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult>;
     async fn put_toolchain(

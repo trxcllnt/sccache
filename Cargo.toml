@@ -139,6 +139,7 @@ rouille = { version = "3.6", optional = true, default-features = false, features
   "ssl",
 ] }
 syslog = { version = "6", optional = true }
+sysinfo = { version = "0.33", optional = true }
 tokio-openssl = { version = "0.6.5", optional = true }
 tokio-stream = { version = "0.1.17", optional = true }
 tokio-tungstenite = { version = "0.24", optional = true, features = [
@@ -245,6 +246,7 @@ dist-server = [
   "reqwest",
   "rouille",
   "syslog",
+  "sysinfo",
   "tower-http",
   "tokio-openssl",
   "tokio-stream",

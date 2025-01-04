@@ -381,7 +381,8 @@ impl DistClientContainer {
                     Ok(res) => {
                         info!(
                             "Successfully created dist client with {:?} cores across {:?} servers",
-                            res.num_cpus, res.num_servers
+                            res.info.num_cpus,
+                            res.servers.len()
                         );
                         DistClientState::Some(Box::new(config), Arc::new(dist_client))
                     }
@@ -1645,7 +1646,7 @@ pub enum DistInfo {
     #[cfg(feature = "dist-client")]
     NotConnected(Option<config::HTTPUrl>, String),
     #[cfg(feature = "dist-client")]
-    SchedulerStatus(Option<config::HTTPUrl>, dist::SchedulerStatusResult),
+    SchedulerStatus(Option<config::HTTPUrl>, dist::SchedulerStatus),
 }
 
 impl Default for ServerStats {

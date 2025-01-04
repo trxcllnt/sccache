@@ -263,7 +263,7 @@ mod client {
     use crate::dist::pkg::{InputsPackager, ToolchainPackager};
     use crate::dist::{
         self, CompileCommand, NewJobRequest, NewJobResponse, PathTransformer, RunJobRequest,
-        RunJobResponse, SchedulerStatusResult, SubmitToolchainResult, Toolchain,
+        RunJobResponse, SchedulerStatus, SubmitToolchainResult, Toolchain,
     };
     use crate::util::new_reqwest_client;
 
@@ -412,7 +412,7 @@ mod client {
             bincode_req_fut(req).await
         }
 
-        async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
+        async fn do_get_status(&self) -> Result<SchedulerStatus> {
             let req = self
                 .client
                 .lock()

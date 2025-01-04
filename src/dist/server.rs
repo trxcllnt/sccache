@@ -74,11 +74,14 @@ mod internal {
                     // application/octet-stream
                     Some(0) => match bincode::serialize(&content) {
                         Ok(body) => Ok((StatusCode::OK, body).into_response()),
-                        Err(err) => Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Failed to serialize response body: {err}").into_bytes(),
-                        )
-                            .into_response()),
+                        Err(err) => {
+                            tracing::error!("Failed to serialize response body: {err:?}");
+                            Err((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("Failed to serialize response body: {err}").into_bytes(),
+                            )
+                                .into_response())
+                        }
                     },
                     // application/json
                     Some(1) => Ok((
@@ -86,15 +89,21 @@ mod internal {
                         json!(content).as_str().unwrap().to_string().into_bytes(),
                     )
                         .into_response()),
-                    _ => Err((
-                        StatusCode::BAD_REQUEST,
-                        "Request must accept application/json or application/octet-stream"
-                            .to_string()
-                            .into_bytes(),
-                    )
-                        .into_response()),
+                    _ => {
+                        tracing::error!(
+                            "Request must accept application/json or application/octet-stream"
+                        );
+                        Err((
+                            StatusCode::BAD_REQUEST,
+                            "Request must accept application/json or application/octet-stream"
+                                .to_string()
+                                .into_bytes(),
+                        )
+                            .into_response())
+                    }
                 }
             } else {
+                tracing::error!("Request must accept application/json or application/octet-stream");
                 Err((
                     StatusCode::BAD_REQUEST,
                     "Request must accept application/json or application/octet-stream"
@@ -111,10 +120,7 @@ mod internal {
         uri: Uri,
     ) -> impl FnOnce(anyhow::Error) -> std::result::Result<Response, Response> {
         move |err: anyhow::Error| {
-            tracing::error!(
-                "{}",
-                format!("sccache: `{method} {uri}` failed with: {err:?}")
-            );
+            tracing::error!("sccache: `{method} {uri}` failed with: {err:?}");
             let msg = format!("sccache: `{method} {uri}` failed with: `{err}`");
             Err((StatusCode::INTERNAL_SERVER_ERROR, msg.into_bytes()).into_response())
         }

@@ -1,7 +1,7 @@
 use fs_err as fs;
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 use sccache::config::HTTPUrl;
-use sccache::dist::{self, SchedulerStatusResult};
+use sccache::dist::{self, SchedulerStatus};
 use sccache::server::ServerInfo;
 use std::env;
 use std::io::Write;
@@ -372,11 +372,12 @@ impl DistSystem {
                 let status = self.scheduler_status();
                 if matches!(
                     status,
-                    SchedulerStatusResult {
-                        num_cpus: _,
-                        num_jobs_pending: 0,
-                        num_jobs_running: 0,
-                        num_servers: 0,
+                    SchedulerStatus {
+                        info: _,
+                        jobs: dist::JobStats {
+                            fetched: 0,
+                            running: 0,
+                        },
                         servers: _
                     }
                 ) {
@@ -564,7 +565,7 @@ impl DistSystem {
         HTTPUrl::from_url(reqwest::Url::parse(&url).unwrap())
     }
 
-    fn scheduler_status(&self) -> SchedulerStatusResult {
+    fn scheduler_status(&self) -> SchedulerStatus {
         let mut req = reqwest::blocking::Client::builder().build().unwrap().get(
             dist::http::urls::scheduler_status(&self.scheduler_url().to_url()),
         );

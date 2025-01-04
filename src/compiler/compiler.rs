@@ -3061,7 +3061,7 @@ LLVM version: 6.0",
 mod test_dist {
     use crate::dist::{
         self, CompileCommand, NewJobResponse, OutputData, PathTransformer, ProcessOutput,
-        RunJobResponse, SchedulerStatusResult, SubmitToolchainResult, Toolchain,
+        RunJobResponse, SchedulerStatus, SubmitToolchainResult, Toolchain,
     };
     use crate::dist::{pkg, BuildResult};
     use async_trait::async_trait;
@@ -3087,7 +3087,7 @@ mod test_dist {
         ) -> Result<(NewJobResponse, PathTransformer)> {
             unreachable!()
         }
-        async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
+        async fn do_get_status(&self) -> Result<SchedulerStatus> {
             unreachable!()
         }
         async fn do_submit_toolchain(&self, _: Toolchain) -> Result<SubmitToolchainResult> {
@@ -3142,7 +3142,7 @@ mod test_dist {
             assert_eq!(self.tc, tc);
             Err(anyhow!("MOCK: alloc job failure"))
         }
-        async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
+        async fn do_get_status(&self) -> Result<SchedulerStatus> {
             unreachable!()
         }
         async fn do_submit_toolchain(&self, _: Toolchain) -> Result<SubmitToolchainResult> {
@@ -3214,7 +3214,7 @@ mod test_dist {
                 path_transformer,
             ))
         }
-        async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
+        async fn do_get_status(&self) -> Result<SchedulerStatus> {
             unreachable!("fn do_get_status is not used for this test. qed")
         }
         async fn do_submit_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
@@ -3287,7 +3287,7 @@ mod test_dist {
                 path_transformer,
             ))
         }
-        async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
+        async fn do_get_status(&self) -> Result<SchedulerStatus> {
             unreachable!()
         }
         async fn do_submit_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
@@ -3373,7 +3373,7 @@ mod test_dist {
                 path_transformer,
             ))
         }
-        async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
+        async fn do_get_status(&self) -> Result<SchedulerStatus> {
             unreachable!("fn do_get_status is not used for this test. qed")
         }
         async fn do_submit_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
