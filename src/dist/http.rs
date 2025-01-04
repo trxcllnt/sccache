@@ -22,37 +22,6 @@ pub use self::{
 
 pub use self::common::{bincode_deserialize, bincode_serialize};
 
-use std::env;
-use std::time::Duration;
-
-/// Default timeout for connections to an sccache-dist server
-const DEFAULT_DIST_CONNECT_TIMEOUT: u64 = 5;
-
-/// Timeout for connections to an sccache-dist server
-pub fn get_dist_connect_timeout() -> Duration {
-    Duration::new(
-        env::var("SCCACHE_DIST_CONNECT_TIMEOUT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_DIST_CONNECT_TIMEOUT),
-        0,
-    )
-}
-
-/// Default timeout for compile requests to an sccache-dist server
-const DEFAULT_DIST_REQUEST_TIMEOUT: u64 = 600;
-
-/// Timeout for compile requests to an sccache-dist server
-pub fn get_dist_request_timeout() -> Duration {
-    Duration::new(
-        env::var("SCCACHE_DIST_REQUEST_TIMEOUT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_DIST_REQUEST_TIMEOUT),
-        0,
-    )
-}
-
 mod common {
     use reqwest::header;
 
@@ -334,8 +303,9 @@ mod client {
             toolchain_configs: &[config::DistToolchainConfig],
             auth_token: String,
             rewrite_includes_only: bool,
+            net: &config::DistNetworking,
         ) -> Result<Self> {
-            let client = new_reqwest_client();
+            let client = new_reqwest_client(Some(net.clone()));
             let client = Arc::new(Mutex::new(client));
             let client_toolchains =
                 cache::ClientToolchains::new(cache_dir, cache_size, toolchain_configs)

@@ -151,6 +151,7 @@ pub struct DistClientConfig {
     // From the static dist configuration
     scheduler_url: Option<config::HTTPUrl>,
     auth: config::DistAuth,
+    net: config::DistNetworking,
     cache_dir: PathBuf,
     toolchain_cache_size: u64,
     toolchains: Vec<config::DistToolchainConfig>,
@@ -205,6 +206,7 @@ impl DistClientContainer {
             pool: pool.clone(),
             scheduler_url: config.dist.scheduler_url.clone(),
             auth: config.dist.auth.clone(),
+            net: config.dist.net.clone(),
             cache_dir: config.dist.cache_dir.clone(),
             toolchain_cache_size: config.dist.toolchain_cache_size,
             toolchains: config.dist.toolchains.clone(),
@@ -369,6 +371,7 @@ impl DistClientContainer {
                     &config.toolchains,
                     auth_token,
                     config.rewrite_includes_only,
+                    &config.net,
                 )
                 .await;
                 let dist_client =
@@ -966,6 +969,7 @@ where
                     pool: rt.clone(),
                     scheduler_url: None,
                     auth: config::DistAuth::Token { token: "".into() },
+                    net: Default::default(),
                     cache_dir: "".into(),
                     toolchain_cache_size: 0,
                     toolchains: vec![],

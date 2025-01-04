@@ -246,7 +246,7 @@ mod code_grant_pkce {
             grant_type: GRANT_TYPE_PARAM_VALUE,
             redirect_uri,
         };
-        let client = new_reqwest_client();
+        let client = new_reqwest_client(None);
         let runtime = tokio::runtime::Handle::current();
         let res = runtime.block_on(client.post(token_url).json(&token_request).send())?;
         if !res.status().is_success() {

@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::result::Result as StdResult;
 use std::str::FromStr;
 use std::sync::Mutex;
+use std::time::Duration;
 
 pub use crate::cache::PreprocessorCacheModeConfig;
 use crate::errors::*;
@@ -559,11 +560,57 @@ impl Default for DistAuth {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct DistNetworking {
+    pub connect_timeout: u64,
+    pub request_timeout: u64,
+    pub connection_pool: bool,
+    pub keepalive: DistNetworkingKeepalive,
+}
+
+impl Default for DistNetworking {
+    fn default() -> Self {
+        Self {
+            // Default timeout for connections to an sccache-dist server
+            connect_timeout: 5,
+            // Default timeout for compile requests to an sccache-dist server.
+            // Users should set their load balancer's idle timeout to match or
+            // exceed this value.
+            request_timeout: 600,
+            // Default to not using reqwest's connection pool
+            connection_pool: false,
+            keepalive: Default::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct DistNetworkingKeepalive {
+    pub enabled: bool,
+    pub timeout: u64,
+    pub interval: u64,
+}
+
+impl Default for DistNetworkingKeepalive {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout: 60,
+            interval: 20,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct DistConfig {
     pub auth: DistAuth,
+    pub net: DistNetworking,
     #[cfg(any(feature = "dist-client", feature = "dist-server"))]
     pub scheduler_url: Option<HTTPUrl>,
     #[cfg(not(any(feature = "dist-client", feature = "dist-server")))]
@@ -578,6 +625,7 @@ impl Default for DistConfig {
     fn default() -> Self {
         Self {
             auth: Default::default(),
+            net: Default::default(),
             scheduler_url: Default::default(),
             cache_dir: default_dist_cache_dir(),
             toolchains: Default::default(),
@@ -1006,7 +1054,7 @@ pub struct Config {
     pub cache: Option<CacheType>,
     pub fallback_cache: DiskCacheConfig,
     pub dist: DistConfig,
-    pub server_startup_timeout: Option<std::time::Duration>,
+    pub server_startup_timeout: Option<Duration>,
 }
 
 impl Config {
@@ -1018,7 +1066,31 @@ impl Config {
             .context("Failed to load config file")?
             .unwrap_or_default();
 
-        Ok(Self::from_env_and_file_configs(env_conf, file_conf))
+        let mut conf = Self::from_env_and_file_configs(env_conf, file_conf);
+
+        conf.dist.net.connect_timeout = number_from_env_var("SCCACHE_DIST_CONNECT_TIMEOUT")
+            .transpose()?
+            .unwrap_or(conf.dist.net.connect_timeout);
+
+        conf.dist.net.request_timeout = number_from_env_var("SCCACHE_DIST_REQUEST_TIMEOUT")
+            .transpose()?
+            .unwrap_or(conf.dist.net.request_timeout);
+
+        conf.dist.net.connection_pool = bool_from_env_var("SCCACHE_DIST_CONNECTION_POOL")?
+            .unwrap_or(conf.dist.net.connection_pool);
+
+        conf.dist.net.keepalive.enabled = bool_from_env_var("SCCACHE_DIST_KEEPALIVE_ENABLED")?
+            .unwrap_or(conf.dist.net.keepalive.enabled);
+
+        conf.dist.net.keepalive.interval = number_from_env_var("SCCACHE_DIST_KEEPALIVE_INTERVAL")
+            .transpose()?
+            .unwrap_or(conf.dist.net.keepalive.interval);
+
+        conf.dist.net.keepalive.timeout = number_from_env_var("SCCACHE_DIST_KEEPALIVE_TIMEOUT")
+            .transpose()?
+            .unwrap_or(conf.dist.net.keepalive.timeout);
+
+        Ok(conf)
     }
 
     fn from_env_and_file_configs(env_conf: EnvConfig, file_conf: FileConfig) -> Self {
@@ -1031,8 +1103,7 @@ impl Config {
         } = file_conf;
         conf_caches.merge(cache);
 
-        let server_startup_timeout =
-            server_startup_timeout_ms.map(std::time::Duration::from_millis);
+        let server_startup_timeout = server_startup_timeout_ms.map(Duration::from_millis);
 
         let EnvConfig { cache } = env_conf;
         conf_caches.merge(cache);
@@ -1941,6 +2012,7 @@ no_credentials = true
                 auth: DistAuth::Token {
                     token: "secrettoken".to_owned()
                 },
+                net: Default::default(),
                 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
                 scheduler_url: Some(
                     parse_http_url("http://1.2.3.4:10600")

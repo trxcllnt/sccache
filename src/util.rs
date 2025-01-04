@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(any(feature = "dist-server", feature = "dist-client"))]
-use crate::dist::http::{get_dist_connect_timeout, get_dist_request_timeout};
 use crate::mock_command::{CommandChild, RunCommand};
 use blake3::Hasher as blake3_Hasher;
 use byteorder::{BigEndian, ByteOrder};
@@ -935,17 +933,55 @@ pub fn daemonize() -> Result<()> {
 }
 
 #[cfg(any(feature = "dist-server", feature = "dist-client"))]
-pub fn new_reqwest_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        // Force HTTP/2
-        .http2_prior_knowledge()
+pub fn new_reqwest_client(config: Option<crate::config::DistNetworking>) -> reqwest::Client {
+    let config = config.unwrap_or_default();
+    let request_timeout = Duration::from_secs(config.request_timeout);
+    let connect_timeout = Duration::from_secs(config.connect_timeout);
+
+    let builder = reqwest::Client::builder()
+        // HTTP/2
+        .http2_prior_knowledge() // force HTTP/2
+        // Timeouts
+        .timeout(request_timeout)
+        .connect_timeout(connect_timeout);
+
+    // Connection pool
+    let builder = if config.connection_pool {
+        // Users should set their load balancer's idle timeout
+        // to the same value as `SCCACHE_DIST_REQUEST_TIMEOUT`
+        builder.pool_idle_timeout(request_timeout)
+        // AWS application load balancer's default
+        // builder.pool_idle_timeout(Duration::from_secs(60))
+    } else {
         // Disable connection pool
-        .pool_max_idle_per_host(0)
-        .timeout(get_dist_request_timeout())
-        .connect_timeout(get_dist_connect_timeout())
-        // .pool_idle_timeout(get_dist_request_timeout())
-        // .http2_keep_alive_timeout(Duration::from_secs(20))
-        // .http2_keep_alive_interval(Some(Duration::from_secs(15)))
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("close"),
+        );
+        builder.pool_max_idle_per_host(0).default_headers(headers)
+    };
+
+    // keepalive
+    let builder = if config.keepalive.enabled {
+        let builder = if config.keepalive.timeout > 0 {
+            builder.http2_keep_alive_interval(Duration::from_secs(config.keepalive.timeout))
+        } else {
+            builder
+        };
+
+        if config.keepalive.interval > 0 {
+            builder
+                .http2_keep_alive_while_idle(true)
+                .http2_keep_alive_interval(Duration::from_secs(config.keepalive.interval))
+        } else {
+            builder
+        }
+    } else {
+        builder
+    };
+
+    builder
         .build()
         .expect("http client must build with success")
 }
