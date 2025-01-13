@@ -815,17 +815,21 @@ impl SchedulerService for Scheduler {
     }
 }
 
+struct ServerState {
+    jobs: HashMap<String, (String, String)>,
+    sys: sysinfo::System,
+}
+
 #[derive(Clone)]
 pub struct Server {
     builder: Arc<dyn BuilderIncoming>,
     jobs_storage: Arc<dyn sccache::cache::Storage>,
-    jobs: Arc<Mutex<HashMap<String, (String, String)>>>,
     job_queue: Arc<tokio::sync::Semaphore>,
     report_interval: Duration,
     schedulers: Arc<Mutex<HashMap<String, Instant>>>,
     server_id: String,
+    state: Arc<Mutex<ServerState>>,
     stats: dist::ServerStats,
-    sys: Arc<Mutex<sysinfo::System>>,
     task_queue: Arc<celery::Celery>,
     toolchains: ServerToolchains,
 }
@@ -845,7 +849,6 @@ impl Server {
         Self {
             builder,
             jobs_storage,
-            jobs: Default::default(),
             job_queue,
             // Report status at least every 30s
             report_interval: Duration::from_secs(30),
@@ -854,11 +857,14 @@ impl Server {
             stats,
             task_queue,
             toolchains,
-            sys: Arc::new(Mutex::new(System::new_with_specifics(
-                RefreshKind::nothing()
-                    .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
-                    .with_memory(MemoryRefreshKind::nothing().with_ram()),
-            ))),
+            state: Arc::new(Mutex::new(ServerState {
+                jobs: Default::default(),
+                sys: System::new_with_specifics(
+                    RefreshKind::nothing()
+                        .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
+                        .with_memory(MemoryRefreshKind::nothing().with_ram()),
+                ),
+            })),
         }
     }
 
@@ -871,13 +877,9 @@ impl Server {
             .or_insert_with(Instant::now);
     }
 
-    fn get_details(
-        &self,
-        jobs: &HashMap<String, (String, String)>,
-        sys: &mut sysinfo::System,
-    ) -> ServerDetails {
+    fn get_details(&self, num_jobs: usize, sys: &mut sysinfo::System) -> ServerDetails {
         let running = self.stats.occupancy - self.job_queue.available_permits();
-        let fetched = jobs.len() - running;
+        let fetched = num_jobs - running;
 
         sys.refresh_cpu_specifics(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
         sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
@@ -986,9 +988,8 @@ impl ServerService for Server {
             async move {
                 loop {
                     let details = {
-                        let jobs = this.jobs.lock().await;
-                        let mut sys = this.sys.lock().await;
-                        this.get_details(&jobs, &mut sys)
+                        let mut state = this.state.lock().await;
+                        this.get_details(state.jobs.len(), &mut state.sys)
                     };
                     tokio::time::sleep(
                         this.broadcast_status(details)
@@ -1016,14 +1017,13 @@ impl ServerService for Server {
         outputs: Vec<String>,
     ) -> Result<()> {
         let details = {
-            let mut jobs = self.jobs.lock().await;
-            let mut sys = self.sys.lock().await;
+            let mut state = self.state.lock().await;
             // Associate the task with the scheduler and job so we can report success or failure
-            jobs.insert(
+            state.jobs.insert(
                 task_id.to_owned(),
                 (respond_to.to_owned(), job_id.to_owned()),
             );
-            self.get_details(&jobs, &mut sys)
+            self.get_details(state.jobs.len(), &mut state.sys)
         };
 
         let jobs_storage = self.jobs_storage.as_ref();
@@ -1066,15 +1066,12 @@ impl ServerService for Server {
     }
 
     async fn job_failure(&self, task_id: &str, reason: &str) -> Result<()> {
-        let mut jobs = self.jobs.lock().await;
-        if let Some((respond_to, job_id)) = jobs.remove(task_id) {
+        let mut state = self.state.lock().await;
+        if let Some((respond_to, job_id)) = state.jobs.remove(task_id) {
             // Get ServerDetails
-            let details = {
-                let mut sys = self.sys.lock().await;
-                self.get_details(&jobs, &mut sys)
-            };
+            let details = self.get_details(state.jobs.len(), &mut state.sys);
             // Drop lock
-            drop(jobs);
+            drop(state);
 
             self.task_queue
                 .send_task(
@@ -1097,15 +1094,12 @@ impl ServerService for Server {
     }
 
     async fn job_success(&self, task_id: &str) -> Result<()> {
-        let mut jobs = self.jobs.lock().await;
-        if let Some((respond_to, job_id)) = jobs.remove(task_id) {
+        let mut state = self.state.lock().await;
+        if let Some((respond_to, job_id)) = state.jobs.remove(task_id) {
             // Get ServerDetails
-            let details = {
-                let mut sys = self.sys.lock().await;
-                self.get_details(&jobs, &mut sys)
-            };
+            let details = self.get_details(state.jobs.len(), &mut state.sys);
             // Drop lock
-            drop(jobs);
+            drop(state);
 
             self.task_queue
                 .send_task(
