@@ -202,9 +202,6 @@ impl OverlayBuilder {
 
         let job_id = job_id.to_owned();
 
-        // Guard compiling until we get a token from the job queue
-        let job_slot = job_queue.acquire().await?;
-
         let build_in_overlay = move || {
             // Now mounted filesystems will be automatically unmounted when this thread dies
             // (and tmpfs filesystems will be completely destroyed)
@@ -336,9 +333,6 @@ impl OverlayBuilder {
                 .output()
                 .context("Failed to retrieve output from compile")?;
 
-            // Drop the job slot once compile is finished
-            drop(job_slot);
-
             if !compile_output.status.success() {
                 tracing::warn!(
                     "[perform_build({job_id})]: compile output:\n===========\nstdout:\n{}\n==========\n=========\nstderr:\n{}\n===============\n",
@@ -383,8 +377,11 @@ impl OverlayBuilder {
             })
         };
 
+        // Guard compiling until we get a token from the job queue
+        let job_slot = job_queue.acquire().await?;
+
         // Use `block_in_place` to take ownership of this worker thread
-        tokio::task::block_in_place(move || {
+        let res = tokio::task::spawn_blocking(move || {
             // Explicitly launch a new thread outside tokio's thread pool,
             // so that our overlayfs and tmpfs are unmounted when it dies.
             //
@@ -400,6 +397,13 @@ impl OverlayBuilder {
                     .unwrap_or_else(|_e| Err(anyhow!("Build thread exited unsuccessfully")))
             })
         })
+        .await
+        .map_err(anyhow::Error::new)?;
+
+        // Drop the job slot once compile is finished
+        drop(job_slot);
+
+        res
     }
 
     // Failing during cleanup is pretty unexpected, but we can still return the successful compile
