@@ -527,12 +527,8 @@ where
                 use_preprocessor_cache_mode,
             )
             .await;
-        let out_pretty = parsed_args.output_pretty().into_owned();
-        let result = result.map_err(|e| {
-            warn!("[{}]: preprocessor failed: {:?}", out_pretty, e);
-            e
-        });
 
+        let out_pretty = parsed_args.output_pretty().into_owned();
         let outputs = parsed_args.outputs.clone();
         let args_cwd = cwd.clone();
 
@@ -571,7 +567,10 @@ where
                         ..output
                     }))
                 }
-                Err(err) => Err(err),
+                Err(err) => {
+                    warn!("[{out_pretty}]: preprocessor failed: {err:?}");
+                    Err(err)
+                }
             }
         })?;
 
