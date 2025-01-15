@@ -23,14 +23,20 @@ use libmount::Overlay;
 use sccache::dist::{BuildResult, BuilderIncoming, CompileCommand, OutputData, ProcessOutput};
 use std::io;
 use std::path::{self, Path, PathBuf};
-use std::process::Output;
+use std::process::{Output, Stdio};
 use std::sync::Arc;
-use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
+use tokio::process::ChildStdin;
+use tokio_util::compat::FuturesAsyncReadCompatExt;
 use version_compare::Version;
 
 #[async_trait]
 trait AsyncCommandExt {
     async fn check_stdout_trim(&mut self) -> Result<String>;
+    async fn check_piped<F, Fut>(&mut self, pipe: F) -> Result<()>
+    where
+        F: FnOnce(ChildStdin) -> Fut + std::marker::Send,
+        Fut: std::future::Future<Output = Result<()>> + std::marker::Send;
+    async fn check_run(&mut self) -> Result<()>;
 }
 
 #[async_trait]
@@ -41,6 +47,34 @@ impl AsyncCommandExt for tokio::process::Command {
         let stdout =
             String::from_utf8(output.stdout).context("Output from listing containers not UTF8")?;
         Ok(stdout.trim().to_owned())
+    }
+    // Should really take a FnOnce/FnBox
+    async fn check_piped<F, Fut>(&mut self, pipe: F) -> Result<()>
+    where
+        F: FnOnce(ChildStdin) -> Fut + std::marker::Send,
+        Fut: std::future::Future<Output = Result<()>> + std::marker::Send,
+    {
+        let mut process = self
+            .stdin(Stdio::piped())
+            .spawn()
+            .context("Failed to start command")?;
+        pipe(
+            process
+                .stdin
+                .take()
+                .expect("Requested piped stdin but not present"),
+        )
+        .await
+        .context("Failed to pipe input to process")?;
+        let output = process
+            .wait_with_output()
+            .await
+            .context("Failed to wait for process to return")?;
+        check_output(&output)
+    }
+    async fn check_run(&mut self) -> Result<()> {
+        let output = self.output().await.context("Failed to start command")?;
+        check_output(&output)
     }
 }
 
@@ -54,22 +88,6 @@ fn check_output(output: &Output) -> Result<()> {
         bail!("Command failed with status {}", output.status)
     }
     Ok(())
-}
-
-fn list_files(root: &Path) -> Vec<PathBuf> {
-    walkdir::WalkDir::new(root)
-        .follow_links(false)
-        .same_file_system(true)
-        .into_iter()
-        .flatten()
-        // Only mount files and symlinks, not dirs
-        .filter_map(|entr| {
-            entr.metadata()
-                .ok()
-                .and_then(|meta| (!meta.is_dir()).then_some(entr))
-        })
-        .map(|file| file.path().to_path_buf())
-        .collect::<Vec<_>>()
 }
 
 fn join_suffix<P: AsRef<Path>>(path: &Path, suffix: P) -> PathBuf {
@@ -462,7 +480,13 @@ impl BuilderIncoming for OverlayBuilder {
     }
 }
 
+// Name of the image to run
+// TODO: Make this configurable?
 const BUSYBOX_DOCKER_IMAGE: &str = "busybox:stable-musl";
+// Make sure sh doesn't exec the final command, since we need it to do
+// init duties (reaping zombies). Also, because we kill -9 -1, that kills
+// the sleep (it's not a builtin) so it needs to be a loop.
+const DOCKER_SHELL_INIT: &str = "while true; do busybox sleep 365d && busybox true; done";
 
 pub struct DockerBuilder {
     job_queue: Arc<tokio::sync::Semaphore>,
@@ -479,6 +503,7 @@ impl DockerBuilder {
 
     async fn perform_build(
         job_id: &str,
+        c_name: &str,
         toolchain_dir: &Path,
         CompileCommand {
             executable,
@@ -500,25 +525,31 @@ impl DockerBuilder {
 
         // Do as much asyncio work as possible before acquiring a job slot
 
+        fn bind_mount<P: AsRef<Path>>(prefix: &Path) -> impl FnMut(P) -> Vec<String> {
+            let prefix = prefix.to_owned();
+            move |h_path| {
+                let h_path = h_path.as_ref();
+                if let Ok(c_path) = h_path.strip_prefix(&prefix) {
+                    let c_path = Path::new("/").join(c_path);
+                    let h_path = h_path.display();
+                    let c_path = c_path.display();
+                    vec![
+                        "--mount".into(),
+                        format!("type=bind,src={h_path},dst={c_path}"),
+                    ]
+                } else {
+                    vec![]
+                }
+            }
+        }
+
         // Should automatically get deleted when host_temp goes out of scope
         let host_temp = tempfile::Builder::new().prefix("sccache_dist").tempdir()?;
         let host_root = host_temp.path();
 
         let cwd = Path::new(&cwd);
         let cwd_host = join_suffix(host_root, cwd);
-
-        tracing::trace!("[perform_build({job_id})]: copying in inputs");
-
-        // Copy inputs to host_root
-        {
-            let reader = inputs.reader();
-            let reader = futures::io::AllowStdIo::new(reader);
-            let reader = ZlibDecoderAsync::new(reader.compat());
-            async_tar::Archive::new(reader.compat())
-                .unpack(&host_root)
-                .await
-                .context("Failed to unpack inputs to tempdir")?;
-        }
+        let tc_dir = format!("{}", toolchain_dir.display());
 
         // Canonicalize output path as either absolute or relative to cwd
         let output_paths_absolute = output_paths
@@ -533,22 +564,12 @@ impl DockerBuilder {
             })
             .collect::<Vec<_>>();
 
-        let host_toolchain_paths = list_files(toolchain_dir);
-
         // Collect host CWD, input, and output dir paths
         let host_bindmount_paths = {
             // Always create the CWD even if it's not in the inputs archive
             std::iter::once(cwd_host.as_path())
-                .chain(
-                    // Input paths
-                    list_files(host_root)
-                        .iter()
-                        .filter_map(|path| path.strip_prefix(host_root).ok()),
-                )
-                .chain(
-                    // Output paths
-                    output_paths_absolute.iter().map(Path::new),
-                )
+                // Output paths
+                .chain(output_paths_absolute.iter().map(Path::new))
                 // If it doesn't have a parent, nothing needs creating
                 .filter_map(|path| path.parent().map(|p| join_suffix(host_root, p)))
                 .unique()
@@ -564,23 +585,51 @@ impl DockerBuilder {
                 .context(format!("Failed to create output directory {path:?}"))?;
         }
 
-        fn volume_mount<P: AsRef<Path>>(
-            prefix: &Path,
-            access: &str,
-        ) -> impl FnMut(P) -> Vec<String> {
-            let prefix = prefix.to_owned();
-            let access = access.to_owned();
-            move |h_path| {
-                let h_path = h_path.as_ref();
-                if let Ok(c_path) = h_path.strip_prefix(&prefix) {
-                    let c_path = Path::new("/").join(c_path);
-                    let h_path = h_path.display();
-                    let c_path = c_path.display();
-                    vec!["--volume".into(), format!("{h_path}:{c_path}:{access}")]
-                } else {
-                    vec![]
-                }
-            }
+        {
+            tracing::trace!("[perform_build({job_id})]: creating docker container");
+            let mut cmd = tokio::process::Command::new("docker");
+            cmd.args(["run", "--init", "-d", "--name", c_name])
+                // Mount output dirs
+                .args(host_bindmount_paths.iter().flat_map(bind_mount(host_root)))
+                .args([
+                    BUSYBOX_DOCKER_IMAGE,
+                    "busybox",
+                    "sh",
+                    "-c",
+                    DOCKER_SHELL_INIT,
+                ])
+                .check_stdout_trim()
+                .await
+                .context("Failed to create docker container")?;
+        }
+
+        {
+            tracing::trace!("[perform_build({job_id})]: copying in toolchain");
+            let mut cmd = tokio::process::Command::new("docker");
+            cmd.arg("cp")
+                .arg(format!("{tc_dir}/."))
+                .arg(format!("{c_name}:/"))
+                .check_run()
+                .await
+                .context("Failed to copy toolchain into container")?;
+        }
+
+        {
+            tracing::trace!("[perform_build({job_id})]: copying in inputs");
+            let inputs_rdr = inputs.reader();
+            let inputs_rdr = futures::io::AllowStdIo::new(inputs_rdr);
+            let mut inputs_rdr = ZlibDecoderAsync::new(inputs_rdr.compat());
+
+            let mut cmd = tokio::process::Command::new("docker");
+            cmd.arg("cp")
+                .arg("-")
+                .arg(format!("{c_name}:/"))
+                .check_piped(|mut stdin| async move {
+                    tokio::io::copy(&mut inputs_rdr, &mut stdin).await?;
+                    Ok(())
+                })
+                .await
+                .context("Failed to copy inputs tar into container")?;
         }
 
         tracing::trace!("[perform_build({job_id})]: creating compile command");
@@ -588,23 +637,10 @@ impl DockerBuilder {
         // TODO: likely shouldn't perform the compile as root in the container
         let mut cmd = tokio::process::Command::new("docker");
 
-        // Start a new container and remove it on exit
-        cmd.args(["run", "--rm"])
-            .args(["--name", &format!("sccache-builder-{job_id}")])
+        cmd.args(["exec"])
             // Run in `cwd`
-            .args(["--workdir", &format!("{}", cwd.display())])
-            // Mount input and output dirs as read-write
-            .args(
-                host_bindmount_paths
-                    .iter()
-                    .flat_map(volume_mount(host_root, "rw")),
-            )
-            // Mount toolchain files as read-only
-            .args(
-                host_toolchain_paths
-                    .iter()
-                    .flat_map(volume_mount(toolchain_dir, "ro")),
-            )
+            .arg("--workdir")
+            .arg(cwd)
             // Define envvars
             .args(env_vars.iter().flat_map(|(k, v)| {
                 if k.contains('=') {
@@ -616,9 +652,8 @@ impl DockerBuilder {
                     vec!["--env".into(), format!("{k}=\"{v}\"")]
                 }
             }))
-            // Name of the image to run (currently busybox:stable-musl)
-            // TODO: Make this configurable?
-            .arg(BUSYBOX_DOCKER_IMAGE)
+            // container name
+            .arg(c_name)
             // Finally, the executable and arguments
             .arg(executable)
             .args(arguments);
@@ -694,8 +729,11 @@ impl BuilderIncoming for DockerBuilder {
     ) -> Result<BuildResult> {
         tracing::debug!("[run_build({})]: Performing build in container", job_id);
 
+        let c_name = format!("sccache-builder-{job_id}");
+
         let res = Self::perform_build(
             job_id,
+            &c_name,
             toolchain_dir,
             command,
             outputs,
@@ -703,6 +741,15 @@ impl BuilderIncoming for DockerBuilder {
             self.job_queue.as_ref(),
         )
         .await;
+
+        if let Err(err) = tokio::process::Command::new("docker")
+            .args(["rm", "-f", &c_name])
+            .check_run()
+            .await
+            .context("Failed to remove docker container")
+        {
+            tracing::warn!("{err:#}");
+        }
 
         tracing::debug!("[run_build({})]: Returning result", job_id);
 
