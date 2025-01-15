@@ -448,6 +448,7 @@ fn run(command: Command) -> Result<()> {
                     res = status.fuse() => res?,
                 };
 
+                server.close().await;
                 task_queue.close().await?;
 
                 Ok(())
@@ -866,6 +867,17 @@ impl Server {
                 ),
             })),
         }
+    }
+
+    pub async fn close(&self) {
+        let stats = self.state.lock().await;
+        let task_ids = stats.jobs.keys().cloned().collect::<Vec<_>>();
+        futures::future::join_all(
+            task_ids
+                .iter()
+                .map(|task_id| self.job_failure(task_id, "server shutdown").boxed()),
+        )
+        .await;
     }
 
     async fn update_last_report_time(&self, scheduler: &str) {
