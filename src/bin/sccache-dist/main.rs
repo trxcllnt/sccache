@@ -370,7 +370,7 @@ fn run(command: Command) -> Result<()> {
                 let to_servers = scheduler_to_servers_queue();
 
                 let task_queue =
-                    Arc::new(celery_app(&server_id, &broker_uri, &to_servers, pre_fetch as u16).await?);
+                    Arc::new(celery_app(&server_id, &broker_uri, &to_servers, (occupancy + pre_fetch) as u16).await?);
 
                 // Tasks this server receives
                 task_queue
@@ -1145,9 +1145,9 @@ mod scheduler_to_servers {
     #[celery::task(
         bind = true,
         acks_late = true,
-        // acks_on_failure_or_timeout = false,
+        acks_on_failure_or_timeout = false,
         max_retries = 1,
-        // nacks_enabled = true,
+        nacks_enabled = true,
         on_failure = on_run_job_failure,
         on_success = on_run_job_success,
     )]
