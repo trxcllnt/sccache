@@ -166,8 +166,6 @@ impl OverlayBuilder {
         fs::create_dir_all(&ret.dir).context("Failed to create base directory for builder")?;
         fs::create_dir_all(ret.dir.join("builds"))
             .context("Failed to create builder builds directory")?;
-        fs::create_dir_all(ret.dir.join("toolchains"))
-            .context("Failed to create builder toolchains directory")?;
         Ok(ret)
     }
 
