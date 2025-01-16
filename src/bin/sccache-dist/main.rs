@@ -141,38 +141,35 @@ async fn celery_app(
     app_name: &str,
     broker_uri: &str,
     default_queue: &str,
-    prefetch_count: Option<u16>,
+    prefetch_count: u16,
 ) -> Result<celery::Celery> {
     let to_servers = scheduler_to_servers_queue();
     let to_schedulers = server_to_schedulers_queue();
 
-    let builder = celery::CeleryBuilder::new(app_name, broker_uri)
+    celery::CeleryBuilder::new(app_name, broker_uri)
         .default_queue(default_queue)
         .task_content_type(MessageContentType::MsgPack)
         // Register at least one task route for each queue, because that's
         // how celery knows which queues to create in the message broker.
         .task_route(scheduler_to_servers::run_job::NAME, &to_servers)
         .task_route(server_to_schedulers::status::NAME, &to_schedulers)
+        .prefetch_count(prefetch_count)
+        .heartbeat(Some(10))
         // Wait at most 10s before retrying failed tasks
         .task_max_retry_delay(10)
         // Don't retry tasks that fail with unexpected errors
         .task_retry_for_unexpected(false)
         // Indefinitely retry connecting to the broker
-        .broker_connection_max_retries(u32::MAX);
-
-    let builder = if let Some(prefetch_count) = prefetch_count {
-        builder.prefetch_count(prefetch_count)
-    } else {
-        builder
-    };
-
-    builder.build().await.map_err(|err| {
-        let err_message = match err {
-            CeleryError::BrokerError(err) => err.to_string(),
-            err => err.to_string(),
-        };
-        anyhow!("{}\n\n{}", err_message, message_broker_info_text())
-    })
+        .broker_connection_max_retries(u32::MAX)
+        .build()
+        .await
+        .map_err(|err| {
+            let err_message = match err {
+                CeleryError::BrokerError(err) => err.to_string(),
+                err => err.to_string(),
+            };
+            anyhow!("{}\n\n{}", err_message, message_broker_info_text())
+        })
 }
 
 fn run(command: Command) -> Result<()> {
@@ -235,7 +232,7 @@ fn run(command: Command) -> Result<()> {
                         &scheduler_id,
                         &broker_uri,
                         &to_this_scheduler,
-                        Some(100 * num_cpus as u16),
+                        100 * num_cpus as u16,
                     )
                     .await?,
                 );
@@ -358,7 +355,7 @@ fn run(command: Command) -> Result<()> {
                     .context("Failed to initialize toolchain storage")?;
 
                 let server_toolchains = ServerToolchains::new(
-                    &cache_dir.join("toolchains"),
+                    &cache_dir.join("tc"),
                     toolchain_cache_size,
                     toolchains_storage,
                 );
@@ -373,17 +370,7 @@ fn run(command: Command) -> Result<()> {
                 let to_servers = scheduler_to_servers_queue();
 
                 let task_queue =
-                    Arc::new(
-                        celery_app(
-                            &server_id,
-                            &broker_uri,
-                            &to_servers,
-                            if pre_fetch == 0 {
-                                None
-                            } else {
-                                Some(pre_fetch as u16)
-                            }
-                    ).await?);
+                    Arc::new(celery_app(&server_id, &broker_uri, &to_servers, (occupancy + pre_fetch) as u16).await?);
 
                 // Tasks this server receives
                 task_queue
@@ -1157,10 +1144,10 @@ mod scheduler_to_servers {
 
     #[celery::task(
         bind = true,
-        // acks_late = true,
-        // acks_on_failure_or_timeout = false,
+        acks_late = true,
+        acks_on_failure_or_timeout = false,
         max_retries = 1,
-        // nacks_enabled = true,
+        nacks_enabled = true,
         on_failure = on_run_job_failure,
         on_success = on_run_job_success,
     )]
