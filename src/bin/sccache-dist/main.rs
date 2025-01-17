@@ -155,11 +155,10 @@ async fn celery_app(
         .task_route(scheduler_to_servers::run_job::NAME, &to_servers)
         .task_route(server_to_schedulers::status::NAME, &to_schedulers)
         .prefetch_count(prefetch_count)
-        .heartbeat(Some(10))
         // Wait at most 10s before retrying failed tasks
         .task_max_retry_delay(10)
-        // Don't retry tasks that fail with unexpected errors
-        .task_retry_for_unexpected(false)
+        // // Don't retry tasks that fail with unexpected errors
+        // .task_retry_for_unexpected(false)
         // Indefinitely retry connecting to the broker
         .broker_connection_max_retries(u32::MAX)
         .build()
@@ -1188,7 +1187,7 @@ mod scheduler_to_servers {
         bind = true,
         acks_late = true,
         acks_on_failure_or_timeout = false,
-        max_retries = 1,
+        max_retries = 3,
         nacks_enabled = true,
         on_failure = on_run_job_failure,
         on_success = on_run_job_success,
