@@ -27,7 +27,7 @@ mod internal {
 
     use serde_json::json;
 
-    use std::{io, net::SocketAddr, sync::Arc};
+    use std::{io, net::SocketAddr, str::FromStr, sync::Arc};
 
     use tokio::net::TcpListener;
     use tokio_util::{compat::TokioAsyncReadCompatExt, io::StreamReader};
@@ -141,12 +141,23 @@ mod internal {
             http::header::COOKIE,
             http::header::SET_COOKIE,
         ]);
+
+        let request_id_header_name = http::HeaderName::from_str(
+            &std::env::var("SCCACHE_DIST_REQUEST_ID_HEADER_NAME")
+                // tower_http::request_id::X_REQUEST_ID inlined here because it is not public
+                .unwrap_or("x-request-id".to_owned()),
+        )
+        .unwrap();
+
         app.layer(
             ServiceBuilder::new()
                 .layer(SetSensitiveRequestHeadersLayer::from_shared(Arc::clone(
                     &headers_to_redact,
                 )))
-                .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+                .layer(SetRequestIdLayer::new(
+                    request_id_header_name,
+                    MakeRequestUuid,
+                ))
                 .layer(
                     TraceLayer::new_for_http()
                         .make_span_with(DefaultMakeSpan::new().include_headers(true))
