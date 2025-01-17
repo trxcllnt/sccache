@@ -540,6 +540,8 @@ fn make_lru_key_path(key: &str) -> PathBuf {
 mod server {
     use async_compression::tokio::bufread::GzipDecoder;
 
+    use bytes::Buf;
+    use futures::AsyncReadExt;
     use futures::{lock::Mutex, StreamExt};
     use tokio::io::BufReader;
     use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
@@ -562,32 +564,30 @@ mod server {
         toolchains.iter().map(|(_, (_, size))| size).sum()
     }
 
-    async fn load_toolchain_archive(
-        id: &str,
-        tc_storage: &dyn cache::Storage,
-    ) -> Result<async_tar::Archive<Box<dyn futures::AsyncRead + Send + Unpin>>> {
-        let reader = tc_storage.get_stream(id).await?;
-        let reader = GzipDecoder::new(BufReader::new(reader.compat()));
-        let reader = Box::new(reader.compat()) as Box<dyn futures::AsyncRead + Send + Unpin>;
-        Ok(async_tar::Archive::new(reader))
-    }
+    async fn load_toolchain_size(
+        id: String,
+        tc_storage: Arc<dyn cache::Storage>,
+        toolchains_storage_queue: Arc<tokio::sync::Semaphore>,
+    ) -> Result<u64> {
+        // Guard loading until we get a token from the job queue
+        let _ = toolchains_storage_queue.acquire().await?;
 
-    async fn load_toolchain_size(id: String, tc_storage: Arc<dyn cache::Storage>) -> Result<u64> {
         trace!("[ServerToolchains({id})]: Loading toolchain to compute inflated size");
 
         // Download the toolchain and compute its inflated size
         // TODO: Would be better if this was stored as metadata
-        let inflated_size = load_toolchain_archive(&id, tc_storage.as_ref())
-            .await?
-            .entries()?
-            .fold(0, |inflated_size, entry| async move {
-                if let Ok(inflated_entry_size) = entry.and_then(|e| e.header().size()) {
-                    inflated_size + inflated_entry_size
-                } else {
-                    inflated_size
-                }
-            })
-            .await;
+        let inflated_size = async_tar::Archive::new(
+            GzipDecoder::new(BufReader::new(tc_storage.get_stream(&id).await?.compat())).compat(),
+        )
+        .entries()?
+        .fold(0, |inflated_size, entry| async move {
+            if let Ok(inflated_entry_size) = entry.and_then(|e| e.header().size()) {
+                inflated_size + inflated_entry_size
+            } else {
+                inflated_size
+            }
+        })
+        .await;
 
         trace!("[ServerToolchains({id})]: Computed inflated size: {inflated_size}");
 
@@ -600,12 +600,36 @@ mod server {
         tc_sizes: Arc<ResourceLoaderQueue<Toolchain, u64>>,
         tc_storage: Arc<dyn cache::Storage>,
         toolchains: Arc<Mutex<LruCache<Toolchain, (PathBuf, u64), RandomState, ToolchainSize>>>,
+        toolchains_storage_queue: Arc<tokio::sync::Semaphore>,
     ) -> Result<()> {
         let toolchain_id = &tc.archive_id;
         let inflated_size = tc_sizes.enqueue(&tc).await?;
         let path = root_dir.join(make_lru_key_path(toolchain_id));
 
-        // Hold this lock until after the toolchain is unpacked
+        // Load the toolchain into memory
+
+        let toolchain = {
+            // Guard loading until we get a token from the job queue
+            let _ = toolchains_storage_queue.acquire().await?;
+            // TODO: Cache the compressed toolchain on disk instead of downloading it again
+            let mut toolchain_reader = tc_storage.get_stream(toolchain_id).await?;
+            let mut toolchain = vec![];
+            toolchain_reader
+                .read_to_end(&mut toolchain)
+                .await
+                .map_err(|err| {
+                    tracing::warn!(
+                        "ServerToolchains({toolchain_id})]: Error reading stream: {err:?}"
+                    );
+                    err
+                })?;
+            toolchain
+        };
+
+        // Clean up old toolchains so we have enough room to unpack this one
+
+        // Hold this lock until after the toolchain is unpacked to ensure another thread
+        // doesn't unpack a toolchain after the cleanup but before this one is unpacked.
         let mut cached_toolchains = toolchains.lock().await;
         let mut cached_size = cached_toolchains_size(&cached_toolchains);
 
@@ -624,14 +648,16 @@ mod server {
             }
         }
 
-        // Load and unpack the toolchain
+        // Unpack the toolchain
+
         trace!("[ServerToolchains({toolchain_id})]: Unpacking toolchain to {path:?}");
-        // TODO: Cache the compressed toolchain on disk instead of downloading it again
-        load_toolchain_archive(toolchain_id, tc_storage.as_ref())
-            .await?
-            .unpack(&path)
-            .await
-            .context("Failed to unpack toolchain")?;
+
+        async_tar::Archive::new(
+            GzipDecoder::new(futures::io::AllowStdIo::new(toolchain.reader()).compat()).compat(),
+        )
+        .unpack(&path)
+        .await
+        .context("Failed to unpack toolchain")?;
 
         cached_size += inflated_size;
         debug!("ServerToolchains({toolchain_id})]: Toolchain unpacked, new cache size is: {cached_size}");
@@ -665,6 +691,8 @@ mod server {
         pub fn new(root_dir: &Path, capacity: u64, tc_storage: Arc<dyn cache::Storage>) -> Self {
             trace!("Using ServerToolchains({:?}, {})", root_dir, capacity);
 
+            // Only load up to 16 toolchains concurrently
+            let toolchains_storage_queue = Arc::new(tokio::sync::Semaphore::new(16));
             let toolchains = Arc::new(Mutex::new(LruCache::with_meter(capacity, ToolchainSize)));
 
             let toolchains_loader = ResourceLoaderQueue::new(0, {
@@ -673,11 +701,13 @@ mod server {
                     1000,
                     {
                         // Local clone that the closure can own
+                        let toolchains_storage_queue = toolchains_storage_queue.clone();
                         let tc_storage = tc_storage.clone();
                         move |tc: &Toolchain| {
                             Box::pin(load_toolchain_size(
                                 tc.archive_id.clone(),
                                 tc_storage.clone(),
+                                toolchains_storage_queue.clone(),
                             ))
                         }
                     },
@@ -685,6 +715,7 @@ mod server {
 
                 // Local clones that the closure can own
                 let root_dir = root_dir.to_owned();
+                let toolchains_storage_queue = toolchains_storage_queue.clone();
                 let toolchains = toolchains.clone();
 
                 move |tc: &Toolchain| {
@@ -694,6 +725,7 @@ mod server {
                         tc_sizes.clone(),
                         tc_storage.clone(),
                         toolchains.clone(),
+                        toolchains_storage_queue.clone(),
                     ))
                 }
             });

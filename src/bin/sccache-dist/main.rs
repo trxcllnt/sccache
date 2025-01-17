@@ -11,6 +11,7 @@ use futures::{pin_mut, AsyncReadExt, FutureExt, TryFutureExt};
 
 use std::collections::HashMap;
 use std::env;
+use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -490,97 +491,6 @@ fn job_result_key(job_id: &str) -> String {
     format!("{job_id}-result")
 }
 
-async fn has_job_inputs(jobs: &dyn sccache::cache::Storage, job_id: &str) -> bool {
-    jobs.has(&job_inputs_key(job_id)).await
-}
-
-async fn get_job_inputs(jobs: &dyn sccache::cache::Storage, job_id: &str) -> Result<Vec<u8>> {
-    let mut reader = jobs
-        .get_stream(&job_inputs_key(job_id))
-        .await
-        .map_err(|err| {
-            tracing::warn!("[get_job_inputs({job_id})]: Error loading stream: {err:?}");
-            err
-        })?;
-    let mut inputs = vec![];
-    reader.read_to_end(&mut inputs).await.map_err(|err| {
-        tracing::warn!("[get_job_inputs({job_id})]: Error reading stream: {err:?}");
-        err
-    })?;
-    Ok(inputs)
-}
-
-async fn put_job_inputs(
-    jobs: &dyn sccache::cache::Storage,
-    job_id: &str,
-    inputs: &[u8],
-) -> Result<()> {
-    let reader = futures::io::AllowStdIo::new(inputs.reader());
-    pin_mut!(reader);
-    jobs.put_stream(&job_inputs_key(job_id), reader)
-        .await
-        .map_err(|err| {
-            tracing::warn!("[put_job_inputs({job_id})]: Error writing stream: {err:?}");
-            err
-        })
-}
-
-async fn has_job_result(jobs: &dyn sccache::cache::Storage, job_id: &str) -> bool {
-    jobs.has(&job_result_key(job_id)).await
-}
-
-async fn get_job_result(
-    jobs: &dyn sccache::cache::Storage,
-    job_id: &str,
-) -> Result<RunJobResponse> {
-    let mut reader = jobs
-        .get_stream(&job_result_key(job_id))
-        .await
-        .map_err(|err| {
-            tracing::warn!("[get_job_result({job_id})]: Error loading stream: {err:?}");
-            err
-        })?;
-    let mut result = vec![];
-    reader.read_to_end(&mut result).await.map_err(|err| {
-        tracing::warn!("[get_job_result({job_id})]: Error reading stream: {err:?}");
-        err
-    })?;
-    // Retrieve the result
-    let result = bincode_deserialize(result).await.map_err(|err| {
-        tracing::warn!("[get_job_result({job_id})]: Error reading result: {err:?}");
-        err
-    })?;
-    // Delete the inputs and result
-    let _ = futures::future::join(
-        jobs.del(&job_inputs_key(job_id)).map_err(|e| {
-            tracing::warn!("[get_job_result({job_id})]: Error deleting job inputs: {e:?}");
-            e
-        }),
-        jobs.del(&job_result_key(job_id)).map_err(|e| {
-            tracing::warn!("[get_job_result({job_id})]: Error deleting job result: {e:?}");
-            e
-        }),
-    )
-    .await;
-    Ok(result)
-}
-
-async fn put_job_result(
-    jobs: &dyn sccache::cache::Storage,
-    job_id: &str,
-    result: RunJobResponse,
-) -> Result<()> {
-    let result = bincode_serialize(result).await?;
-    let reader = futures::io::AllowStdIo::new(result.reader());
-    pin_mut!(reader);
-    jobs.put_stream(&job_result_key(job_id), reader)
-        .await
-        .map_err(|err| {
-            tracing::warn!("[put_job_result({job_id})]: Error writing stream: {err:?}");
-            err
-        })
-}
-
 #[derive(Clone, Debug)]
 struct ServerInfo {
     pub u_time: Instant,
@@ -592,6 +502,8 @@ pub struct Scheduler {
     job_time_limit: u32,
     jobs_storage: Arc<dyn sccache::cache::Storage>,
     jobs: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<RunJobResponse>>>>,
+    jobs_storage_queue: Arc<tokio::sync::Semaphore>,
+    toolchains_storage_queue: Arc<tokio::sync::Semaphore>,
     queue_name: String,
     servers: Arc<Mutex<HashMap<String, ServerInfo>>>,
     task_queue: Arc<celery::Celery>,
@@ -610,6 +522,10 @@ impl Scheduler {
             job_time_limit,
             jobs_storage,
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            // Only load up to 32 jobs concurrently
+            jobs_storage_queue: Arc::new(tokio::sync::Semaphore::new(32)),
+            // Only load up to 32 toolchains concurrently
+            toolchains_storage_queue: Arc::new(tokio::sync::Semaphore::new(32)),
             servers: Arc::new(Mutex::new(HashMap::new())),
             task_queue,
             queue_name: to_this_scheduler_queue,
@@ -622,6 +538,81 @@ impl Scheduler {
         // Prune servers we haven't seen in 90s
         let timeout = Duration::from_secs(90);
         servers.retain(|_, server| now.duration_since(server.u_time) <= timeout);
+    }
+
+    async fn has_job_inputs(&self, job_id: &str) -> bool {
+        // Guard loading until we get a slot in the network queue
+        let _ = self.jobs_storage_queue.acquire().await;
+        self.jobs_storage.has(&job_inputs_key(job_id)).await
+    }
+
+    async fn has_job_result(&self, job_id: &str) -> bool {
+        // Guard loading until we get a slot in the network queue
+        let _ = self.jobs_storage_queue.acquire().await;
+        self.jobs_storage.has(&job_result_key(job_id)).await
+    }
+
+    async fn get_job_result(&self, job_id: &str) -> Result<RunJobResponse> {
+        // Guard loading until we get a slot in the network queue
+        let job_slot = self.jobs_storage_queue.acquire().await;
+        // Retrieve the result
+        let mut reader = self
+            .jobs_storage
+            .get_stream(&job_result_key(job_id))
+            .await
+            .map_err(|err| {
+                tracing::warn!("[get_job_result({job_id})]: Error loading stream: {err:?}");
+                err
+            })?;
+
+        let mut result = vec![];
+        reader.read_to_end(&mut result).await.map_err(|err| {
+            tracing::warn!("[get_job_result({job_id})]: Error reading stream: {err:?}");
+            err
+        })?;
+
+        // Delete the inputs
+        let _ = self
+            .jobs_storage
+            .del(&job_inputs_key(job_id))
+            .map_err(|e| {
+                tracing::warn!("[get_job_result({job_id})]: Error deleting job inputs: {e:?}");
+                e
+            })
+            .await;
+
+        // Delete the result
+        let _ = self
+            .jobs_storage
+            .del(&job_result_key(job_id))
+            .map_err(|e| {
+                tracing::warn!("[get_job_result({job_id})]: Error deleting job result: {e:?}");
+                e
+            })
+            .await;
+
+        // Drop the lock
+        drop(job_slot);
+
+        // Deserialize and return the result
+        bincode_deserialize(result).await.map_err(|err| {
+            tracing::warn!("[get_job_result({job_id})]: Error reading result: {err:?}");
+            err
+        })
+    }
+
+    async fn put_job_inputs(&self, job_id: &str, inputs: &[u8]) -> Result<()> {
+        // Guard storing until we get a slot in the network queue
+        let _ = self.jobs_storage_queue.acquire().await;
+        let reader = futures::io::AllowStdIo::new(inputs.reader());
+        pin_mut!(reader);
+        self.jobs_storage
+            .put_stream(&job_inputs_key(job_id), reader)
+            .await
+            .map_err(|err| {
+                tracing::warn!("[put_job_inputs({job_id})]: Error writing stream: {err:?}");
+                err
+            })
     }
 }
 
@@ -675,6 +666,8 @@ impl SchedulerService for Scheduler {
         toolchain: Toolchain,
         toolchain_reader: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<SubmitToolchainResult> {
+        // Guard storing until we get a slot in the network queue
+        let _ = self.toolchains_storage_queue.acquire().await;
         // Upload toolchain to toolchains storage (S3, GCS, etc.)
         self.toolchains
             .put_stream(&toolchain.archive_id, toolchain_reader)
@@ -692,7 +685,7 @@ impl SchedulerService for Scheduler {
 
         let (has_toolchain, _) = futures::future::try_join(
             async { Ok(self.has_toolchain(request.toolchain).await) },
-            put_job_inputs(self.jobs_storage.as_ref(), &job_id, &request.inputs),
+            self.put_job_inputs(&job_id, &request.inputs),
         )
         .await?;
 
@@ -712,13 +705,11 @@ impl SchedulerService for Scheduler {
             outputs,
         }: RunJobRequest,
     ) -> Result<RunJobResponse> {
-        let jobs_storage = self.jobs_storage.as_ref();
-
-        if has_job_result(jobs_storage, &job_id).await {
-            return get_job_result(jobs_storage, &job_id).await;
+        if self.has_job_result(&job_id).await {
+            return self.get_job_result(&job_id).await;
         }
 
-        if !has_job_inputs(jobs_storage, &job_id).await {
+        if !self.has_job_inputs(&job_id).await {
             return Ok(RunJobResponse::JobFailed {
                 reason: "Missing inputs".into(),
             });
@@ -767,7 +758,7 @@ impl SchedulerService for Scheduler {
 
     async fn job_success(&self, job_id: &str, info: ServerDetails) -> Result<()> {
         let send_res = if let Some(sndr) = self.jobs.lock().await.remove(job_id) {
-            get_job_result(self.jobs_storage.as_ref(), job_id)
+            self.get_job_result(job_id)
                 .await
                 .context(format!("Failed to retrieve result for job {job_id}"))
                 .and_then(|result| {
@@ -826,6 +817,7 @@ pub struct Server {
     builder: Arc<dyn BuilderIncoming>,
     jobs_storage: Arc<dyn sccache::cache::Storage>,
     job_queue: Arc<tokio::sync::Semaphore>,
+    jobs_storage_queue: Arc<tokio::sync::Semaphore>,
     report_interval: Duration,
     schedulers: Arc<Mutex<HashMap<String, Instant>>>,
     server_id: String,
@@ -851,6 +843,8 @@ impl Server {
             builder,
             jobs_storage,
             job_queue,
+            // Only load up to 16 job inputs concurrently
+            jobs_storage_queue: Arc::new(tokio::sync::Semaphore::new(16)),
             // Report status at least every 30s
             report_interval: Duration::from_secs(30),
             schedulers: Default::default(),
@@ -889,19 +883,23 @@ impl Server {
             .or_insert_with(Instant::now);
     }
 
-    fn get_details(&self, num_jobs: usize, sys: &mut sysinfo::System) -> ServerDetails {
+    fn state_to_details(&self, state: &mut ServerState) -> ServerDetails {
         let running = self.stats.occupancy - self.job_queue.available_permits();
-        let fetched = num_jobs - running;
+        let fetched = state.jobs.len() - running;
 
-        sys.refresh_cpu_specifics(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
-        sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+        state
+            .sys
+            .refresh_cpu_specifics(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
+        state
+            .sys
+            .refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
 
         ServerDetails {
             id: self.server_id.clone(),
             info: dist::ServerStats {
-                cpu_usage: sys.global_cpu_usage(),
-                mem_avail: sys.available_memory(),
-                mem_total: sys.total_memory(),
+                cpu_usage: state.sys.global_cpu_usage(),
+                mem_avail: state.sys.available_memory(),
+                mem_total: state.sys.total_memory(),
                 num_cpus: self.stats.num_cpus,
                 occupancy: self.stats.occupancy,
                 pre_fetch: self.stats.pre_fetch,
@@ -941,7 +939,14 @@ impl Server {
         Ok(())
     }
 
-    async fn broadcast_status(&self, details: ServerDetails) -> Vec<Result<()>> {
+    async fn broadcast_status(&self) -> Vec<Result<()>> {
+        // Separate these statements so `broadcast_status_details().await` doesn't hold the lock on `self.state`
+        let details = self.state_to_details(self.state.lock().await.deref_mut());
+        self.broadcast_status_details(details).await
+    }
+
+    // A version of `broadcast_status` that accepts the details
+    async fn broadcast_status_details(&self, details: ServerDetails) -> Vec<Result<()>> {
         let ids = {
             let report_interval = self.report_interval;
             let mut schedulers = self.schedulers.lock().await;
@@ -990,6 +995,40 @@ impl Server {
         let timeout = Duration::from_secs(90);
         schedulers.retain(|_, &mut last_ack_time| now.duration_since(last_ack_time) <= timeout);
     }
+
+    async fn get_job_inputs(&self, job_id: &str) -> Result<Vec<u8>> {
+        // Guard loading until we get a slot in the network queue
+        let _ = self.jobs_storage_queue.acquire().await;
+        let mut reader = self
+            .jobs_storage
+            .get_stream(&job_inputs_key(job_id))
+            .await
+            .map_err(|err| {
+                tracing::warn!("[get_job_inputs({job_id})]: Error loading stream: {err:?}");
+                err
+            })?;
+        let mut inputs = vec![];
+        reader.read_to_end(&mut inputs).await.map_err(|err| {
+            tracing::warn!("[get_job_inputs({job_id})]: Error reading stream: {err:?}");
+            err
+        })?;
+        Ok(inputs)
+    }
+
+    async fn put_job_result(&self, job_id: &str, result: RunJobResponse) -> Result<()> {
+        // Guard storing until we get a slot in the network queue
+        let _ = self.jobs_storage_queue.acquire().await;
+        let result = bincode_serialize(result).await?;
+        let reader = futures::io::AllowStdIo::new(result.reader());
+        pin_mut!(reader);
+        self.jobs_storage
+            .put_stream(&job_result_key(job_id), reader)
+            .await
+            .map_err(|err| {
+                tracing::warn!("[put_job_result({job_id})]: Error writing stream: {err:?}");
+                err
+            })
+    }
 }
 
 #[async_trait]
@@ -999,12 +1038,8 @@ impl ServerService for Server {
             let this = Arc::new(self.clone());
             async move {
                 loop {
-                    let details = {
-                        let mut state = this.state.lock().await;
-                        this.get_details(state.jobs.len(), &mut state.sys)
-                    };
                     tokio::time::sleep(
-                        this.broadcast_status(details)
+                        this.broadcast_status()
                             .await
                             .iter()
                             .any(|res| res.is_err())
@@ -1028,31 +1063,39 @@ impl ServerService for Server {
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> Result<()> {
+        // Associate the task with the scheduler and job,
+        // then compute and report the latest server details
         let details = {
             let mut state = self.state.lock().await;
-            // Associate the task with the scheduler and job so we can report success or failure
             state.jobs.insert(
                 task_id.to_owned(),
                 (respond_to.to_owned(), job_id.to_owned()),
             );
-            self.get_details(state.jobs.len(), &mut state.sys)
+            // Get details before releasing state lock
+            self.state_to_details(&mut state)
         };
 
-        let jobs_storage = self.jobs_storage.as_ref();
+        // Report status after accepting the job
+        self.broadcast_status_details(details).await;
 
-        // Report status and load toolchain + inputs in parallel
-        let (inputs, toolchain_dir, _) = futures::future::try_join3(
-            // Load inputs
-            get_job_inputs(jobs_storage, job_id),
-            // Load and unpack toolchain
-            self.toolchains.acquire(&toolchain).map_err(|err| {
+        // Load and unpack the toolchain
+        let toolchain_dir = self
+            .toolchains
+            .acquire(&toolchain)
+            .map_err(|err| {
                 tracing::warn!("[run_job({job_id})]: Error loading toolchain: {err:?}");
                 err
-            }),
-            // Report status
-            async { Ok(self.broadcast_status(details).await) },
-        )
-        .await?;
+            })
+            .await?;
+
+        // Report status after loading the toolchain
+        self.broadcast_status().await;
+
+        // Load job inputs into memory
+        let inputs = self.get_job_inputs(job_id).await?;
+
+        // Report status after loading the inputs
+        self.broadcast_status().await;
 
         match self
             .builder
@@ -1060,8 +1103,7 @@ impl ServerService for Server {
             .await
         {
             Ok(result) => {
-                put_job_result(
-                    jobs_storage,
+                self.put_job_result(
                     job_id,
                     RunJobResponse::JobComplete {
                         result,
@@ -1081,7 +1123,7 @@ impl ServerService for Server {
         let mut state = self.state.lock().await;
         if let Some((respond_to, job_id)) = state.jobs.remove(task_id) {
             // Get ServerDetails
-            let details = self.get_details(state.jobs.len(), &mut state.sys);
+            let details = self.state_to_details(&mut state);
             // Drop lock
             drop(state);
 
@@ -1109,7 +1151,7 @@ impl ServerService for Server {
         let mut state = self.state.lock().await;
         if let Some((respond_to, job_id)) = state.jobs.remove(task_id) {
             // Get ServerDetails
-            let details = self.get_details(state.jobs.len(), &mut state.sys);
+            let details = self.state_to_details(&mut state);
             // Drop lock
             drop(state);
 
