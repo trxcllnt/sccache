@@ -25,6 +25,7 @@ use serde::{
 };
 #[cfg(test)]
 use serial_test::serial;
+use std::collections::HashMap;
 use std::env;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -32,7 +33,6 @@ use std::result::Result as StdResult;
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::Duration;
-use std::{collections::HashMap, net::SocketAddr};
 
 pub use crate::cache::PreprocessorCacheModeConfig;
 use crate::errors::*;
