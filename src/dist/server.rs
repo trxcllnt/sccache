@@ -9,7 +9,8 @@ mod internal {
     use axum::{
         body::Bytes,
         extract::{
-            ConnectInfo, DefaultBodyLimit, Extension, FromRequest, FromRequestParts, Path, Request,
+            ConnectInfo, DefaultBodyLimit, Extension, FromRequest, FromRequestParts, MatchedPath,
+            Path, Request,
         },
         http::{request::Parts, HeaderMap, Method, StatusCode, Uri},
         response::{IntoResponse, Response},
@@ -25,9 +26,10 @@ mod internal {
 
     use hyper_util::rt::{TokioExecutor, TokioIo};
 
+    use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
     use serde_json::json;
 
-    use std::{io, net::SocketAddr, str::FromStr, sync::Arc};
+    use std::{io, net::SocketAddr, str::FromStr, sync::Arc, time::Instant};
 
     use tokio::net::TcpListener;
     use tokio_util::{compat::TokioAsyncReadCompatExt, io::StreamReader};
@@ -38,9 +40,12 @@ mod internal {
         trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
     };
 
-    use crate::dist::{
-        http::{bincode_deserialize, ClientAuthCheck},
-        NewJobRequest, RunJobRequest, SchedulerService, Toolchain,
+    use crate::{
+        config::MetricsConfig,
+        dist::{
+            http::{bincode_deserialize, ClientAuthCheck},
+            NewJobRequest, RunJobRequest, SchedulerService, Toolchain,
+        },
     };
 
     use crate::errors::*;
@@ -168,6 +173,87 @@ mod internal {
                     headers_to_redact,
                 )),
         )
+    }
+
+    fn with_metrics(app: Router, metrics: MetricsConfig) -> Router {
+        const EXPONENTIAL_SECONDS: &[f64] = &[
+            0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+        ];
+
+        let builder = PrometheusBuilder::new()
+            .set_buckets_for_metric(
+                Matcher::Full("http_requests_duration_seconds".to_string()),
+                EXPONENTIAL_SECONDS,
+            )
+            .unwrap();
+
+        let app = match metrics {
+            MetricsConfig::Listen { path, .. } => {
+                let handle = builder.install_recorder().unwrap();
+
+                tokio::spawn({
+                    let handle = handle.clone();
+                    async move {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            handle.run_upkeep();
+                        }
+                    }
+                });
+
+                app.route(
+                    &path.unwrap_or("/metrics".to_owned()),
+                    routing::get(move || std::future::ready(handle.render())),
+                )
+            }
+            MetricsConfig::Gateway {
+                endpoint,
+                interval,
+                username,
+                password,
+            } => {
+                builder
+                    .with_push_gateway(
+                        endpoint,
+                        std::time::Duration::from_millis(interval),
+                        username,
+                        password,
+                    )
+                    .unwrap()
+                    .install()
+                    .unwrap();
+                app
+            }
+        };
+
+        // Define this here so we also track metrics on the `/metrics` route
+        app.route_layer(axum::middleware::from_fn(track_metrics))
+    }
+
+    async fn track_metrics(req: Request, next: axum::middleware::Next) -> impl IntoResponse {
+        let start = Instant::now();
+        let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
+            matched_path.as_str().to_owned()
+        } else {
+            req.uri().path().to_owned()
+        };
+        let method = req.method().clone();
+
+        let response = next.run(req).await;
+
+        let latency = start.elapsed().as_secs_f64();
+        let status = response.status().as_u16().to_string();
+
+        let labels = [
+            ("method", method.to_string()),
+            ("path", path),
+            ("status", status),
+        ];
+
+        metrics::counter!("sccache_scheduler_http_requests", &labels).increment(1);
+        metrics::histogram!("sccache_scheduler_http_requests_duration", &labels).record(latency);
+
+        response
     }
 
     // Verify authenticated sccache clients
@@ -375,13 +461,24 @@ mod internal {
                 )
         }
 
-        pub async fn serve(self, addr: SocketAddr, max_body_size: usize) -> Result<()> {
-            let app = with_request_tracing(
-                Self::make_router()
-                    .fallback(|| async move { (StatusCode::NOT_FOUND, "404") })
-                    .layer(DefaultBodyLimit::max(max_body_size))
-                    .layer(Extension(self.state.clone())),
-            );
+        pub async fn serve(
+            self,
+            addr: SocketAddr,
+            max_body_size: usize,
+            metrics: Option<MetricsConfig>,
+        ) -> Result<()> {
+            let app = Self::make_router()
+                .fallback(|| async move { (StatusCode::NOT_FOUND, "404") })
+                .layer(DefaultBodyLimit::max(max_body_size))
+                .layer(Extension(self.state.clone()));
+
+            let app = if let Some(metrics) = metrics {
+                with_metrics(app, metrics)
+            } else {
+                app
+            };
+
+            let app = with_request_tracing(app);
 
             let mut make_service = app.into_make_service_with_connect_info::<SocketAddr>();
 

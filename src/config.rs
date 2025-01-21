@@ -25,7 +25,6 @@ use serde::{
 };
 #[cfg(test)]
 use serial_test::serial;
-use std::collections::HashMap;
 use std::env;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -33,6 +32,7 @@ use std::result::Result as StdResult;
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::Duration;
+use std::{collections::HashMap, net::SocketAddr};
 
 pub use crate::cache::PreprocessorCacheModeConfig;
 use crate::errors::*;
@@ -1220,6 +1220,26 @@ impl MessageBroker {
 }
 
 #[cfg(feature = "dist-server")]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type")]
+#[serde(deny_unknown_fields)]
+pub enum MetricsConfig {
+    #[serde(rename = "listen")]
+    Listen {
+        addr: Option<SocketAddr>,
+        path: Option<String>,
+    },
+    #[serde(rename = "push")]
+    Gateway {
+        endpoint: String,
+        // Interval (in milliseconds) to push metrics to prometheus
+        interval: u64,
+        username: Option<String>,
+        password: Option<String>,
+    },
+}
+
+#[cfg(feature = "dist-server")]
 #[derive(Debug)]
 pub struct StorageConfig {
     pub storage: Option<CacheType>,
@@ -1259,7 +1279,7 @@ pub mod scheduler {
     use super::{
         config_from_env, default_disk_cache_dir, default_disk_cache_size, number_from_env_var,
         try_read_config_file, CacheConfigs, CacheModeConfig, DiskCacheConfig, MessageBroker,
-        StorageConfig,
+        MetricsConfig, StorageConfig,
     };
 
     // pub fn default_remember_server_error_timeout() -> u64 {
@@ -1301,6 +1321,7 @@ pub mod scheduler {
         pub jobs: CacheConfigs,
         pub max_body_size: Option<usize>,
         pub message_broker: Option<MessageBroker>,
+        pub metrics: Option<MetricsConfig>,
         pub public_addr: SocketAddr,
         pub scheduler_id: Option<String>,
         pub toolchains: CacheConfigs,
@@ -1322,6 +1343,7 @@ pub mod scheduler {
                 },
                 max_body_size: None,
                 message_broker: None,
+                metrics: None,
                 public_addr: SocketAddr::from_str("0.0.0.0:10500").unwrap(),
                 scheduler_id: None,
                 toolchains: CacheConfigs {
@@ -1344,6 +1366,7 @@ pub mod scheduler {
         pub jobs: StorageConfig,
         pub max_body_size: usize,
         pub message_broker: Option<MessageBroker>,
+        pub metrics: Option<MetricsConfig>,
         pub public_addr: SocketAddr,
         pub scheduler_id: String,
         pub toolchains: StorageConfig,
@@ -1357,6 +1380,7 @@ pub mod scheduler {
                 jobs,
                 max_body_size,
                 message_broker,
+                metrics,
                 public_addr,
                 scheduler_id,
                 toolchains,
@@ -1406,6 +1430,7 @@ pub mod scheduler {
                 jobs: jobs_storage.into(),
                 max_body_size,
                 message_broker,
+                metrics,
                 public_addr,
                 scheduler_id,
                 toolchains: toolchains_storage.into(),
@@ -1425,6 +1450,7 @@ pub mod scheduler {
                 jobs: scheduler_config.jobs.into(),
                 max_body_size: Some(scheduler_config.max_body_size),
                 message_broker: scheduler_config.message_broker,
+                metrics: scheduler_config.metrics,
                 public_addr: scheduler_config.public_addr,
                 scheduler_id: Some(scheduler_config.scheduler_id),
                 toolchains: scheduler_config.toolchains.into(),
@@ -1438,7 +1464,7 @@ pub mod server {
     use super::{
         config_from_env, default_disk_cache_dir, default_disk_cache_size, number_from_env_var,
         try_read_config_file, CacheConfigs, CacheModeConfig, DiskCacheConfig, MessageBroker,
-        StorageConfig,
+        MetricsConfig, StorageConfig,
     };
     use serde::{Deserialize, Serialize};
     use std::env;
@@ -1520,6 +1546,7 @@ pub mod server {
         pub jobs: CacheConfigs,
         pub max_per_core_load: Option<f64>,
         pub message_broker: Option<MessageBroker>,
+        pub metrics: Option<MetricsConfig>,
         pub server_id: Option<String>,
         pub toolchain_cache_size: Option<u64>,
         pub toolchains: CacheConfigs,
@@ -1541,6 +1568,7 @@ pub mod server {
                 },
                 max_per_core_load: None,
                 message_broker: None,
+                metrics: None,
                 server_id: None,
                 toolchain_cache_size: None,
                 toolchains: CacheConfigs {
@@ -1563,6 +1591,7 @@ pub mod server {
         pub jobs: StorageConfig,
         pub max_per_core_load: f64,
         pub message_broker: Option<MessageBroker>,
+        pub metrics: Option<MetricsConfig>,
         pub server_id: String,
         pub toolchain_cache_size: u64,
         pub toolchains: StorageConfig,
@@ -1576,6 +1605,7 @@ pub mod server {
                 cache_dir,
                 jobs,
                 max_per_core_load,
+                metrics,
                 server_id,
                 toolchain_cache_size,
                 toolchains,
@@ -1625,6 +1655,7 @@ pub mod server {
                 jobs: jobs_storage.into(),
                 max_per_core_load,
                 message_broker,
+                metrics,
                 server_id,
                 toolchain_cache_size,
                 toolchains: toolchains_storage.into(),
@@ -1644,6 +1675,7 @@ pub mod server {
                 jobs: server_config.jobs.into(),
                 max_per_core_load: Some(server_config.max_per_core_load),
                 message_broker: server_config.message_broker,
+                metrics: server_config.metrics,
                 server_id: Some(server_config.server_id),
                 toolchain_cache_size: Some(server_config.toolchain_cache_size),
                 toolchains: server_config.toolchains.into(),
