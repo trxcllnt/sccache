@@ -1226,7 +1226,7 @@ impl MessageBroker {
 pub enum MetricsConfig {
     #[serde(rename = "listen")]
     Listen {
-        addr: Option<SocketAddr>,
+        addr: Option<std::net::SocketAddr>,
         path: Option<String>,
     },
     #[serde(rename = "push")]
