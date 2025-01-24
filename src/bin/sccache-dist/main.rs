@@ -1008,12 +1008,23 @@ impl Server {
             .sys
             .refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
 
+        let cpu_usage = state.sys.global_cpu_usage();
+        let mem_avail = state.sys.available_memory();
+        let mem_total = state.sys.total_memory();
+
+        // Record cpu_usage
+        metrics::histogram!("sccache_server_cpu_usage_percent", &labels).record(cpu_usage);
+        // Record mem_avail
+        metrics::histogram!("sccache_server_mem_avail_bytes", &labels).record(mem_avail as f64);
+        // Record mem_total
+        metrics::histogram!("sccache_server_mem_total_bytes", &labels).record(mem_total as f64);
+
         let details = ServerDetails {
             id: self.server_id.clone(),
             info: dist::ServerStats {
-                cpu_usage: state.sys.global_cpu_usage(),
-                mem_avail: state.sys.available_memory(),
-                mem_total: state.sys.total_memory(),
+                cpu_usage,
+                mem_avail,
+                mem_total,
                 num_cpus: self.stats.num_cpus,
                 occupancy: self.stats.occupancy,
                 pre_fetch: self.stats.pre_fetch,
