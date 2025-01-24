@@ -59,9 +59,6 @@ static SCHEDULER: OnceCell<Arc<dyn SchedulerService>> = OnceCell::const_new();
 fn main() {
     init_logging();
 
-    // Needed for metrics-exporter-prometheus
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     let incr_env_strs = ["CARGO_BUILD_INCREMENTAL", "CARGO_INCREMENTAL"];
     incr_env_strs
         .iter()
