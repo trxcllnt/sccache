@@ -565,10 +565,7 @@ impl Scheduler {
     }
 
     async fn has_job_inputs(&self, job_id: &str) -> bool {
-        let labels = [
-            ("scheduler_id", self.scheduler_id.clone()),
-            ("job_id", job_id.to_owned()),
-        ];
+        let labels = [("scheduler_id", self.scheduler_id.clone())];
         // Guard loading until we get a slot in the network queue
         let start = Instant::now();
         let _ = self.jobs_storage_queue.acquire().await;
@@ -586,10 +583,7 @@ impl Scheduler {
     }
 
     async fn has_job_result(&self, job_id: &str) -> bool {
-        let labels = [
-            ("scheduler_id", self.scheduler_id.clone()),
-            ("job_id", job_id.to_owned()),
-        ];
+        let labels = [("scheduler_id", self.scheduler_id.clone())];
 
         // Guard loading until we get a slot in the network queue
         let start = Instant::now();
@@ -608,10 +602,7 @@ impl Scheduler {
     }
 
     async fn get_job_result(&self, job_id: &str) -> Result<RunJobResponse> {
-        let labels = [
-            ("scheduler_id", self.scheduler_id.clone()),
-            ("job_id", job_id.to_owned()),
-        ];
+        let labels = [("scheduler_id", self.scheduler_id.clone())];
 
         // Guard loading until we get a slot in the network queue
         let start = Instant::now();
@@ -681,10 +672,7 @@ impl Scheduler {
     }
 
     async fn put_job_inputs(&self, job_id: &str, inputs: &[u8]) -> Result<()> {
-        let labels = [
-            ("scheduler_id", self.scheduler_id.clone()),
-            ("job_id", job_id.to_owned()),
-        ];
+        let labels = [("scheduler_id", self.scheduler_id.clone())];
         // Guard storing until we get a slot in the network queue
         let start = Instant::now();
         let _ = self.jobs_storage_queue.acquire().await;
@@ -761,10 +749,7 @@ impl SchedulerService for Scheduler {
         toolchain_reader: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<SubmitToolchainResult> {
         let start = Instant::now();
-        let labels = [
-            ("scheduler_id", self.scheduler_id.clone()),
-            ("toolchain", toolchain.archive_id.clone()),
-        ];
+        let labels = [("scheduler_id", self.scheduler_id.clone())];
 
         // Guard storing until we get a slot in the network queue
         let _ = self.toolchains_storage_queue.acquire().await;
@@ -1147,10 +1132,7 @@ impl Server {
 
     async fn get_job_inputs(&self, job_id: &str) -> Result<Vec<u8>> {
         let start = Instant::now();
-        let labels = [
-            ("server_id", self.server_id.clone()),
-            ("job_id", job_id.to_owned()),
-        ];
+        let labels = [("server_id", self.server_id.clone())];
         // Guard loading until we get a slot in the network queue
         let _ = self.jobs_storage_queue.acquire().await;
         // Record get_job_inputs wait time
@@ -1181,10 +1163,7 @@ impl Server {
 
     async fn put_job_result(&self, job_id: &str, result: RunJobResponse) -> Result<()> {
         let start = Instant::now();
-        let labels = [
-            ("server_id", self.server_id.clone()),
-            ("job_id", job_id.to_owned()),
-        ];
+        let labels = [("server_id", self.server_id.clone())];
         // Guard storing until we get a slot in the network queue
         let _ = self.jobs_storage_queue.acquire().await;
         // Record put_job_result wait time
@@ -1245,11 +1224,7 @@ impl ServerService for Server {
         outputs: Vec<String>,
     ) -> Result<()> {
         let start = Instant::now();
-        let labels = [
-            ("server_id", self.server_id.clone()),
-            ("job_id", job_id.to_owned()),
-            ("toolchain", toolchain.archive_id.clone()),
-        ];
+        let labels = [("server_id", self.server_id.clone())];
 
         // Associate the task with the scheduler and job,
         // then compute and report the latest server details
@@ -1311,22 +1286,20 @@ impl ServerService for Server {
                 .await
                 .map(|x| {
                     // Record total run_job time
-                    metrics::histogram!("sccache_server_run_job_success_time_seconds", &labels)
+                    metrics::histogram!("sccache_server_run_job_time_seconds", &labels)
                         .record(start.elapsed().as_secs_f64());
                     x
                 })
                 .map_err(|e| {
                     // Record total run_job time
-                    let labels = [labels.to_vec(), vec![("error", format!("{e:?}"))]].concat();
-                    metrics::histogram!("sccache_server_run_job_failure_time_seconds", &labels)
+                    metrics::histogram!("sccache_server_run_job_time_seconds", &labels)
                         .record(start.elapsed().as_secs_f64());
                     e
                 })
             }
             Err(e) => {
                 // Record total run_job time
-                let labels = [labels.to_vec(), vec![("error", format!("{e:?}"))]].concat();
-                metrics::histogram!("sccache_server_run_job_failure_time_seconds", &labels)
+                metrics::histogram!("sccache_server_run_job_time_seconds", &labels)
                     .record(start.elapsed().as_secs_f64());
                 Err(e)
             }
@@ -1338,7 +1311,6 @@ impl ServerService for Server {
         if let Some((respond_to, job_id)) = state.jobs.remove(task_id) {
             let labels = [
                 ("server_id", self.server_id.clone()),
-                ("job_id", job_id.to_owned()),
                 ("reason", reason.to_owned()),
             ];
             // Increment job_failure count
@@ -1372,10 +1344,7 @@ impl ServerService for Server {
     async fn job_success(&self, task_id: &str) -> Result<()> {
         let mut state = self.state.lock().await;
         if let Some((respond_to, job_id)) = state.jobs.remove(task_id) {
-            let labels = [
-                ("server_id", self.server_id.clone()),
-                ("job_id", job_id.to_owned()),
-            ];
+            let labels = [("server_id", self.server_id.clone())];
             // Increment job_success count
             metrics::counter!("sccache_server_job_success", &labels).increment(1);
 
