@@ -1022,7 +1022,7 @@ impl Server {
         };
 
         // Record server_stats time (e.g. in case sys.refresh_* functions are expensive?)
-        metrics::histogram!("sccache_server_stats_to_details", &labels)
+        metrics::histogram!("sccache_server_stats_to_details_time_seconds", &labels)
             .record(start.elapsed().as_secs_f64());
 
         details
@@ -1066,7 +1066,7 @@ impl Server {
         let details = self.state_to_details(self.state.lock().await.deref_mut());
         let res = self.broadcast_status_details(details).await;
         // Record broadcast_status time
-        metrics::histogram!("sccache_server_broadcast_status", &labels)
+        metrics::histogram!("sccache_server_broadcast_status_time_seconds", &labels)
             .record(start.elapsed().as_secs_f64());
         res
     }
@@ -1117,8 +1117,11 @@ impl Server {
         .await;
 
         // Record broadcast_status_details time
-        metrics::histogram!("sccache_server_broadcast_status_details", &labels)
-            .record(start.elapsed().as_secs_f64());
+        metrics::histogram!(
+            "sccache_server_broadcast_status_details_time_seconds",
+            &labels
+        )
+        .record(start.elapsed().as_secs_f64());
 
         res
     }
@@ -1140,7 +1143,7 @@ impl Server {
         // Guard loading until we get a slot in the network queue
         let _ = self.jobs_storage_queue.acquire().await;
         // Record get_job_inputs wait time
-        metrics::histogram!("sccache_server_get_job_inputs_wait", &labels)
+        metrics::histogram!("sccache_server_get_job_inputs_wait_time_seconds", &labels)
             .record(start.elapsed().as_secs_f64());
 
         let start = Instant::now();
@@ -1159,7 +1162,7 @@ impl Server {
             err
         })?;
         // Record get_job_inputs load time
-        metrics::histogram!("sccache_server_get_job_inputs_load", &labels)
+        metrics::histogram!("sccache_server_get_job_inputs_load_time_seconds", &labels)
             .record(start.elapsed().as_secs_f64());
 
         Ok(inputs)
@@ -1174,7 +1177,7 @@ impl Server {
         // Guard storing until we get a slot in the network queue
         let _ = self.jobs_storage_queue.acquire().await;
         // Record put_job_result wait time
-        metrics::histogram!("sccache_server_put_job_result_wait", &labels)
+        metrics::histogram!("sccache_server_put_job_result_wait_time_seconds", &labels)
             .record(start.elapsed().as_secs_f64());
 
         let start = Instant::now();
@@ -1191,7 +1194,7 @@ impl Server {
             })?;
 
         // Record put_job_result load time
-        metrics::histogram!("sccache_server_put_job_result_load", &labels)
+        metrics::histogram!("sccache_server_put_job_result_load_time_seconds", &labels)
             .record(start.elapsed().as_secs_f64());
 
         Ok(())
@@ -1246,7 +1249,7 @@ impl ServerService for Server {
                 (respond_to.to_owned(), job_id.to_owned()),
             );
             // Record the time it took to accept the job
-            metrics::histogram!("sccache_server_run_job_wait", &labels)
+            metrics::histogram!("sccache_server_run_job_wait_time_seconds", &labels)
                 .record(start.elapsed().as_secs_f64());
             // Get details before releasing state lock
             self.state_to_details(&mut state)
@@ -1267,7 +1270,7 @@ impl ServerService for Server {
                 })
                 .await?;
             // Record toolchain load time
-            metrics::histogram!("sccache_server_toolchain_load", &labels)
+            metrics::histogram!("sccache_server_acquire_toolchain_time_seconds", &labels)
                 .record(start.elapsed().as_secs_f64());
             toolchain_dir
         };
@@ -1297,14 +1300,14 @@ impl ServerService for Server {
                 .await
                 .map(|x| {
                     // Record total run_job time
-                    metrics::histogram!("sccache_server_run_job_success", &labels)
+                    metrics::histogram!("sccache_server_run_job_success_time_seconds", &labels)
                         .record(start.elapsed().as_secs_f64());
                     x
                 })
                 .map_err(|e| {
                     // Record total run_job time
                     let labels = [labels.to_vec(), vec![("error", format!("{e:?}"))]].concat();
-                    metrics::histogram!("sccache_server_run_job_failure", &labels)
+                    metrics::histogram!("sccache_server_run_job_failure_time_seconds", &labels)
                         .record(start.elapsed().as_secs_f64());
                     e
                 })
@@ -1312,7 +1315,7 @@ impl ServerService for Server {
             Err(e) => {
                 // Record total run_job time
                 let labels = [labels.to_vec(), vec![("error", format!("{e:?}"))]].concat();
-                metrics::histogram!("sccache_server_run_job_failure", &labels)
+                metrics::histogram!("sccache_server_run_job_failure_time_seconds", &labels)
                     .record(start.elapsed().as_secs_f64());
                 Err(e)
             }

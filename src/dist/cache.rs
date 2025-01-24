@@ -569,11 +569,22 @@ mod server {
         tc_storage: Arc<dyn cache::Storage>,
         toolchains_storage_queue: Arc<tokio::sync::Semaphore>,
     ) -> Result<u64> {
+        let labels = [("toolchain", id.clone())];
+        let start = std::time::Instant::now();
+
         // Guard loading until we get a token from the job queue
         let _ = toolchains_storage_queue.acquire().await?;
 
+        // Record toolchain wait time
+        metrics::histogram!(
+            "sccache_server_get_toolchain_size_wait_time_seconds",
+            &labels
+        )
+        .record(start.elapsed().as_secs_f64());
+
         trace!("[ServerToolchains({id})]: Loading toolchain to compute inflated size");
 
+        let start = std::time::Instant::now();
         // Download the toolchain and compute its inflated size
         // TODO: Would be better if this was stored as metadata
         let inflated_size = async_tar::Archive::new(
@@ -588,6 +599,13 @@ mod server {
             }
         })
         .await;
+
+        // Record toolchain load time
+        metrics::histogram!(
+            "sccache_server_get_toolchain_size_load_time_seconds",
+            &labels
+        )
+        .record(start.elapsed().as_secs_f64());
 
         trace!("[ServerToolchains({id})]: Computed inflated size: {inflated_size}");
 
@@ -607,10 +625,17 @@ mod server {
         let path = root_dir.join(make_lru_key_path(toolchain_id));
 
         // Load the toolchain into memory
+        let labels = [("toolchain", tc.archive_id.clone())];
 
         let toolchain = {
+            let start = std::time::Instant::now();
             // Guard loading until we get a token from the job queue
             let _ = toolchains_storage_queue.acquire().await?;
+            // Record toolchain wait time
+            metrics::histogram!("sccache_server_get_toolchain_wait_time_seconds", &labels)
+                .record(start.elapsed().as_secs_f64());
+
+            let start = std::time::Instant::now();
             // TODO: Cache the compressed toolchain on disk instead of downloading it again
             let mut toolchain_reader = tc_storage.get_stream(toolchain_id).await?;
             let mut toolchain = vec![];
@@ -623,6 +648,11 @@ mod server {
                     );
                     err
                 })?;
+
+            // Record toolchain load time
+            metrics::histogram!("sccache_server_get_toolchain_load_time_seconds", &labels)
+                .record(start.elapsed().as_secs_f64());
+
             toolchain
         };
 
@@ -633,6 +663,7 @@ mod server {
         let mut cached_toolchains = toolchains.lock().await;
         let mut cached_size = cached_toolchains_size(&cached_toolchains);
 
+        let start = std::time::Instant::now();
         // Remove old toolchains if necessary
         while cached_size + inflated_size > cached_toolchains.capacity() {
             if let Some((toolchain, (path, inflated_size))) = cached_toolchains.remove_lru() {
@@ -648,9 +679,15 @@ mod server {
             }
         }
 
+        // Record toolchain cleanup time
+        metrics::histogram!("sccache_server_clean_old_toolchains_time_seconds", &labels)
+            .record(start.elapsed().as_secs_f64());
+
         // Unpack the toolchain
 
         trace!("[ServerToolchains({toolchain_id})]: Unpacking toolchain to {path:?}");
+
+        let start = std::time::Instant::now();
 
         async_tar::Archive::new(
             GzipDecoder::new(futures::io::AllowStdIo::new(toolchain.reader()).compat()).compat(),
@@ -658,6 +695,10 @@ mod server {
         .unpack(&path)
         .await
         .context("Failed to unpack toolchain")?;
+
+        // Record toolchain unpack time
+        metrics::histogram!("sccache_server_unpack_toolchain_time_seconds", &labels)
+            .record(start.elapsed().as_secs_f64());
 
         cached_size += inflated_size;
         debug!("ServerToolchains({toolchain_id})]: Toolchain unpacked, new cache size is: {cached_size}");
