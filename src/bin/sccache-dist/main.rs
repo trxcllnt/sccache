@@ -1013,7 +1013,7 @@ impl Server {
         let mem_total = state.sys.total_memory();
 
         // Record cpu_usage
-        metrics::histogram!("sccache_server_cpu_usage_percent", &labels).record(cpu_usage);
+        metrics::histogram!("sccache_server_cpu_usage_ratio", &labels).record(cpu_usage / 100.0);
         // Record mem_avail
         metrics::histogram!("sccache_server_mem_avail_bytes", &labels).record(mem_avail as f64);
         // Record mem_total
