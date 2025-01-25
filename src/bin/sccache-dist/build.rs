@@ -396,7 +396,6 @@ impl OverlayBuilder {
         // Guard compiling until we get a token from the job queue
         let job_slot = job_queue.acquire().await?;
 
-        // Use `block_in_place` to take ownership of this worker thread
         let res = tokio::task::spawn_blocking(move || {
             // Explicitly launch a new thread outside tokio's thread pool,
             // so that our overlayfs and tmpfs are unmounted when it dies.

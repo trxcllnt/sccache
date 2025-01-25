@@ -568,8 +568,8 @@ mod server {
         id: String,
         tc_storage: Arc<dyn cache::Storage>,
         toolchains_storage_queue: Arc<tokio::sync::Semaphore>,
+        metric_labels: Vec<(String, String)>,
     ) -> Result<u64> {
-        let labels = [("toolchain", id.clone())];
         let start = std::time::Instant::now();
 
         // Guard loading until we get a token from the job queue
@@ -577,8 +577,8 @@ mod server {
 
         // Record toolchain wait time
         metrics::histogram!(
-            "sccache_server_get_toolchain_size_wait_time_seconds",
-            &labels
+            "sccache_server_toolchain_size_wait_time_seconds",
+            &metric_labels
         )
         .record(start.elapsed().as_secs_f64());
 
@@ -602,8 +602,8 @@ mod server {
 
         // Record toolchain load time
         metrics::histogram!(
-            "sccache_server_get_toolchain_size_load_time_seconds",
-            &labels
+            "sccache_server_toolchain_size_load_time_seconds",
+            &metric_labels
         )
         .record(start.elapsed().as_secs_f64());
 
@@ -619,20 +619,19 @@ mod server {
         tc_storage: Arc<dyn cache::Storage>,
         toolchains: Arc<Mutex<LruCache<Toolchain, (PathBuf, u64), RandomState, ToolchainSize>>>,
         toolchains_storage_queue: Arc<tokio::sync::Semaphore>,
+        metric_labels: Vec<(String, String)>,
     ) -> Result<()> {
         let toolchain_id = &tc.archive_id;
         let inflated_size = tc_sizes.enqueue(&tc).await?;
         let path = root_dir.join(make_lru_key_path(toolchain_id));
 
         // Load the toolchain into memory
-        let labels = [("toolchain", tc.archive_id.clone())];
-
         let toolchain = {
             let start = std::time::Instant::now();
             // Guard loading until we get a token from the job queue
             let _ = toolchains_storage_queue.acquire().await?;
             // Record toolchain wait time
-            metrics::histogram!("sccache_server_get_toolchain_wait_time_seconds", &labels)
+            metrics::histogram!("sccache_server_toolchain_wait_time_seconds", &metric_labels)
                 .record(start.elapsed().as_secs_f64());
 
             let start = std::time::Instant::now();
@@ -650,7 +649,7 @@ mod server {
                 })?;
 
             // Record toolchain load time
-            metrics::histogram!("sccache_server_get_toolchain_load_time_seconds", &labels)
+            metrics::histogram!("sccache_server_toolchain_load_time_seconds", &metric_labels)
                 .record(start.elapsed().as_secs_f64());
 
             toolchain
@@ -680,8 +679,11 @@ mod server {
         }
 
         // Record toolchain cleanup time
-        metrics::histogram!("sccache_server_clean_old_toolchains_time_seconds", &labels)
-            .record(start.elapsed().as_secs_f64());
+        metrics::histogram!(
+            "sccache_server_toolchain_clean_time_seconds",
+            &metric_labels
+        )
+        .record(start.elapsed().as_secs_f64());
 
         // Unpack the toolchain
 
@@ -697,8 +699,11 @@ mod server {
         .context("Failed to unpack toolchain")?;
 
         // Record toolchain unpack time
-        metrics::histogram!("sccache_server_unpack_toolchain_time_seconds", &labels)
-            .record(start.elapsed().as_secs_f64());
+        metrics::histogram!(
+            "sccache_server_toolchain_unpack_time_seconds",
+            &metric_labels
+        )
+        .record(start.elapsed().as_secs_f64());
 
         cached_size += inflated_size;
         debug!("ServerToolchains({toolchain_id})]: Toolchain unpacked, new cache size is: {cached_size}");
@@ -729,7 +734,12 @@ mod server {
     }
 
     impl ServerToolchains {
-        pub fn new(root_dir: &Path, capacity: u64, tc_storage: Arc<dyn cache::Storage>) -> Self {
+        pub fn new(
+            root_dir: &Path,
+            capacity: u64,
+            tc_storage: Arc<dyn cache::Storage>,
+            metric_labels: Vec<(String, String)>,
+        ) -> Self {
             trace!("Using ServerToolchains({:?}, {})", root_dir, capacity);
 
             // Only load up to 16 toolchains concurrently
@@ -742,6 +752,7 @@ mod server {
                     1000,
                     {
                         // Local clone that the closure can own
+                        let metric_labels = metric_labels.clone();
                         let toolchains_storage_queue = toolchains_storage_queue.clone();
                         let tc_storage = tc_storage.clone();
                         move |tc: &Toolchain| {
@@ -749,6 +760,7 @@ mod server {
                                 tc.archive_id.clone(),
                                 tc_storage.clone(),
                                 toolchains_storage_queue.clone(),
+                                metric_labels.clone(),
                             ))
                         }
                     },
@@ -756,6 +768,7 @@ mod server {
 
                 // Local clones that the closure can own
                 let root_dir = root_dir.to_owned();
+                let metric_labels = metric_labels.clone();
                 let toolchains_storage_queue = toolchains_storage_queue.clone();
                 let toolchains = toolchains.clone();
 
@@ -767,6 +780,7 @@ mod server {
                         tc_storage.clone(),
                         toolchains.clone(),
                         toolchains_storage_queue.clone(),
+                        metric_labels.clone(),
                     ))
                 }
             });
