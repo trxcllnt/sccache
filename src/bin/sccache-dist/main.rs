@@ -197,6 +197,7 @@ fn run(command: Command) -> Result<()> {
         }) => {
             let metric_labels = vec![
                 ("env".into(), env_info()),
+                ("type".into(), "scheduler".into()),
                 ("scheduler_id".into(), scheduler_id.clone()),
             ];
 
@@ -339,6 +340,7 @@ fn run(command: Command) -> Result<()> {
         }) => {
             let metric_labels = vec![
                 ("env".into(), env_info()),
+                ("type".into(), "server".into()),
                 ("server_id".into(), server_id.clone()),
             ];
 
