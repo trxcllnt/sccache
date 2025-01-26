@@ -156,6 +156,8 @@ impl OverlayBuilder {
             );
         }
 
+        let dir = dir.join("builds");
+
         // TODO: pidfile
         let ret = Self {
             bubblewrap,
@@ -163,9 +165,7 @@ impl OverlayBuilder {
             job_queue,
         };
         ret.cleanup().await?;
-        fs::create_dir_all(&ret.dir).context("Failed to create base directory for builder")?;
-        fs::create_dir_all(ret.dir.join("builds"))
-            .context("Failed to create builder builds directory")?;
+        fs::create_dir_all(&ret.dir).context("Failed to create builder builds directory")?;
         Ok(ret)
     }
 
@@ -181,7 +181,7 @@ impl OverlayBuilder {
         job_id: &str,
         toolchain_dir: &Path,
     ) -> Result<OverlaySpec> {
-        let build_dir = self.dir.join("builds").join(job_id);
+        let build_dir = self.dir.join(job_id);
 
         tracing::trace!(
             "[prepare_overlay_dirs({job_id})]: Creating build directory: {build_dir:?}"
