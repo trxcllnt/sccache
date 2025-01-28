@@ -1018,7 +1018,8 @@ impl Server {
 
     fn state_to_details(&self, state: &mut ServerState) -> ServerDetails {
         // let start = Instant::now();
-        let running = self.stats.occupancy - self.job_queue.available_permits();
+        let running = (self.stats.occupancy as i64 - self.job_queue.available_permits() as i64)
+            .max(0) as usize;
         let fetched = state.jobs.len() - running;
 
         state
