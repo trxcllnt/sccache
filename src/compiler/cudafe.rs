@@ -183,7 +183,7 @@ use cicc::ArgData::*;
 
 counted_array!(pub static ARGS: [ArgInfo<cicc::ArgData>; _] = [
     take_arg!("--gen_c_file_name", PathBuf, Separated, UnhashedOutput),
-    flag!("--gen_module_id_file", UnhashedGenModuleIdFileFlag),
+    flag!("--gen_module_id_file", GenModuleIdFileFlag),
     take_arg!("--module_id_file_name", PathBuf, Separated, Output),
     take_arg!("--stub_file_name", OsString, Separated, UnhashedPassThrough),
 ]);
