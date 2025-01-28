@@ -752,7 +752,7 @@ where
                 });
                 (env_vars.clone(), Cacheable::Yes, group)
             }
-            // cudafe++ is not cacheable
+            // cudafe++ _must be_ cached, because the `.module_id` file is unique to each invocation (new in CTK 12.8)
             Some("cudafe++") => {
                 // Fix for CTK < 12.0:
                 // Add `--gen_module_id_file` if the cudafe++ args include `--module_id_file_name`
@@ -764,7 +764,7 @@ where
                 }
                 (
                     env_vars.clone(),
-                    Cacheable::No,
+                    Cacheable::Yes,
                     Some(&mut cuda_front_end_group),
                 )
             }
