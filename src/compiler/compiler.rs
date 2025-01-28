@@ -18,6 +18,7 @@ use crate::compiler::args::*;
 use crate::compiler::c::{CCompiler, CCompilerKind};
 use crate::compiler::cicc::Cicc;
 use crate::compiler::clang::Clang;
+use crate::compiler::cudafe::CudaFE;
 use crate::compiler::diab::Diab;
 use crate::compiler::gcc::Gcc;
 use crate::compiler::msvc;
@@ -235,6 +236,7 @@ pub enum Language {
     ObjectiveCxx,
     ObjectiveCxxHeader,
     Cuda,
+    CudaFE,
     Ptx,
     Cubin,
     Rust,
@@ -281,6 +283,7 @@ impl Language {
             Language::ObjectiveC => "objc",
             Language::ObjectiveCxx | Language::ObjectiveCxxHeader => "objc++",
             Language::Cuda => "cuda",
+            Language::CudaFE => "cuda",
             Language::Ptx => "ptx",
             Language::Cubin => "cubin",
             Language::Rust => "rust",
@@ -301,6 +304,7 @@ impl CompilerKind {
             | Language::ObjectiveCxx
             | Language::ObjectiveCxxHeader => "C/C++",
             Language::Cuda => "CUDA",
+            Language::CudaFE => "CUDA (Device code)",
             Language::Ptx => "PTX",
             Language::Cubin => "CUBIN",
             Language::Rust => "Rust",
@@ -316,6 +320,7 @@ impl CompilerKind {
             CompilerKind::C(CCompilerKind::Gcc) => textual_lang + " [gcc]",
             CompilerKind::C(CCompilerKind::Msvc) => textual_lang + " [msvc]",
             CompilerKind::C(CCompilerKind::Nvcc) => textual_lang + " [nvcc]",
+            CompilerKind::C(CCompilerKind::CudaFE) => textual_lang + " [cudafe++]",
             CompilerKind::C(CCompilerKind::Cicc) => textual_lang + " [cicc]",
             CompilerKind::C(CCompilerKind::Ptxas) => textual_lang + " [ptxas]",
             CompilerKind::C(CCompilerKind::Nvhpc) => textual_lang + " [nvhpc]",
@@ -1255,6 +1260,17 @@ fn is_rustc_like<P: AsRef<Path>>(p: P) -> bool {
     )
 }
 
+/// Returns true if the given path looks like cudafe++
+fn is_nvidia_cudafe<P: AsRef<Path>>(p: P) -> bool {
+    matches!(
+        p.as_ref()
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .as_deref(),
+        Some("cudafe++")
+    )
+}
+
 /// Returns true if the given path looks like cicc
 fn is_nvidia_cicc<P: AsRef<Path>>(p: P) -> bool {
     matches!(
@@ -1338,6 +1354,18 @@ where
 
     let rustc_executable = if let Some(ref rustc_executable) = maybe_rustc_executable {
         rustc_executable
+    } else if is_nvidia_cudafe(executable) {
+        debug!("Found cudafe++");
+        return CCompiler::new(
+            CudaFE {
+                // TODO: Use nvcc --version
+                version: Some(String::new()),
+            },
+            executable.to_owned(),
+            &pool,
+        )
+        .await
+        .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
     } else if is_nvidia_cicc(executable) {
         trace!("Found cicc");
         return CCompiler::new(

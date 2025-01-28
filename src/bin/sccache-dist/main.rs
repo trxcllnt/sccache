@@ -401,7 +401,11 @@ fn run(command: Command) -> Result<()> {
                     .register_task::<scheduler_to_servers::run_job>()
                     .await?;
 
-                let job_queue = Arc::new(tokio::sync::Semaphore::new(occupancy));
+                // Oversubscribe cores just a little to make up for network and I/O latency. This formula is
+                // not based on hard data but an extrapolation to high core counts of the conventional wisdom
+                // that slightly more jobs than cores achieve the shortest compile time. Which is originally
+                // about local compiles and this is over the network, so be slightly less conservative.
+                let job_queue = Arc::new(tokio::sync::Semaphore::new((occupancy as f64 * 1.1).ceil() as usize));
 
                 let builder: Arc<dyn BuilderIncoming> = match builder {
                     #[cfg(not(target_os = "freebsd"))]

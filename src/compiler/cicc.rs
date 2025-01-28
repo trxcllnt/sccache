@@ -58,7 +58,7 @@ impl CCompilerImpl for Cicc {
         cwd: &Path,
         _env_vars: &[(OsString, OsString)],
     ) -> CompilerArguments<ParsedArguments> {
-        parse_arguments(arguments, cwd, Language::Ptx, &ARGS[..])
+        parse_arguments(arguments, cwd, Language::Ptx, &ARGS[..], 3)
     }
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
@@ -106,12 +106,13 @@ pub fn parse_arguments<S>(
     cwd: &Path,
     language: Language,
     arg_info: S,
+    input_arg_offset_from_end: usize,
 ) -> CompilerArguments<ParsedArguments>
 where
     S: SearchableArgInfo<ArgData>,
 {
     let mut args = arguments.to_vec();
-    let input_loc = arguments.len() - 3;
+    let input_loc = arguments.len() - input_arg_offset_from_end;
     let input = args.splice(input_loc..input_loc + 1, []).next().unwrap();
 
     let mut take_next = false;
@@ -151,6 +152,10 @@ where
                     Some(UnhashedModuleIdFileName(o)) => {
                         take_next = false;
                         module_id_file_name = Some(cwd.join(o));
+                        &mut unhashed_args
+                    }
+                    Some(UnhashedPassThrough(o)) => {
+                        take_next = false;
                         &mut unhashed_args
                     }
                     Some(UnhashedOutput(o)) => {
@@ -263,8 +268,6 @@ pub fn generate_compile_commands(
         let _ = path_transformer;
     }
 
-    trace!("compile");
-
     let lang_str = &parsed_args.language.as_str();
     let out_file = match parsed_args.outputs.get("obj") {
         Some(obj) => &obj.path,
@@ -331,6 +334,7 @@ ArgData! { pub
     UnhashedFlag,
     UnhashedGenModuleIdFileFlag,
     UnhashedModuleIdFileName(PathBuf),
+    UnhashedPassThrough(OsString),
     UnhashedOutput(PathBuf),
 }
 

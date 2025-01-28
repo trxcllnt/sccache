@@ -156,6 +156,8 @@ pub enum CCompilerKind {
     Msvc,
     /// NVIDIA CUDA compiler
     Nvcc,
+    /// NVIDIA CUDA front-end
+    CudaFE,
     /// NVIDIA CUDA optimizer and PTX generator
     Cicc,
     /// NVIDIA CUDA PTX assembler
@@ -1404,11 +1406,10 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                 add_named_file(&mut package_builder, "liblto_plugin.so")?;
             }
 
-            CCompilerKind::Cicc => {}
-
-            CCompilerKind::Ptxas => {}
-
-            CCompilerKind::Nvcc => {}
+            CCompilerKind::Cicc
+            | CCompilerKind::CudaFE
+            | CCompilerKind::Ptxas
+            | CCompilerKind::Nvcc => {}
 
             CCompilerKind::Nvhpc => {
                 // Various programs called by the nvc nvc++ front end.
