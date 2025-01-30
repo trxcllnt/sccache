@@ -214,8 +214,8 @@ async fn celery_app(
         .prefetch_count(prefetch_count)
         // Wait at most 10s before retrying failed tasks
         .task_max_retry_delay(10)
-        // // Don't retry tasks that fail with unexpected errors
-        // .task_retry_for_unexpected(false)
+        // Don't retry tasks that fail with unexpected errors
+        .task_retry_for_unexpected(false)
         // Indefinitely retry connecting to the broker
         .broker_connection_max_retries(u32::MAX)
         .build()
@@ -294,6 +294,7 @@ fn run(command: Command) -> Result<()> {
                 }
 
                 let broker_uri = message_broker_uri(message_broker)?;
+                // This URI can contain the username/password, so log at trace level
                 tracing::trace!("Message broker URI: {broker_uri}");
 
                 let to_schedulers = server_to_schedulers_queue();
@@ -449,6 +450,7 @@ fn run(command: Command) -> Result<()> {
                 );
 
                 let broker_uri = message_broker_uri(message_broker)?;
+                // This URI can contain the username/password, so log at trace level
                 tracing::trace!("Message broker URI: {broker_uri}");
 
                 let to_servers = scheduler_to_servers_queue();
@@ -1336,7 +1338,7 @@ mod scheduler_to_servers {
         bind = true,
         acks_late = true,
         acks_on_failure_or_timeout = false,
-        max_retries = 0,
+        max_retries = 2,
         nacks_enabled = true,
         on_failure = on_run_job_failure,
         on_success = on_run_job_success,
@@ -1367,10 +1369,17 @@ mod scheduler_to_servers {
                 futures::future::err(anyhow!("sccache-dist server is not initialized")).boxed()
             })
             .await
-            .map_err(|e| {
-                let msg = format!("run_job failed with error: {e:?}");
-                tracing::error!("[run_job({job_id})]: {msg}");
-                TaskError::UnexpectedError(msg)
+            .map_err(|e| match e.downcast_ref::<TaskError>() {
+                Some(TaskError::UnexpectedError(msg)) => {
+                    let msg = format!("run_job failed with unexpected error: {msg}");
+                    tracing::error!("[run_job({job_id})]: {msg}");
+                    TaskError::UnexpectedError(msg.clone())
+                }
+                _ => {
+                    let msg = format!("run_job failed with error: {e:?}");
+                    tracing::error!("[run_job({job_id})]: {msg}");
+                    TaskError::ExpectedError(msg)
+                }
             })
     }
 
@@ -1422,37 +1431,70 @@ mod server_to_schedulers {
     // messages instead of keeping them in the queue indefinitely.
 
     // Runs on scheduler to handle heartbeats from servers
-    #[celery::task(max_retries = 10)]
-    pub async fn status(info: ServerDetails) -> TaskResult<()> {
+    #[celery::task(max_retries = 0)]
+    pub async fn status(server: ServerDetails) -> TaskResult<()> {
         super::SCHEDULER
             .get()
             .unwrap()
-            .receive_status(info, None)
+            .receive_status(server, None)
             .await
-            .map_err(|e| TaskError::UnexpectedError(e.to_string()))
+            .map_err(|e| match e.downcast_ref::<TaskError>() {
+                Some(TaskError::UnexpectedError(msg)) => {
+                    let msg = format!("receive_status failed with unexpected error: {msg}");
+                    tracing::error!("[receive_status]: {msg}");
+                    TaskError::UnexpectedError(msg.clone())
+                }
+                _ => {
+                    let msg = format!("receive_status failed with error: {e:?}");
+                    tracing::error!("[receive_status]: {msg}");
+                    TaskError::ExpectedError(msg)
+                }
+            })
     }
 
-    #[celery::task(max_retries = 10)]
+    #[celery::task(max_retries = 0)]
     pub async fn job_failure(
         job_id: String,
         reason: String,
-        info: ServerDetails,
+        server: ServerDetails,
     ) -> TaskResult<()> {
         super::SCHEDULER
             .get()
             .unwrap()
-            .job_failure(&job_id, &reason, info)
+            .job_failure(&job_id, &reason, server)
             .await
-            .map_err(|e| TaskError::UnexpectedError(e.to_string()))
+            .map_err(|e| match e.downcast_ref::<TaskError>() {
+                Some(TaskError::UnexpectedError(msg)) => {
+                    let msg = format!("job_failure failed with unexpected error: {msg}");
+                    tracing::error!("[job_failure({job_id})]: {msg}");
+                    TaskError::UnexpectedError(msg.clone())
+                }
+                _ => {
+                    let msg = format!("job_failure failed with error: {e:?}");
+                    tracing::error!("[job_failure({job_id})]: {msg}");
+                    TaskError::ExpectedError(msg)
+                }
+            })
     }
 
-    #[celery::task(max_retries = 10)]
-    pub async fn job_success(job_id: String, info: ServerDetails) -> TaskResult<()> {
+    #[celery::task(max_retries = 0)]
+    pub async fn job_success(job_id: String, server: ServerDetails) -> TaskResult<()> {
         super::SCHEDULER
             .get()
             .unwrap()
-            .job_success(&job_id, info)
+            .job_success(&job_id, server)
             .await
-            .map_err(|e| TaskError::UnexpectedError(e.to_string()))
+            .map_err(|e| match e.downcast_ref::<TaskError>() {
+                Some(TaskError::UnexpectedError(msg)) => {
+                    let msg = format!("job_success failed with unexpected error: {msg}");
+                    tracing::error!("[job_success({job_id})]: {msg}");
+                    TaskError::UnexpectedError(msg.clone())
+                }
+                _ => {
+                    let msg = format!("job_success failed with error: {e:?}");
+                    tracing::error!("[job_success({job_id})]: {msg}");
+                    TaskError::ExpectedError(msg)
+                }
+            })
     }
 }
