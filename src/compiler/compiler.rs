@@ -685,6 +685,7 @@ where
 }
 
 #[cfg(not(feature = "dist-client"))]
+#[allow(clippy::too_many_arguments)]
 async fn dist_or_local_compile<T>(
     service: &server::SccacheService<T>,
     _dist_client: Option<Arc<dyn dist::Client>>,
@@ -693,6 +694,7 @@ async fn dist_or_local_compile<T>(
     compilation: Box<dyn Compilation<T>>,
     _weak_toolchain_key: String,
     out_pretty: String,
+    pool: &tokio::runtime::Handle,
 ) -> Result<(Cacheable, DistType, process::Output)>
 where
     T: CommandCreatorSync,
