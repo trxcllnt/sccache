@@ -947,11 +947,12 @@ pub fn new_reqwest_client(config: Option<crate::config::DistNetworking>) -> reqw
 
     // Connection pool
     let builder = if config.connection_pool {
-        // Users should set their load balancer's idle timeout
-        // to the same value as `SCCACHE_DIST_REQUEST_TIMEOUT`
+        // This has to be at least as long as `request_timeout`, otherwise
+        // reqwest will close idle connections before build jobs are done.
+        //
+        // Users should set their load balancer's idle timeout to the same
+        // value as `request_timeout` (AWS's ALB default is 60s).
         builder.pool_idle_timeout(request_timeout)
-        // AWS application load balancer's default
-        // builder.pool_idle_timeout(Duration::from_secs(60))
     } else {
         // Disable connection pool
         let mut headers = http::HeaderMap::new();
@@ -965,7 +966,7 @@ pub fn new_reqwest_client(config: Option<crate::config::DistNetworking>) -> reqw
     // keepalive
     let builder = if config.keepalive.enabled {
         let builder = if config.keepalive.timeout > 0 {
-            builder.http2_keep_alive_interval(Duration::from_secs(config.keepalive.timeout))
+            builder.http2_keep_alive_timeout(Duration::from_secs(config.keepalive.timeout))
         } else {
             builder
         };

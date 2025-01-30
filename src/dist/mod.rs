@@ -649,15 +649,17 @@ pub trait Client: Send + Sync {
         outputs: Vec<String>,
     ) -> Result<RunJobResponse>;
     // To Scheduler
-    async fn do_get_status(&self) -> Result<SchedulerStatus>;
+    async fn get_status(&self) -> Result<SchedulerStatus>;
     // To Scheduler
-    async fn do_submit_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult>;
-    async fn put_toolchain(
+    async fn put_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult>;
+    // Write to local toolchain cache
+    async fn put_toolchain_local(
         &self,
         compiler_path: PathBuf,
         weak_key: String,
         toolchain_packager: Box<dyn pkg::ToolchainPackager>,
     ) -> Result<(Toolchain, Option<(String, PathBuf)>)>;
+    fn max_retries(&self) -> f64;
     fn rewrite_includes_only(&self) -> bool;
     fn get_custom_toolchain(&self, exe: &Path) -> Option<PathBuf>;
 }

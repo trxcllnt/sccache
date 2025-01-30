@@ -590,6 +590,7 @@ where
                     compilation,
                     weak_toolchain_key,
                     out_pretty.clone(),
+                    &pool,
                 )
                 .await?;
                 let duration_compilation = start.elapsed();
@@ -709,19 +710,7 @@ where
 }
 
 #[cfg(feature = "dist-client")]
-/// Number of times to retry distributed compilations
-const DEFAULT_DIST_RETRY_LIMIT: u64 = 0;
-
-#[cfg(feature = "dist-client")]
-/// Get the number of times to retry distributed compilations
-fn get_dist_retry_limit() -> u64 {
-    std::env::var("SCCACHE_DIST_RETRY_LIMIT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_DIST_RETRY_LIMIT)
-}
-
-#[cfg(feature = "dist-client")]
+#[allow(clippy::too_many_arguments)]
 async fn dist_or_local_compile<T>(
     service: &server::SccacheService<T>,
     dist_client: Option<Arc<dyn dist::Client>>,
@@ -730,6 +719,7 @@ async fn dist_or_local_compile<T>(
     compilation: Box<dyn Compilation<T>>,
     weak_toolchain_key: String,
     out_pretty: String,
+    pool: &tokio::runtime::Handle,
 ) -> Result<(Cacheable, DistType, process::Output)>
 where
     T: CommandCreatorSync,
@@ -763,6 +753,7 @@ where
         compile_cmd.clone(),
         dist_compile_cmd.clone(),
         out_pretty.clone(),
+        pool,
     )
     .await
     {
@@ -806,6 +797,7 @@ async fn dist_compile<T>(
     compile_cmd: Box<dyn CompileCommand<T>>,
     dist_compile_cmd: Option<dist::CompileCommand>,
     out_pretty: String,
+    pool: &tokio::runtime::Handle,
 ) -> Result<(DistType, std::process::Output)>
 where
     T: CommandCreatorSync,
@@ -833,7 +825,7 @@ where
         compile_cmd.get_executable()
     );
     let (dist_toolchain, maybe_dist_compile_executable) = dist_client
-        .put_toolchain(
+        .put_toolchain_local(
             compile_cmd.get_executable(),
             weak_toolchain_key,
             toolchain_packager,
@@ -3115,10 +3107,10 @@ mod test_dist {
         ) -> Result<(NewJobResponse, PathTransformer)> {
             unreachable!()
         }
-        async fn do_get_status(&self) -> Result<SchedulerStatus> {
             unreachable!()
         }
         async fn do_submit_toolchain(&self, _: Toolchain) -> Result<SubmitToolchainResult> {
+        async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!()
         }
         async fn run_job(
@@ -3131,13 +3123,16 @@ mod test_dist {
         ) -> Result<RunJobResponse> {
             unreachable!()
         }
-        async fn put_toolchain(
+        async fn put_toolchain_local(
             &self,
             _: PathBuf,
             _: String,
             _: Box<dyn pkg::ToolchainPackager>,
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
             Err(anyhow!("MOCK: put toolchain failure"))
+        }
+        fn max_retries(&self) -> f64 {
+            0f64
         }
         fn rewrite_includes_only(&self) -> bool {
             false
@@ -3170,10 +3165,10 @@ mod test_dist {
             assert_eq!(self.tc, tc);
             Err(anyhow!("MOCK: alloc job failure"))
         }
-        async fn do_get_status(&self) -> Result<SchedulerStatus> {
+        async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!()
         }
-        async fn do_submit_toolchain(&self, _: Toolchain) -> Result<SubmitToolchainResult> {
+        async fn put_toolchain(&self, _: Toolchain) -> Result<SubmitToolchainResult> {
             unreachable!()
         }
         async fn run_job(
@@ -3186,13 +3181,16 @@ mod test_dist {
         ) -> Result<RunJobResponse> {
             unreachable!()
         }
-        async fn put_toolchain(
+        async fn put_toolchain_local(
             &self,
             _: PathBuf,
             _: String,
             _: Box<dyn pkg::ToolchainPackager>,
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
             Ok((self.tc.clone(), None))
+        }
+        fn max_retries(&self) -> f64 {
+            0f64
         }
         fn rewrite_includes_only(&self) -> bool {
             false
@@ -3242,10 +3240,10 @@ mod test_dist {
                 path_transformer,
             ))
         }
-        async fn do_get_status(&self) -> Result<SchedulerStatus> {
+        async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!("fn do_get_status is not used for this test. qed")
         }
-        async fn do_submit_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
+        async fn put_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
             assert_eq!(self.tc, tc);
             Err(anyhow!("MOCK: submit toolchain failure"))
         }
@@ -3259,13 +3257,16 @@ mod test_dist {
         ) -> Result<RunJobResponse> {
             unreachable!("fn run_job is not used for this test. qed")
         }
-        async fn put_toolchain(
+        async fn put_toolchain_local(
             &self,
             _: PathBuf,
             _: String,
             _: Box<dyn pkg::ToolchainPackager>,
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
             Ok((self.tc.clone(), None))
+        }
+        fn max_retries(&self) -> f64 {
+            0f64
         }
         fn rewrite_includes_only(&self) -> bool {
             false
@@ -3315,10 +3316,10 @@ mod test_dist {
                 path_transformer,
             ))
         }
-        async fn do_get_status(&self) -> Result<SchedulerStatus> {
+        async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!()
         }
-        async fn do_submit_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
+        async fn put_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
             assert_eq!(self.tc, tc);
             Ok(SubmitToolchainResult::Success)
         }
@@ -3336,7 +3337,7 @@ mod test_dist {
             assert_eq!(command.executable, "/overridden/compiler");
             Err(anyhow!("MOCK: run job failure"))
         }
-        async fn put_toolchain(
+        async fn put_toolchain_local(
             &self,
             _: PathBuf,
             _: String,
@@ -3349,6 +3350,9 @@ mod test_dist {
                     PathBuf::from("somearchiveid"),
                 )),
             ))
+        }
+        fn max_retries(&self) -> f64 {
+            0f64
         }
         fn rewrite_includes_only(&self) -> bool {
             false
@@ -3401,10 +3405,10 @@ mod test_dist {
                 path_transformer,
             ))
         }
-        async fn do_get_status(&self) -> Result<SchedulerStatus> {
+        async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!("fn do_get_status is not used for this test. qed")
         }
-        async fn do_submit_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
+        async fn put_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
             assert_eq!(self.tc, tc);
 
             Ok(SubmitToolchainResult::Success)
@@ -3439,7 +3443,7 @@ mod test_dist {
             };
             Ok(result)
         }
-        async fn put_toolchain(
+        async fn put_toolchain_local(
             &self,
             _: PathBuf,
             _: String,
@@ -3452,6 +3456,9 @@ mod test_dist {
                     PathBuf::from("somearchiveid"),
                 )),
             ))
+        }
+        fn max_retries(&self) -> f64 {
+            0f64
         }
         fn rewrite_includes_only(&self) -> bool {
             false

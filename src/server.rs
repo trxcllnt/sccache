@@ -151,6 +151,7 @@ pub struct DistClientConfig {
     // From the static dist configuration
     scheduler_url: Option<config::HTTPUrl>,
     auth: config::DistAuth,
+    max_retries: f64,
     net: config::DistNetworking,
     cache_dir: PathBuf,
     toolchain_cache_size: u64,
@@ -206,6 +207,7 @@ impl DistClientContainer {
             pool: pool.clone(),
             scheduler_url: config.dist.scheduler_url.clone(),
             auth: config.dist.auth.clone(),
+            max_retries: config.dist.max_retries,
             net: config.dist.net.clone(),
             cache_dir: config.dist.cache_dir.clone(),
             toolchain_cache_size: config.dist.toolchain_cache_size,
@@ -269,7 +271,7 @@ impl DistClientContainer {
             DistClientState::Some(cfg, client) => (Arc::clone(client), cfg.scheduler_url.clone()),
         };
 
-        match client.do_get_status().await {
+        match client.get_status().await {
             Ok(res) => DistInfo::SchedulerStatus(scheduler_url.clone(), res),
             Err(_) => DistInfo::NotConnected(
                 scheduler_url.clone(),
@@ -370,6 +372,7 @@ impl DistClientContainer {
                     config.toolchain_cache_size,
                     &config.toolchains,
                     auth_token,
+                    config.max_retries,
                     config.rewrite_includes_only,
                     &config.net,
                 )
@@ -377,7 +380,7 @@ impl DistClientContainer {
                 let dist_client =
                     try_or_retry_later!(dist_client.context("failure during dist client creation"));
                 use crate::dist::Client;
-                match dist_client.do_get_status().await {
+                match dist_client.get_status().await {
                     Ok(res) => {
                         info!(
                             "Successfully created dist client with {:?} cores across {:?} servers",
@@ -970,6 +973,7 @@ where
                     pool: rt.clone(),
                     scheduler_url: None,
                     auth: config::DistAuth::Token { token: "".into() },
+                    max_retries: 0f64,
                     net: Default::default(),
                     cache_dir: "".into(),
                     toolchain_cache_size: 0,

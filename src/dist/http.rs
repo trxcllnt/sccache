@@ -285,12 +285,13 @@ mod client {
 
     pub struct Client {
         auth_token: String,
-        scheduler_url: reqwest::Url,
         client: Arc<Mutex<reqwest::Client>>,
+        max_retries: f64,
         pool: tokio::runtime::Handle,
-        tc_cache: Arc<cache::ClientToolchains>,
         rewrite_includes_only: bool,
+        scheduler_url: reqwest::Url,
         submit_toolchain_reqs: ResourceLoaderQueue<(Toolchain, PathBuf), SubmitToolchainResult>,
+        tc_cache: Arc<cache::ClientToolchains>,
     }
 
     impl Client {
@@ -302,6 +303,7 @@ mod client {
             cache_size: u64,
             toolchain_configs: &[config::DistToolchainConfig],
             auth_token: String,
+            max_retries: f64,
             rewrite_includes_only: bool,
             net: &config::DistNetworking,
         ) -> Result<Self> {
@@ -336,10 +338,14 @@ mod client {
                 auth_token: auth_token.clone(),
                 scheduler_url: scheduler_url.clone(),
                 client,
+                max_retries,
                 pool: pool.clone(),
                 tc_cache: Arc::new(client_toolchains),
                 submit_toolchain_reqs,
                 rewrite_includes_only,
+                scheduler_url: scheduler_url.clone(),
+                submit_toolchain_reqs,
+                tc_cache: Arc::new(client_toolchains),
             })
         }
     }
@@ -412,7 +418,7 @@ mod client {
             bincode_req_fut(req).await
         }
 
-        async fn do_get_status(&self) -> Result<SchedulerStatus> {
+        async fn get_status(&self) -> Result<SchedulerStatus> {
             let req = self
                 .client
                 .lock()
@@ -422,7 +428,7 @@ mod client {
             bincode_req_fut(req).await
         }
 
-        async fn do_submit_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
+        async fn put_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
             match self.tc_cache.get_toolchain(&tc) {
                 Ok(Some(toolchain_file)) => {
                     self.submit_toolchain_reqs
@@ -434,7 +440,7 @@ mod client {
             }
         }
 
-        async fn put_toolchain(
+        async fn put_toolchain_local(
             &self,
             compiler_path: PathBuf,
             weak_key: String,
@@ -449,6 +455,10 @@ mod client {
                     tc_cache.put_toolchain(&compiler_path, &weak_key, toolchain_packager)
                 })
                 .await?
+        }
+
+        fn max_retries(&self) -> f64 {
+            self.max_retries
         }
 
         fn rewrite_includes_only(&self) -> bool {

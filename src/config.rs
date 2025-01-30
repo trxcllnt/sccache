@@ -605,38 +605,41 @@ impl Default for DistNetworkingKeepalive {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct DistConfig {
     pub auth: DistAuth,
+    pub cache_dir: PathBuf,
+    // f64 to allow `max_retries = inf`, i.e. never fallback to local compile
+    pub max_retries: f64,
     pub net: DistNetworking,
+    pub rewrite_includes_only: bool,
     #[cfg(any(feature = "dist-client", feature = "dist-server"))]
     pub scheduler_url: Option<HTTPUrl>,
     #[cfg(not(any(feature = "dist-client", feature = "dist-server")))]
     pub scheduler_url: Option<String>,
-    pub cache_dir: PathBuf,
     pub toolchains: Vec<DistToolchainConfig>,
     pub toolchain_cache_size: u64,
-    pub rewrite_includes_only: bool,
 }
 
 impl Default for DistConfig {
     fn default() -> Self {
         Self {
             auth: Default::default(),
-            net: Default::default(),
-            scheduler_url: Default::default(),
             cache_dir: default_dist_cache_dir(),
+            max_retries: 0f64,
+            net: Default::default(),
+            rewrite_includes_only: false,
+            scheduler_url: Default::default(),
             toolchains: Default::default(),
             toolchain_cache_size: default_toolchain_cache_size(),
-            rewrite_includes_only: false,
         }
     }
 }
 
 // TODO: fields only pub for tests
-#[derive(Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
@@ -1049,7 +1052,7 @@ fn config_file(env_var: &str, leaf: &str) -> PathBuf {
     dirs.config_dir().join(leaf)
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Config {
     pub cache: Option<CacheType>,
     pub fallback_cache: DiskCacheConfig,
@@ -1067,6 +1070,10 @@ impl Config {
             .unwrap_or_default();
 
         let mut conf = Self::from_env_and_file_configs(env_conf, file_conf);
+
+        conf.dist.max_retries = number_from_env_var("SCCACHE_DIST_MAX_RETRIES")
+            .transpose()?
+            .unwrap_or(conf.dist.max_retries);
 
         conf.dist.net.connect_timeout = number_from_env_var("SCCACHE_DIST_CONNECT_TIMEOUT")
             .transpose()?
@@ -2044,7 +2051,10 @@ no_credentials = true
                 auth: DistAuth::Token {
                     token: "secrettoken".to_owned()
                 },
-                net: Default::default(),
+                cache_dir: PathBuf::from("/home/user/.cache/sccache-dist-client"),
+                rewrite_includes_only: false,
+                toolchains: vec![],
+                toolchain_cache_size: 5368709120,
                 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
                 scheduler_url: Some(
                     parse_http_url("http://1.2.3.4:10600")
@@ -2053,10 +2063,7 @@ no_credentials = true
                 ),
                 #[cfg(not(any(feature = "dist-client", feature = "dist-server")))]
                 scheduler_url: Some("http://1.2.3.4:10600".to_owned()),
-                cache_dir: PathBuf::from("/home/user/.cache/sccache-dist-client"),
-                toolchains: vec![],
-                toolchain_cache_size: 5368709120,
-                rewrite_includes_only: false,
+                ..Default::default()
             },
             server_startup_timeout_ms: Some(10000),
         }
