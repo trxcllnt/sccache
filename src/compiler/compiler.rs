@@ -839,48 +839,73 @@ where
         tc_archive = Some(archive_path);
     }
 
-    let (
-        NewJobResponse {
-            has_toolchain,
-            job_id,
-            timeout,
-        },
-        path_transformer,
-    ) = dist_client
-        .new_job(dist_toolchain.clone(), inputs_packager)
+    let (job_inputs, path_transformer) = pool
+        .spawn_blocking(move || -> Result<_> {
+            let mut job_inputs = vec![];
+            let mut compressor =
+                flate2::write::ZlibEncoder::new(&mut job_inputs, flate2::Compression::fast());
+            let path_transformer = inputs_packager
+                .write_inputs(&mut compressor)
+                .context("Could not write inputs for compilation")?;
+            compressor.flush().context("failed to flush compressor")?;
+            trace!(
+                "Compressed inputs from {} -> {}",
+                compressor.total_in(),
+                compressor.total_out()
+            );
+            compressor.finish().context("failed to finish compressor")?;
+            Ok((job_inputs, path_transformer))
+        })
+        .await??;
+
+    let NewJobResponse {
+        mut has_toolchain,
+        job_id,
+        timeout,
+    } = dist_client
+        .new_job(dist_toolchain.clone(), &job_inputs)
         .await?;
 
-    if !has_toolchain {
-        trace!(
-            "[{}]: Submitting toolchain `{}`",
-            out_pretty,
-            dist_toolchain.archive_id,
-        );
-        match dist_client
-            .do_submit_toolchain(dist_toolchain.clone())
-            .await
-            .map_err(|e| e.context("Could not submit toolchain"))?
-        {
-            dist::SubmitToolchainResult::Success => {
-                trace!(
-                    "[{out_pretty}]: Successfully sent toolchain `{}`",
-                    dist_toolchain.archive_id,
-                );
-            }
-            dist::SubmitToolchainResult::Error { message } => {
-                trace!(
-                    "[{out_pretty}]: Failed sending toolchain `{}`: {message}",
-                    dist_toolchain.archive_id,
-                );
-                return Err(anyhow!(message));
+    let dist_retry_limit = dist_client.max_retries() + 1.0;
+    let mut num_dist_attempts = 1.0f64;
+    let mut has_inputs = true;
+
+    let (output, server_id) = loop {
+        if !has_toolchain {
+            trace!(
+                "[{out_pretty}]: Submitting toolchain `{}`",
+                dist_toolchain.archive_id,
+            );
+            match dist_client
+                .put_toolchain(dist_toolchain.clone())
+                .await
+                .map_err(|e| e.context("Could not submit toolchain"))?
+            {
+                dist::SubmitToolchainResult::Success => {
+                    trace!(
+                        "[{out_pretty}]: Successfully sent toolchain `{}`",
+                        dist_toolchain.archive_id,
+                    );
+                }
+                dist::SubmitToolchainResult::Error { message } => {
+                    trace!(
+                        "[{out_pretty}]: Failed sending toolchain `{}`: {message}",
+                        dist_toolchain.archive_id,
+                    );
+                    // Break because we can't run a job without a toolchain
+                    break Err(anyhow!(message));
+                }
             }
         }
-    }
 
-    let dist_retry_limit = get_dist_retry_limit() + 1;
-    let mut num_dist_attempts = 1;
+        if !has_inputs {
+            trace!("[{out_pretty}]: Submitting job inputs");
+            dist_client
+                .put_job(&job_id, &job_inputs)
+                .await
+                .map_err(|e| e.context("Could not submit job inputs"))?;
+        }
 
-    let (jc, server_id) = loop {
         debug!("[{out_pretty}, {job_id}]: Running job");
 
         let job_result = dist_client
@@ -893,89 +918,135 @@ where
             )
             .await;
 
-        let err = match job_result {
-            Ok(dist::RunJobResponse::JobComplete { result, server_id }) => {
-                break Ok((result, server_id));
-            }
+        let job_result = match job_result {
+            // Success
+            Ok(dist::RunJobResponse::JobComplete { result, server_id }) => Ok((result, server_id)),
+            // Failure
             Ok(dist::RunJobResponse::JobFailed { reason }) => {
                 warn!("[{out_pretty}, {job_id}]: Distributed compilation job failed");
-                // JobFailed responses are not retry-able
+                // Break because JobFailed responses are not retryable
                 break Err(anyhow!(reason));
             }
+            // Missing inputs (S3 cleared, Redis rebooted, etc.)
+            // Loop back around without incrementing the retry counter.
+            Ok(dist::RunJobResponse::MissingInputs) => {
+                has_inputs = false;
+                continue;
+            }
+            // Missing toolchain (S3 cleared, Redis rebooted, etc.)
+            // Loop back around without incrementing the retry counter.
+            Ok(dist::RunJobResponse::MissingToolchain) => {
+                has_toolchain = false;
+                continue;
+            }
+            // Build server shutdown before job completed
+            Ok(dist::RunJobResponse::ServerShutdown { reason }) => {
+                warn!("[{out_pretty}, {job_id}]: Distributed compilation job terminated");
+                // Don't break because JobTerminated responses _are_ retryable
+                Err(anyhow!("Distributed compilation job terminated: {reason}"))
+            }
+            // Other (e.g. network, timeout, etc.) errors
             Err(err) => {
-                warn!("[{out_pretty}, {job_id}]: Could not run distributed compilation job:");
-                err
+                // Don't break because these errors can be retried
+                Err(anyhow!(err))
             }
         };
 
-        if num_dist_attempts < dist_retry_limit {
-            warn!(
-                "[{out_pretty}]: Distributed compilation error (attempt {num_dist_attempts} of {dist_retry_limit}), retrying: {err:#}"
-            );
-            num_dist_attempts += 1;
-            continue;
-        }
+        match job_result {
+            // Maybe retry errors
+            Err(err) => {
+                if num_dist_attempts < dist_retry_limit {
+                    warn!(
+                        "[{out_pretty}]: Distributed compilation error ({num_dist_attempts} of {dist_retry_limit}), retrying: {err:#}"
+                    );
+                    num_dist_attempts += 1.0;
+                    continue;
+                }
 
-        break Err(err);
+                warn!("[{out_pretty}, {job_id}]: Could not run distributed compilation job: {err}");
+
+                break Err(err);
+            }
+            Ok((result, server_id)) => {
+                // Don't need this in memory anymore
+                drop(job_inputs);
+
+                debug!(
+                    "[{out_pretty}, {job_id}]: Fetched {:?}",
+                    result
+                        .outputs
+                        .iter()
+                        .map(|(p, bs)| (p, bs.lens().to_string()))
+                        .collect::<Vec<_>>()
+                );
+
+                let mut output_paths: Vec<PathBuf> = vec![];
+
+                macro_rules! try_or_cleanup {
+                    ($v:expr) => {{
+                        match $v {
+                            Ok(v) => v,
+                            Err(e) => {
+                                // Do our best to clear up. We may end up deleting a file that we just wrote over
+                                // the top of, but it's better to clear up too much than too little
+                                for local_path in output_paths.iter() {
+                                    if let Err(e) = fs::remove_file(local_path) {
+                                        if e.kind() != io::ErrorKind::NotFound {
+                                            warn!("[{out_pretty}, {job_id}]: {e} while attempting to remove `{}`", local_path.display())
+                                        }
+                                    }
+                                }
+                                return Err(e)
+                            },
+                        }
+                    }};
+                }
+
+                for (path, output_data) in result.outputs {
+                    let len = output_data.lens().actual;
+                    let local_path =
+                        try_or_cleanup!(path_transformer.to_local(&path).with_context(|| format!(
+                            "[{out_pretty}, {job_id}]: unable to transform output path {path}"
+                        )));
+
+                    // Do this first so cleanup works correctly
+                    output_paths.push(local_path.clone());
+
+                    let mut file = try_or_cleanup!(File::create(&local_path).with_context(
+                        || format!("Failed to create output file {}", local_path.display())
+                    ));
+                    let count =
+                        try_or_cleanup!(io::copy(&mut output_data.into_reader(), &mut file)
+                            .with_context(|| format!(
+                                "Failed to write output to {}",
+                                local_path.display()
+                            )));
+
+                    assert!(count == len);
+                }
+
+                let extra_inputs = tc_archive.map(|p| vec![p]).unwrap_or(vec![]);
+                try_or_cleanup!(outputs_rewriter
+                    .handle_outputs(&path_transformer, &output_paths, &extra_inputs)
+                    .with_context(|| "Failed to rewrite outputs from compile"));
+
+                break Ok((result.output, server_id));
+            }
+        }
     }?;
 
-    debug!(
-        "[{out_pretty}, {job_id}]: Fetched {:?}",
-        jc.outputs
-            .iter()
-            .map(|(p, bs)| (p, bs.lens().to_string()))
-            .collect::<Vec<_>>()
-    );
+    // Inform the scheduler we've received and unpacked the result. This is its
+    // chance to clean up after the job.
+    //
+    // Intentionally ignore errors so we don't fail otherwise successful builds.
+    //
+    // It's possible a network error occurs and the scheduler isn't notified
+    // it should delete job artifacts. To mitigate this, sccache-dist servers
+    // should use storage backends that are configured to delete job artifacts
+    // after some reasonable time, like 3-24hrs.
+    let _ = dist_client.del_job(&job_id).await;
 
-    let mut output_paths: Vec<PathBuf> = vec![];
-    macro_rules! try_or_cleanup {
-        ($v:expr) => {{
-            match $v {
-                Ok(v) => v,
-                Err(e) => {
-                    // Do our best to clear up. We may end up deleting a file that we just wrote over
-                    // the top of, but it's better to clear up too much than too little
-                    for local_path in output_paths.iter() {
-                        if let Err(e) = fs::remove_file(local_path) {
-                            if e.kind() != io::ErrorKind::NotFound {
-                                warn!("[{out_pretty}, {job_id}]: {e} while attempting to remove `{}`", local_path.display())
-                            }
-                        }
-                    }
-                    return Err(e)
-                },
-            }
-        }};
-    }
-
-    for (path, output_data) in jc.outputs {
-        let len = output_data.lens().actual;
-        let local_path = try_or_cleanup!(path_transformer.to_local(&path).with_context(
-            || format!("[{out_pretty}, {job_id}]: unable to transform output path {path}")
-        ));
-        output_paths.push(local_path);
-        // Do this first so cleanup works correctly
-        let local_path = output_paths.last().expect("nothing in vec after push");
-
-        let mut file = try_or_cleanup!(File::create(local_path)
-            .with_context(|| format!("Failed to create output file {}", local_path.display())));
-        let count = try_or_cleanup!(io::copy(&mut output_data.into_reader(), &mut file)
-            .with_context(|| format!("Failed to write output to {}", local_path.display())));
-
-        assert!(count == len);
-    }
-    let extra_inputs = match tc_archive {
-        Some(p) => vec![p],
-        None => vec![],
-    };
-    try_or_cleanup!(outputs_rewriter
-        .handle_outputs(&path_transformer, &output_paths, &extra_inputs)
-        .with_context(|| "Failed to rewrite outputs from compile"));
-
-    Ok((
-        DistType::Ok(server_id),
-        std::process::Output::from(jc.output),
-    ))
+    Ok((DistType::Ok(server_id), std::process::Output::from(output)))
 }
 
 impl<T: CommandCreatorSync> Clone for Box<dyn CompilerHasher<T>> {
@@ -3080,8 +3151,8 @@ LLVM version: 6.0",
 #[cfg(feature = "dist-client")]
 mod test_dist {
     use crate::dist::{
-        self, CompileCommand, NewJobResponse, OutputData, PathTransformer, ProcessOutput,
-        RunJobResponse, SchedulerStatus, SubmitToolchainResult, Toolchain,
+        self, CompileCommand, NewJobResponse, OutputData, ProcessOutput, RunJobResponse,
+        SchedulerStatus, SubmitToolchainResult, Toolchain,
     };
     use crate::dist::{pkg, BuildResult};
     use async_trait::async_trait;
@@ -3100,17 +3171,19 @@ mod test_dist {
     }
     #[async_trait]
     impl dist::Client for ErrorPutToolchainClient {
-        async fn new_job(
-            &self,
-            _: Toolchain,
-            _: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(NewJobResponse, PathTransformer)> {
+        async fn new_job(&self, _: Toolchain, _: &[u8]) -> Result<NewJobResponse> {
             unreachable!()
         }
+        async fn put_job(&self, _: &str, _: &[u8]) -> Result<()> {
             unreachable!()
         }
-        async fn do_submit_toolchain(&self, _: Toolchain) -> Result<SubmitToolchainResult> {
+        async fn del_job(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
         async fn get_status(&self) -> Result<SchedulerStatus> {
+            unreachable!()
+        }
+        async fn put_toolchain(&self, _: Toolchain) -> Result<SubmitToolchainResult> {
             unreachable!()
         }
         async fn run_job(
@@ -3157,13 +3230,15 @@ mod test_dist {
     }
     #[async_trait]
     impl dist::Client for ErrorAllocJobClient {
-        async fn new_job(
-            &self,
-            tc: Toolchain,
-            _: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(NewJobResponse, PathTransformer)> {
+        async fn new_job(&self, tc: Toolchain, _: &[u8]) -> Result<NewJobResponse> {
             assert_eq!(self.tc, tc);
             Err(anyhow!("MOCK: alloc job failure"))
+        }
+        async fn put_job(&self, _: &str, _: &[u8]) -> Result<()> {
+            unreachable!()
+        }
+        async fn del_job(&self, _: &str) -> Result<()> {
+            Ok(())
         }
         async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!()
@@ -3218,27 +3293,23 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for ErrorSubmitToolchainClient {
-        async fn new_job(
-            &self,
-            tc: Toolchain,
-            inputs_packager: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(NewJobResponse, PathTransformer)> {
+        async fn new_job(&self, tc: Toolchain, _: &[u8]) -> Result<NewJobResponse> {
             assert!(!self
                 .has_started
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
             assert_eq!(self.tc, tc);
 
-            let mut inputs = vec![];
-            let path_transformer = inputs_packager.write_inputs(&mut inputs).unwrap();
-
-            Ok((
-                NewJobResponse {
-                    has_toolchain: false,
-                    job_id: "job_id".into(),
-                    timeout: 10,
-                },
-                path_transformer,
-            ))
+            Ok(NewJobResponse {
+                has_toolchain: false,
+                job_id: "job_id".into(),
+                timeout: 10,
+            })
+        }
+        async fn put_job(&self, _: &str, _: &[u8]) -> Result<()> {
+            unreachable!()
+        }
+        async fn del_job(&self, _: &str) -> Result<()> {
+            Ok(())
         }
         async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!("fn do_get_status is not used for this test. qed")
@@ -3294,27 +3365,23 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for ErrorRunJobClient {
-        async fn new_job(
-            &self,
-            tc: Toolchain,
-            inputs_packager: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(NewJobResponse, PathTransformer)> {
+        async fn new_job(&self, tc: Toolchain, _: &[u8]) -> Result<NewJobResponse> {
             assert!(!self
                 .has_started
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
             assert_eq!(self.tc, tc);
 
-            let mut inputs = vec![];
-            let path_transformer = inputs_packager.write_inputs(&mut inputs).unwrap();
-
-            Ok((
-                NewJobResponse {
-                    has_toolchain: false,
-                    job_id: "job_id".into(),
-                    timeout: 10,
-                },
-                path_transformer,
-            ))
+            Ok(NewJobResponse {
+                has_toolchain: false,
+                job_id: "job_id".into(),
+                timeout: 10,
+            })
+        }
+        async fn put_job(&self, _: &str, _: &[u8]) -> Result<()> {
+            unreachable!()
+        }
+        async fn del_job(&self, _: &str) -> Result<()> {
+            Ok(())
         }
         async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!()
@@ -3383,27 +3450,22 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for OneshotClient {
-        async fn new_job(
-            &self,
-            tc: Toolchain,
-            inputs_packager: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(NewJobResponse, PathTransformer)> {
+        async fn new_job(&self, tc: Toolchain, _: &[u8]) -> Result<NewJobResponse> {
             assert!(!self
                 .has_started
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
             assert_eq!(self.tc, tc);
-
-            let mut inputs = vec![];
-            let path_transformer = inputs_packager.write_inputs(&mut inputs).unwrap();
-
-            Ok((
-                NewJobResponse {
-                    has_toolchain: false,
-                    job_id: "job_id".into(),
-                    timeout: 10,
-                },
-                path_transformer,
-            ))
+            Ok(NewJobResponse {
+                has_toolchain: false,
+                job_id: "job_id".into(),
+                timeout: 10,
+            })
+        }
+        async fn put_job(&self, _: &str, _: &[u8]) -> Result<()> {
+            unreachable!()
+        }
+        async fn del_job(&self, _: &str) -> Result<()> {
+            Ok(())
         }
         async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!("fn do_get_status is not used for this test. qed")

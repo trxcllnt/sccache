@@ -479,7 +479,6 @@ pub struct NewJobResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunJobRequest {
-    pub job_id: String,
     pub command: CompileCommand,
     pub outputs: Vec<String>,
     pub toolchain: Toolchain,
@@ -488,12 +487,17 @@ pub struct RunJobRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum RunJobResponse {
-    JobFailed {
-        reason: String,
-    },
+    MissingInputs,
+    MissingToolchain,
     JobComplete {
         result: BuildResult,
         server_id: String,
+    },
+    JobFailed {
+        reason: String,
+    },
+    ServerShutdown {
+        reason: String,
     },
 }
 
@@ -537,6 +541,7 @@ pub struct ServerStatus {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerDetails {
+    pub alive: bool,
     pub id: String,
     // #[serde(flatten)]
     pub info: ServerStats,
@@ -587,12 +592,20 @@ pub trait SchedulerService: Send + Sync {
         toolchain_reader: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<SubmitToolchainResult>;
 
-    async fn new_job(&self, request: NewJobRequest) -> Result<NewJobResponse>;
-    async fn run_job(&self, request: RunJobRequest) -> Result<RunJobResponse>;
-    async fn job_failure(&self, job_id: &str, reason: &str, info: ServerDetails) -> Result<()>;
-    async fn job_success(&self, job_id: &str, info: ServerDetails) -> Result<()>;
+    async fn del_toolchain(&self, toolchain: Toolchain) -> Result<()>;
 
-    async fn receive_status(&self, info: ServerDetails, job_status: Option<bool>) -> Result<()>;
+    async fn new_job(&self, request: NewJobRequest) -> Result<NewJobResponse>;
+    async fn run_job(&self, job_id: &str, request: RunJobRequest) -> Result<RunJobResponse>;
+    async fn put_job(
+        &self,
+        job_id: &str,
+        inputs: Pin<&mut (dyn futures::AsyncRead + Send)>,
+    ) -> Result<()>;
+    async fn del_job(&self, job_id: &str) -> Result<()>;
+    async fn job_failure(&self, job_id: &str, reason: &str, server: ServerDetails) -> Result<()>;
+    async fn job_success(&self, job_id: &str, server: ServerDetails) -> Result<()>;
+
+    async fn receive_status(&self, server: ServerDetails, job_status: Option<bool>) -> Result<()>;
 }
 
 #[cfg(feature = "dist-server")]
@@ -634,11 +647,11 @@ pub trait BuilderIncoming: Send + Sync {
 #[async_trait]
 pub trait Client: Send + Sync {
     // To Scheduler
-    async fn new_job(
-        &self,
-        toolchain: Toolchain,
-        inputs_packager: Box<dyn pkg::InputsPackager>,
-    ) -> Result<(NewJobResponse, PathTransformer)>;
+    async fn new_job(&self, toolchain: Toolchain, inputs: &[u8]) -> Result<NewJobResponse>;
+    // To Scheduler
+    async fn put_job(&self, job_id: &str, inputs: &[u8]) -> Result<()>;
+    // To Scheduler
+    async fn del_job(&self, job_id: &str) -> Result<()>;
     // To Scheduler
     async fn run_job(
         &self,

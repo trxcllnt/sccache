@@ -290,6 +290,33 @@ mod internal {
         }
     }
 
+    struct RequestBodyAsyncRead(Box<dyn futures::AsyncRead + Send + Unpin>);
+
+    #[async_trait]
+    impl<S> FromRequest<S> for RequestBodyAsyncRead
+    where
+        S: Send + Sync,
+    {
+        type Rejection = Response;
+
+        async fn from_request(
+            req: Request,
+            _state: &S,
+        ) -> std::result::Result<Self, Self::Rejection> {
+            // Convert the request body stream into an `AsyncRead`
+            let reader = StreamReader::new(
+                req.into_body()
+                    .into_data_stream()
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err)),
+            )
+            .compat();
+
+            Ok(Self(
+                Box::new(reader) as Box<dyn futures::AsyncRead + Send + Unpin>
+            ))
+        }
+    }
+
     struct SchedulerState {
         service: Arc<dyn SchedulerService>,
         // Test whether clients are permitted to use the scheduler
@@ -331,6 +358,12 @@ mod internal {
                         },
                     ),
                 )
+
+                //
+                // TOOLCHAIN OPERATIONS
+                //
+
+                // HEAD
                 .route(
                     "/api/v2/toolchain/:archive_id",
                     routing::head(
@@ -346,6 +379,7 @@ mod internal {
                         },
                     ),
                 )
+                // PUT
                 .route(
                     "/api/v2/toolchain/:archive_id",
                     routing::put(
@@ -356,21 +390,11 @@ mod internal {
                          uri: Uri,
                          Extension(state): Extension<Arc<SchedulerState>>,
                          Path(archive_id): Path<String>,
-                         request: Request| async move {
-                            // Convert the request body stream into an `AsyncRead`
-                            let toolchain_reader = StreamReader::new(
-                                request
-                                    .into_body()
-                                    .into_data_stream()
-                                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err)),
-                            )
-                            .compat();
-
-                            pin_mut!(toolchain_reader);
-
+                         RequestBodyAsyncRead(toolchain): RequestBodyAsyncRead| async move {
+                            pin_mut!(toolchain);
                             state
                                 .service
-                                .put_toolchain(Toolchain { archive_id }, toolchain_reader)
+                                .put_toolchain(Toolchain { archive_id }, toolchain)
                                 .await
                                 .map_or_else(
                                     anyhow_to_response(method, uri),
@@ -379,6 +403,34 @@ mod internal {
                         },
                     ),
                 )
+                // DELETE
+                .route(
+                    "/api/v2/toolchain/:archive_id",
+                    routing::delete(
+                        |// Authenticate the client bearer token first
+                         _: AuthenticatedClient,
+                         headers: HeaderMap,
+                         method: Method,
+                         uri: Uri,
+                         Extension(state): Extension<Arc<SchedulerState>>,
+                         Path(archive_id): Path<String>| async move {
+                            state
+                                .service
+                                .del_toolchain(Toolchain { archive_id })
+                                .await
+                                .map_or_else(
+                                    anyhow_to_response(method, uri),
+                                    result_to_response(headers),
+                                )
+                        },
+                    ),
+                )
+
+                //
+                // JOB OPERATIONS
+                //
+
+                // CREATE
                 .route(
                     "/api/v2/jobs/new",
                     routing::post(
@@ -396,8 +448,29 @@ mod internal {
                         },
                     ),
                 )
+                // PUT
                 .route(
-                    "/api/v2/job/:job_id/run",
+                    "/api/v2/job/:job_id",
+                    routing::put(
+                        |// Authenticate the client bearer token first
+                         _: AuthenticatedClient,
+                         headers: HeaderMap,
+                         method: Method,
+                         uri: Uri,
+                         Extension(state): Extension<Arc<SchedulerState>>,
+                         Path(job_id): Path<String>,
+                         RequestBodyAsyncRead(inputs): RequestBodyAsyncRead| async move {
+                            pin_mut!(inputs);
+                            state.service.put_job(&job_id, inputs).await.map_or_else(
+                                anyhow_to_response(method, uri),
+                                result_to_response(headers),
+                            )
+                        },
+                    ),
+                )
+                // POST
+                .route(
+                    "/api/v2/job/:job_id",
                     routing::post(
                         |// Authenticate the client bearer token first
                          _: AuthenticatedClient,
@@ -407,14 +480,28 @@ mod internal {
                          Extension(state): Extension<Arc<SchedulerState>>,
                          Path(job_id): Path<String>,
                          Bincode(req): Bincode<RunJobRequest>| async move {
-                            if job_id != req.job_id {
-                                Ok((StatusCode::BAD_REQUEST).into_response())
-                            } else {
-                                state.service.run_job(req).await.map_or_else(
-                                    anyhow_to_response(method, uri),
-                                    result_to_response(headers),
-                                )
-                            }
+                            state.service.run_job(&job_id, req).await.map_or_else(
+                                anyhow_to_response(method, uri),
+                                result_to_response(headers),
+                            )
+                        },
+                    ),
+                )
+                // DELETE
+                .route(
+                    "/api/v2/job/:job_id",
+                    routing::delete(
+                        |// Authenticate the client bearer token first
+                         _: AuthenticatedClient,
+                         headers: HeaderMap,
+                         method: Method,
+                         uri: Uri,
+                         Extension(state): Extension<Arc<SchedulerState>>,
+                         Path(job_id): Path<String>| async move {
+                            state.service.del_job(&job_id).await.map_or_else(
+                                anyhow_to_response(method, uri),
+                                result_to_response(headers),
+                            )
                         },
                     ),
                 )

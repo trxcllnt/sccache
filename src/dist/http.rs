@@ -222,10 +222,20 @@ pub mod urls {
             .join("/api/v2/jobs/new")
             .expect("failed to create new job url")
     }
+    pub fn scheduler_put_job(scheduler_url: &reqwest::Url, job_id: &str) -> reqwest::Url {
+        scheduler_url
+            .join(&format!("/api/v2/job/{job_id}"))
+            .expect("failed to create put job url")
+    }
     pub fn scheduler_run_job(scheduler_url: &reqwest::Url, job_id: &str) -> reqwest::Url {
         scheduler_url
-            .join(&format!("/api/v2/job/{job_id}/run"))
+            .join(&format!("/api/v2/job/{job_id}"))
             .expect("failed to create run job url")
+    }
+    pub fn scheduler_del_job(scheduler_url: &reqwest::Url, job_id: &str) -> reqwest::Url {
+        scheduler_url
+            .join(&format!("/api/v2/job/{job_id}"))
+            .expect("failed to create put job url")
     }
     pub fn scheduler_submit_toolchain(
         scheduler_url: &reqwest::Url,
@@ -260,10 +270,10 @@ mod server {
 mod client {
     use super::super::cache;
     use crate::config;
-    use crate::dist::pkg::{InputsPackager, ToolchainPackager};
+    use crate::dist::pkg::ToolchainPackager;
     use crate::dist::{
-        self, CompileCommand, NewJobRequest, NewJobResponse, PathTransformer, RunJobRequest,
-        RunJobResponse, SchedulerStatus, SubmitToolchainResult, Toolchain,
+        self, CompileCommand, NewJobRequest, NewJobResponse, RunJobRequest, RunJobResponse,
+        SchedulerStatus, SubmitToolchainResult, Toolchain,
     };
     use crate::util::new_reqwest_client;
 
@@ -273,10 +283,7 @@ mod client {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use flate2::write::ZlibEncoder as ZlibWriteEncoder;
-    use flate2::Compression;
     use reqwest::Body;
-    use std::io::Write;
     use std::path::{Path, PathBuf};
 
     use super::common::{bincode_req_fut, ReqwestRequestBuilderExt, ResourceLoaderQueue};
@@ -336,12 +343,9 @@ mod client {
 
             Ok(Self {
                 auth_token: auth_token.clone(),
-                scheduler_url: scheduler_url.clone(),
                 client,
                 max_retries,
                 pool: pool.clone(),
-                tc_cache: Arc::new(client_toolchains),
-                submit_toolchain_reqs,
                 rewrite_includes_only,
                 scheduler_url: scheduler_url.clone(),
                 submit_toolchain_reqs,
@@ -352,45 +356,31 @@ mod client {
 
     #[async_trait]
     impl dist::Client for Client {
-        async fn new_job(
-            &self,
-            toolchain: Toolchain,
-            inputs_packager: Box<dyn InputsPackager>,
-        ) -> Result<(NewJobResponse, PathTransformer)> {
-            let (req, path_transformer) = self
-                .pool
-                .spawn_blocking(move || -> Result<_> {
-                    let mut inputs = vec![];
-                    let path_transformer;
-                    {
-                        let mut compressor =
-                            ZlibWriteEncoder::new(&mut inputs, Compression::fast());
-                        path_transformer = inputs_packager
-                            .write_inputs(&mut compressor)
-                            .context("Could not write inputs for compilation")?;
-                        compressor.flush().context("failed to flush compressor")?;
-                        trace!(
-                            "Compressed inputs from {} -> {}",
-                            compressor.total_in(),
-                            compressor.total_out()
-                        );
-                        compressor.finish().context("failed to finish compressor")?;
-                    }
-                    Ok((NewJobRequest { inputs, toolchain }, path_transformer))
-                })
-                .await??;
-
+        async fn new_job(&self, toolchain: Toolchain, inputs: &[u8]) -> Result<NewJobResponse> {
             let req = self
                 .client
                 .lock()
                 .await
                 .post(urls::scheduler_new_job(&self.scheduler_url))
                 .bearer_auth(self.auth_token.clone())
-                .bincode(&req)?;
+                .bincode(&NewJobRequest {
+                    inputs: inputs.to_vec(),
+                    toolchain,
+                })?;
 
-            bincode_req_fut(req)
+            bincode_req_fut(req).await
+        }
+
+        async fn put_job(&self, job_id: &str, inputs: &[u8]) -> Result<()> {
+            let req = self
+                .client
+                .lock()
                 .await
-                .map(|res| (res, path_transformer))
+                .put(urls::scheduler_put_job(&self.scheduler_url, job_id))
+                .bearer_auth(self.auth_token.clone())
+                .body(inputs.to_vec());
+
+            bincode_req_fut(req).await
         }
 
         async fn run_job(
@@ -409,11 +399,21 @@ mod client {
                 .bearer_auth(self.auth_token.clone())
                 .timeout(timeout)
                 .bincode(&RunJobRequest {
-                    job_id: job_id.to_owned(),
                     command,
                     outputs,
                     toolchain,
                 })?;
+
+            bincode_req_fut(req).await
+        }
+
+        async fn del_job(&self, job_id: &str) -> Result<()> {
+            let req = self
+                .client
+                .lock()
+                .await
+                .delete(urls::scheduler_del_job(&self.scheduler_url, job_id))
+                .bearer_auth(self.auth_token.clone());
 
             bincode_req_fut(req).await
         }
