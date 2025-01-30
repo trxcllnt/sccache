@@ -8,7 +8,7 @@ use celery::prelude::*;
 use celery::protocol::MessageContentType;
 use futures::lock::Mutex;
 use futures::{pin_mut, AsyncReadExt, FutureExt, TryFutureExt};
-use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use sccache::config::MetricsConfig;
 
 use std::collections::HashMap;
@@ -146,6 +146,55 @@ fn to_scheduler_queue(id: &str) -> String {
     queue_name_with_env_info(&format!("scheduler-{id}"))
 }
 
+fn init_metrics(
+    config: MetricsConfig,
+    labels: &[(&str, &str)],
+) -> Result<(MetricsConfig, PrometheusHandle)> {
+    let builder = labels
+        .iter()
+        .fold(PrometheusBuilder::new(), |builder, &(key, val)| {
+            builder.add_global_label(key, val)
+        });
+
+    let (recorder, exporter) = match config {
+        MetricsConfig::ListenAddr { ref addr } => {
+            let addr = addr.unwrap_or(SocketAddr::from_str("0.0.0.0:9000")?);
+            tracing::info!("Listening for metrics at {addr}");
+            builder.with_http_listener(addr).build()?
+        }
+        MetricsConfig::ListenPath { ref path } => {
+            let path = path.clone().unwrap_or("/metrics".to_owned());
+            tracing::info!("Listening for metrics at {path}");
+            builder.build()?
+        }
+        MetricsConfig::Gateway {
+            ref endpoint,
+            interval,
+            ref username,
+            ref password,
+        } => {
+            tracing::info!("Pushing metrics to {endpoint} every {interval}ms");
+            builder
+                .set_bucket_count(std::num::NonZeroU32::new(3).unwrap())
+                .with_push_gateway(
+                    endpoint,
+                    Duration::from_millis(interval),
+                    username.clone(),
+                    password.clone(),
+                )?
+                .build()?
+        }
+    };
+
+    let handle = recorder.handle();
+
+    metrics::set_global_recorder(recorder)?;
+
+    tokio::spawn(exporter);
+
+    Ok((config, handle))
+}
+
 async fn celery_app(
     app_name: &str,
     broker_uri: &str,
@@ -195,12 +244,6 @@ fn run(command: Command) -> Result<()> {
             scheduler_id,
             toolchains,
         }) => {
-            let metric_labels = vec![
-                ("env".into(), env_info()),
-                ("type".into(), "scheduler".into()),
-                ("scheduler_id".into(), scheduler_id.clone()),
-            ];
-
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
@@ -220,6 +263,20 @@ fn run(command: Command) -> Result<()> {
             .context("Failed to initialize toolchain storage")?;
 
             runtime.block_on(async move {
+                let metrics = metrics
+                    .ok_or(anyhow!(""))
+                    .and_then(|config| {
+                        init_metrics(
+                            config,
+                            &[
+                                ("env", &env_info()),
+                                ("type", "scheduler"),
+                                ("scheduler_id", &scheduler_id),
+                            ],
+                        )
+                    })
+                    .ok();
+
                 // Verify read/write access to jobs storage
                 match jobs_storage.check().await {
                     Ok(sccache::cache::CacheMode::ReadWrite) => {}
@@ -270,7 +327,6 @@ fn run(command: Command) -> Result<()> {
 
                 let scheduler = Arc::new(Scheduler::new(
                     job_time_limit,
-                    metric_labels.clone(),
                     to_this_scheduler.clone(),
                     task_queue.clone(),
                     jobs_storage,
@@ -309,6 +365,8 @@ fn run(command: Command) -> Result<()> {
 
                 task_queue.display_pretty().await;
 
+                tracing::info!("sccache: Scheduler `{scheduler_id}` initialized");
+
                 daemonize()?;
 
                 let queues = [to_this_scheduler.as_str(), to_schedulers.as_str()];
@@ -339,12 +397,6 @@ fn run(command: Command) -> Result<()> {
             toolchain_cache_size,
             toolchains,
         }) => {
-            let metric_labels = vec![
-                ("env".into(), env_info()),
-                ("type".into(), "server".into()),
-                ("server_id".into(), server_id.clone()),
-            ];
-
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
@@ -364,6 +416,18 @@ fn run(command: Command) -> Result<()> {
             .context("Failed to initialize toolchain storage")?;
 
             runtime.block_on(async move {
+
+                if let Some(config) = metrics {
+                    let _ = init_metrics(
+                        config,
+                        &[
+                            ("env", &env_info()),
+                            ("type", "server"),
+                            ("server_id", &server_id),
+                        ],
+                    )?;
+                }
+
                 // Verify read/write access to jobs storage
                 match jobs_storage.check().await {
                     Ok(sccache::cache::CacheMode::ReadWrite) => {}
@@ -382,7 +446,6 @@ fn run(command: Command) -> Result<()> {
                     &cache_dir.join("tc"),
                     toolchain_cache_size,
                     toolchains_storage,
-                    metric_labels.clone(),
                 );
 
                 let broker_uri = message_broker_uri(message_broker)?;
@@ -439,7 +502,7 @@ fn run(command: Command) -> Result<()> {
                 };
 
                 let server = Arc::new(Server::new(
-                    server_id,
+                    server_id.clone(),
                     dist::ServerStats {
                         num_cpus,
                         occupancy,
@@ -447,7 +510,6 @@ fn run(command: Command) -> Result<()> {
                         ..Default::default()
                     },
                     job_queue.clone(),
-                    metric_labels.clone(),
                     builder,
                     task_queue.clone(),
                     jobs_storage,
@@ -456,20 +518,6 @@ fn run(command: Command) -> Result<()> {
 
                 SERVER.set(server.clone()).map_err(|err| anyhow!("{err}"))?;
 
-                if let Some(metrics) = metrics {
-                    let builder = PrometheusBuilder::new();
-                    match metrics {
-                        MetricsConfig::Listen { addr, .. } => {
-                            let addr = addr.unwrap_or(SocketAddr::from_str("0.0.0.0:9000")?);
-                            tracing::info!("Listening for metrics at {addr}");
-                            builder.with_http_listener(addr).install()?;
-                        },
-                        MetricsConfig::Gateway { endpoint, interval, username, password } => {
-                            tracing::info!("Pushing metrics to {endpoint} every {interval}ms");
-                            builder.with_push_gateway(endpoint, Duration::from_millis(interval), username, password)?.install()?;
-                        }
-                    };
-                }
                 task_queue.display_pretty().await;
 
                 tracing::info!("sccache: Server `{server_id}` initialized to run {occupancy} parallel build jobs and prefetch up to {pre_fetch} job(s) in the background");
@@ -540,7 +588,6 @@ pub struct Scheduler {
     jobs_storage: Arc<dyn sccache::cache::Storage>,
     jobs: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<RunJobResponse>>>>,
     // jobs_storage_queue: Arc<tokio::sync::Semaphore>,
-    metric_labels: Vec<(String, String)>,
     // toolchains_storage_queue: Arc<tokio::sync::Semaphore>,
     queue_name: String,
     servers: Arc<Mutex<HashMap<String, ServerInfo>>>,
@@ -551,7 +598,6 @@ pub struct Scheduler {
 impl Scheduler {
     pub fn new(
         job_time_limit: u32,
-        metric_labels: Vec<(String, String)>,
         to_this_scheduler_queue: String,
         task_queue: Arc<celery::Celery>,
         jobs_storage: Arc<dyn sccache::cache::Storage>,
@@ -563,7 +609,6 @@ impl Scheduler {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             // Only load up to 32 jobs concurrently
             // jobs_storage_queue: Arc::new(tokio::sync::Semaphore::new(32)),
-            metric_labels,
             // Only load up to 32 toolchains concurrently
             // toolchains_storage_queue: Arc::new(tokio::sync::Semaphore::new(32)),
             servers: Arc::new(Mutex::new(HashMap::new())),
@@ -581,53 +626,26 @@ impl Scheduler {
     }
 
     async fn has_job_inputs(&self, job_id: &str) -> bool {
-        // // Guard loading until we get a slot in the network queue
-        // let start = Instant::now();
-        // let _ = self.jobs_storage_queue.acquire().await;
-        // // Record has_job_inputs wait time
-        // metrics::histogram!("sccache_scheduler_has_job_inputs_wait_time_seconds", &self.metric_labels)
-        //     .record(start.elapsed().as_secs_f64());
-
         let start = Instant::now();
         let res = self.jobs_storage.has(&job_inputs_key(job_id)).await;
-        // Record has_job_inputs load time
-        metrics::histogram!(
-            "sccache_scheduler_has_job_inputs_time_seconds",
-            &self.metric_labels
-        )
-        .record(start.elapsed().as_secs_f64());
+        // Record has_job_inputs time
+        metrics::histogram!("sccache::scheduler::has_job_inputs_time")
+            .record(start.elapsed().as_secs_f64());
 
         res
     }
 
     async fn has_job_result(&self, job_id: &str) -> bool {
-        // // Guard loading until we get a slot in the network queue
-        // let start = Instant::now();
-        // let _ = self.jobs_storage_queue.acquire().await;
-        // // Record has_job_result wait time
-        // metrics::histogram!("sccache_scheduler_has_job_result_wait_time_seconds", &self.metric_labels)
-        //     .record(start.elapsed().as_secs_f64());
-
         let start = Instant::now();
         let res = self.jobs_storage.has(&job_result_key(job_id)).await;
-        // Record has_job_result load time
-        metrics::histogram!(
-            "sccache_scheduler_has_job_result_time_seconds",
-            &self.metric_labels
-        )
-        .record(start.elapsed().as_secs_f64());
+        // Record has_job_result time
+        metrics::histogram!("sccache::scheduler::has_job_result_time")
+            .record(start.elapsed().as_secs_f64());
 
         res
     }
 
     async fn get_job_result(&self, job_id: &str) -> Result<RunJobResponse> {
-        // // Guard loading until we get a slot in the network queue
-        // let start = Instant::now();
-        // let job_slot = self.jobs_storage_queue.acquire().await;
-        // // Record has_job_result wait time
-        // metrics::histogram!("sccache_scheduler_get_job_result_wait_time_seconds", &self.metric_labels)
-        //     .record(start.elapsed().as_secs_f64());
-
         // Retrieve the result
         let start = Instant::now();
         let mut reader = self
@@ -644,13 +662,19 @@ impl Scheduler {
             tracing::warn!("[get_job_result({job_id})]: Error reading stream: {err:?}");
             err
         })?;
-        // Record get_job_result load time
-        metrics::histogram!(
-            "sccache_scheduler_get_job_result_time_seconds",
-            &self.metric_labels
-        )
-        .record(start.elapsed().as_secs_f64());
 
+        // Deserialize the result
+        let res = bincode_deserialize(result).await.map_err(|err| {
+            tracing::warn!("[get_job_result({job_id})]: Error reading result: {err:?}");
+            err
+        });
+
+        // Record get_job_result time
+        metrics::histogram!("sccache::scheduler::get_job_result_time")
+            .record(start.elapsed().as_secs_f64());
+
+        res
+    }
         // Delete the inputs
         let start = Instant::now();
         let _ = self
@@ -662,12 +686,9 @@ impl Scheduler {
             })
             .await;
 
-        // Record del_job_inputs load time
-        metrics::histogram!(
-            "sccache_scheduler_del_job_inputs_time_seconds",
-            &self.metric_labels
-        )
-        .record(start.elapsed().as_secs_f64());
+        // Record del_job_inputs time
+        metrics::histogram!("sccache::scheduler::del_job_inputs_time")
+            .record(start.elapsed().as_secs_f64());
 
         // Delete the result
         let start = Instant::now();
@@ -680,15 +701,9 @@ impl Scheduler {
             })
             .await;
 
-        // Record del_job_result load time
-        metrics::histogram!(
-            "sccache_scheduler_del_job_result_time_seconds",
-            &self.metric_labels
-        )
-        .record(start.elapsed().as_secs_f64());
-
-        // // Drop the lock
-        // drop(job_slot);
+        // Record del_job_result time
+        metrics::histogram!("sccache::scheduler::del_job_result_time")
+            .record(start.elapsed().as_secs_f64());
 
         // Deserialize and return the result
         bincode_deserialize(result).await.map_err(|err| {
@@ -698,13 +713,6 @@ impl Scheduler {
     }
 
     async fn put_job_inputs(&self, job_id: &str, inputs: &[u8]) -> Result<()> {
-        // // Guard storing until we get a slot in the network queue
-        // let start = Instant::now();
-        // let _ = self.jobs_storage_queue.acquire().await;
-        // // Record put_job_inputs wait time
-        // metrics::histogram!("sccache_scheduler_put_job_inputs_wait_time_seconds", &self.metric_labels)
-        //     .record(start.elapsed().as_secs_f64());
-
         let start = Instant::now();
         let reader = futures::io::AllowStdIo::new(inputs.reader());
         pin_mut!(reader);
@@ -715,12 +723,10 @@ impl Scheduler {
                 tracing::warn!("[put_job_inputs({job_id})]: Error writing stream: {err:?}");
                 err
             })?;
-        // Record put_job_inputs load time
-        metrics::histogram!(
-            "sccache_scheduler_put_job_inputs_time_seconds",
-            &self.metric_labels
-        )
-        .record(start.elapsed().as_secs_f64());
+
+        // Record put_job_inputs time
+        metrics::histogram!("sccache::scheduler::put_job_inputs_time")
+            .record(start.elapsed().as_secs_f64());
 
         Ok(())
     }
@@ -776,12 +782,6 @@ impl SchedulerService for Scheduler {
         toolchain: Toolchain,
         toolchain_reader: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<SubmitToolchainResult> {
-        // let start = Instant::now();
-        // // Guard storing until we get a slot in the network queue
-        // let _ = self.toolchains_storage_queue.acquire().await;
-        // metrics::histogram!("sccache_scheduler_put_toolchain_wait_time_seconds", &self.metric_labels)
-        //     .record(start.elapsed().as_secs_f64());
-
         let start = Instant::now();
         // Upload toolchain to toolchains storage (S3, GCS, etc.)
         let res = self
@@ -793,15 +793,12 @@ impl SchedulerService for Scheduler {
             .map_err(|err| {
                 tracing::error!("[put_toolchain({})]: {err:?}", toolchain.archive_id);
                 err
-            })?;
+            });
 
-        metrics::histogram!(
-            "sccache_scheduler_put_toolchain_time_seconds",
-            &self.metric_labels
-        )
-        .record(start.elapsed().as_secs_f64());
+        metrics::histogram!("sccache::scheduler::put_toolchain_time")
+            .record(start.elapsed().as_secs_f64());
 
-        Ok(res)
+        res
     }
 
     async fn new_job(&self, request: NewJobRequest) -> Result<NewJobResponse> {
@@ -942,7 +939,6 @@ pub struct Server {
     jobs_storage: Arc<dyn sccache::cache::Storage>,
     job_queue: Arc<tokio::sync::Semaphore>,
     // jobs_storage_queue: Arc<tokio::sync::Semaphore>,
-    metric_labels: Vec<(String, String)>,
     report_interval: Duration,
     schedulers: Arc<Mutex<HashMap<String, Instant>>>,
     server_id: String,
@@ -958,7 +954,6 @@ impl Server {
         server_id: String,
         stats: dist::ServerStats,
         job_queue: Arc<tokio::sync::Semaphore>,
-        metric_labels: Vec<(String, String)>,
         builder: Arc<dyn BuilderIncoming>,
         task_queue: Arc<celery::Celery>,
         jobs_storage: Arc<dyn sccache::cache::Storage>,
@@ -971,7 +966,6 @@ impl Server {
             job_queue,
             // Only load up to 16 job inputs concurrently
             // jobs_storage_queue: Arc::new(tokio::sync::Semaphore::new(16)),
-            metric_labels,
             // Report status at least every 30s
             report_interval: Duration::from_secs(30),
             schedulers: Default::default(),
@@ -1011,7 +1005,6 @@ impl Server {
     }
 
     fn state_to_details(&self, state: &mut ServerState) -> ServerDetails {
-        // let start = Instant::now();
         let running = (self.stats.occupancy as i64 - self.job_queue.available_permits() as i64)
             .max(0) as usize;
         let fetched = state.jobs.len() - running;
@@ -1049,28 +1042,6 @@ impl Server {
             },
             jobs: dist::JobStats { fetched, running },
         }
-
-        // let details = ServerDetails {
-        //     id: self.server_id.clone(),
-        //     info: dist::ServerStats {
-        //         cpu_usage,
-        //         mem_avail,
-        //         mem_total,
-        //         num_cpus: self.stats.num_cpus,
-        //         occupancy: self.stats.occupancy,
-        //         pre_fetch: self.stats.pre_fetch,
-        //     },
-        //     jobs: dist::JobStats { fetched, running },
-        // };
-
-        // // Record server_stats time (e.g. in case sys.refresh_* functions are expensive?)
-        // metrics::histogram!(
-        //     "sccache_server_stats_to_details_time_seconds",
-        //     &self.metric_labels
-        // )
-        // .record(start.elapsed().as_secs_f64());
-
-        // details
     }
 
     async fn send_status(
@@ -1191,16 +1162,6 @@ impl Server {
     }
 
     async fn get_job_inputs(&self, job_id: &str) -> Result<Vec<u8>> {
-        // let start = Instant::now();
-        // // Guard loading until we get a slot in the network queue
-        // let _ = self.jobs_storage_queue.acquire().await;
-        // // Record get_job_inputs wait time
-        // metrics::histogram!(
-        //     "sccache_server_get_job_inputs_wait_time_seconds",
-        //     &self.metric_labels
-        // )
-        // .record(start.elapsed().as_secs_f64());
-
         let start = Instant::now();
         let mut reader = self
             .jobs_storage
@@ -1216,27 +1177,15 @@ impl Server {
             tracing::warn!("[get_job_inputs({job_id})]: Error reading stream: {err:?}");
             err
         })?;
+
         // Record get_job_inputs load time
-        metrics::histogram!(
-            "sccache_server_get_job_inputs_time_seconds",
-            &self.metric_labels
-        )
-        .record(start.elapsed().as_secs_f64());
+        metrics::histogram!("sccache::server::get_job_inputs_time")
+            .record(start.elapsed().as_secs_f64());
 
         Ok(inputs)
     }
 
     async fn put_job_result(&self, job_id: &str, result: RunJobResponse) -> Result<()> {
-        // let start = Instant::now();
-        // // Guard storing until we get a slot in the network queue
-        // let _ = self.jobs_storage_queue.acquire().await;
-        // // Record put_job_result wait time
-        // metrics::histogram!(
-        //     "sccache_server_put_job_result_wait_time_seconds",
-        //     &self.metric_labels
-        // )
-        // .record(start.elapsed().as_secs_f64());
-
         let start = Instant::now();
         let result = bincode_serialize(result).await?;
         let reader = futures::io::AllowStdIo::new(result.reader());
@@ -1251,11 +1200,8 @@ impl Server {
             })?;
 
         // Record put_job_result load time
-        metrics::histogram!(
-            "sccache_server_put_job_result_time_seconds",
-            &self.metric_labels
-        )
-        .record(start.elapsed().as_secs_f64());
+        metrics::histogram!("sccache::server::put_job_result_time")
+            .record(start.elapsed().as_secs_f64());
 
         Ok(())
     }
@@ -1293,9 +1239,10 @@ impl ServerService for Server {
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> Result<()> {
-        metrics::counter!("sccache_server_job_fetched", &self.metric_labels).increment(1);
+        metrics::counter!("sccache::server::job_fetched").increment(1);
 
-        let run_job_start = Instant::now();
+        let job_start = Instant::now();
+
         // Associate the task with the scheduler and job,
         // then compute and report the latest server details
         let details = {
@@ -1304,9 +1251,6 @@ impl ServerService for Server {
                 task_id.to_owned(),
                 (respond_to.to_owned(), job_id.to_owned()),
             );
-            // Record the time it took to accept the job
-            // metrics::histogram!("sccache_server_job_wait_time_seconds", &self.metric_labels)
-            //     .record(start.elapsed().as_secs_f64());
             // Get details before releasing state lock
             self.state_to_details(&mut state)
         };
@@ -1334,13 +1278,10 @@ impl ServerService for Server {
         self.broadcast_status().await;
 
         // Record toolchain load time
-        metrics::histogram!(
-            "sccache_server_job_fetched_time_seconds",
-            &self.metric_labels
-        )
-        .record(run_job_start.elapsed().as_secs_f64());
+        metrics::histogram!("sccache::server::job_fetched_time")
+            .record(job_start.elapsed().as_secs_f64());
 
-        metrics::counter!("sccache_server_job_started", &self.metric_labels).increment(1);
+        metrics::counter!("sccache::server::job_started").increment(1);
 
         let run_build_start = Instant::now();
 
@@ -1359,37 +1300,13 @@ impl ServerService for Server {
                 )
                 .await
                 .map(|x| {
-                    // Record build time
-                    metrics::histogram!(
-                        "sccache_server_job_build_time_seconds",
-                        &self.metric_labels
-                    )
-                    .record(run_build_start.elapsed().as_secs_f64());
-                    // Record total run_job time
-                    metrics::histogram!("sccache_server_job_time_seconds", &self.metric_labels)
-                        .record(run_job_start.elapsed().as_secs_f64());
                     x
                 })
                 .map_err(|e| {
-                    // Record build time
-                    metrics::histogram!(
-                        "sccache_server_job_build_time_seconds",
-                        &self.metric_labels
-                    )
-                    .record(run_build_start.elapsed().as_secs_f64());
-                    // Record total run_job time
-                    metrics::histogram!("sccache_server_job_time_seconds", &self.metric_labels)
-                        .record(run_job_start.elapsed().as_secs_f64());
                     e
                 })
             }
             Err(e) => {
-                // Record build time
-                metrics::histogram!("sccache_server_job_build_time_seconds", &self.metric_labels)
-                    .record(run_build_start.elapsed().as_secs_f64());
-                // Record total run_job time
-                metrics::histogram!("sccache_server_job_time_seconds", &self.metric_labels)
-                    .record(run_job_start.elapsed().as_secs_f64());
                 Err(e)
             }
         }
@@ -1399,7 +1316,7 @@ impl ServerService for Server {
         let mut state = self.state.lock().await;
         if let Some((respond_to, job_id)) = state.jobs.remove(task_id) {
             // Increment job_failure count
-            metrics::counter!("sccache_server_job_failure", &self.metric_labels).increment(1);
+            metrics::counter!("sccache::server::job_failed_count").increment(1);
 
             // Get ServerDetails
             let details = self.state_to_details(&mut state);
@@ -1430,7 +1347,7 @@ impl ServerService for Server {
         let mut state = self.state.lock().await;
         if let Some((respond_to, job_id)) = state.jobs.remove(task_id) {
             // Increment job_success count
-            metrics::counter!("sccache_server_job_success", &self.metric_labels).increment(1);
+            metrics::counter!("sccache::server::job_success_count").increment(1);
 
             // Get ServerDetails
             let details = self.state_to_details(&mut state);

@@ -1231,11 +1231,10 @@ impl MessageBroker {
 #[serde(tag = "type")]
 #[serde(deny_unknown_fields)]
 pub enum MetricsConfig {
-    #[serde(rename = "listen")]
-    Listen {
-        addr: Option<std::net::SocketAddr>,
-        path: Option<String>,
-    },
+    #[serde(rename = "bind")]
+    ListenAddr { addr: Option<std::net::SocketAddr> },
+    #[serde(rename = "path")]
+    ListenPath { path: Option<String> },
     #[serde(rename = "push")]
     Gateway {
         endpoint: String,
@@ -1633,6 +1632,10 @@ pub mod server {
                     }
                 })
                 .unwrap_or_default();
+
+            if let Some(MetricsConfig::ListenPath { .. }) = metrics {
+                return Err(anyhow!("Invalid config `metrics.type=\"path\"`. Choose `metrics.type = \"addr\"` or `metrics.type = \"push\"`"));
+            }
 
             let mut jobs_storage = CacheConfigs::default();
             jobs_storage.merge(jobs);
