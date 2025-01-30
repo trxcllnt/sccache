@@ -16,7 +16,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fmt;
-use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "dist-server")]
 use std::pin::Pin;
@@ -400,12 +399,12 @@ impl From<ProcessOutput> for process::Output {
 pub struct OutputData(Vec<u8>, u64);
 impl OutputData {
     #[cfg(any(feature = "dist-server", all(feature = "dist-client", test)))]
-    pub fn try_from_reader<R: Read>(r: R) -> io::Result<Self> {
+    pub fn try_from_reader<R: std::io::Read>(r: R) -> std::io::Result<Self> {
         use flate2::read::ZlibEncoder as ZlibReadEncoder;
         use flate2::Compression;
         let mut compressor = ZlibReadEncoder::new(r, Compression::fast());
         let mut res = vec![];
-        io::copy(&mut compressor, &mut res)?;
+        std::io::copy(&mut compressor, &mut res)?;
         Ok(OutputData(res, compressor.total_in()))
     }
     pub fn lens(&self) -> OutputDataLens {
@@ -415,9 +414,9 @@ impl OutputData {
         }
     }
     #[cfg(feature = "dist-client")]
-    pub fn into_reader(self) -> impl Read {
+    pub fn into_reader(self) -> impl std::io::Read {
         use flate2::read::ZlibDecoder as ZlibReadDecoder;
-        ZlibReadDecoder::new(io::Cursor::new(self.0))
+        ZlibReadDecoder::new(std::io::Cursor::new(self.0))
     }
 }
 
