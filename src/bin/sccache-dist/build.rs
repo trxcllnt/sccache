@@ -396,7 +396,7 @@ impl OverlayBuilder {
         // Guard compiling until we get a token from the job queue
         let job_slot = job_queue.acquire().await?;
 
-        let res = tokio::task::spawn_blocking(move || {
+        let res = tokio::task::block_in_place(move || {
             // Explicitly launch a new thread outside tokio's thread pool,
             // so that our overlayfs and tmpfs are unmounted when it dies.
             //
@@ -411,9 +411,7 @@ impl OverlayBuilder {
                     .join()
                     .unwrap_or_else(|_e| Err(anyhow!("Build thread exited unsuccessfully")))
             })
-        })
-        .await
-        .map_err(anyhow::Error::new)?;
+        });
 
         // Drop the job slot once compile is finished
         drop(job_slot);
