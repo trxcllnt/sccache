@@ -1552,6 +1552,7 @@ pub mod server {
         pub cache_dir: PathBuf,
         pub jobs: CacheConfigs,
         pub max_per_core_load: Option<f64>,
+        pub max_per_core_prefetch: Option<f64>,
         pub message_broker: Option<MessageBroker>,
         pub metrics: Option<MetricsConfig>,
         pub server_id: Option<String>,
@@ -1574,6 +1575,7 @@ pub mod server {
                     ..Default::default()
                 },
                 max_per_core_load: None,
+                max_per_core_prefetch: None,
                 message_broker: None,
                 metrics: None,
                 server_id: None,
@@ -1597,6 +1599,7 @@ pub mod server {
         pub cache_dir: PathBuf,
         pub jobs: StorageConfig,
         pub max_per_core_load: f64,
+        pub max_per_core_prefetch: f64,
         pub message_broker: Option<MessageBroker>,
         pub metrics: Option<MetricsConfig>,
         pub server_id: String,
@@ -1612,6 +1615,7 @@ pub mod server {
                 cache_dir,
                 jobs,
                 max_per_core_load,
+                max_per_core_prefetch,
                 metrics,
                 server_id,
                 toolchain_cache_size,
@@ -1641,8 +1645,14 @@ pub mod server {
             let max_per_core_load = number_from_env_var("SCCACHE_DIST_MAX_PER_CORE_LOAD")
                 .transpose()?
                 .or(max_per_core_load)
-                // Default to 2
-                .unwrap_or(2f64);
+                // Default to 1.1
+                .unwrap_or(1.1f64);
+
+            let max_per_core_prefetch = number_from_env_var("SCCACHE_DIST_MAX_PER_CORE_PREFETCH")
+                .transpose()?
+                .or(max_per_core_prefetch)
+                // Default to 1
+                .unwrap_or(1f64);
 
             let message_broker = MessageBroker::from_env().or(message_broker);
 
@@ -1661,6 +1671,7 @@ pub mod server {
                 cache_dir,
                 jobs: jobs_storage.into(),
                 max_per_core_load,
+                max_per_core_prefetch,
                 message_broker,
                 metrics,
                 server_id,
@@ -1681,6 +1692,7 @@ pub mod server {
                 cache_dir: server_config.cache_dir.clone(),
                 jobs: server_config.jobs.into(),
                 max_per_core_load: Some(server_config.max_per_core_load),
+                max_per_core_prefetch: Some(server_config.max_per_core_prefetch),
                 message_broker: server_config.message_broker,
                 metrics: server_config.metrics,
                 server_id: Some(server_config.server_id),

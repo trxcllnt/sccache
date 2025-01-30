@@ -333,6 +333,7 @@ fn run(command: Command) -> Result<()> {
             cache_dir,
             jobs,
             max_per_core_load,
+            max_per_core_prefetch,
             metrics,
             server_id,
             toolchain_cache_size,
@@ -384,14 +385,12 @@ fn run(command: Command) -> Result<()> {
                     metric_labels.clone(),
                 );
 
-                let occupancy = (num_cpus as f64 * max_per_core_load.max(0.0)).floor().max(1.0);
-                let pre_fetch = (occupancy - num_cpus as f64).abs().floor() as usize;
-                let occupancy = occupancy.min(num_cpus as f64) as usize;
-
                 let broker_uri = message_broker_uri(message_broker)?;
                 tracing::trace!("Message broker URI: {broker_uri}");
 
                 let to_servers = scheduler_to_servers_queue();
+                let occupancy = (num_cpus as f64 * max_per_core_load.max(0.0)).floor().max(1.0) as usize;
+                let pre_fetch = (num_cpus as f64 * max_per_core_prefetch.max(0.0)).floor().max(0.0) as usize;
 
                 let task_queue =
                     Arc::new(celery_app(&server_id, &broker_uri, &to_servers, (occupancy + pre_fetch) as u16).await?);
@@ -401,11 +400,7 @@ fn run(command: Command) -> Result<()> {
                     .register_task::<scheduler_to_servers::run_job>()
                     .await?;
 
-                // Oversubscribe cores just a little to make up for network and I/O latency. This formula is
-                // not based on hard data but an extrapolation to high core counts of the conventional wisdom
-                // that slightly more jobs than cores achieve the shortest compile time. Which is originally
-                // about local compiles and this is over the network, so be slightly less conservative.
-                let job_queue = Arc::new(tokio::sync::Semaphore::new((occupancy as f64 * 1.1).ceil() as usize));
+                let job_queue = Arc::new(tokio::sync::Semaphore::new(occupancy));
 
                 let builder: Arc<dyn BuilderIncoming> = match builder {
                     #[cfg(not(target_os = "freebsd"))]
@@ -475,10 +470,9 @@ fn run(command: Command) -> Result<()> {
                         }
                     };
                 }
-
-                tracing::info!("sccache: Server initialized to run {occupancy} parallel build jobs and prefetch up to {pre_fetch} job(s) in the background");
-
                 task_queue.display_pretty().await;
+
+                tracing::info!("sccache: Server `{server_id}` initialized to run {occupancy} parallel build jobs and prefetch up to {pre_fetch} job(s) in the background");
 
                 daemonize()?;
 
