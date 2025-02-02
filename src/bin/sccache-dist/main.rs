@@ -1220,6 +1220,8 @@ impl ServerService for Server {
 
         // Load and unpack the toolchain
         let toolchain_dir = self.toolchains.acquire(&toolchain).await.map_err(|err| {
+            // Record toolchain errors
+            metrics::counter!("sccache::server::toolchain_error_count").increment(1);
             tracing::warn!("[run_job({job_id})]: Error loading toolchain: {err:?}");
             TaskError::UnexpectedError(format!("{err:#}"))
         })?;
@@ -1229,6 +1231,8 @@ impl ServerService for Server {
 
         // Load job inputs into memory
         let inputs = self.get_job_inputs(job_id).await.map_err(|err| {
+            // Record get_job_inputs errors
+            metrics::counter!("sccache::server::get_job_inputs_error_count").increment(1);
             tracing::warn!("[run_job({job_id})]: Error retrieving job inputs: {err:?}");
             TaskError::UnexpectedError(format!("{err:#}"))
         })?;
@@ -1249,6 +1253,8 @@ impl ServerService for Server {
             .run_build(job_id, &toolchain_dir, command, outputs, inputs)
             .await
             .map_err(|err| {
+                // Record run_build errors
+                metrics::counter!("sccache::server::job_build_error_count").increment(1);
                 tracing::warn!("[run_job({job_id})]: Build error: {err:?}");
                 TaskError::ExpectedError(format!("{err:#}"))
             });
@@ -1268,6 +1274,8 @@ impl ServerService for Server {
             )
             .await
             .map_err(|err| {
+                // Record put_job_inputs errors
+                metrics::counter!("sccache::server::put_job_inputs_error_count").increment(1);
                 tracing::warn!("[run_job({job_id})]: Error storing job result: {err:?}");
                 TaskError::UnexpectedError(format!("{err:#}"))
             });

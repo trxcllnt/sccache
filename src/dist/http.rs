@@ -186,7 +186,8 @@ mod common {
                     async move {
                         let val = match fetch(&input).await {
                             Ok(val) => val,
-                            Err(_) => {
+                            Err(err) => {
+                                error!("ResourceLoaderQueue: Error loading resource: {err:?}");
                                 state.lock().await.1.remove(&input);
                                 return;
                             }
