@@ -1283,7 +1283,7 @@ impl ServerService for Server {
         // Record total run_job time
         metrics::histogram!("sccache::server::job_time").record(job_start.elapsed().as_secs_f64());
 
-        result.map_err(anyhow::Error::new)
+        Ok(result?)
     }
 
     async fn job_failure(&self, task_id: &str, reason: &str) -> Result<()> {
@@ -1380,24 +1380,32 @@ mod scheduler_to_servers {
         super::SERVER
             .get()
             .map(|server| {
-                server.run_job(&task_id, &job_id, &respond_to, toolchain, command, outputs)
+                async {
+                    server
+                        .run_job(&task_id, &job_id, &respond_to, toolchain, command, outputs)
+                        .await
+                        .map_err(|e| match e.downcast_ref::<TaskError>() {
+                            Some(TaskError::UnexpectedError(msg)) => {
+                                let msg = format!("run_job failed with unexpected error: {msg}");
+                                tracing::error!("[run_job({job_id})]: {msg}");
+                                TaskError::UnexpectedError(msg.clone())
+                            }
+                            _ => {
+                                let msg = format!("run_job failed with error: {e:?}");
+                                tracing::error!("[run_job({job_id})]: {msg}");
+                                TaskError::ExpectedError(msg)
+                            }
+                        })
+                }
+                .boxed()
             })
             .unwrap_or_else(|| {
-                futures::future::err(anyhow!("sccache-dist server is not initialized")).boxed()
+                futures::future::err(TaskError::ExpectedError(
+                    "sccache-dist server is not initialized".into(),
+                ))
+                .boxed()
             })
             .await
-            .map_err(|e| match e.downcast_ref::<TaskError>() {
-                Some(TaskError::UnexpectedError(msg)) => {
-                    let msg = format!("run_job failed with unexpected error: {msg}");
-                    tracing::error!("[run_job({job_id})]: {msg}");
-                    TaskError::UnexpectedError(msg.clone())
-                }
-                _ => {
-                    let msg = format!("run_job failed with error: {e:?}");
-                    tracing::error!("[run_job({job_id})]: {msg}");
-                    TaskError::ExpectedError(msg)
-                }
-            })
     }
 
     async fn on_run_job_failure(task: &run_job, err: &TaskError) {
