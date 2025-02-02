@@ -351,8 +351,15 @@ impl OverlayBuilder {
 
             if !compile_output.status.success() {
                 tracing::warn!(
-                    "[perform_build({job_id})]: compile output:\n===========\nstdout:\n{}\n==========\n=========\nstderr:\n{}\n===============\n",
-                    String::from_utf8_lossy(&compile_output.stdout),
+                    "[perform_build({job_id})]: compile output status: {}",
+                    compile_output.status
+                );
+                tracing::warn!(
+                    "[perform_build({job_id})]: compile output stdout: {}",
+                    String::from_utf8_lossy(&compile_output.stdout)
+                );
+                tracing::warn!(
+                    "[perform_build({job_id})]: compile output stderr: {}",
                     String::from_utf8_lossy(&compile_output.stderr)
                 );
             } else {
@@ -396,22 +403,26 @@ impl OverlayBuilder {
         // Guard compiling until we get a token from the job queue
         let job_slot = job_queue.acquire().await?;
 
-        let res = tokio::task::block_in_place(move || {
-            // Explicitly launch a new thread outside tokio's thread pool,
-            // so that our overlayfs and tmpfs are unmounted when it dies.
-            //
-            // This might be equivalent to tokio's Handle::spawn_blocking,
-            // but their docs say that uses a thread pool, and the comment
-            // about overlayfs unmounting says it happens when the thread
-            // dies. So I'd rather be less efficient here than accidentally
-            // never unmount any of the FSs because we used a thread pool.
-            std::thread::scope(|scope| {
-                scope
-                    .spawn(build_in_overlay)
-                    .join()
-                    .unwrap_or_else(|_e| Err(anyhow!("Build thread exited unsuccessfully")))
-            })
-        });
+        let res = tokio::runtime::Handle::current()
+            .spawn_blocking(build_in_overlay)
+            .await?;
+
+        // let res = tokio::task::block_in_place(move || {
+        //     // Explicitly launch a new thread outside tokio's thread pool,
+        //     // so that our overlayfs and tmpfs are unmounted when it dies.
+        //     //
+        //     // This might be equivalent to tokio's Handle::spawn_blocking,
+        //     // but their docs say that uses a thread pool, and the comment
+        //     // about overlayfs unmounting says it happens when the thread
+        //     // dies. So I'd rather be less efficient here than accidentally
+        //     // never unmount any of the FSs because we used a thread pool.
+        //     std::thread::scope(|scope| {
+        //         scope
+        //             .spawn(build_in_overlay)
+        //             .join()
+        //             .unwrap_or_else(|_e| Err(anyhow!("Build thread exited unsuccessfully")))
+        //     })
+        // });
 
         // Drop the job slot once compile is finished
         drop(job_slot);
