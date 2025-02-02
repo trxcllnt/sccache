@@ -865,10 +865,12 @@ impl SchedulerService for Scheduler {
             return self.get_job_result(job_id).await;
         }
 
+        if !self.has_toolchain(toolchain.clone()).await {
+            return Ok(RunJobResponse::MissingToolchain);
+        }
+
         if !self.has_job_inputs(job_id).await {
-            return Ok(RunJobResponse::JobFailed {
-                reason: "Missing inputs".into(),
-            });
+            return Ok(RunJobResponse::MissingInputs);
         }
 
         let (tx, rx) = tokio::sync::oneshot::channel::<RunJobResponse>();
