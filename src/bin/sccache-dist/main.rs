@@ -735,16 +735,21 @@ impl Scheduler {
 #[async_trait]
 impl SchedulerService for Scheduler {
     async fn get_status(&self) -> Result<SchedulerStatus> {
-        let mut servers = vec![];
+        let servers = {
+            let mut servers = self.servers.lock().await;
+            Self::prune_servers(&mut servers);
 
-        for (server_id, server) in self.servers.lock().await.iter() {
-            servers.push(ServerStatus {
-                id: server_id.clone(),
-                info: server.info.clone(),
-                jobs: server.jobs.clone(),
-                u_time: server.u_time.elapsed().as_secs(),
-            });
-        }
+            let mut server_statuses = vec![];
+            for (server_id, server) in servers.iter() {
+                server_statuses.push(ServerStatus {
+                    id: server_id.clone(),
+                    info: server.info.clone(),
+                    jobs: server.jobs.clone(),
+                    u_time: server.u_time.elapsed().as_secs(),
+                });
+            }
+            server_statuses
+        };
 
         Ok(SchedulerStatus {
             info: Some(
