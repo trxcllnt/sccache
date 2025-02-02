@@ -494,9 +494,11 @@ pub enum RunJobResponse {
     },
     JobFailed {
         reason: String,
+        server_id: String,
     },
     ServerShutdown {
         reason: String,
+        server_id: String,
     },
 }
 

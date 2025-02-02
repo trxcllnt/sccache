@@ -908,10 +908,12 @@ impl SchedulerService for Scheduler {
             sndr.send(if server.alive {
                 RunJobResponse::JobFailed {
                     reason: reason.to_owned(),
+                    server_id: server.id.clone(),
                 }
             } else {
                 RunJobResponse::ServerShutdown {
                     reason: reason.to_owned(),
+                    server_id: server.id.clone(),
                 }
             })
             .map_err(|_| anyhow!("Failed to send job result"))
