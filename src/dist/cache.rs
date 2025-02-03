@@ -551,7 +551,7 @@ mod server {
     use std::sync::Arc;
 
     use crate::cache::cache;
-    use crate::dist::http::ResourceLoaderQueue;
+    use crate::dist::http::AsyncMemoizer;
     use crate::dist::Toolchain;
     use crate::errors::*;
     use crate::lru_disk_cache::{LruCache, Meter};
@@ -595,7 +595,7 @@ mod server {
     async fn load_and_unpack_toolchain(
         tc: Toolchain,
         root_dir: PathBuf,
-        tc_sizes: Arc<ResourceLoaderQueue<Toolchain, u64>>,
+        tc_sizes: Arc<AsyncMemoizer<Toolchain, u64>>,
         tc_storage: Arc<dyn cache::Storage>,
         toolchains: Arc<Mutex<LruCache<Toolchain, (PathBuf, u64), RandomState, ToolchainSize>>>,
     ) -> Result<(PathBuf, u64)> {
@@ -617,7 +617,7 @@ mod server {
             return Ok((path.to_path_buf(), *inflated_size));
         }
 
-        let inflated_size = tc_sizes.enqueue(&tc).await?;
+        let inflated_size = tc_sizes.call(&tc).await?;
 
         // Load the toolchain into memory
         let toolchain = {
@@ -720,7 +720,7 @@ mod server {
 
     #[derive(Clone)]
     pub struct ServerToolchains {
-        toolchains_loader: ResourceLoaderQueue<Toolchain, (PathBuf, u64)>,
+        toolchains_loader: AsyncMemoizer<Toolchain, (PathBuf, u64)>,
     }
 
     impl ServerToolchains {
@@ -730,8 +730,8 @@ mod server {
             // Only load up to 16 toolchains concurrently
             let toolchains = Arc::new(Mutex::new(LruCache::with_meter(capacity, ToolchainSize)));
 
-            let toolchains_loader = ResourceLoaderQueue::new(0, {
-                let tc_sizes = Arc::new(ResourceLoaderQueue::new(
+            let toolchains_loader = AsyncMemoizer::new(0, {
+                let tc_sizes = Arc::new(AsyncMemoizer::new(
                     // Arbitrary: remember the sizes of the 1000 most recent toolchains
                     1000,
                     {
@@ -768,7 +768,7 @@ mod server {
         pub async fn acquire(&self, toolchain: &Toolchain) -> Result<PathBuf> {
             // Lookup or load the toolchain
             let start = std::time::Instant::now();
-            let res = self.toolchains_loader.enqueue(toolchain).await;
+            let res = self.toolchains_loader.call(toolchain).await;
 
             // Record toolchain load time
             metrics::histogram!("sccache::server::toolchain_acquired_time")

@@ -16,7 +16,7 @@
 pub use self::client::Client;
 #[cfg(feature = "dist-server")]
 pub use self::{
-    common::ResourceLoaderQueue,
+    common::AsyncMemoizer,
     server::{ClientAuthCheck, ClientVisibleMsg},
 };
 
@@ -132,8 +132,8 @@ mod common {
     }
 
     #[derive(Clone)]
-    pub struct ResourceLoaderQueue<K: Eq + Hash, V> {
-        fetch: Arc<
+    pub struct AsyncMemoizer<K: Eq + Hash, V> {
+        run_f: Arc<
             dyn Fn(&K) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<V>> + Send>>
                 + Send
                 + Sync,
@@ -146,7 +146,7 @@ mod common {
         >,
     }
 
-    impl<K, V> ResourceLoaderQueue<K, V>
+    impl<K, V> AsyncMemoizer<K, V>
     where
         K: Clone + std::fmt::Debug + Eq + Hash + Send + Sync + 'static,
         V: Clone + Send + Sync + 'static,
@@ -158,53 +158,69 @@ mod common {
                 + 'static,
         >(
             capacity: u64,
-            fetch: F,
+            run_f: F,
         ) -> Self {
             Self {
-                fetch: Arc::new(fetch),
+                run_f: Arc::new(run_f),
                 state: Arc::new(Mutex::new((LruCache::new(capacity), HashMap::new()))),
             }
         }
 
-        pub async fn enqueue(&self, input: &K) -> Result<V> {
+        pub async fn call(&self, args: &K) -> Result<V> {
+            // Lock state
             let mut state = self.state.lock().await;
-            let (fetched, pending) = state.deref_mut();
-            if fetched.capacity() > 0 {
-                if let Some(val) = fetched.get(input) {
-                    return Ok(val.clone());
-                }
+            let (results, pending) = state.deref_mut();
+
+            // Return result if cached
+            if let Some(val) = results.get(args) {
+                return Ok(val.clone());
             }
-            let mut recv = if let Some(sndr) = pending.get(input) {
+
+            let mut recv = if let Some(sndr) = pending.get(args) {
+                // Return shared broadcast receiver if pending
                 sndr.subscribe()
             } else {
+                // Create broadcast sender/receiver on first call
                 let (sndr, recv) = tokio::sync::broadcast::channel(1);
-                pending.insert(input.clone(), sndr);
+                pending.insert(args.clone(), sndr);
+
+                // Run the function on a worker thread
                 tokio::runtime::Handle::current().spawn({
-                    let input = input.clone();
-                    let fetch = self.fetch.clone();
+                    let args = args.clone();
+                    let run_f = self.run_f.clone();
                     let state = self.state.clone();
                     async move {
-                        let val = match fetch(&input).await {
-                            Ok(val) => val,
-                            Err(err) => {
-                                error!("ResourceLoaderQueue: Error loading resource: {err:?}");
-                                state.lock().await.1.remove(&input);
-                                return;
-                            }
-                        };
+                        // Call the function
+                        let res = run_f(&args).await;
+                        // Lock state again to store and notify
                         let mut state = state.lock().await;
-                        let (fetched, pending) = state.deref_mut();
-                        let sender = pending.remove(&input).unwrap();
-                        if fetched.capacity() > 0 {
-                            fetched.insert(input, val.clone());
+                        let (results, pending) = state.deref_mut();
+                        match res {
+                            Ok(val) => {
+                                // Since both we have a lock on state, the order of these doesn't matter.
+                                // Choosing to do the one that doesn't require copying args again.
+                                let sender = pending.remove(&args).unwrap();
+                                if results.capacity() > 0 {
+                                    results.insert(args, val.clone());
+                                }
+                                // Unlock state before we notify
+                                drop(state);
+                                // Notify receivers
+                                let _ = sender.send(val);
+                            }
+                            Err(err) => {
+                                // TODO: Broadcast this error instead of just closing the channel
+                                error!("AsyncMemoizer: Error loading resource: {err:?}");
+                                pending.remove(&args);
+                            }
                         }
-                        let _ = sender.send(val);
                     }
                 });
 
                 recv
             };
 
+            // Unlock state while we await the receiver
             drop(state);
 
             recv.recv().await.map_err(anyhow::Error::new)
@@ -287,7 +303,7 @@ mod client {
     use reqwest::Body;
     use std::path::{Path, PathBuf};
 
-    use super::common::{bincode_req_fut, ReqwestRequestBuilderExt, ResourceLoaderQueue};
+    use super::common::{bincode_req_fut, AsyncMemoizer, ReqwestRequestBuilderExt};
     use super::urls;
     use crate::errors::*;
 
@@ -298,7 +314,7 @@ mod client {
         pool: tokio::runtime::Handle,
         rewrite_includes_only: bool,
         scheduler_url: reqwest::Url,
-        submit_toolchain_reqs: ResourceLoaderQueue<(Toolchain, PathBuf), SubmitToolchainResult>,
+        submit_toolchain_reqs: AsyncMemoizer<(Toolchain, PathBuf), SubmitToolchainResult>,
         tc_cache: Arc<cache::ClientToolchains>,
     }
 
@@ -321,7 +337,7 @@ mod client {
                 cache::ClientToolchains::new(cache_dir, cache_size, toolchain_configs)
                     .context("failed to initialise client toolchains")?;
 
-            let submit_toolchain_reqs = ResourceLoaderQueue::new(0, {
+            let submit_toolchain_reqs = AsyncMemoizer::new(0, {
                 let client = client.clone();
                 let auth_token = auth_token.clone();
                 let scheduler_url = scheduler_url.clone();
@@ -433,7 +449,7 @@ mod client {
             match self.tc_cache.get_toolchain(&tc) {
                 Ok(Some(toolchain_file)) => {
                     self.submit_toolchain_reqs
-                        .enqueue(&(tc, toolchain_file.path().to_path_buf()))
+                        .call(&(tc, toolchain_file.path().to_path_buf()))
                         .await
                 }
                 Ok(None) => return Err(anyhow!("couldn't find toolchain locally")),
