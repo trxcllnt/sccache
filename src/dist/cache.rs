@@ -565,7 +565,7 @@ mod server {
     }
 
     async fn load_toolchain_size(id: String, tc_storage: Arc<dyn cache::Storage>) -> Result<u64> {
-        trace!("[ServerToolchains({id})]: Loading toolchain to compute inflated size");
+        tracing::trace!("[ServerToolchains({id})]: Loading toolchain to compute inflated size");
 
         let start = std::time::Instant::now();
         // Download the toolchain and compute its inflated size
@@ -587,7 +587,7 @@ mod server {
         metrics::histogram!("sccache::server::toolchain_size_time")
             .record(start.elapsed().as_secs_f64());
 
-        trace!("[ServerToolchains({id})]: Computed inflated size: {inflated_size}");
+        tracing::trace!("[ServerToolchains({id})]: Computed inflated size: {inflated_size}");
 
         Ok(inflated_size)
     }
@@ -598,10 +598,26 @@ mod server {
         tc_sizes: Arc<ResourceLoaderQueue<Toolchain, u64>>,
         tc_storage: Arc<dyn cache::Storage>,
         toolchains: Arc<Mutex<LruCache<Toolchain, (PathBuf, u64), RandomState, ToolchainSize>>>,
-    ) -> Result<()> {
+    ) -> Result<(PathBuf, u64)> {
         let toolchain_id = &tc.archive_id;
-        let inflated_size = tc_sizes.enqueue(&tc).await?;
+
+        // First ensure the toolchain is still in storage. If not, delete it and report an error.
+        if !tc_storage.has(toolchain_id).await {
+            // Delete it from the server toolchain cache
+            let mut cached_toolchains = toolchains.lock().await;
+            if let Some((path, inflated_size)) = cached_toolchains.remove(&tc) {
+                remove_toolchain_dir(&tc, &path, inflated_size).await?;
+            }
+            return Err(anyhow!("Storage is missing toolchain"));
+        }
+
         let path = root_dir.join(make_lru_key_path(toolchain_id));
+
+        if let Some((path, inflated_size)) = toolchains.lock().await.get(&tc) {
+            return Ok((path.to_path_buf(), *inflated_size));
+        }
+
+        let inflated_size = tc_sizes.enqueue(&tc).await?;
 
         // Load the toolchain into memory
         let toolchain = {
@@ -648,10 +664,9 @@ mod server {
             .record(start.elapsed().as_secs_f64());
 
         // Unpack the toolchain
-
-        trace!("[ServerToolchains({toolchain_id})]: Unpacking toolchain to {path:?}");
-
         let start = std::time::Instant::now();
+
+        tracing::trace!("[ServerToolchains({toolchain_id})]: Unpacking toolchain to {path:?}");
 
         async_tar::Archive::new(
             GzipDecoder::new(futures::io::AllowStdIo::new(toolchain.reader()).compat()).compat(),
@@ -665,12 +680,13 @@ mod server {
             .record(start.elapsed().as_secs_f64());
 
         cached_size += inflated_size;
-        debug!("ServerToolchains({toolchain_id})]: Toolchain unpacked, new cache size is: {cached_size}");
+
+        tracing::debug!("ServerToolchains({toolchain_id})]: Toolchain unpacked, new cache size is: {cached_size}");
 
         // Insert the toolchain entry into the map
-        cached_toolchains.insert(tc, (path.clone(), inflated_size));
+        cached_toolchains.insert(tc.clone(), (path.clone(), inflated_size));
 
-        Ok(())
+        Ok((path, inflated_size))
     }
 
     async fn remove_toolchain_dir(
@@ -679,7 +695,7 @@ mod server {
         inflated_size: u64,
     ) -> Result<u64> {
         if path.exists() {
-            trace!("[ServerToolchains({})]: Removing toolchain with size={inflated_size}, path={path:?}", toolchain.archive_id);
+            tracing::trace!("[ServerToolchains({})]: Removing toolchain with size={inflated_size}, path={path:?}", toolchain.archive_id);
             tokio::fs::remove_dir_all(path)
                 .await
                 .expect("Failed to clean up toolchain directory");
@@ -704,14 +720,12 @@ mod server {
 
     #[derive(Clone)]
     pub struct ServerToolchains {
-        tc_storage: Arc<dyn cache::Storage>,
-        toolchains: Arc<Mutex<LruCache<Toolchain, (PathBuf, u64), RandomState, ToolchainSize>>>,
-        toolchains_loader: ResourceLoaderQueue<Toolchain, ()>,
+        toolchains_loader: ResourceLoaderQueue<Toolchain, (PathBuf, u64)>,
     }
 
     impl ServerToolchains {
         pub fn new(root_dir: &Path, capacity: u64, tc_storage: Arc<dyn cache::Storage>) -> Self {
-            trace!("Using ServerToolchains({:?}, {})", root_dir, capacity);
+            tracing::trace!("Using ServerToolchains({:?}, {})", root_dir, capacity);
 
             // Only load up to 16 toolchains concurrently
             let toolchains = Arc::new(Mutex::new(LruCache::with_meter(capacity, ToolchainSize)));
@@ -748,41 +762,32 @@ mod server {
                 }
             });
 
-            Self {
-                tc_storage,
-                toolchains,
-                toolchains_loader,
-            }
+            Self { toolchains_loader }
         }
 
         pub async fn acquire(&self, toolchain: &Toolchain) -> Result<PathBuf> {
+            // Lookup or load the toolchain
             let start = std::time::Instant::now();
-            let toolchain_id = &toolchain.archive_id;
-            loop {
-                let mut toolchains = self.toolchains.lock().await;
-                // First ensure the toolchain is still in storage
-                // If not, delete it and report an error.
-                if !self.tc_storage.has(toolchain_id).await {
-                    // Delete it from server toolchain cache
-                    if let Some((path, inflated_size)) = toolchains.remove(toolchain) {
-                        drop(toolchains);
-                        remove_toolchain_dir(toolchain, &path, inflated_size).await?;
-                    }
-                    return Err(anyhow!("Storage is missing toolchain"));
-                } else {
-                    if let Some((path, inflated_size)) = toolchains.get(toolchain) {
-                        // Record toolchain load time
-                        metrics::histogram!("sccache::server::toolchain_acquired_time")
-                            .record(start.elapsed().as_secs_f64());
-                        trace!("[ServerToolchains({toolchain_id})]: Acquired toolchain with size={inflated_size}");
-                        return Ok(path.clone());
-                    }
+            let res = self.toolchains_loader.enqueue(toolchain).await;
 
-                    drop(toolchains);
+            // Record toolchain load time
+            metrics::histogram!("sccache::server::toolchain_acquired_time")
+                .record(start.elapsed().as_secs_f64());
 
-                    // If it's in storage but not yet loaded, load it now
-                    trace!("[ServerToolchains({toolchain_id})]: Loading toolchain");
-                    self.toolchains_loader.enqueue(toolchain).await?;
+            match res {
+                Ok((path, inflated_size)) => {
+                    tracing::trace!(
+                        "[ServerToolchains({})]: Acquired toolchain with size={inflated_size}",
+                        toolchain.archive_id
+                    );
+                    Ok(path)
+                }
+                Err(err) => {
+                    tracing::error!(
+                        "[ServerToolchains({})]: Error acquiring toolchain: {err:?}",
+                        toolchain.archive_id
+                    );
+                    Err(err)
                 }
             }
         }
