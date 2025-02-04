@@ -109,6 +109,7 @@ pub struct OverlayBuilder {
     bubblewrap: PathBuf,
     dir: PathBuf,
     job_queue: Arc<tokio::sync::Semaphore>,
+    runtime: tokio::runtime::Handle,
 }
 
 impl OverlayBuilder {
@@ -116,6 +117,7 @@ impl OverlayBuilder {
         bubblewrap: PathBuf,
         dir: PathBuf,
         job_queue: Arc<tokio::sync::Semaphore>,
+        runtime: &tokio::runtime::Handle,
     ) -> Result<Self> {
         tracing::info!("Creating overlay builder");
 
@@ -163,6 +165,7 @@ impl OverlayBuilder {
             bubblewrap,
             dir,
             job_queue,
+            runtime: runtime.clone(),
         };
         ret.cleanup().await?;
         tokio::fs::create_dir_all(&ret.dir)
@@ -202,6 +205,7 @@ impl OverlayBuilder {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn perform_build(
         job_id: &str,
         bubblewrap: PathBuf,
@@ -215,6 +219,7 @@ impl OverlayBuilder {
         output_paths: Vec<String>,
         overlay: OverlaySpec,
         job_queue: &tokio::sync::Semaphore,
+        runtime: &tokio::runtime::Handle,
     ) -> Result<BuildResult> {
         tracing::trace!("[perform_build({job_id})]: Compile environment: {env_vars:?}");
         tracing::trace!("[perform_build({job_id})]: Compile command: {executable:?} {arguments:?}");
@@ -408,22 +413,24 @@ impl OverlayBuilder {
         let job_slot = job_queue.acquire().await?;
 
         // Run build in a blocking background thread
-        let res = tokio::task::block_in_place(move || {
-            // Explicitly launch a new thread outside tokio's thread pool,
-            // so that our overlayfs and tmpfs are unmounted when it dies.
-            //
-            // This might be equivalent to tokio's Handle::spawn_blocking,
-            // but their docs say they use a thread pool, and the comment
-            // about overlayfs unmounting says it happens when the thread
-            // dies. Being less efficient here is better than accidentally
-            // sharing the build context because tokio uses a thread pool.
-            std::thread::scope(|scope| {
-                scope
-                    .spawn(build_in_overlay)
-                    .join()
-                    .unwrap_or_else(|_e| Err(anyhow!("Build thread exited unsuccessfully")))
+        let res = runtime
+            .spawn_blocking(move || {
+                // Explicitly launch a new thread outside tokio's thread pool,
+                // so that our overlayfs and tmpfs are unmounted when it dies.
+                //
+                // This might be equivalent to tokio's Handle::spawn_blocking,
+                // but their docs say they use a thread pool, and the comment
+                // about overlayfs unmounting says it happens when the thread
+                // dies. Being less efficient here is better than accidentally
+                // sharing the build context because tokio uses a thread pool.
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(build_in_overlay)
+                        .join()
+                        .unwrap_or_else(|e| Err(anyhow!("Build thread exited with error: {e:?}")))
+                })
             })
-        });
+            .await?;
 
         // Drop the job slot once compile is finished
         drop(job_slot);
@@ -477,6 +484,7 @@ impl BuilderIncoming for OverlayBuilder {
             outputs,
             overlay.clone(),
             self.job_queue.as_ref(),
+            &self.runtime,
         )
         .await;
 

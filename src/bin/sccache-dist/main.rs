@@ -466,7 +466,7 @@ fn run(command: Command) -> Result<()> {
                         bwrap_path,
                         build_dir,
                     } => Arc::new(
-                        build::OverlayBuilder::new(bwrap_path, build_dir, job_queue.clone())
+                        build::OverlayBuilder::new(bwrap_path, build_dir, job_queue.clone(), pool)
                             .await
                             .context("Overlay builder failed to start")?,
                     ),

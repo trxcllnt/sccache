@@ -611,8 +611,6 @@ mod server {
             return Err(anyhow!("Storage is missing toolchain"));
         }
 
-        let path = root_dir.join(make_lru_key_path(toolchain_id));
-
         if let Some((path, inflated_size)) = toolchains.lock().await.get(&tc) {
             return Ok((path.to_path_buf(), *inflated_size));
         }
@@ -665,6 +663,7 @@ mod server {
 
         // Unpack the toolchain
         let start = std::time::Instant::now();
+        let path = root_dir.join(make_lru_key_path(toolchain_id));
 
         tracing::trace!("[ServerToolchains({toolchain_id})]: Unpacking toolchain to {path:?}");
 
