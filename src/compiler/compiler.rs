@@ -925,7 +925,7 @@ where
             Ok(dist::RunJobResponse::JobComplete { result, server_id }) => Ok((result, server_id)),
             // Failure
             Ok(dist::RunJobResponse::JobFailed { reason, server_id }) => {
-                warn!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation job failed");
+                warn!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation job failed: {reason}");
                 // Break because JobFailed responses are not retryable
                 break Err(anyhow!(reason));
             }
@@ -944,7 +944,7 @@ where
             // Build server shutdown before job completed
             Ok(dist::RunJobResponse::ServerShutdown { reason, server_id }) => {
                 warn!(
-                    "[{out_pretty}, {job_id}, {server_id}]: Distributed compilation job terminated"
+                    "[{out_pretty}, {job_id}, {server_id}]: Distributed compilation job terminated: {reason}"
                 );
                 // Don't break because JobTerminated responses _are_ retryable
                 Err(anyhow!("Distributed compilation job terminated: {reason}"))

@@ -625,6 +625,8 @@ pub trait ServerService: Send + Sync {
         outputs: Vec<String>,
     ) -> Result<()>;
 
+    async fn del_job(&self, task_id: &str) -> Option<(String, String)>;
+
     async fn job_failure(&self, task_id: &str, reason: &str) -> Result<()>;
 
     async fn job_success(&self, task_id: &str) -> Result<()>;

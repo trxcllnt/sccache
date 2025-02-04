@@ -1276,13 +1276,17 @@ impl ServerService for Server {
                 // Record put_job_inputs errors
                 metrics::counter!("sccache::server::put_job_inputs_error_count").increment(1);
                 tracing::warn!("[run_job({job_id})]: Error storing job result: {err:?}");
-                TaskError::UnexpectedError(format!("{err:#}"))
+                TaskError::ExpectedError(format!("{err:#}"))
             });
 
         // Record total run_job time
         metrics::histogram!("sccache::server::job_time").record(job_start.elapsed().as_secs_f64());
 
         Ok(result?)
+    }
+
+    async fn del_job(&self, task_id: &str) -> Option<(String, String)> {
+        self.state.lock().await.jobs.remove(task_id)
     }
 
     async fn job_failure(&self, task_id: &str, reason: &str) -> Result<()> {
@@ -1344,18 +1348,14 @@ impl ServerService for Server {
 
 // Sent by schedulers, runs on servers
 mod scheduler_to_servers {
-    use anyhow::anyhow;
-    use celery::prelude::*;
 
-    use futures::FutureExt;
+    use celery::prelude::*;
     use sccache::dist::{CompileCommand, Toolchain};
 
     #[celery::task(
         bind = true,
         acks_late = true,
-        acks_on_failure_or_timeout = false,
-        max_retries = 2,
-        nacks_enabled = true,
+        max_retries = 5,
         on_failure = on_run_job_failure,
         on_success = on_run_job_success,
     )]
@@ -1376,70 +1376,78 @@ mod scheduler_to_servers {
             command.arguments,
         );
 
-        super::SERVER
-            .get()
-            .map(|server| {
-                async {
-                    server
-                        .run_job(&task_id, &job_id, &respond_to, toolchain, command, outputs)
-                        .await
-                        .map_err(|e| match e.downcast_ref::<TaskError>() {
-                            Some(TaskError::UnexpectedError(msg)) => {
-                                let msg = format!("run_job failed with unexpected error: {msg}");
-                                tracing::error!("[run_job({job_id})]: {msg}");
-                                TaskError::UnexpectedError(msg.clone())
-                            }
-                            _ => {
-                                let msg = format!("run_job failed with error: {e:?}");
-                                tracing::error!("[run_job({job_id})]: {msg}");
-                                TaskError::ExpectedError(msg)
-                            }
-                        })
-                }
-                .boxed()
-            })
-            .unwrap_or_else(|| {
-                futures::future::err(TaskError::ExpectedError(
+        let server = match super::SERVER.get() {
+            Some(server) => server,
+            None => {
+                tracing::error!("sccache-dist server is not initialized");
+                return Err(TaskError::ExpectedError(
                     "sccache-dist server is not initialized".into(),
-                ))
-                .boxed()
-            })
+                ));
+            }
+        };
+
+        server
+            .run_job(&task_id, &job_id, &respond_to, toolchain, command, outputs)
             .await
+            .map_err(|e| match e.downcast_ref::<TaskError>() {
+                Some(TaskError::UnexpectedError(msg)) => {
+                    tracing::error!("[run_job({job_id})]: failed with unexpected error: {msg}");
+                    let msg = format!("Job {job_id} failed with unexpected error: {msg}");
+                    TaskError::UnexpectedError(msg.clone())
+                }
+                _ => {
+                    tracing::error!("[run_job({job_id})]: failed with expected error: {e:?}");
+                    let msg = format!("Job {job_id} failed with expected error: {e:#}");
+                    TaskError::ExpectedError(msg)
+                }
+            })
     }
 
     async fn on_run_job_failure(task: &run_job, err: &TaskError) {
         let task_id = task.request().id.clone();
-        let reason = match err {
-            TaskError::TimeoutError => {
-                format!("[run_job({task_id})]: run_job timed out")
-            }
-            _ => {
-                format!("[run_job({task_id})]: {err}")
+        let server = match super::SERVER.get() {
+            Some(server) => server,
+            None => {
+                tracing::error!("sccache-dist server is not initialized: {err:#}");
+                return;
             }
         };
-        if let Err(err) = super::SERVER
-            .get()
-            .map(|server| server.job_failure(&task_id, &reason))
-            .unwrap_or_else(|| {
-                futures::future::err(anyhow!("sccache-dist server is not initialized")).boxed()
-            })
-            .await
-        {
-            tracing::error!("[on_run_job_failure({task_id})]: {err}");
+
+        let reason = {
+            if let TaskError::UnexpectedError(msg) = err {
+                // Never retry unexpected errors
+                msg
+            } else if task.request().retries < task.options().max_retries.unwrap_or(0) {
+                // Other errors may be retried.
+                // Don't report the failure to the client yet.
+                server.del_job(&task_id).await;
+                return;
+            } else if let TaskError::ExpectedError(msg) = err {
+                msg
+            } else if let TaskError::Retry(_) = err {
+                "run_job max retries exceeded"
+            } else {
+                "run_job timed out"
+            }
+        };
+
+        if let Err(err) = server.job_failure(&task_id, reason).await {
+            tracing::error!("[on_run_job_failure({task_id})]: {err:#}");
         }
     }
 
     async fn on_run_job_success(task: &run_job, _: &()) {
         let task_id = task.request().id.clone();
-        if let Err(err) = super::SERVER
-            .get()
-            .map(|server| server.job_success(&task_id))
-            .unwrap_or_else(|| {
-                futures::future::err(anyhow!("sccache-dist server is not initialized")).boxed()
-            })
-            .await
-        {
-            tracing::error!("[on_run_job_success({task_id})]: {err}");
+        let server = match super::SERVER.get() {
+            Some(server) => server,
+            None => {
+                tracing::error!("sccache-dist server is not initialized");
+                return;
+            }
+        };
+
+        if let Err(err) = server.job_success(&task_id).await {
+            tracing::error!("[on_run_job_success({task_id})]: {err:#}");
         }
     }
 }
@@ -1457,23 +1465,30 @@ mod server_to_schedulers {
     // Runs on scheduler to handle heartbeats from servers
     #[celery::task(max_retries = 0)]
     pub async fn status(server: ServerDetails) -> TaskResult<()> {
-        super::SCHEDULER
-            .get()
-            .unwrap()
-            .receive_status(server, None)
-            .await
-            .map_err(|e| match e.downcast_ref::<TaskError>() {
+        let scheduler = match super::SCHEDULER.get() {
+            Some(scheduler) => scheduler,
+            None => {
+                tracing::error!("sccache-dist scheduler is not initialized");
+                return Err(TaskError::ExpectedError(
+                    "sccache-dist scheduler is not initialized".into(),
+                ));
+            }
+        };
+
+        scheduler.receive_status(server, None).await.map_err(|e| {
+            match e.downcast_ref::<TaskError>() {
                 Some(TaskError::UnexpectedError(msg)) => {
+                    tracing::error!("[receive_status]: failed with unexpected error: {msg}");
                     let msg = format!("receive_status failed with unexpected error: {msg}");
-                    tracing::error!("[receive_status]: {msg}");
                     TaskError::UnexpectedError(msg.clone())
                 }
                 _ => {
-                    let msg = format!("receive_status failed with error: {e:?}");
-                    tracing::error!("[receive_status]: {msg}");
+                    tracing::error!("[receive_status]: failed with expected error: {e:?}");
+                    let msg = format!("receive_status failed with expected error: {e:#}");
                     TaskError::ExpectedError(msg)
                 }
-            })
+            }
+        })
     }
 
     #[celery::task(max_retries = 0)]
@@ -1482,20 +1497,28 @@ mod server_to_schedulers {
         reason: String,
         server: ServerDetails,
     ) -> TaskResult<()> {
-        super::SCHEDULER
-            .get()
-            .unwrap()
+        let scheduler = match super::SCHEDULER.get() {
+            Some(scheduler) => scheduler,
+            None => {
+                tracing::error!("sccache-dist scheduler is not initialized");
+                return Err(TaskError::ExpectedError(
+                    "sccache-dist scheduler is not initialized".into(),
+                ));
+            }
+        };
+
+        scheduler
             .job_failure(&job_id, &reason, server)
             .await
             .map_err(|e| match e.downcast_ref::<TaskError>() {
                 Some(TaskError::UnexpectedError(msg)) => {
-                    let msg = format!("job_failure failed with unexpected error: {msg}");
-                    tracing::error!("[job_failure({job_id})]: {msg}");
+                    tracing::error!("[job_failure({job_id})]: failed with unexpected error: {msg}");
+                    let msg = format!("Job {job_id} failed with unexpected error: {msg}");
                     TaskError::UnexpectedError(msg.clone())
                 }
                 _ => {
-                    let msg = format!("job_failure failed with error: {e:?}");
-                    tracing::error!("[job_failure({job_id})]: {msg}");
+                    tracing::error!("[job_failure({job_id})]: failed with expected error: {e:?}");
+                    let msg = format!("Job {job_id} failed with expected error: {e:#}");
                     TaskError::ExpectedError(msg)
                 }
             })
@@ -1503,22 +1526,29 @@ mod server_to_schedulers {
 
     #[celery::task(max_retries = 0)]
     pub async fn job_success(job_id: String, server: ServerDetails) -> TaskResult<()> {
-        super::SCHEDULER
-            .get()
-            .unwrap()
-            .job_success(&job_id, server)
-            .await
-            .map_err(|e| match e.downcast_ref::<TaskError>() {
+        let scheduler = match super::SCHEDULER.get() {
+            Some(scheduler) => scheduler,
+            None => {
+                tracing::error!("sccache-dist scheduler is not initialized");
+                return Err(TaskError::ExpectedError(
+                    "sccache-dist scheduler is not initialized".into(),
+                ));
+            }
+        };
+
+        scheduler.job_success(&job_id, server).await.map_err(|e| {
+            match e.downcast_ref::<TaskError>() {
                 Some(TaskError::UnexpectedError(msg)) => {
-                    let msg = format!("job_success failed with unexpected error: {msg}");
-                    tracing::error!("[job_success({job_id})]: {msg}");
+                    tracing::error!("[job_success({job_id})]: failed with unexpected error: {msg}");
+                    let msg = format!("Job {job_id} failed with unexpected error: {msg}");
                     TaskError::UnexpectedError(msg.clone())
                 }
                 _ => {
-                    let msg = format!("job_success failed with error: {e:?}");
-                    tracing::error!("[job_success({job_id})]: {msg}");
+                    tracing::error!("[job_success({job_id})]: failed with expected error: {e:?}");
+                    let msg = format!("Job {job_id} failed with expected error: {e:#}");
                     TaskError::ExpectedError(msg)
                 }
-            })
+            }
+        })
     }
 }
