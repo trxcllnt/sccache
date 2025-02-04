@@ -133,6 +133,7 @@ mod common {
 
     #[derive(Clone)]
     pub struct AsyncMemoizer<K: Eq + Hash, V> {
+        rt: tokio::runtime::Handle,
         run_f: Arc<
             dyn Fn(&K) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<V>> + Send>>
                 + Send
@@ -157,10 +158,12 @@ mod common {
                 + Sync
                 + 'static,
         >(
+            runtime: &tokio::runtime::Handle,
             capacity: u64,
             run_f: F,
         ) -> Self {
             Self {
+                rt: runtime.clone(),
                 run_f: Arc::new(run_f),
                 state: Arc::new(Mutex::new((LruCache::new(capacity), HashMap::new()))),
             }
@@ -185,7 +188,7 @@ mod common {
                 pending.insert(args.clone(), sndr);
 
                 // Run the function on a worker thread
-                tokio::runtime::Handle::current().spawn({
+                self.rt.spawn({
                     let args = args.clone();
                     let run_f = self.run_f.clone();
                     let state = self.state.clone();
@@ -337,7 +340,7 @@ mod client {
                 cache::ClientToolchains::new(cache_dir, cache_size, toolchain_configs)
                     .context("failed to initialise client toolchains")?;
 
-            let submit_toolchain_reqs = AsyncMemoizer::new(0, {
+            let submit_toolchain_reqs = AsyncMemoizer::new(pool, 0, {
                 let client = client.clone();
                 let auth_token = auth_token.clone();
                 let scheduler_url = scheduler_url.clone();

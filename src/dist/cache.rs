@@ -731,7 +731,9 @@ mod server {
             let toolchains = Arc::new(Mutex::new(LruCache::with_meter(capacity, ToolchainSize)));
 
             let toolchains_loader = AsyncMemoizer::new(0, {
+            let toolchains_loader = AsyncMemoizer::new(runtime, 0, {
                 let tc_sizes = Arc::new(AsyncMemoizer::new(
+                    runtime,
                     // Arbitrary: remember the sizes of the 1000 most recent toolchains
                     1000,
                     {

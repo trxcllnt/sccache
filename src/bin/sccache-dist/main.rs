@@ -248,17 +248,16 @@ fn run(command: Command) -> Result<()> {
                 .enable_all()
                 .build()?;
 
-            let jobs_storage = sccache::cache::cache::storage_from_config(
-                &jobs.storage,
-                &jobs.fallback,
-                runtime.handle(),
-            )
-            .context("Failed to initialize jobs storage")?;
+            let pool = runtime.handle();
+
+            let jobs_storage =
+                sccache::cache::cache::storage_from_config(&jobs.storage, &jobs.fallback, pool)
+                    .context("Failed to initialize jobs storage")?;
 
             let toolchains_storage = sccache::cache::cache::storage_from_config(
                 &toolchains.storage,
                 &toolchains.fallback,
-                runtime.handle(),
+                pool,
             )
             .context("Failed to initialize toolchain storage")?;
 
@@ -339,7 +338,6 @@ fn run(command: Command) -> Result<()> {
                     .map_err(|e| anyhow!(e.to_string()))?;
 
                 let server = dist::server::Scheduler::new(
-                    scheduler.clone(),
                     match client_auth {
                         scheduler_config::ClientAuth::Insecure => Box::new(
                             token_check::EqCheck::new(INSECURE_DIST_CLIENT_TOKEN.to_owned()),
@@ -402,17 +400,16 @@ fn run(command: Command) -> Result<()> {
                 .enable_all()
                 .build()?;
 
-            let jobs_storage = sccache::cache::cache::storage_from_config(
-                &jobs.storage,
-                &jobs.fallback,
-                runtime.handle(),
-            )
-            .context("Failed to initialize jobs storage")?;
+            let pool = runtime.handle();
+
+            let jobs_storage =
+                sccache::cache::cache::storage_from_config(&jobs.storage, &jobs.fallback, pool)
+                    .context("Failed to initialize jobs storage")?;
 
             let toolchains_storage = sccache::cache::cache::storage_from_config(
                 &toolchains.storage,
                 &toolchains.fallback,
-                runtime.handle(),
+                pool,
             )
             .context("Failed to initialize toolchain storage")?;
 
@@ -452,6 +449,8 @@ fn run(command: Command) -> Result<()> {
                 let broker_uri = message_broker_uri(message_broker)?;
                 // This URI can contain the username/password, so log at trace level
                 tracing::trace!("Message broker URI: {broker_uri}");
+                    pool,
+                ).await?;
 
                 let to_servers = scheduler_to_servers_queue();
                 let occupancy = (num_cpus as f64 * max_per_core_load.max(0.0)).floor().max(1.0) as usize;
