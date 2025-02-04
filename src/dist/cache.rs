@@ -668,12 +668,34 @@ mod server {
 
         tracing::trace!("[ServerToolchains({toolchain_id})]: Unpacking toolchain to {path:?}");
 
-        async_tar::Archive::new(
-            GzipDecoder::new(futures::io::AllowStdIo::new(toolchain.reader()).compat()).compat(),
-        )
-        .unpack(&path)
-        .await
-        .context("Failed to unpack toolchain")?;
+        let mut unpack_retried = false;
+
+        loop {
+            // Ensure the toolchain parent dir exists
+            tokio::fs::create_dir_all(&path)
+                .await
+                .context("Failed to create toolchain directory")?;
+
+            let res = async_tar::Archive::new(
+                GzipDecoder::new(futures::io::AllowStdIo::new(toolchain.reader()).compat())
+                    .compat(),
+            )
+            .unpack(&path)
+            .await
+            .context("Failed to unpack toolchain");
+
+            if let Err(err) = res {
+                if unpack_retried {
+                    return Err(err);
+                }
+                // If there was an error unpacking the toolchain, remove the directory and try again
+                unpack_retried = true;
+                let _ = remove_toolchain_dir(&tc, &path, inflated_size).await;
+                continue;
+            }
+
+            break;
+        }
 
         // Record toolchain unpack time
         metrics::histogram!("sccache::server::toolchain_unpack_time")
