@@ -724,13 +724,20 @@ mod server {
     }
 
     impl ServerToolchains {
-        pub fn new(root_dir: &Path, capacity: u64, tc_storage: Arc<dyn cache::Storage>) -> Self {
+        pub async fn new(
+            root_dir: &Path,
+            capacity: u64,
+            tc_storage: Arc<dyn cache::Storage>,
+            runtime: &tokio::runtime::Handle,
+        ) -> Result<Self> {
             tracing::trace!("Using ServerToolchains({:?}, {})", root_dir, capacity);
 
-            // Only load up to 16 toolchains concurrently
+            tokio::fs::create_dir_all(&root_dir)
+                .await
+                .context("Failed to create toolchain directory")?;
+
             let toolchains = Arc::new(Mutex::new(LruCache::with_meter(capacity, ToolchainSize)));
 
-            let toolchains_loader = AsyncMemoizer::new(0, {
             let toolchains_loader = AsyncMemoizer::new(runtime, 0, {
                 let tc_sizes = Arc::new(AsyncMemoizer::new(
                     runtime,
@@ -764,7 +771,7 @@ mod server {
                 }
             });
 
-            Self { toolchains_loader }
+            Ok(Self { toolchains_loader })
         }
 
         pub async fn acquire(&self, toolchain: &Toolchain) -> Result<PathBuf> {

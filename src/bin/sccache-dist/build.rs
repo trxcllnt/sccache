@@ -165,13 +165,17 @@ impl OverlayBuilder {
             job_queue,
         };
         ret.cleanup().await?;
-        fs::create_dir_all(&ret.dir).context("Failed to create builder builds directory")?;
+        tokio::fs::create_dir_all(&ret.dir)
+            .await
+            .context("Failed to create builder builds directory")?;
         Ok(ret)
     }
 
     async fn cleanup(&self) -> Result<()> {
         if self.dir.exists() {
-            fs::remove_dir_all(&self.dir).context("Failed to clean up builder directory")?
+            tokio::fs::remove_dir_all(&self.dir)
+                .await
+                .context("Failed to clean up builder directory")?
         }
         Ok(())
     }
@@ -438,10 +442,13 @@ impl OverlayBuilder {
             toolchain_dir: _,
         } = overlay;
 
-        if let Err(e) = fs::remove_dir_all(build_dir) {
-            tracing::warn!(
-                "[finish_overlay({job_id})]: Failed to remove build directory {build_dir:?}: {e}"
-            );
+        if build_dir.exists() {
+            if let Err(e) = tokio::fs::remove_dir_all(build_dir).await {
+                tracing::warn!(
+                    "[finish_overlay({job_id})]: Failed to remove build directory {}: {e:?}",
+                    build_dir.display()
+                );
+            }
         }
     }
 }

@@ -338,6 +338,7 @@ fn run(command: Command) -> Result<()> {
                     .map_err(|e| anyhow!(e.to_string()))?;
 
                 let server = dist::server::Scheduler::new(
+                    scheduler,
                     match client_auth {
                         scheduler_config::ClientAuth::Insecure => Box::new(
                             token_check::EqCheck::new(INSECURE_DIST_CLIENT_TOKEN.to_owned()),
@@ -444,25 +445,12 @@ fn run(command: Command) -> Result<()> {
                     &cache_dir.join("tc"),
                     toolchain_cache_size,
                     toolchains_storage,
-                );
-
-                let broker_uri = message_broker_uri(message_broker)?;
-                // This URI can contain the username/password, so log at trace level
-                tracing::trace!("Message broker URI: {broker_uri}");
                     pool,
                 ).await?;
 
                 let to_servers = scheduler_to_servers_queue();
                 let occupancy = (num_cpus as f64 * max_per_core_load.max(0.0)).floor().max(1.0) as usize;
                 let pre_fetch = (num_cpus as f64 * max_per_core_prefetch.max(0.0)).floor().max(0.0) as usize;
-
-                let task_queue =
-                    Arc::new(celery_app(&server_id, &broker_uri, &to_servers, (occupancy + pre_fetch) as u16).await?);
-
-                // Tasks this server receives
-                task_queue
-                    .register_task::<scheduler_to_servers::run_job>()
-                    .await?;
 
                 let job_queue = Arc::new(tokio::sync::Semaphore::new(occupancy));
 
@@ -501,6 +489,18 @@ fn run(command: Command) -> Result<()> {
                             .unwrap_or("")
                     ),
                 };
+
+                let broker_uri = message_broker_uri(message_broker)?;
+                // This URI can contain the username/password, so log at trace level
+                tracing::trace!("Message broker URI: {broker_uri}");
+
+                let task_queue =
+                    Arc::new(celery_app(&server_id, &broker_uri, &to_servers, (occupancy + pre_fetch) as u16).await?);
+
+                // Tasks this server receives
+                task_queue
+                    .register_task::<scheduler_to_servers::run_job>()
+                    .await?;
 
                 let server = Arc::new(Server::new(
                     server_id.clone(),
