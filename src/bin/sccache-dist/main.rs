@@ -10,11 +10,13 @@ use futures::lock::Mutex;
 use futures::{pin_mut, AsyncReadExt, FutureExt, TryFutureExt};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use sccache::config::MetricsConfig;
+use sccache::dist::http::{AsyncMemoize, AsyncMemoizeFn};
 
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::ops::DerefMut;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -437,12 +439,6 @@ fn run(command: Command) -> Result<()> {
                     .await
                     .context("Failed to initialize toolchain storage")?;
 
-                let server_toolchains = ServerToolchains::new(
-                    &cache_dir.join("tc"),
-                    toolchain_cache_size,
-                    toolchains_storage,
-                ).await?;
-
                 let to_servers = scheduler_to_servers_queue();
                 let occupancy = (num_cpus as f64 * max_per_core_load.max(0.0)).floor().max(1.0) as usize;
                 let pre_fetch = (num_cpus as f64 * max_per_core_prefetch.max(0.0)).floor().max(0.0) as usize;
@@ -497,6 +493,17 @@ fn run(command: Command) -> Result<()> {
                     .register_task::<scheduler_to_servers::run_job>()
                     .await?;
 
+                struct LoadToolchainFn {
+                    toolchains: ServerToolchains,
+                }
+
+                #[async_trait]
+                impl AsyncMemoizeFn<'_, Toolchain, PathBuf> for LoadToolchainFn {
+                    async fn call(&self, tc: &Toolchain) -> Result<PathBuf> {
+                        self.toolchains.load(tc).await
+                    }
+                }
+
                 let server = Arc::new(Server::new(
                     server_id.clone(),
                     dist::ServerStats {
@@ -509,7 +516,13 @@ fn run(command: Command) -> Result<()> {
                     builder,
                     task_queue.clone(),
                     jobs_storage,
-                    server_toolchains,
+                    AsyncMemoize::new(0, LoadToolchainFn {
+                        toolchains: ServerToolchains::new(
+                            cache_dir.join("tc"),
+                            toolchain_cache_size,
+                            toolchains_storage,
+                        )
+                    }),
                 ));
 
                 SERVER.set(server.clone()).map_err(|err| anyhow!("{err}"))?;
@@ -996,7 +1009,7 @@ pub struct Server {
     state: Arc<Mutex<ServerState>>,
     stats: dist::ServerStats,
     task_queue: Arc<celery::Celery>,
-    toolchains: ServerToolchains,
+    fetch_toolchain: AsyncMemoize<Toolchain, PathBuf>,
 }
 
 impl Server {
@@ -1008,7 +1021,7 @@ impl Server {
         builder: Arc<dyn BuilderIncoming>,
         task_queue: Arc<celery::Celery>,
         jobs_storage: Arc<dyn sccache::cache::Storage>,
-        toolchains: ServerToolchains,
+        fetch_toolchain: AsyncMemoize<Toolchain, PathBuf>,
     ) -> Self {
         use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
         Self {
@@ -1020,7 +1033,7 @@ impl Server {
             server_id,
             stats,
             task_queue,
-            toolchains,
+            fetch_toolchain,
             state: Arc::new(Mutex::new(ServerState {
                 alive: true,
                 jobs: Default::default(),
@@ -1196,7 +1209,7 @@ impl ServerService for Server {
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> Result<()> {
-        metrics::counter!("sccache::server::job_fetched").increment(1);
+        metrics::counter!("sccache::server::job_started_count").increment(1);
 
         let job_start = Instant::now();
 
@@ -1216,7 +1229,7 @@ impl ServerService for Server {
         self.broadcast_status(Some(details)).await?;
 
         // Load and unpack the toolchain
-        let toolchain_dir = self.toolchains.acquire(&toolchain).await.map_err(|err| {
+        let toolchain_dir = self.fetch_toolchain.call(&toolchain).await.map_err(|err| {
             // Record toolchain errors
             metrics::counter!("sccache::server::toolchain_error_count").increment(1);
             tracing::warn!("[run_job({job_id})]: Error loading toolchain: {err:?}");
@@ -1241,7 +1254,7 @@ impl ServerService for Server {
         metrics::histogram!("sccache::server::job_fetched_time")
             .record(job_start.elapsed().as_secs_f64());
 
-        metrics::counter!("sccache::server::job_started").increment(1);
+        metrics::counter!("sccache::server::job_fetched_count").increment(1);
 
         let build_start = Instant::now();
 

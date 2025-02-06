@@ -16,13 +16,15 @@
 pub use self::client::Client;
 #[cfg(feature = "dist-server")]
 pub use self::{
-    common::AsyncMemoizer,
+    common::{AsyncMemoize, AsyncMemoizeFn},
     server::{ClientAuthCheck, ClientVisibleMsg},
 };
 
 pub use self::common::{bincode_deserialize, bincode_serialize};
 
 mod common {
+    use async_trait::async_trait;
+
     use reqwest::header;
 
     use futures::lock::Mutex;
@@ -131,14 +133,14 @@ mod common {
         }
     }
 
+    #[async_trait]
+    pub trait AsyncMemoizeFn<'a, K: Eq + Hash, V> {
+        async fn call(&self, args: &K) -> Result<V>;
+    }
+
     #[derive(Clone)]
-    pub struct AsyncMemoizer<K: Eq + Hash, V> {
-        rt: tokio::runtime::Handle,
-        run_f: Arc<
-            dyn Fn(&K) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<V>> + Send>>
-                + Send
-                + Sync,
-        >,
+    pub struct AsyncMemoize<K: Eq + Hash, V> {
+        run_f: Arc<dyn for<'a> AsyncMemoizeFn<'a, K, V> + Send + Sync>,
         state: Arc<
             Mutex<(
                 LruCache<K, V>,
@@ -147,23 +149,16 @@ mod common {
         >,
     }
 
-    impl<K, V> AsyncMemoizer<K, V>
+    impl<K, V> AsyncMemoize<K, V>
     where
         K: Clone + std::fmt::Debug + Eq + Hash + Send + Sync + 'static,
         V: Clone + Send + Sync + 'static,
     {
-        pub fn new<
-            F: Fn(&K) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<V>> + Send>>
-                + Send
-                + Sync
-                + 'static,
-        >(
-            runtime: &tokio::runtime::Handle,
-            capacity: u64,
-            run_f: F,
-        ) -> Self {
+        pub fn new<F>(capacity: u64, run_f: F) -> Self
+        where
+            F: for<'a> AsyncMemoizeFn<'a, K, V> + Send + Sync + 'static,
+        {
             Self {
-                rt: runtime.clone(),
                 run_f: Arc::new(run_f),
                 state: Arc::new(Mutex::new((LruCache::new(capacity), HashMap::new()))),
             }
@@ -185,37 +180,42 @@ mod common {
             } else {
                 // Create broadcast sender/receiver on first call
                 let (sndr, recv) = tokio::sync::broadcast::channel(1);
+
                 pending.insert(args.clone(), sndr);
 
                 // Run the function on a worker thread
-                self.rt.spawn({
+                tokio::runtime::Handle::current().spawn({
                     let args = args.clone();
                     let run_f = self.run_f.clone();
                     let state = self.state.clone();
                     async move {
                         // Call the function
-                        let res = run_f(&args).await;
-                        // Lock state again to store and notify
-                        let mut state = state.lock().await;
-                        let (results, pending) = state.deref_mut();
-                        match res {
-                            Ok(val) => {
-                                // Since both we have a lock on state, the order of these doesn't matter.
-                                // Choosing to do the one that doesn't require copying args again.
-                                let sender = pending.remove(&args).unwrap();
-                                if results.capacity() > 0 {
-                                    results.insert(args, val.clone());
-                                }
-                                // Unlock state before we notify
-                                drop(state);
-                                // Notify receivers
-                                let _ = sender.send(val);
-                            }
+                        let res = run_f.call(&args).await;
+
+                        // Unwrap the result
+                        let val = match res {
+                            Ok(val) => val,
                             Err(err) => {
                                 // TODO: Broadcast this error instead of just closing the channel
-                                error!("AsyncMemoizer: Error loading resource: {err:?}");
-                                pending.remove(&args);
+                                error!("AsyncMemoize error: {err:?}");
+                                state.lock().await.1.remove(&args);
+                                return;
                             }
+                        };
+
+                        // Notify receivers
+                        let sndr = {
+                            // Lock state to store result and notify
+                            let mut state = state.lock().await;
+                            let (results, pending) = state.deref_mut();
+                            if results.capacity() > 0 {
+                                results.insert(args.clone(), val.clone());
+                            }
+                            pending.remove(&args)
+                        };
+
+                        if let Some(sndr) = sndr {
+                            let _ = sndr.send(val);
                         }
                     }
                 });
@@ -306,9 +306,36 @@ mod client {
     use reqwest::Body;
     use std::path::{Path, PathBuf};
 
-    use super::common::{bincode_req_fut, AsyncMemoizer, ReqwestRequestBuilderExt};
+    use super::common::{bincode_req_fut, AsyncMemoize, AsyncMemoizeFn, ReqwestRequestBuilderExt};
     use super::urls;
     use crate::errors::*;
+
+    struct SubmitToolchainFn {
+        client: Arc<Mutex<reqwest::Client>>,
+        auth_token: String,
+        scheduler_url: reqwest::Url,
+    }
+
+    #[async_trait]
+    impl AsyncMemoizeFn<'_, (Toolchain, PathBuf), SubmitToolchainResult> for SubmitToolchainFn {
+        async fn call(&self, (tc, path): &(Toolchain, PathBuf)) -> Result<SubmitToolchainResult> {
+            let Self {
+                client,
+                auth_token,
+                scheduler_url,
+            } = self;
+            let url = urls::scheduler_submit_toolchain(scheduler_url, &tc.archive_id);
+            let req = client
+                .lock()
+                .await
+                .put(url)
+                .bearer_auth(auth_token)
+                .body(Body::wrap_stream(tokio_util::io::ReaderStream::new(
+                    tokio::fs::File::open(path).await?,
+                )));
+            bincode_req_fut::<SubmitToolchainResult>(req).await
+        }
+    }
 
     pub struct Client {
         auth_token: String,
@@ -317,7 +344,7 @@ mod client {
         pool: tokio::runtime::Handle,
         rewrite_includes_only: bool,
         scheduler_url: reqwest::Url,
-        submit_toolchain_reqs: AsyncMemoizer<(Toolchain, PathBuf), SubmitToolchainResult>,
+        submit_toolchain_reqs: AsyncMemoize<(Toolchain, PathBuf), SubmitToolchainResult>,
         tc_cache: Arc<cache::ClientToolchains>,
     }
 
@@ -340,26 +367,14 @@ mod client {
                 cache::ClientToolchains::new(cache_dir, cache_size, toolchain_configs)
                     .context("failed to initialise client toolchains")?;
 
-            let submit_toolchain_reqs = AsyncMemoizer::new(pool, 0, {
-                let client = client.clone();
-                let auth_token = auth_token.clone();
-                let scheduler_url = scheduler_url.clone();
-
-                move |(tc, path): &(Toolchain, PathBuf)| {
-                    let path = path.clone();
-                    let client = client.clone();
-                    let auth_token = auth_token.clone();
-                    let url = urls::scheduler_submit_toolchain(&scheduler_url, &tc.archive_id);
-                    Box::pin(async move {
-                        let req = client.lock().await.put(url).bearer_auth(auth_token).body(
-                            Body::wrap_stream(tokio_util::io::ReaderStream::new(
-                                tokio::fs::File::open(path).await?,
-                            )),
-                        );
-                        bincode_req_fut::<SubmitToolchainResult>(req).await
-                    })
-                }
-            });
+            let submit_toolchain_reqs = AsyncMemoize::new(
+                0,
+                SubmitToolchainFn {
+                    client: client.clone(),
+                    auth_token: auth_token.clone(),
+                    scheduler_url: scheduler_url.clone(),
+                },
+            );
 
             Ok(Self {
                 auth_token: auth_token.clone(),
