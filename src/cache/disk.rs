@@ -196,6 +196,12 @@ impl Storage for DiskCache {
         Ok(())
     }
 
+    async fn size(&self, key: &str) -> Result<u64> {
+        self.lru
+            .lock()
+            .await
+            .get_or_init()
+            .and_then(|lru| lru.get_size(key).map_err(|e| e.into()))
     }
 
     async fn check(&self) -> Result<CacheMode> {

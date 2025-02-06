@@ -101,6 +101,18 @@ impl Storage for MockStorage {
         }
         Ok(())
     }
+    async fn size(&self, _key: &str) -> Result<u64> {
+        if let Some(delay) = self.delay {
+            sleep(delay).await;
+        }
+        let next = self.rx.lock().await.try_next().unwrap();
+        if let Some(Ok(Cache::Hit(next))) = next {
+            let mut next = next.into_inner();
+            let mut data = vec![];
+            return Ok(next.read_to_end(&mut data)? as u64);
+        }
+        Ok(0)
+    }
     async fn location(&self) -> String {
         "Mock Storage".to_string()
     }

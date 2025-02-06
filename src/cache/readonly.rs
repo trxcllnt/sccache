@@ -59,6 +59,10 @@ impl Storage for ReadOnlyStorage {
         Err(anyhow!("Cannot write to read-only storage"))
     }
 
+    async fn size(&self, key: &str) -> Result<u64> {
+        self.0.size(key).await
+    }
+
     /// Check the cache capability.
     ///
     /// The ReadOnlyStorage cache is always read-only.

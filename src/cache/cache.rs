@@ -373,6 +373,8 @@ pub trait Storage: Send + Sync {
         stream: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<()>;
 
+    async fn size(&self, key: &str) -> Result<u64>;
+
     /// Check the cache capability.
     ///
     /// - `Ok(CacheMode::ReadOnly)` means cache can only be used to `get`
@@ -542,6 +544,10 @@ impl Storage for opendal::Operator {
         futures::io::copy(source, &mut sink).await?;
         sink.close().await?;
         Ok(())
+    }
+
+    async fn size(&self, key: &str) -> Result<u64> {
+        Ok(self.stat_with(&normalize_key(key)).await?.content_length())
     }
 
     async fn check(&self) -> Result<CacheMode> {
