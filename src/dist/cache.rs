@@ -1,33 +1,31 @@
-use crate::dist::Toolchain;
-use crate::lru_disk_cache::Result as LruResult;
-use crate::lru_disk_cache::{LruDiskCache, ReadSeek};
-use anyhow::{anyhow, Result};
-use fs_err as fs;
-use std::io;
-use std::path::{Path, PathBuf};
-
 #[cfg(feature = "dist-client")]
 pub use self::client::ClientToolchains;
 #[cfg(feature = "dist-server")]
 pub use self::server::ServerToolchains;
 
-use crate::util::Digest;
-use std::io::Read;
-
 #[cfg(feature = "dist-client")]
 mod client {
+
     use crate::config;
     use crate::dist::pkg::ToolchainPackager;
     use crate::dist::Toolchain;
     use crate::lru_disk_cache::Error as LruError;
+    use crate::lru_disk_cache::LruDiskCache;
+    use crate::util::Digest;
     use anyhow::{bail, Context, Error, Result};
     use fs_err as fs;
     use std::collections::{HashMap, HashSet};
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
-    use super::{path_key, TcCache};
+    fn path_key(path: &Path) -> Result<String> {
+        file_key(fs::File::open(path)?)
+    }
+
+    fn file_key<R: Read>(rdr: R) -> Result<String> {
+        Digest::reader_sync(rdr)
+    }
 
     #[derive(Clone, Debug)]
     pub struct CustomToolchain {
@@ -38,7 +36,7 @@ mod client {
     // TODO: possibly shouldn't be public
     pub struct ClientToolchains {
         cache_dir: PathBuf,
-        cache: Mutex<TcCache>,
+        cache: Mutex<LruDiskCache>,
         // Lookup from dist toolchain -> path to custom toolchain archive
         custom_toolchain_archives: Mutex<HashMap<Toolchain, PathBuf>>,
         // Lookup from local path -> toolchain details
@@ -99,7 +97,7 @@ mod client {
                 ))?;
 
             let tc_cache_dir = cache_dir.join("tc");
-            let cache = TcCache::new(&tc_cache_dir, cache_size)
+            let cache = LruDiskCache::new(&tc_cache_dir, cache_size)
                 .map(Mutex::new)
                 .context("failed to initialise a toolchain cache")?;
 
@@ -181,7 +179,7 @@ mod client {
                     )
                 })?
             } else {
-                match self.cache.lock().unwrap().get_file(tc) {
+                match self.cache.lock().unwrap().get_file(&tc.archive_id) {
                     Ok(file) => file,
                     Err(LruError::FileNotInCache) => return Ok(None),
                     Err(e) => return Err(e).context("error while retrieving toolchain from cache"),
@@ -219,7 +217,10 @@ mod client {
             toolchain_packager
                 .write_pkg(fs_err::File::from_parts(tmpfile.reopen()?, tmpfile.path()))
                 .context("Could not package toolchain")?;
-            let tc = cache.insert_file(tmpfile.path())?;
+            let tc = Toolchain {
+                archive_id: path_key(tmpfile.path())?,
+            };
+            cache.insert_file(&tc.archive_id, tmpfile.path())?;
             self.record_weak(weak_key.to_owned(), tc.archive_id.clone())?;
             Ok((tc, None))
         }
@@ -459,81 +460,6 @@ mod client {
             assert!(client_toolchains.is_err())
         }
     }
-}
-
-pub struct TcCache {
-    inner: LruDiskCache,
-}
-
-impl TcCache {
-    pub fn new(cache_dir: &Path, cache_size: u64) -> Result<TcCache> {
-        trace!("Using TcCache({:?}, {})", cache_dir, cache_size);
-        Ok(TcCache {
-            inner: LruDiskCache::new(cache_dir, cache_size)?,
-        })
-    }
-
-    pub fn contains_toolchain(&self, tc: &Toolchain) -> bool {
-        self.inner.contains_key(make_lru_key_path(&tc.archive_id))
-    }
-
-    pub async fn insert_with<F, Fut>(&mut self, tc: &Toolchain, with: F) -> Result<()>
-    where
-        F: FnOnce(tokio::fs::File) -> Fut,
-        Fut: std::future::Future<Output = io::Result<u64>>,
-    {
-        self.inner
-            .insert_with(make_lru_key_path(&tc.archive_id), with)
-            .await?;
-        let verified_archive_id = file_key(self.get(tc)?)?;
-        // TODO: remove created toolchain?
-        if verified_archive_id == tc.archive_id {
-            Ok(())
-        } else {
-            Err(anyhow!("written file does not match expected hash key"))
-        }
-    }
-
-    pub fn get_file(&mut self, tc: &Toolchain) -> LruResult<fs::File> {
-        self.inner.get_file(make_lru_key_path(&tc.archive_id))
-    }
-
-    pub fn get(&mut self, tc: &Toolchain) -> LruResult<Box<dyn ReadSeek>> {
-        self.inner.get(make_lru_key_path(&tc.archive_id))
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    pub fn remove(&mut self, tc: &Toolchain) -> LruResult<()> {
-        self.inner.remove(make_lru_key_path(&tc.archive_id))
-    }
-
-    #[cfg(feature = "dist-client")]
-    fn insert_file(&mut self, path: &Path) -> Result<Toolchain> {
-        let archive_id = path_key(path)?;
-        self.inner
-            .insert_file(make_lru_key_path(&archive_id), path)?;
-        Ok(Toolchain { archive_id })
-    }
-}
-
-#[cfg(feature = "dist-client")]
-fn path_key(path: &Path) -> Result<String> {
-    file_key(fs::File::open(path)?)
-}
-
-fn file_key<R: Read>(rdr: R) -> Result<String> {
-    Digest::reader_sync(rdr)
-}
-/// Make a path to the cache entry with key `key`.
-fn make_lru_key_path(key: &str) -> PathBuf {
-    Path::new(&key[0..1]).join(&key[1..2]).join(key)
 }
 
 #[cfg(feature = "dist-server")]
