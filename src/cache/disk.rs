@@ -17,15 +17,14 @@ use crate::compiler::PreprocessorCacheEntry;
 use crate::lru_disk_cache::LruDiskCache;
 use crate::lru_disk_cache::{Error as LruError, ReadSeek};
 use async_trait::async_trait;
-use futures::AsyncReadExt;
+use bytes::Buf;
 use futures::lock::Mutex;
 use std::ffi::{OsStr, OsString};
-use std::io::{BufWriter, Write};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::errors::*;
 
@@ -96,9 +95,32 @@ impl DiskCache {
     }
 }
 
-/// Make a path to the cache entry with key `key`.
-fn make_key_path(key: &str) -> PathBuf {
-    Path::new(&key[0..1]).join(&key[1..2]).join(key)
+impl DiskCache {
+    pub async fn entry(&self, key: &str) -> Result<(PathBuf, u64)> {
+        match self.lru.lock().await.get_or_init() {
+            Err(err) => Err(err),
+            Ok(lru) => Ok((lru.key_to_abs_path(key), lru.get_size(key)?)),
+        }
+    }
+
+    pub async fn insert_with<F, Fut>(
+        &self,
+        key: &str,
+        size: u64,
+        with_fn: F,
+    ) -> Result<(PathBuf, u64)>
+    where
+        F: FnOnce(&Path) -> Fut,
+        Fut: std::future::Future<Output = std::io::Result<u64>>,
+    {
+        self.lru
+            .lock()
+            .await
+            .get_or_init()?
+            .insert_with(key, size, with_fn)
+            .await
+            .map_err(|e| e.into())
+    }
 }
 
 #[async_trait]

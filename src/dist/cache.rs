@@ -6,18 +6,19 @@ pub use self::server::ServerToolchains;
 #[cfg(feature = "dist-client")]
 mod client {
 
-    use crate::config;
-    use crate::dist::pkg::ToolchainPackager;
-    use crate::dist::Toolchain;
-    use crate::lru_disk_cache::Error as LruError;
-    use crate::lru_disk_cache::LruDiskCache;
-    use crate::util::Digest;
     use anyhow::{bail, Context, Error, Result};
     use fs_err as fs;
     use std::collections::{HashMap, HashSet};
     use std::io::{Read, Write};
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
+
+    use crate::config;
+    use crate::dist::pkg::ToolchainPackager;
+    use crate::dist::Toolchain;
+    use crate::lru_disk_cache::Error as LruError;
+    use crate::lru_disk_cache::LruDiskCache;
+    use crate::util::Digest;
 
     fn path_key(path: &Path) -> Result<String> {
         file_key(fs::File::open(path)?)
@@ -466,286 +467,199 @@ mod client {
 mod server {
     use async_compression::tokio::bufread::GzipDecoder;
 
-    use bytes::Buf;
-    use futures::AsyncReadExt;
-    use futures::{lock::Mutex, StreamExt};
+    use futures::StreamExt;
     use tokio::io::BufReader;
-    use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
+    use tokio_util::compat::TokioAsyncReadCompatExt;
 
-    use std::collections::hash_map::RandomState;
+    use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use crate::cache::cache;
-    use crate::dist::http::AsyncMemoizer;
+    use crate::cache::disk::DiskCache;
+    use crate::cache::{cache, Storage};
     use crate::dist::Toolchain;
     use crate::errors::*;
-    use crate::lru_disk_cache::{LruCache, Meter};
 
-    use super::make_lru_key_path;
-
-    fn cached_toolchains_size(
-        toolchains: &LruCache<Toolchain, (PathBuf, u64), RandomState, ToolchainSize>,
-    ) -> u64 {
-        toolchains.iter().map(|(_, (_, size))| size).sum()
+    fn make_deflated_key(tc: &Toolchain) -> String {
+        format!("{}.tgz", tc.archive_id)
     }
 
-    async fn load_toolchain_size(id: String, tc_storage: Arc<dyn cache::Storage>) -> Result<u64> {
-        tracing::trace!("[ServerToolchains({id})]: Loading toolchain to compute inflated size");
-
-        let start = std::time::Instant::now();
-        // Download the toolchain and compute its inflated size
-        // TODO: Would be better if this was stored as metadata
-        let inflated_size = async_tar::Archive::new(
-            GzipDecoder::new(BufReader::new(tc_storage.get_stream(&id).await?.compat())).compat(),
-        )
-        .entries()?
-        .fold(0, |inflated_size, entry| async move {
-            if let Ok(inflated_entry_size) = entry.and_then(|e| e.header().size()) {
-                inflated_size + inflated_entry_size
-            } else {
-                inflated_size
-            }
-        })
-        .await;
-
-        // Record toolchain load time
-        metrics::histogram!("sccache::server::toolchain_size_time")
-            .record(start.elapsed().as_secs_f64());
-
-        tracing::trace!("[ServerToolchains({id})]: Computed inflated size: {inflated_size}");
-
-        Ok(inflated_size)
-    }
-
-    async fn load_and_unpack_toolchain(
-        tc: Toolchain,
-        root_dir: PathBuf,
-        tc_sizes: Arc<AsyncMemoizer<Toolchain, u64>>,
-        tc_storage: Arc<dyn cache::Storage>,
-        toolchains: Arc<Mutex<LruCache<Toolchain, (PathBuf, u64), RandomState, ToolchainSize>>>,
-    ) -> Result<(PathBuf, u64)> {
-        let toolchain_id = &tc.archive_id;
-
-        // First ensure the toolchain is still in storage. If not, delete it and report an error.
-        if !tc_storage.has(toolchain_id).await {
-            // Delete it from the server toolchain cache
-            let mut cached_toolchains = toolchains.lock().await;
-            if let Some((path, inflated_size)) = cached_toolchains.remove(&tc) {
-                remove_toolchain_dir(&tc, &path, inflated_size).await?;
-            }
-            return Err(anyhow!("Storage is missing toolchain"));
-        }
-
-        if let Some((path, inflated_size)) = toolchains.lock().await.get(&tc) {
-            return Ok((path.to_path_buf(), *inflated_size));
-        }
-
-        let inflated_size = tc_sizes.call(&tc).await?;
-
-        // Load the toolchain into memory
-        let toolchain = {
-            let start = std::time::Instant::now();
-            // TODO: Cache the compressed toolchain on disk instead of downloading it again
-            let mut toolchain_reader = tc_storage.get_stream(toolchain_id).await?;
-            let mut toolchain = vec![];
-            toolchain_reader
-                .read_to_end(&mut toolchain)
-                .await
-                .map_err(|err| {
-                    tracing::warn!(
-                        "ServerToolchains({toolchain_id})]: Error reading stream: {err:?}"
-                    );
-                    err
-                })?;
-
-            // Record toolchain load time
-            metrics::histogram!("sccache::server::toolchain_load_time")
-                .record(start.elapsed().as_secs_f64());
-
-            toolchain
-        };
-
-        // Clean up old toolchains so we have enough room to unpack this one
-
-        // Hold this lock until after the toolchain is unpacked to ensure another thread
-        // doesn't unpack a toolchain after the cleanup but before this one is unpacked.
-        let mut cached_toolchains = toolchains.lock().await;
-        let mut cached_size = cached_toolchains_size(&cached_toolchains);
-
-        let start = std::time::Instant::now();
-        // Remove old toolchains if necessary
-        while cached_size + inflated_size > cached_toolchains.capacity() {
-            if let Some((toolchain, (path, inflated_size))) = cached_toolchains.remove_lru() {
-                cached_size -= remove_toolchain_dir(&toolchain, &path, inflated_size).await?;
-            } else {
-                break;
-            }
-        }
-
-        // Record toolchain cleanup time
-        metrics::histogram!("sccache::server::toolchain_clean_time")
-            .record(start.elapsed().as_secs_f64());
-
-        // Unpack the toolchain
-        let start = std::time::Instant::now();
-        let path = root_dir.join(make_lru_key_path(toolchain_id));
-
-        tracing::trace!("[ServerToolchains({toolchain_id})]: Unpacking toolchain to {path:?}");
-
-        let mut unpack_retried = false;
-
-        loop {
-            // Ensure the toolchain parent dir exists
-            tokio::fs::create_dir_all(&path)
-                .await
-                .context("Failed to create toolchain directory")?;
-
-            let res = async_tar::Archive::new(
-                GzipDecoder::new(futures::io::AllowStdIo::new(toolchain.reader()).compat())
-                    .compat(),
-            )
-            .unpack(&path)
-            .await
-            .context("Failed to unpack toolchain");
-
-            if let Err(err) = res {
-                if unpack_retried {
-                    return Err(err);
-                }
-                // If there was an error unpacking the toolchain, remove the directory and try again
-                unpack_retried = true;
-                let _ = remove_toolchain_dir(&tc, &path, inflated_size).await;
-                continue;
-            }
-
-            break;
-        }
-
-        // Record toolchain unpack time
-        metrics::histogram!("sccache::server::toolchain_unpack_time")
-            .record(start.elapsed().as_secs_f64());
-
-        cached_size += inflated_size;
-
-        tracing::debug!("ServerToolchains({toolchain_id})]: Toolchain unpacked, new cache size is: {cached_size}");
-
-        // Insert the toolchain entry into the map
-        cached_toolchains.insert(tc.clone(), (path.clone(), inflated_size));
-
-        Ok((path, inflated_size))
-    }
-
-    async fn remove_toolchain_dir(
-        toolchain: &Toolchain,
-        path: &Path,
-        inflated_size: u64,
-    ) -> Result<u64> {
-        if path.exists() {
-            tracing::trace!("[ServerToolchains({})]: Removing toolchain with size={inflated_size}, path={path:?}", toolchain.archive_id);
-            tokio::fs::remove_dir_all(path)
-                .await
-                .expect("Failed to clean up toolchain directory");
-            Ok(inflated_size)
-        } else {
-            Ok(0)
-        }
-    }
-
-    struct ToolchainSize;
-
-    /// Given a tuple of (path, filesize), use the filesize for measurement.
-    impl<K> Meter<K, (PathBuf, u64)> for ToolchainSize {
-        type Measure = usize;
-        fn measure<Q: ?Sized>(&self, _: &Q, v: &(PathBuf, u64)) -> usize
-        where
-            K: std::borrow::Borrow<Q>,
-        {
-            v.1 as usize
-        }
+    fn make_inflated_key(tc: &Toolchain) -> String {
+        tc.archive_id.clone()
     }
 
     #[derive(Clone)]
     pub struct ServerToolchains {
-        toolchains_loader: AsyncMemoizer<Toolchain, (PathBuf, u64)>,
+        cache: Arc<DiskCache>,
+        store: Arc<dyn cache::Storage>,
     }
 
     impl ServerToolchains {
-        pub async fn new(
-            root_dir: &Path,
-            capacity: u64,
-            tc_storage: Arc<dyn cache::Storage>,
-            runtime: &tokio::runtime::Handle,
-        ) -> Result<Self> {
-            tracing::trace!("Using ServerToolchains({:?}, {})", root_dir, capacity);
-
-            tokio::fs::create_dir_all(&root_dir)
-                .await
-                .context("Failed to create toolchain directory")?;
-
-            let toolchains = Arc::new(Mutex::new(LruCache::with_meter(capacity, ToolchainSize)));
-
-            let toolchains_loader = AsyncMemoizer::new(runtime, 0, {
-                let tc_sizes = Arc::new(AsyncMemoizer::new(
-                    runtime,
-                    // Arbitrary: remember the sizes of the 1000 most recent toolchains
-                    1000,
-                    {
-                        // Local clone that the closure can own
-                        let tc_storage = tc_storage.clone();
-                        move |tc: &Toolchain| {
-                            Box::pin(load_toolchain_size(
-                                tc.archive_id.clone(),
-                                tc_storage.clone(),
-                            ))
-                        }
-                    },
-                ));
-
-                // Local clones that the closure can own
-                let root_dir = root_dir.to_owned();
-                let tc_storage = tc_storage.clone();
-                let toolchains = toolchains.clone();
-
-                move |tc: &Toolchain| {
-                    Box::pin(load_and_unpack_toolchain(
-                        tc.clone(),
-                        root_dir.clone(),
-                        tc_sizes.clone(),
-                        tc_storage.clone(),
-                        toolchains.clone(),
-                    ))
-                }
-            });
-
-            Ok(Self { toolchains_loader })
+        pub fn new<P: AsRef<OsStr>>(
+            root: P,
+            max_size: u64,
+            store: Arc<dyn cache::Storage>,
+        ) -> Self {
+            Self {
+                cache: Arc::new(DiskCache::new(
+                    root,
+                    max_size,
+                    Default::default(),
+                    crate::cache::CacheMode::ReadWrite,
+                )),
+                store,
+            }
         }
 
-        pub async fn acquire(&self, toolchain: &Toolchain) -> Result<PathBuf> {
-            // Lookup or load the toolchain
+        pub async fn load(&self, tc: &Toolchain) -> Result<PathBuf> {
             let start = std::time::Instant::now();
-            let res = self.toolchains_loader.call(toolchain).await;
+            let res = loop {
+                // Ensure the toolchain is still in storage.
+                // If not, delete it and report an error.
+                if !self.storage_has_toolchain(tc).await {
+                    let _ = self.cache.del(&make_inflated_key(tc)).await;
+                    let _ = self.cache.del(&make_deflated_key(tc)).await;
+                    break Err(anyhow!("Storage is missing toolchain"));
+                }
 
+                // Load and cache the deflated toolchain.
+                // Inflate, unpack, and cache it in a directory.
+                // Return the path to the unpacked toolchain dir.
+                match self.load_inflated_toolchain(tc).await {
+                    Ok(inflated_path) => break Ok(inflated_path),
+                    Err(err) => {
+                        tracing::warn!(
+                            "ServerToolchains({})]: Error loading toolchain, retrying: {err:?}",
+                            &tc.archive_id
+                        );
+                        continue;
+                    }
+                }
+            };
             // Record toolchain load time
-            metrics::histogram!("sccache::server::toolchain_acquired_time")
+            metrics::histogram!("sccache::server::toolchain::load_time")
                 .record(start.elapsed().as_secs_f64());
+            res
+        }
 
-            match res {
-                Ok((path, inflated_size)) => {
-                    tracing::trace!(
-                        "[ServerToolchains({})]: Acquired toolchain with size={inflated_size}",
-                        toolchain.archive_id
-                    );
-                    Ok(path)
+        async fn storage_has_toolchain(&self, tc: &Toolchain) -> bool {
+            let start = std::time::Instant::now();
+            let toolchain_exists = self.store.has(&tc.archive_id).await;
+            // Record toolchain existence check time
+            metrics::histogram!("sccache::server::toolchain::storage_has_toolchain_time")
+                .record(start.elapsed().as_secs_f64());
+            toolchain_exists
+        }
+
+        async fn load_inflated_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
+            let start = std::time::Instant::now();
+            let res = {
+                if let Ok((inflated_path, _)) = self.cache.entry(&tc.archive_id).await {
+                    // Return early if the toolchain is already loaded and unpacked
+                    Ok(inflated_path)
+                } else {
+                    async move {
+                        // Load the compressed toolchain
+                        let deflated_path = self.load_deflated_toolchain(tc).await?;
+                        // Compute the toolchain's inflated size
+                        let inflated_size =
+                            self.load_inflated_toolchain_size(&deflated_path).await?;
+                        // Inflate and unpack the toolchain archive
+                        let inflated_path = self
+                            .unpack_inflated_toolchain(
+                                &deflated_path,
+                                &tc.archive_id,
+                                inflated_size,
+                            )
+                            .await?;
+                        Ok(inflated_path)
+                    }
+                    .await
                 }
-                Err(err) => {
-                    tracing::error!(
-                        "[ServerToolchains({})]: Error acquiring toolchain: {err:?}",
-                        toolchain.archive_id
-                    );
-                    Err(err)
-                }
+            };
+            // Record toolchain load inflated size time
+            metrics::histogram!("sccache::server::toolchain::load_inflated_time")
+                .record(start.elapsed().as_secs_f64());
+            res
+        }
+
+        async fn load_deflated_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
+            let start = std::time::Instant::now();
+            let deflated_key = make_deflated_key(tc);
+            if !self.cache.has(&deflated_key).await {
+                let deflated_size = self.load_deflated_toolchain_size(tc).await?;
+                let mut reader = self.store.get_stream(&tc.archive_id).await?;
+                self.cache
+                    .put_stream(&deflated_key, deflated_size, std::pin::pin!(&mut reader))
+                    .await?;
             }
+            let entry = self.cache.entry(&deflated_key).await;
+            // Record toolchain load deflated time
+            metrics::histogram!("sccache::server::toolchain::load_deflated_time")
+                .record(start.elapsed().as_secs_f64());
+            Ok(entry?.0)
+        }
+
+        async fn load_deflated_toolchain_size(&self, tc: &Toolchain) -> Result<u64> {
+            let start = std::time::Instant::now();
+            let res = self.store.size(&tc.archive_id).await;
+            // Record toolchain load deflated size time
+            metrics::histogram!("sccache::server::toolchain::load_deflated_size_time")
+                .record(start.elapsed().as_secs_f64());
+            res
+        }
+
+        async fn load_inflated_toolchain_size(&self, deflated_path: &Path) -> Result<u64> {
+            let start = std::time::Instant::now();
+            let deflated_file = tokio::fs::File::open(&deflated_path).await?;
+            let gunzip_reader = GzipDecoder::new(BufReader::new(deflated_file));
+            let inflated_size = async_tar::Archive::new(gunzip_reader.compat())
+                .entries()?
+                .fold(0, |inflated_size, entry| async move {
+                    if let Ok(inflated_entry_size) = entry.and_then(|e| e.header().size()) {
+                        inflated_size + inflated_entry_size
+                    } else {
+                        inflated_size
+                    }
+                })
+                .await;
+            // Record toolchain load inflated size time
+            metrics::histogram!("sccache::server::toolchain::load_inflated_size_time")
+                .record(start.elapsed().as_secs_f64());
+            Ok(inflated_size)
+        }
+
+        async fn unpack_inflated_toolchain(
+            &self,
+            deflated_path: &Path,
+            inflated_key: &str,
+            inflated_size: u64,
+        ) -> Result<PathBuf> {
+            let start = std::time::Instant::now();
+            let res = self
+                .cache
+                .insert_with(inflated_key, inflated_size, |inflated_path: &Path| {
+                    let deflated_path = deflated_path.to_owned();
+                    let inflated_path = inflated_path.to_owned();
+                    async move {
+                        // Ensure the inflated dir exists first
+                        tokio::fs::create_dir_all(&inflated_path).await?;
+                        let deflated_file = tokio::fs::File::open(&deflated_path).await?;
+                        let gunzip_reader = GzipDecoder::new(BufReader::new(deflated_file));
+                        let targz_archive = async_tar::Archive::new(gunzip_reader.compat());
+                        // Unpack the tgz into the inflated dir
+                        targz_archive
+                            .unpack(&inflated_path)
+                            .await
+                            .map(|_| inflated_size)
+                    }
+                })
+                .await
+                .map(|(path, _)| path);
+            // Record toolchain load inflated time
+            metrics::histogram!("sccache::server::toolchain::unpack_inflated_time")
+                .record(start.elapsed().as_secs_f64());
+            res
         }
     }
 }
