@@ -590,6 +590,7 @@ pub trait SchedulerService: Send + Sync {
     async fn put_toolchain(
         &self,
         toolchain: Toolchain,
+        toolchain_size: u64,
         toolchain_reader: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<SubmitToolchainResult>;
 
@@ -600,6 +601,7 @@ pub trait SchedulerService: Send + Sync {
     async fn put_job(
         &self,
         job_id: &str,
+        inputs_size: u64,
         inputs: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<()>;
     async fn del_job(&self, job_id: &str) -> Result<()>;

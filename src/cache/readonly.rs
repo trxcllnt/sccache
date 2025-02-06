@@ -53,6 +53,7 @@ impl Storage for ReadOnlyStorage {
     async fn put_stream(
         &self,
         _key: &str,
+        _size: u64,
         _stream: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<()> {
         Err(anyhow!("Cannot write to read-only storage"))

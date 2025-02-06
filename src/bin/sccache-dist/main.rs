@@ -248,16 +248,13 @@ fn run(command: Command) -> Result<()> {
                 .enable_all()
                 .build()?;
 
-            let pool = runtime.handle();
-
             let jobs_storage =
-                sccache::cache::cache::storage_from_config(&jobs.storage, &jobs.fallback, pool)
+                sccache::cache::cache::storage_from_config(&jobs.storage, &jobs.fallback)
                     .context("Failed to initialize jobs storage")?;
 
             let toolchains_storage = sccache::cache::cache::storage_from_config(
                 &toolchains.storage,
                 &toolchains.fallback,
-                pool,
             )
             .context("Failed to initialize toolchain storage")?;
 
@@ -404,13 +401,12 @@ fn run(command: Command) -> Result<()> {
             let pool = runtime.handle();
 
             let jobs_storage =
-                sccache::cache::cache::storage_from_config(&jobs.storage, &jobs.fallback, pool)
+                sccache::cache::cache::storage_from_config(&jobs.storage, &jobs.fallback)
                     .context("Failed to initialize jobs storage")?;
 
             let toolchains_storage = sccache::cache::cache::storage_from_config(
                 &toolchains.storage,
                 &toolchains.fallback,
-                pool,
             )
             .context("Failed to initialize toolchain storage")?;
 
@@ -445,7 +441,6 @@ fn run(command: Command) -> Result<()> {
                     &cache_dir.join("tc"),
                     toolchain_cache_size,
                     toolchains_storage,
-                    pool,
                 ).await?;
 
                 let to_servers = scheduler_to_servers_queue();
@@ -712,11 +707,12 @@ impl Scheduler {
     async fn put_job_inputs(
         &self,
         job_id: &str,
+        inputs_size: u64,
         inputs: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<()> {
         let start = Instant::now();
         self.jobs_storage
-            .put_stream(&job_inputs_key(job_id), inputs)
+            .put_stream(&job_inputs_key(job_id), inputs_size, inputs)
             .await
             .map_err(|err| {
                 tracing::warn!("[put_job_inputs({job_id})]: Error writing stream: {err:?}");
@@ -784,13 +780,14 @@ impl SchedulerService for Scheduler {
     async fn put_toolchain(
         &self,
         toolchain: Toolchain,
+        toolchain_size: u64,
         toolchain_reader: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<SubmitToolchainResult> {
         let start = Instant::now();
         // Upload toolchain to toolchains storage (S3, GCS, etc.)
         let res = self
             .toolchains
-            .put_stream(&toolchain.archive_id, toolchain_reader)
+            .put_stream(&toolchain.archive_id, toolchain_size, toolchain_reader)
             .await
             .context("Failed to put toolchain")
             .map(|_| SubmitToolchainResult::Success)
@@ -832,7 +829,7 @@ impl SchedulerService for Scheduler {
 
         let (has_toolchain, _) = futures::future::try_join(
             async { Ok(self.has_toolchain(request.toolchain).await) },
-            self.put_job(&job_id, inputs),
+            self.put_job(&job_id, request.inputs.len() as u64, inputs),
         )
         .await?;
 
@@ -846,9 +843,10 @@ impl SchedulerService for Scheduler {
     async fn put_job(
         &self,
         job_id: &str,
+        inputs_size: u64,
         inputs: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<()> {
-        self.put_job_inputs(job_id, inputs).await
+        self.put_job_inputs(job_id, inputs_size, inputs).await
     }
 
     async fn run_job(
@@ -1153,7 +1151,7 @@ impl Server {
         pin_mut!(reader);
 
         self.jobs_storage
-            .put_stream(&job_result_key(job_id), reader)
+            .put_stream(&job_result_key(job_id), result.len() as u64, reader)
             .await
             .map_err(|err| {
                 tracing::warn!("[put_job_result({job_id})]: Error writing stream: {err:?}");

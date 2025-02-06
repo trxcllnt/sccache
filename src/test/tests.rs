@@ -82,7 +82,6 @@ where
         let storage = Arc::new(DiskCache::new(
             &cache_dir,
             cache_size,
-            runtime.handle(),
             PreprocessorCacheModeConfig::default(),
             CacheMode::ReadWrite,
         ));

@@ -2391,7 +2391,6 @@ LLVM version: 6.0",
         let storage = DiskCache::new(
             f.tempdir.path().join("cache"),
             u64::MAX,
-            &pool,
             PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: preprocessor_cache_mode,
                 ..Default::default()
@@ -2522,7 +2521,6 @@ LLVM version: 6.0",
         let storage = DiskCache::new(
             f.tempdir.path().join("cache"),
             u64::MAX,
-            &pool,
             PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: preprocessor_cache_mode,
                 ..Default::default()
@@ -2826,7 +2824,6 @@ LLVM version: 6.0",
         let storage = DiskCache::new(
             f.tempdir.path().join("cache"),
             u64::MAX,
-            &pool,
             PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: preprocessor_cache_mode,
                 ..Default::default()
@@ -2956,7 +2953,6 @@ LLVM version: 6.0",
         let storage = DiskCache::new(
             f.tempdir.path().join("cache"),
             u64::MAX,
-            &pool,
             PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: preprocessor_cache_mode,
                 ..Default::default()
@@ -3054,7 +3050,6 @@ LLVM version: 6.0",
         let storage = DiskCache::new(
             f.tempdir.path().join("cache"),
             u64::MAX,
-            &pool,
             PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: preprocessor_cache_mode,
                 ..Default::default()

@@ -59,6 +59,15 @@ mod internal {
         None
     }
 
+    fn get_content_length(headers: &HeaderMap) -> u64 {
+        Option::<&str>::None
+            .or(get_header_value(headers, "Content-Length"))
+            .or(get_header_value(headers, "content-length"))
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0)
+    }
+
     /// Return `content` as either a bincode or json encoded `Response` depending on the Accept header.
     fn result_to_response<T>(
         headers: HeaderMap,
@@ -394,7 +403,7 @@ mod internal {
                             pin_mut!(toolchain);
                             state
                                 .service
-                                .put_toolchain(Toolchain { archive_id }, toolchain)
+                                .put_toolchain(Toolchain { archive_id }, get_content_length(&headers), toolchain)
                                 .await
                                 .map_or_else(
                                     anyhow_to_response(method, uri),
@@ -461,7 +470,7 @@ mod internal {
                          Path(job_id): Path<String>,
                          RequestBodyAsyncRead(inputs): RequestBodyAsyncRead| async move {
                             pin_mut!(inputs);
-                            state.service.put_job(&job_id, inputs).await.map_or_else(
+                            state.service.put_job(&job_id, get_content_length(&headers), inputs).await.map_or_else(
                                 anyhow_to_response(method, uri),
                                 result_to_response(headers),
                             )

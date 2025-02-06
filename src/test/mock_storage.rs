@@ -93,6 +93,7 @@ impl Storage for MockStorage {
     async fn put_stream(
         &self,
         _key: &str,
+        _size: u64,
         _source: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<()> {
         if let Some(delay) = self.delay {

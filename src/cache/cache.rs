@@ -194,9 +194,6 @@ impl CacheRead {
 
     pub fn into_inner(self) -> Box<dyn ReadSeek> {
         self.zip.into_inner()
-        // let mut reader = self.zip.into_inner();
-        // reader.seek(std::io::SeekFrom::Start(0)).unwrap();
-        // reader
     }
 
     pub async fn extract_objects<T>(
@@ -372,6 +369,7 @@ pub trait Storage: Send + Sync {
     async fn put_stream(
         &self,
         key: &str,
+        size: u64,
         stream: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<()>;
 
@@ -534,6 +532,7 @@ impl Storage for opendal::Operator {
     async fn put_stream(
         &self,
         key: &str,
+        _size: u64,
         source: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<()> {
         let mut sink = self
@@ -620,7 +619,6 @@ pub(in crate::cache) fn normalize_key(key: &str) -> String {
 pub fn storage_from_config(
     cache: &Option<CacheType>,
     fallback_cache: &DiskCacheConfig,
-    pool: &tokio::runtime::Handle,
 ) -> Result<Arc<dyn Storage>> {
     if let Some(cache_type) = &cache {
         match cache_type {
@@ -799,7 +797,6 @@ pub fn storage_from_config(
     Ok(Arc::new(DiskCache::new(
         dir,
         size,
-        pool,
         preprocessor_cache_mode_config,
         rw_mode,
     )))
@@ -846,9 +843,7 @@ mod test {
         config.fallback_cache.rw_mode = CacheModeConfig::ReadWrite;
 
         {
-            let cache =
-                storage_from_config(&config.cache, &config.fallback_cache, runtime.handle())
-                    .unwrap();
+            let cache = storage_from_config(&config.cache, &config.fallback_cache).unwrap();
 
             runtime.block_on(async move {
                 cache.put("test1", CacheWrite::default()).await.unwrap();
@@ -863,9 +858,7 @@ mod test {
         config.fallback_cache.rw_mode = CacheModeConfig::ReadOnly;
 
         {
-            let cache =
-                storage_from_config(&config.cache, &config.fallback_cache, runtime.handle())
-                    .unwrap();
+            let cache = storage_from_config(&config.cache, &config.fallback_cache).unwrap();
 
             runtime.block_on(async move {
                 assert_eq!(
