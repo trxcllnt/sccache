@@ -588,9 +588,9 @@ mod server {
             let deflated_key = make_deflated_key(tc);
             if !self.cache.has(&deflated_key).await {
                 let deflated_size = self.load_deflated_toolchain_size(tc).await?;
-                let mut reader = self.store.get_stream(&tc.archive_id).await?;
+                let reader = self.store.get_stream(&tc.archive_id).await?;
                 self.cache
-                    .put_stream(&deflated_key, deflated_size, std::pin::pin!(&mut reader))
+                    .put_stream(&deflated_key, deflated_size, std::pin::pin!(reader))
                     .await?;
             }
             let entry = self.cache.entry(&deflated_key).await;

@@ -113,13 +113,34 @@ impl DiskCache {
         F: FnOnce(&Path) -> Fut,
         Fut: std::future::Future<Output = std::io::Result<u64>>,
     {
-        self.lru
+        // HACK: This is basically a reimplementation of `insert_with`, but
+        // done in a way that drops the lru lock while `with_fn` is executing.
+        // This is so concurrent insertions aren't serialized by the lru lock.
+
+        // Dummy insert so the entry is created in the LRU
+        let (abs_path, size) = self
+            .lru
             .lock()
             .await
             .get_or_init()?
-            .insert_with(key, size, with_fn)
-            .await
-            .map_err(|e| e.into())
+            .insert_with(key, size, |_| async { Ok(size) })
+            .await?;
+
+        // Do the actual I/O now that the LRU lock dropped
+        if let Err(err) = with_fn(&abs_path).await {
+            // Clean up if it fails
+            error!("DiskCache: Failed to insert entry \"{key}\":\n{err:?}");
+            crate::lru_disk_cache::remove_entry_from_disk_async(&abs_path)
+                .await
+                .unwrap_or_else(|e| {
+                    error!(
+                        "DiskCache: Error removing entry for failed insertion {abs_path:?}:\n{e:?}"
+                    )
+                });
+            Err(err.into())
+        } else {
+            Ok((abs_path, size))
+        }
     }
 }
 

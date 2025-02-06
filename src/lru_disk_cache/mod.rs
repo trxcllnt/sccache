@@ -66,7 +66,7 @@ fn remove_entry_from_disk<P: AsRef<Path>>(path: P) -> Result<()> {
     }
 }
 
-async fn remove_entry_from_disk_async<P: AsRef<Path>>(path: P) -> Result<()> {
+pub async fn remove_entry_from_disk_async<P: AsRef<Path>>(path: P) -> Result<()> {
     let path = path.as_ref();
     if path.is_dir() {
         fs::remove_dir_all(path).map_err(Error::Io)
