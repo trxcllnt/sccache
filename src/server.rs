@@ -128,13 +128,27 @@ fn notify_server_startup(name: &Option<OsString>, status: ServerStartup) -> Resu
 }
 
 #[cfg(unix)]
-fn get_signal(status: ExitStatus) -> i32 {
+fn get_signal(status: &ExitStatus) -> Option<i32> {
     use std::os::unix::prelude::*;
-    status.signal().expect("must have signal")
+    status.signal()
 }
 #[cfg(windows)]
-fn get_signal(_status: ExitStatus) -> i32 {
-    panic!("no signals on windows")
+fn get_signal(_status: &ExitStatus) -> Option<i32> {
+    None
+}
+
+fn set_retcode_or_signal(res: &mut CompileFinished, status: &ExitStatus) {
+    if let Some(code) = status.code() {
+        res.retcode = Some(code)
+    } else if let Some(signal) = get_signal(status) {
+        res.signal = Some(signal)
+    } else if cfg!(windows) {
+        // No signals on Windows, assume exited with error
+        res.retcode = Some(1)
+    } else {
+        // If no code or signal on Unix, assume SIGKILL
+        res.signal = Some(9)
+    }
 }
 
 pub struct DistClientContainer {
@@ -1464,11 +1478,7 @@ where
 
                         trace!("[{}]: CompileFinished retcode: {}", out_pretty, status);
 
-                        match status.code() {
-                            Some(code) => res.retcode = Some(code),
-                            None => res.signal = Some(get_signal(status)),
-                        };
-
+                        set_retcode_or_signal(&mut res, &status);
                         res.stdout = stdout;
                         res.stderr = stderr;
                     }
@@ -1480,10 +1490,7 @@ where
                                 // Make sure the write guard has been dropped ASAP.
                                 drop(stats);
 
-                                match output.status.code() {
-                                    Some(code) => res.retcode = Some(code),
-                                    None => res.signal = Some(get_signal(output.status)),
-                                };
+                                set_retcode_or_signal(&mut res, &output.status);
                                 res.stdout = output.stdout;
                                 res.stderr = output.stderr;
                             }
