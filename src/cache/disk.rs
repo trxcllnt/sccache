@@ -121,11 +121,24 @@ impl Storage for DiskCache {
     }
 
     async fn get_stream(&self, key: &str) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>> {
-        // HACK: Ignore the LRU and assume the file exists
         trace!("DiskCache::get_stream({})", key);
-        let path = self.root.join(make_key_path(key));
-        let file = tokio::fs::File::open(path).await?;
-        Ok(Box::new(file.compat()) as Box<dyn futures::AsyncRead + Unpin + Send>)
+        let file = match self.lru.lock().await.get_or_init()?.get(key) {
+            Ok(file) => file,
+            Err(LruError::FileNotInCache) => {
+                trace!("DiskCache::get_stream({}): FileNotInCache", key.to_owned());
+                return Err(anyhow!("FileNotInCache"));
+            }
+            Err(LruError::Io(e)) => {
+                trace!(
+                    "DiskCache::get_stream({}): IoError: {:?}",
+                    key.to_owned(),
+                    e
+                );
+                return Err(e.into());
+            }
+            Err(_) => unreachable!(),
+        };
+        Ok(Box::new(futures::io::AllowStdIo::new(file)))
     }
 
     async fn del(&self, key: &str) -> Result<()> {

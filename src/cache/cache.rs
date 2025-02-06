@@ -615,6 +615,17 @@ impl Storage for opendal::Operator {
     }
 }
 
+#[cfg(any(
+    feature = "azure",
+    feature = "gcs",
+    feature = "gha",
+    feature = "memcached",
+    feature = "redis",
+    feature = "s3",
+    feature = "webdav",
+    feature = "oss",
+    test
+))]
 /// Normalize key `abcdef` into `a/b/c/abcdef`
 pub(in crate::cache) fn normalize_key(key: &str) -> String {
     format!("{}/{}/{}/{}", &key[0..1], &key[1..2], &key[2..3], &key)
