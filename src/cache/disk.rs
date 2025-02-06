@@ -29,7 +29,7 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::errors::*;
 
-use super::{normalize_key, PreprocessorCacheModeConfig};
+use super::PreprocessorCacheModeConfig;
 
 enum LazyDiskCache {
     Uninit { root: OsString, max_size: u64 },
@@ -74,9 +74,7 @@ pub struct DiskCache {
     /// `LruDiskCache` does all the real work here.
     lru: Arc<Mutex<LazyDiskCache>>,
     preprocessor_cache_mode_config: PreprocessorCacheModeConfig,
-    preprocessor_cache: Arc<Mutex<LazyDiskCache>>,
     rw_mode: CacheMode,
-    root: PathBuf,
 }
 
 impl DiskCache {
@@ -93,14 +91,7 @@ impl DiskCache {
                 max_size,
             })),
             preprocessor_cache_mode_config,
-            preprocessor_cache: Arc::new(Mutex::new(LazyDiskCache::Uninit {
-                root: Path::new(root.as_ref())
-                    .join("preprocessor")
-                    .into_os_string(),
-                max_size,
-            })),
             rw_mode,
-            root: PathBuf::from(root.as_ref()),
         }
     }
 }
@@ -222,20 +213,15 @@ impl Storage for DiskCache {
     async fn max_size(&self) -> Result<Option<u64>> {
         Ok(Some(self.lru.lock().await.capacity()))
     }
+
     fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
         self.preprocessor_cache_mode_config
     }
 
     async fn get_preprocessor_cache_entry(&self, key: &str) -> Result<Option<Box<dyn ReadSeek>>> {
-        let key = normalize_key(key);
-        Ok(self
-            .preprocessor_cache
-            .lock()
-            .unwrap()
-            .get_or_init()?
-            .get(key)
-            .ok())
+        Ok(self.lru.lock().await.get_or_init()?.get(key).ok())
     }
+
     async fn put_preprocessor_cache_entry(
         &self,
         key: &str,
@@ -245,20 +231,10 @@ impl Storage for DiskCache {
             return Err(anyhow!("Cannot write to a read-only cache"));
         }
 
-        let key = normalize_key(key);
-        let mut f = self
-            .preprocessor_cache
-            .lock()
-            .unwrap()
-            .get_or_init()?
-            .prepare_add(key, 0)?;
+        let mut f = self.lru.lock().await.get_or_init()?.prepare_add(key, 0)?;
+
         preprocessor_cache_entry.serialize_to(BufWriter::new(f.as_file_mut()))?;
-        Ok(self
-            .preprocessor_cache
-            .lock()
-            .unwrap()
-            .get()
-            .unwrap()
-            .commit(f)?)
+
+        Ok(self.lru.lock().await.get().unwrap().commit(f)?)
     }
 }
