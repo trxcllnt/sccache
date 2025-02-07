@@ -480,14 +480,6 @@ mod server {
     use crate::dist::Toolchain;
     use crate::errors::*;
 
-    fn make_deflated_key(tc: &Toolchain) -> String {
-        format!("{}.tgz", tc.archive_id)
-    }
-
-    fn make_inflated_key(tc: &Toolchain) -> String {
-        tc.archive_id.clone()
-    }
-
     #[derive(Clone)]
     pub struct ServerToolchains {
         cache: Arc<DiskCache>,
@@ -514,14 +506,6 @@ mod server {
         pub async fn load(&self, tc: &Toolchain) -> Result<PathBuf> {
             let start = std::time::Instant::now();
             let res = loop {
-                // Ensure the toolchain is still in storage.
-                // If not, delete it and report an error.
-                if !self.storage_has_toolchain(tc).await {
-                    let _ = self.cache.del(&make_inflated_key(tc)).await;
-                    let _ = self.cache.del(&make_deflated_key(tc)).await;
-                    break Err(anyhow!("Storage is missing toolchain"));
-                }
-
                 // Load and cache the deflated toolchain.
                 // Inflate, unpack, and cache it in a directory.
                 // Return the path to the unpacked toolchain dir.
@@ -540,15 +524,6 @@ mod server {
             metrics::histogram!("sccache::server::toolchain::load_time")
                 .record(start.elapsed().as_secs_f64());
             res
-        }
-
-        async fn storage_has_toolchain(&self, tc: &Toolchain) -> bool {
-            let start = std::time::Instant::now();
-            let toolchain_exists = self.store.has(&tc.archive_id).await;
-            // Record toolchain existence check time
-            metrics::histogram!("sccache::server::toolchain::storage_has_toolchain_time")
-                .record(start.elapsed().as_secs_f64());
-            toolchain_exists
         }
 
         async fn load_inflated_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
@@ -585,7 +560,7 @@ mod server {
 
         async fn load_deflated_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
             let start = std::time::Instant::now();
-            let deflated_key = make_deflated_key(tc);
+            let deflated_key = format!("{}.tgz", tc.archive_id);
             if !self.cache.has(&deflated_key).await {
                 let deflated_size = self.load_deflated_toolchain_size(tc).await?;
                 let reader = self.store.get_stream(&tc.archive_id).await?;
