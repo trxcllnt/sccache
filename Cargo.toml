@@ -152,16 +152,9 @@ nix = { version = "0.28.0", optional = true, features = [
 rouille = { version = "3.6", optional = true, default-features = false, features = [
   "ssl",
 ] }
-# rustls = { version = "0.23", default-features = false, features = [
-#   "ring",
-# ], optional = true }
 sysinfo = { version = "0.33", optional = true }
 syslog = { version = "6", optional = true }
-tokio-openssl = { version = "0.6.5", optional = true }
 tokio-stream = { version = "0.1.17", optional = true }
-tokio-tungstenite = { version = "0.24", optional = true, features = [
-  "rustls-tls-native-roots",
-] }
 tower-http = { version = "0.6", features = [
   "request-id",
   "sensitive-headers",
@@ -230,7 +223,6 @@ vendored-openssl = [
   "openssl?/vendored",
   "reqwest?/native-tls-alpn",
   "reqwest?/native-tls-vendored",
-  "tokio-tungstenite?/native-tls-vendored",
 ]
 # Enable features that require unstable features of Nightly Rust.
 unstable = []
@@ -244,7 +236,6 @@ dist-client = [
   "url",
   "sha2",
   "tokio-stream",
-  "tokio-tungstenite",
 ]
 # Enables the sccache-dist binary
 dist-server = [
@@ -265,13 +256,10 @@ dist-server = [
   "openssl",
   "reqwest",
   "rouille",
-  # "rustls",
   "syslog",
   "sysinfo",
   "tower-http",
-  "tokio-openssl",
   "tokio-stream",
-  "tokio-tungstenite",
   "tracing",
   "tracing-subscriber",
   "version-compare",
