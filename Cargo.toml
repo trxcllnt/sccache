@@ -154,6 +154,7 @@ rouille = { version = "3.6", optional = true, default-features = false, features
 ] }
 sysinfo = { version = "0.33", optional = true }
 syslog = { version = "6", optional = true }
+tokio-retry2 = { version = "0.5", optional = true, features = ["jitter"] }
 tokio-stream = { version = "0.1.17", optional = true }
 tower-http = { version = "0.6", features = [
   "request-id",
@@ -259,6 +260,7 @@ dist-server = [
   "syslog",
   "sysinfo",
   "tower-http",
+  "tokio-retry2",
   "tokio-stream",
   "tracing",
   "tracing-subscriber",

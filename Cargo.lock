@@ -3816,6 +3816,7 @@ dependencies = [
  "test-case",
  "thirtyfour_sync",
  "tokio",
+ "tokio-retry2",
  "tokio-serde",
  "tokio-stream",
  "tokio-util",
