@@ -469,6 +469,7 @@ mod server {
 
     use futures::StreamExt;
     use tokio::io::BufReader;
+    use tokio_retry2::RetryError;
     use tokio_util::compat::TokioAsyncReadCompatExt;
 
     use std::ffi::OsStr;
@@ -477,6 +478,7 @@ mod server {
 
     use crate::cache::disk::DiskCache;
     use crate::cache::{cache, Storage};
+    use crate::dist::http::retry_with_jitter;
     use crate::dist::Toolchain;
     use crate::errors::*;
 
@@ -505,22 +507,20 @@ mod server {
 
         pub async fn load(&self, tc: &Toolchain) -> Result<PathBuf> {
             let start = std::time::Instant::now();
-            let res = loop {
+            let res = retry_with_jitter(10, || async {
                 // Load and cache the deflated toolchain.
                 // Inflate, unpack, and cache it in a directory.
                 // Return the path to the unpacked toolchain dir.
-                match self.load_inflated_toolchain(tc).await {
-                    Ok(inflated_path) => break Ok(inflated_path),
-                    Err(err) => {
-                        tracing::warn!(
-                            "ServerToolchains({})]: Error loading toolchain, retrying: {err:?}",
-                            &tc.archive_id
-                        );
-                        continue;
-                    }
-                }
-            };
-            // Record toolchain load time
+                self.load_inflated_toolchain(tc).await.map_err(|err| {
+                    tracing::warn!(
+                        "ServerToolchains({})]: Error loading toolchain, retrying: {err:?}",
+                        &tc.archive_id
+                    );
+                    RetryError::transient(err)
+                })
+            })
+            .await;
+            // Record toolchain load time after retrying
             metrics::histogram!("sccache::server::toolchain::load_time")
                 .record(start.elapsed().as_secs_f64());
             res

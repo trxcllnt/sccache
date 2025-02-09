@@ -17,7 +17,7 @@ pub use self::client::Client;
 #[cfg(feature = "dist-server")]
 pub use self::{
     common::{AsyncMemoize, AsyncMemoizeFn},
-    server::{ClientAuthCheck, ClientVisibleMsg},
+    server::{retry_with_jitter, ClientAuthCheck, ClientVisibleMsg},
 };
 
 pub use self::common::{bincode_deserialize, bincode_serialize};
@@ -270,6 +270,25 @@ pub mod urls {
 #[cfg(feature = "dist-server")]
 mod server {
     use async_trait::async_trait;
+    use tokio_retry2::strategy::{ExponentialBackoff, MaxInterval};
+    use tokio_retry2::Retry;
+
+    pub async fn retry_with_jitter<F>(
+        limit: usize,
+        func: F,
+    ) -> std::result::Result<F::Item, F::Error>
+    where
+        F: tokio_retry2::Action,
+    {
+        Retry::spawn(
+            ExponentialBackoff::from_millis(1000) // wait 1s before retrying
+                .max_interval(30000) // set max interval to 30 seconds
+                .map(tokio_retry2::strategy::jitter) // add jitter to the retry interval
+                .take(limit), // limit retries
+            func,
+        )
+        .await
+    }
 
     // Messages that are non-sensitive and can be sent to the client
     #[derive(Debug)]
