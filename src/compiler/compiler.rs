@@ -708,7 +708,7 @@ async fn dist_or_local_compile<T>(
     compilation: Box<dyn Compilation<T>>,
     _weak_toolchain_key: String,
     out_pretty: String,
-    pool: &tokio::runtime::Handle,
+    _pool: &tokio::runtime::Handle,
 ) -> Result<(Cacheable, DistType, process::Output)>
 where
     T: CommandCreatorSync,

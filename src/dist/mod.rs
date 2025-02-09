@@ -648,7 +648,7 @@ pub trait ServerService: Send + Sync {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-    ) -> Result<(), RunJobError>;
+    ) -> std::result::Result<(), RunJobError>;
 
     async fn job_failed(&self, job_id: &str, err: RunJobError) -> Result<()>;
     async fn job_finished(&self, job_id: &str) -> Result<()>;

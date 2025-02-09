@@ -1143,7 +1143,7 @@ impl Server {
         start: &Instant,
         job_id: &str,
         toolchain: Toolchain,
-    ) -> Result<(PathBuf, Vec<u8>), RunJobError> {
+    ) -> std::result::Result<(PathBuf, Vec<u8>), RunJobError> {
         self.state.job_stats.lock().unwrap().loading += 1;
 
         // Broadcast status after accepting the job

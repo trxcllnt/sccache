@@ -58,4 +58,4 @@ impl std::fmt::Display for ProcessError {
     }
 }
 
-pub type Result<T, E = anyhow::Error> = anyhow::Result<T, E>;
+pub type Result<T> = anyhow::Result<T>;
