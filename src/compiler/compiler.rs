@@ -855,6 +855,9 @@ where
         tc_archive = Some(archive_path);
     }
 
+    debug!("[{out_pretty}]: Serializing job inputs");
+
+    // TODO: Make this use asyncio
     let (job_inputs, path_transformer) = pool
         .spawn_blocking(move || -> Result<_> {
             let mut job_inputs = vec![];
@@ -874,6 +877,8 @@ where
         })
         .await??;
 
+    debug!("[{out_pretty}]: Requesting job allocation");
+
     let NewJobResponse {
         mut has_toolchain,
         job_id,
@@ -882,14 +887,16 @@ where
         .new_job(dist_toolchain.clone(), &job_inputs)
         .await?;
 
+    debug!("[{out_pretty}, {job_id}]: Received job allocation");
+
     let dist_retry_limit = dist_client.max_retries() + 1.0;
     let mut num_dist_attempts = 1.0f64;
     let mut has_inputs = true;
 
-    let (output, server_id) = loop {
+    let dist_compile_res = loop {
         if !has_toolchain {
-            trace!(
-                "[{out_pretty}]: Submitting toolchain `{}`",
+            debug!(
+                "[{out_pretty}, {job_id}]: Submitting toolchain {:?}",
                 dist_toolchain.archive_id,
             );
             match dist_client
@@ -915,7 +922,7 @@ where
         }
 
         if !has_inputs {
-            trace!("[{out_pretty}]: Submitting job inputs");
+            debug!("[{out_pretty}, {job_id}]: Resubmitting job inputs");
             dist_client
                 .put_job(&job_id, &job_inputs)
                 .await
@@ -944,26 +951,30 @@ where
                 break Err(anyhow!(reason));
             }
             // Missing inputs (S3 cleared, Redis rebooted, etc.)
-            // Loop back around without incrementing the retry counter.
-            Ok(dist::RunJobResponse::MissingInputs) => {
+            Ok(dist::RunJobResponse::MissingJobInputs { server_id }) => {
                 has_inputs = false;
-                continue;
+                debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job inputs");
+                // Don't break because these errors can be retried
+                Err(anyhow!("Missing distributed compilation job inputs"))
+            }
+            // Missing result (S3 cleared, Redis rebooted, etc.),
+            // or build server failed to write the job result due
+            // to e.g. network error, server shutdown, etc.
+            Ok(dist::RunJobResponse::MissingJobResult { server_id }) => {
+                warn!(
+                    "[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job result"
+                );
+                // Don't break because these errors can be retried
+                Err(anyhow!("Missing distributed compilation job result"))
             }
             // Missing toolchain (S3 cleared, Redis rebooted, etc.)
-            // Loop back around without incrementing the retry counter.
-            Ok(dist::RunJobResponse::MissingToolchain) => {
+            Ok(dist::RunJobResponse::MissingToolchain { server_id }) => {
                 has_toolchain = false;
-                continue;
+                debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job toolchain");
+                // Don't break because these errors can be retried
+                Err(anyhow!("Missing distributed compilation job toolchain"))
             }
-            // Build server shutdown before job completed
-            Ok(dist::RunJobResponse::ServerShutdown { reason, server_id }) => {
-                warn!(
-                    "[{out_pretty}, {job_id}, {server_id}]: Distributed compilation job terminated: {reason}"
-                );
-                // Don't break because JobTerminated responses _are_ retryable
-                Err(anyhow!("Distributed compilation job terminated: {reason}"))
-            }
-            // Other (e.g. network, timeout, etc.) errors
+            // Other (e.g. client network, timeout, etc.) errors
             Err(err) => {
                 // Don't break because these errors can be retried
                 Err(anyhow!(err))
@@ -1014,33 +1025,50 @@ where
                                         }
                                     }
                                 }
-                                return Err(e)
+                                break Err(e)
                             },
                         }
                     }};
                 }
 
-                for (path, output_data) in result.outputs {
-                    let len = output_data.lens().actual;
-                    let local_path =
-                        try_or_cleanup!(path_transformer.to_local(&path).with_context(|| format!(
-                            "[{out_pretty}, {job_id}]: unable to transform output path {path}"
-                        )));
+                let mut result_outputs_iter = result.outputs.into_iter();
 
-                    // Do this first so cleanup works correctly
-                    output_paths.push(local_path.clone());
-
-                    let mut file = try_or_cleanup!(File::create(&local_path).with_context(
-                        || format!("Failed to create output file {}", local_path.display())
-                    ));
-                    let count =
-                        try_or_cleanup!(io::copy(&mut output_data.into_reader(), &mut file)
+                // loop instead of for so we can break with the Err instead of
+                // returning to ensure we still delete the job (below) in case
+                // of client errors.
+                let unpack_outputs_res = loop {
+                    if let Some((path, output_data)) = result_outputs_iter.next() {
+                        let len = output_data.lens().actual;
+                        let local_path = try_or_cleanup!(path_transformer
+                            .to_local(&path)
                             .with_context(|| format!(
-                                "Failed to write output to {}",
-                                local_path.display()
+                                "[{out_pretty}, {job_id}]: unable to transform output path {path}"
                             )));
 
-                    assert!(count == len);
+                        // Do this first so cleanup works correctly
+                        output_paths.push(local_path.clone());
+
+                        // TODO: Make this use asyncio
+                        let mut file = try_or_cleanup!(File::create(&local_path).with_context(
+                            || format!("Failed to create output file {}", local_path.display())
+                        ));
+                        let count =
+                            try_or_cleanup!(io::copy(&mut output_data.into_reader(), &mut file)
+                                .with_context(|| format!(
+                                    "Failed to write output to {}",
+                                    local_path.display()
+                                )));
+
+                        if count != len {
+                            break Err(anyhow!("Expected {len} outputs, but received {count}"));
+                        }
+                    } else {
+                        break Ok(());
+                    }
+                };
+
+                if let Err(err) = unpack_outputs_res {
+                    break Err(err);
                 }
 
                 let extra_inputs = tc_archive.map(|p| vec![p]).unwrap_or(vec![]);
@@ -1048,23 +1076,30 @@ where
                     .handle_outputs(&path_transformer, &output_paths, &extra_inputs)
                     .with_context(|| "Failed to rewrite outputs from compile"));
 
-                break Ok((result.output, server_id));
+                break Ok((
+                    DistType::Ok(server_id),
+                    std::process::Output::from(result.output),
+                ));
             }
         }
-    }?;
+    };
 
-    // Inform the scheduler we've received and unpacked the result. This is its
-    // chance to clean up after the job.
-    //
-    // Intentionally ignore errors so we don't fail otherwise successful builds.
+    // Inform the scheduler we've received and unpacked the result.
+    // This is its chance to clean up after the job.
     //
     // It's possible a network error occurs and the scheduler isn't notified
     // it should delete job artifacts. To mitigate this, sccache-dist servers
     // should use storage backends that are configured to delete job artifacts
     // after some reasonable time, like 3-24hrs.
+    //
+    // Intentionally ignore errors so otherwise successful builds don't fail.
+    //
+    // Not unwrapping `dist_compile_res` so that even if the job fails or the
+    // client encounters errors downloading/unpacking the result, the scheduler
+    // is still told to delete the job artifacts.
     let _ = dist_client.del_job(&job_id).await;
 
-    Ok((DistType::Ok(server_id), std::process::Output::from(output)))
+    dist_compile_res
 }
 
 impl<T: CommandCreatorSync> Clone for Box<dyn CompilerHasher<T>> {

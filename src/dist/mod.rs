@@ -480,20 +480,48 @@ pub struct RunJobRequest {
     pub toolchain: Toolchain,
 }
 
+#[derive(Debug)]
+pub enum RunJobError {
+    Err(Error),
+    MissingJobInputs,
+    MissingJobResult,
+    MissingToolchain,
+}
+
+impl std::fmt::Display for RunJobError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingJobInputs => write!(f, "Missing job inputs"),
+            Self::MissingJobResult => write!(f, "Missing job result"),
+            Self::MissingToolchain => write!(f, "Missing tool chain"),
+            Self::Err(e) => e.fmt(f),
+        }
+    }
+}
+
+impl From<anyhow::Error> for RunJobError {
+    fn from(err: anyhow::Error) -> Self {
+        RunJobError::Err(err)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum RunJobResponse {
-    MissingInputs,
-    MissingToolchain,
+    MissingJobInputs {
+        server_id: String,
+    },
+    MissingJobResult {
+        server_id: String,
+    },
+    MissingToolchain {
+        server_id: String,
+    },
     JobComplete {
         result: BuildResult,
         server_id: String,
     },
     JobFailed {
-        reason: String,
-        server_id: String,
-    },
-    ServerShutdown {
         reason: String,
         server_id: String,
     },
@@ -539,11 +567,11 @@ pub struct ServerStatus {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerDetails {
-    pub alive: bool,
     pub id: String,
     // #[serde(flatten)]
     pub info: ServerStats,
     pub jobs: JobStats,
+    pub created_at: u128,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -560,7 +588,9 @@ pub struct ServerStats {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobStats {
-    pub fetched: usize,
+    pub accepted: usize,
+    pub finished: usize,
+    pub loading: usize,
     pub running: usize,
 }
 
@@ -582,17 +612,18 @@ pub enum SubmitToolchainResult {
 pub trait SchedulerService: Send + Sync {
     async fn get_status(&self) -> Result<SchedulerStatus>;
 
-    async fn has_toolchain(&self, toolchain: Toolchain) -> bool;
+    async fn has_toolchain(&self, toolchain: &Toolchain) -> bool;
 
     async fn put_toolchain(
         &self,
-        toolchain: Toolchain,
+        toolchain: &Toolchain,
         toolchain_size: u64,
         toolchain_reader: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<SubmitToolchainResult>;
 
-    async fn del_toolchain(&self, toolchain: Toolchain) -> Result<()>;
+    async fn del_toolchain(&self, toolchain: &Toolchain) -> Result<()>;
 
+    async fn has_job(&self, job_id: &str) -> bool;
     async fn new_job(&self, request: NewJobRequest) -> Result<NewJobResponse>;
     async fn run_job(&self, job_id: &str, request: RunJobRequest) -> Result<RunJobResponse>;
     async fn put_job(
@@ -602,33 +633,25 @@ pub trait SchedulerService: Send + Sync {
         inputs: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<()>;
     async fn del_job(&self, job_id: &str) -> Result<()>;
-    async fn job_failure(&self, job_id: &str, reason: &str, server: ServerDetails) -> Result<()>;
-    async fn job_success(&self, job_id: &str, server: ServerDetails) -> Result<()>;
 
-    async fn receive_status(&self, server: ServerDetails, job_status: Option<bool>) -> Result<()>;
+    async fn job_finished(&self, job_id: &str, server: ServerDetails) -> Result<()>;
+
+    async fn update_status(&self, server: ServerDetails, job_status: Option<bool>) -> Result<()>;
 }
 
 #[cfg(feature = "dist-server")]
 #[async_trait]
 pub trait ServerService: Send + Sync {
-    async fn report_status(&self) -> Result<()>;
-
-    #[allow(clippy::too_many_arguments)]
     async fn run_job(
         &self,
-        task_id: &str,
         job_id: &str,
-        respond_to: &str,
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-    ) -> Result<()>;
+    ) -> Result<(), RunJobError>;
 
-    async fn del_job(&self, task_id: &str) -> Option<(String, String)>;
-
-    async fn job_failure(&self, task_id: &str, reason: &str) -> Result<()>;
-
-    async fn job_success(&self, task_id: &str) -> Result<()>;
+    async fn job_failed(&self, job_id: &str, err: RunJobError) -> Result<()>;
+    async fn job_finished(&self, job_id: &str) -> Result<()>;
 }
 
 #[cfg(feature = "dist-server")]
@@ -639,10 +662,10 @@ pub trait BuilderIncoming: Send + Sync {
         &self,
         job_id: &str,
         toolchain_dir: &Path,
+        inputs: Vec<u8>,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs: Vec<u8>,
-    ) -> std::result::Result<BuildResult, Error>;
+    ) -> Result<BuildResult>;
 }
 
 /////////

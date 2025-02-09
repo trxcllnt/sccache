@@ -7,20 +7,21 @@ use bytes::Buf;
 use celery::prelude::*;
 use celery::protocol::MessageContentType;
 use futures::lock::Mutex;
-use futures::{pin_mut, AsyncReadExt, FutureExt, TryFutureExt};
+use futures::{AsyncReadExt, FutureExt, TryFutureExt};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use sccache::config::MetricsConfig;
-use sccache::dist::http::{AsyncMemoize, AsyncMemoizeFn};
+use sccache::dist::http::{retry_with_jitter, AsyncMulticast, AsyncMulticastFn};
+use sccache::dist::{BuildResult, RunJobError};
+use tokio_retry2::RetryError;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::net::SocketAddr;
-use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::OnceCell;
 
@@ -144,10 +145,6 @@ fn server_to_schedulers_queue() -> String {
     queue_name_with_env_info("server-to-schedulers")
 }
 
-fn to_scheduler_queue(id: &str) -> String {
-    queue_name_with_env_info(&format!("scheduler-{id}"))
-}
-
 fn init_metrics(
     config: MetricsConfig,
     labels: &[(&str, &str)],
@@ -209,13 +206,12 @@ async fn celery_app(
     celery::CeleryBuilder::new(app_name, broker_uri)
         .default_queue(default_queue)
         .task_content_type(MessageContentType::MsgPack)
-        // Register at least one task route for each queue, because that's
-        // how celery knows which queues to create in the message broker.
         .task_route(scheduler_to_servers::run_job::NAME, &to_servers)
-        .task_route(server_to_schedulers::status::NAME, &to_schedulers)
+        .task_route(server_to_schedulers::job_finished::NAME, &to_schedulers)
+        .task_route(server_to_schedulers::status_update::NAME, &to_schedulers)
         .prefetch_count(prefetch_count)
-        // Wait at most 10s before retrying failed tasks
-        .task_max_retry_delay(10)
+        // Wait at most 1s before retrying failed tasks
+        .task_max_retry_delay(1)
         // Don't retry tasks that fail with unexpected errors
         .task_retry_for_unexpected(false)
         // Indefinitely retry connecting to the broker
@@ -246,10 +242,6 @@ fn run(command: Command) -> Result<()> {
             scheduler_id,
             toolchains,
         }) => {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-
             let jobs_storage =
                 sccache::cache::cache::storage_from_config(&jobs.storage, &jobs.fallback)
                     .context("Failed to initialize jobs storage")?;
@@ -260,128 +252,124 @@ fn run(command: Command) -> Result<()> {
             )
             .context("Failed to initialize toolchain storage")?;
 
-            runtime.block_on(async move {
-                let metrics = metrics
-                    .ok_or(anyhow!(""))
-                    .and_then(|config| {
-                        init_metrics(
-                            config,
-                            &[
-                                ("env", &env_info()),
-                                ("type", "scheduler"),
-                                ("scheduler_id", &scheduler_id),
-                            ],
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(async move {
+                    let metrics = metrics
+                        .ok_or(anyhow!(""))
+                        .and_then(|config| {
+                            init_metrics(
+                                config,
+                                &[
+                                    ("env", &env_info()),
+                                    ("type", "scheduler"),
+                                    ("scheduler_id", &scheduler_id),
+                                ],
+                            )
+                        })
+                        .ok();
+
+                    // Verify read/write access to jobs storage
+                    match jobs_storage.check().await {
+                        Ok(sccache::cache::CacheMode::ReadWrite) => {}
+                        _ => {
+                            bail!("Scheduler jobs storage must be read/write")
+                        }
+                    }
+
+                    // Verify read/write access to toolchain storage
+                    match toolchains_storage.check().await {
+                        Ok(sccache::cache::CacheMode::ReadWrite) => {}
+                        _ => {
+                            bail!("Scheduler toolchain storage must be read/write")
+                        }
+                    }
+
+                    let broker_uri = message_broker_uri(message_broker)?;
+                    // This URI can contain the username/password, so log at trace level
+                    tracing::trace!("Message broker URI: {broker_uri}");
+
+                    let to_schedulers = server_to_schedulers_queue();
+
+                    let tasks = Arc::new(
+                        celery_app(
+                            &scheduler_id,
+                            &broker_uri,
+                            &to_schedulers,
+                            100 * num_cpus as u16,
                         )
-                    })
-                    .ok();
+                        .await?,
+                    );
 
-                // Verify read/write access to jobs storage
-                match jobs_storage.check().await {
-                    Ok(sccache::cache::CacheMode::ReadWrite) => {}
-                    _ => {
-                        bail!("Scheduler jobs storage must be read/write")
-                    }
-                }
+                    // Tasks this scheduler receives
+                    tasks
+                        .register_task::<server_to_schedulers::job_finished>()
+                        .await
+                        .unwrap();
 
-                // Verify read/write access to toolchain storage
-                match toolchains_storage.check().await {
-                    Ok(sccache::cache::CacheMode::ReadWrite) => {}
-                    _ => {
-                        bail!("Scheduler toolchain storage must be read/write")
-                    }
-                }
+                    tasks
+                        .register_task::<server_to_schedulers::status_update>()
+                        .await
+                        .unwrap();
 
-                let broker_uri = message_broker_uri(message_broker)?;
-                // This URI can contain the username/password, so log at trace level
-                tracing::trace!("Message broker URI: {broker_uri}");
+                    let scheduler = Arc::new(Scheduler::new(
+                        job_time_limit,
+                        jobs_storage,
+                        scheduler_id.clone(),
+                        tasks.clone(),
+                        toolchains_storage,
+                    ));
 
-                let to_schedulers = server_to_schedulers_queue();
-                let to_this_scheduler = to_scheduler_queue(&scheduler_id);
+                    SCHEDULER
+                        .set(scheduler.clone())
+                        .map_err(|e| anyhow!(e.to_string()))?;
 
-                let task_queue = Arc::new(
-                    celery_app(
-                        &scheduler_id,
-                        &broker_uri,
-                        &to_this_scheduler,
-                        100 * num_cpus as u16,
-                    )
-                    .await?,
-                );
+                    let server = dist::server::Scheduler::new(
+                        scheduler,
+                        match client_auth {
+                            scheduler_config::ClientAuth::Insecure => Box::new(
+                                token_check::EqCheck::new(INSECURE_DIST_CLIENT_TOKEN.to_owned()),
+                            ),
+                            scheduler_config::ClientAuth::Token { token } => {
+                                Box::new(token_check::EqCheck::new(token))
+                            }
+                            scheduler_config::ClientAuth::JwtValidate {
+                                audience,
+                                issuer,
+                                jwks_url,
+                            } => Box::new(
+                                token_check::ValidJWTCheck::new(audience, issuer, &jwks_url)
+                                    .context("Failed to create a checker for valid JWTs")?,
+                            ),
+                            scheduler_config::ClientAuth::Mozilla { required_groups } => {
+                                Box::new(token_check::MozillaCheck::new(required_groups))
+                            }
+                            scheduler_config::ClientAuth::ProxyToken { url, cache_secs } => {
+                                Box::new(token_check::ProxyTokenCheck::new(url, cache_secs))
+                            }
+                        },
+                    );
 
-                // Tasks this scheduler receives
-                task_queue
-                    .register_task::<server_to_schedulers::job_failure>()
-                    .await
-                    .unwrap();
+                    tasks.display_pretty().await;
 
-                task_queue
-                    .register_task::<server_to_schedulers::job_success>()
-                    .await
-                    .unwrap();
+                    tracing::info!("sccache: Scheduler `{scheduler_id}` initialized");
 
-                task_queue
-                    .register_task::<server_to_schedulers::status>()
-                    .await
-                    .unwrap();
+                    daemonize()?;
 
-                let scheduler = Arc::new(Scheduler::new(
-                    job_time_limit,
-                    to_this_scheduler.clone(),
-                    task_queue.clone(),
-                    jobs_storage,
-                    toolchains_storage,
-                ));
+                    let queues = [to_schedulers.as_str()];
+                    let celery = tasks.consume_from(&queues);
+                    let server = server.serve(public_addr, max_body_size, metrics);
 
-                SCHEDULER
-                    .set(scheduler.clone())
-                    .map_err(|e| anyhow!(e.to_string()))?;
+                    futures::select_biased! {
+                        res = celery.fuse() => res?,
+                        res = server.fuse() => res?,
+                    };
 
-                let server = dist::server::Scheduler::new(
-                    scheduler,
-                    match client_auth {
-                        scheduler_config::ClientAuth::Insecure => Box::new(
-                            token_check::EqCheck::new(INSECURE_DIST_CLIENT_TOKEN.to_owned()),
-                        ),
-                        scheduler_config::ClientAuth::Token { token } => {
-                            Box::new(token_check::EqCheck::new(token))
-                        }
-                        scheduler_config::ClientAuth::JwtValidate {
-                            audience,
-                            issuer,
-                            jwks_url,
-                        } => Box::new(
-                            token_check::ValidJWTCheck::new(audience, issuer, &jwks_url)
-                                .context("Failed to create a checker for valid JWTs")?,
-                        ),
-                        scheduler_config::ClientAuth::Mozilla { required_groups } => {
-                            Box::new(token_check::MozillaCheck::new(required_groups))
-                        }
-                        scheduler_config::ClientAuth::ProxyToken { url, cache_secs } => {
-                            Box::new(token_check::ProxyTokenCheck::new(url, cache_secs))
-                        }
-                    },
-                );
+                    tasks.close().await?;
 
-                task_queue.display_pretty().await;
-
-                tracing::info!("sccache: Scheduler `{scheduler_id}` initialized");
-
-                daemonize()?;
-
-                let queues = [to_this_scheduler.as_str(), to_schedulers.as_str()];
-
-                let celery = task_queue.consume_from(&queues);
-                let server = server.serve(public_addr, max_body_size, metrics);
-
-                futures::select_biased! {
-                    res = celery.fuse() => res?,
-                    res = server.fuse() => res?,
-                };
-
-                task_queue.close().await?;
-
-                Ok::<(), anyhow::Error>(())
-            })
+                    Ok::<(), anyhow::Error>(())
+                })
         }
 
         Command::Server(server_config::Config {
@@ -396,12 +384,6 @@ fn run(command: Command) -> Result<()> {
             toolchain_cache_size,
             toolchains,
         }) => {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-
-            let pool = runtime.handle();
-
             let jobs_storage =
                 sccache::cache::cache::storage_from_config(&jobs.storage, &jobs.fallback)
                     .context("Failed to initialize jobs storage")?;
@@ -412,7 +394,10 @@ fn run(command: Command) -> Result<()> {
             )
             .context("Failed to initialize toolchain storage")?;
 
-            runtime.block_on(async move {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(async move {
 
                 if let Some(config) = metrics {
                     let _ = init_metrics(
@@ -457,7 +442,7 @@ fn run(command: Command) -> Result<()> {
                         bwrap_path,
                         build_dir,
                     } => Arc::new(
-                        build::OverlayBuilder::new(bwrap_path, build_dir, job_queue.clone(), pool)
+                        build::OverlayBuilder::new(bwrap_path, build_dir, job_queue.clone())
                             .await
                             .context("Overlay builder failed to start")?,
                     ),
@@ -485,11 +470,11 @@ fn run(command: Command) -> Result<()> {
                 // This URI can contain the username/password, so log at trace level
                 tracing::trace!("Message broker URI: {broker_uri}");
 
-                let task_queue =
+                let tasks =
                     Arc::new(celery_app(&server_id, &broker_uri, &to_servers, (occupancy + pre_fetch) as u16).await?);
 
                 // Tasks this server receives
-                task_queue
+                tasks
                     .register_task::<scheduler_to_servers::run_job>()
                     .await?;
 
@@ -498,13 +483,16 @@ fn run(command: Command) -> Result<()> {
                 }
 
                 #[async_trait]
-                impl AsyncMemoizeFn<'_, Toolchain, PathBuf> for LoadToolchainFn {
+                impl AsyncMulticastFn<'_, Toolchain, PathBuf> for LoadToolchainFn {
                     async fn call(&self, tc: &Toolchain) -> Result<PathBuf> {
                         self.toolchains.load(tc).await
                     }
                 }
 
                 let server = Arc::new(Server::new(
+                    builder,
+                    job_queue,
+                    jobs_storage,
                     server_id.clone(),
                     dist::ServerStats {
                         num_cpus,
@@ -512,11 +500,8 @@ fn run(command: Command) -> Result<()> {
                         pre_fetch,
                         ..Default::default()
                     },
-                    job_queue.clone(),
-                    builder,
-                    task_queue.clone(),
-                    jobs_storage,
-                    AsyncMemoize::new(0, LoadToolchainFn {
+                    tasks.clone(),
+                    AsyncMulticast::new(LoadToolchainFn {
                         toolchains: ServerToolchains::new(
                             cache_dir.join("tc"),
                             toolchain_cache_size,
@@ -527,16 +512,15 @@ fn run(command: Command) -> Result<()> {
 
                 SERVER.set(server.clone()).map_err(|err| anyhow!("{err}"))?;
 
-                task_queue.display_pretty().await;
+                tasks.display_pretty().await;
 
                 tracing::info!("sccache: Server `{server_id}` initialized to run {occupancy} parallel build jobs and prefetch up to {pre_fetch} job(s) in the background");
 
                 daemonize()?;
 
                 let queues = [to_servers.as_str()];
-
-                let celery = task_queue.consume_from(&queues);
-                let status = server.report_status();
+                let celery = tasks.consume_from(&queues);
+                let status = server.start();
 
                 futures::select_biased! {
                     res = celery.fuse() => res?,
@@ -544,7 +528,7 @@ fn run(command: Command) -> Result<()> {
                 };
 
                 server.close().await;
-                task_queue.close().await?;
+                tasks.close().await?;
 
                 Ok(())
             })
@@ -587,7 +571,7 @@ fn job_result_key(job_id: &str) -> String {
 
 #[derive(Clone, Debug)]
 struct ServerInfo {
-    pub u_time: Instant,
+    pub u_time: SystemTime,
     pub info: ServerStats,
     pub jobs: JobStats,
 }
@@ -596,36 +580,36 @@ pub struct Scheduler {
     job_time_limit: u32,
     jobs_storage: Arc<dyn sccache::cache::Storage>,
     jobs: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<RunJobResponse>>>>,
-    queue_name: String,
+    scheduler_id: String,
     servers: Arc<Mutex<HashMap<String, ServerInfo>>>,
-    task_queue: Arc<celery::Celery>,
+    tasks: Arc<celery::Celery>,
     toolchains: Arc<dyn sccache::cache::Storage>,
 }
 
 impl Scheduler {
     pub fn new(
         job_time_limit: u32,
-        to_this_scheduler_queue: String,
-        task_queue: Arc<celery::Celery>,
         jobs_storage: Arc<dyn sccache::cache::Storage>,
+        scheduler_id: String,
+        tasks: Arc<celery::Celery>,
         toolchains: Arc<dyn sccache::cache::Storage>,
     ) -> Self {
         Self {
             job_time_limit,
             jobs_storage,
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            scheduler_id,
             servers: Arc::new(Mutex::new(HashMap::new())),
-            task_queue,
-            queue_name: to_this_scheduler_queue,
+            tasks,
             toolchains,
         }
     }
 
     fn prune_servers(servers: &mut HashMap<String, ServerInfo>) {
-        let now = Instant::now();
+        let now = SystemTime::now();
         // Prune servers we haven't seen in 90s
         let timeout = Duration::from_secs(90);
-        servers.retain(|_, server| now.duration_since(server.u_time) <= timeout);
+        servers.retain(|_, server| now.duration_since(server.u_time).unwrap() <= timeout);
     }
 
     async fn has_job_inputs(&self, job_id: &str) -> bool {
@@ -651,26 +635,33 @@ impl Scheduler {
     async fn get_job_result(&self, job_id: &str) -> Result<RunJobResponse> {
         // Retrieve the result
         let start = Instant::now();
-        let mut reader = self
-            .jobs_storage
-            .get_stream(&job_result_key(job_id))
-            .await
-            .map_err(|err| {
-                tracing::warn!("[get_job_result({job_id})]: Error loading stream: {err:?}");
-                err
+        let job_result_name = job_result_key(job_id);
+        let res = retry_with_jitter(10, || async {
+            let mut reader = self
+                .jobs_storage
+                .get_stream(&job_result_name)
+                .await
+                .map_err(|err| {
+                    tracing::warn!("[get_job_result({job_id})]: Error loading stream: {err:?}");
+                    RetryError::transient(err)
+                })?;
+
+            let mut result = vec![];
+            reader.read_to_end(&mut result).await.map_err(|err| {
+                tracing::warn!("[get_job_result({job_id})]: Error reading stream: {err:?}");
+                RetryError::permanent(anyhow!(err))
             })?;
 
-        let mut result = vec![];
-        reader.read_to_end(&mut result).await.map_err(|err| {
-            tracing::warn!("[get_job_result({job_id})]: Error reading stream: {err:?}");
-            err
-        })?;
-
-        // Deserialize the result
-        let res = bincode_deserialize(result).await.map_err(|err| {
-            tracing::warn!("[get_job_result({job_id})]: Error reading result: {err:?}");
-            err
-        });
+            Ok(result)
+        })
+        .and_then(|result| async move {
+            // Deserialize the result
+            bincode_deserialize(result).await.map_err(|err| {
+                tracing::warn!("[get_job_result({job_id})]: Error deserializing result: {err:?}");
+                err
+            })
+        })
+        .await;
 
         // Record get_job_result time
         metrics::histogram!("sccache::scheduler::get_job_result_time")
@@ -682,7 +673,7 @@ impl Scheduler {
     async fn del_job_inputs(&self, job_id: &str) -> Result<()> {
         // Delete the inputs
         let start = Instant::now();
-        let _ = self
+        let res = self
             .jobs_storage
             .del(&job_inputs_key(job_id))
             .map_err(|e| {
@@ -695,13 +686,13 @@ impl Scheduler {
         metrics::histogram!("sccache::scheduler::del_job_inputs_time")
             .record(start.elapsed().as_secs_f64());
 
-        Ok(())
+        res
     }
 
     async fn del_job_result(&self, job_id: &str) -> Result<()> {
         // Delete the result
         let start = Instant::now();
-        let _ = self
+        let res = self
             .jobs_storage
             .del(&job_result_key(job_id))
             .map_err(|e| {
@@ -714,29 +705,30 @@ impl Scheduler {
         metrics::histogram!("sccache::scheduler::del_job_result_time")
             .record(start.elapsed().as_secs_f64());
 
-        Ok(())
+        res
     }
 
-    async fn put_job_inputs(
+    async fn put_job_result(
         &self,
         job_id: &str,
         inputs_size: u64,
         inputs: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<()> {
         let start = Instant::now();
-        self.jobs_storage
+        let res = self
+            .jobs_storage
             .put_stream(&job_inputs_key(job_id), inputs_size, inputs)
             .await
             .map_err(|err| {
-                tracing::warn!("[put_job_inputs({job_id})]: Error writing stream: {err:?}");
+                tracing::warn!("[put_job_result({job_id})]: Error writing stream: {err:?}");
                 err
-            })?;
+            });
 
-        // Record put_job_inputs time
-        metrics::histogram!("sccache::scheduler::put_job_inputs_time")
+        // Record put_job_result time
+        metrics::histogram!("sccache::scheduler::put_job_result_time")
             .record(start.elapsed().as_secs_f64());
 
-        Ok(())
+        res
     }
 }
 
@@ -753,7 +745,7 @@ impl SchedulerService for Scheduler {
                     id: server_id.clone(),
                     info: server.info.clone(),
                     jobs: server.jobs.clone(),
-                    u_time: server.u_time.elapsed().as_secs(),
+                    u_time: server.u_time.elapsed().unwrap().as_secs(),
                 });
             }
             server_statuses
@@ -779,20 +771,22 @@ impl SchedulerService for Scheduler {
             })
             .unwrap(),
             jobs: dist::JobStats {
-                fetched: servers.iter().map(|server| server.jobs.fetched).sum(),
+                accepted: servers.iter().map(|server| server.jobs.accepted).sum(),
+                finished: servers.iter().map(|server| server.jobs.finished).sum(),
+                loading: servers.iter().map(|server| server.jobs.loading).sum(),
                 running: servers.iter().map(|server| server.jobs.running).sum(),
             },
             servers,
         })
     }
 
-    async fn has_toolchain(&self, toolchain: Toolchain) -> bool {
+    async fn has_toolchain(&self, toolchain: &Toolchain) -> bool {
         self.toolchains.has(&toolchain.archive_id).await
     }
 
     async fn put_toolchain(
         &self,
-        toolchain: Toolchain,
+        toolchain: &Toolchain,
         toolchain_size: u64,
         toolchain_reader: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<SubmitToolchainResult> {
@@ -815,7 +809,7 @@ impl SchedulerService for Scheduler {
         res
     }
 
-    async fn del_toolchain(&self, toolchain: Toolchain) -> Result<()> {
+    async fn del_toolchain(&self, toolchain: &Toolchain) -> Result<()> {
         let start = Instant::now();
         // Delete the toolchain from toolchains storage (S3, GCS, etc.)
         let res = self
@@ -836,12 +830,9 @@ impl SchedulerService for Scheduler {
 
     async fn new_job(&self, request: NewJobRequest) -> Result<NewJobResponse> {
         let job_id = uuid::Uuid::new_v4().simple().to_string();
-
-        let inputs = futures::io::AllowStdIo::new(request.inputs.reader());
-        pin_mut!(inputs);
-
+        let inputs = std::pin::pin!(futures::io::AllowStdIo::new(request.inputs.reader()));
         let (has_toolchain, _) = futures::future::try_join(
-            async { Ok(self.has_toolchain(request.toolchain).await) },
+            async { Ok(self.has_toolchain(&request.toolchain).await) },
             self.put_job(&job_id, request.inputs.len() as u64, inputs),
         )
         .await?;
@@ -859,7 +850,7 @@ impl SchedulerService for Scheduler {
         inputs_size: u64,
         inputs: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<()> {
-        self.put_job_inputs(job_id, inputs_size, inputs).await
+        self.put_job_result(job_id, inputs_size, inputs).await
     }
 
     async fn run_job(
@@ -872,32 +863,40 @@ impl SchedulerService for Scheduler {
         }: RunJobRequest,
     ) -> Result<RunJobResponse> {
         if self.has_job_result(job_id).await {
-            return self.get_job_result(job_id).await;
+            match self.get_job_result(job_id).await {
+                Ok(RunJobResponse::JobFailed { reason, server_id }) => {
+                    return Ok(RunJobResponse::JobFailed { reason, server_id })
+                }
+                Ok(RunJobResponse::JobComplete { result, server_id }) => {
+                    return Ok(RunJobResponse::JobComplete { result, server_id })
+                }
+                _ => {
+                    let _ = self.del_job_result(job_id).await;
+                }
+            }
         }
 
-        if !self.has_toolchain(toolchain.clone()).await {
-            return Ok(RunJobResponse::MissingToolchain);
+        if !self.has_toolchain(&toolchain).await {
+            return Ok(RunJobResponse::MissingToolchain {
+                server_id: self.scheduler_id.clone(),
+            });
         }
 
         if !self.has_job_inputs(job_id).await {
-            return Ok(RunJobResponse::MissingInputs);
+            return Ok(RunJobResponse::MissingJobInputs {
+                server_id: self.scheduler_id.clone(),
+            });
         }
 
         let (tx, rx) = tokio::sync::oneshot::channel::<RunJobResponse>();
         self.jobs.lock().await.insert(job_id.to_owned(), tx);
 
         let res = self
-            .task_queue
+            .tasks
             .send_task(
-                scheduler_to_servers::run_job::new(
-                    job_id.to_owned(),
-                    self.queue_name.clone(),
-                    toolchain,
-                    command,
-                    outputs,
-                )
-                .with_time_limit(self.job_time_limit)
-                .with_expires_in(self.job_time_limit),
+                scheduler_to_servers::run_job::new(job_id.to_owned(), toolchain, command, outputs)
+                    .with_time_limit(self.job_time_limit)
+                    .with_expires_in(self.job_time_limit),
             )
             .await
             .map_err(anyhow::Error::new);
@@ -910,57 +909,35 @@ impl SchedulerService for Scheduler {
         }
     }
 
+    async fn has_job(&self, job_id: &str) -> bool {
+        self.jobs.lock().await.contains_key(job_id)
+    }
+
     async fn del_job(&self, job_id: &str) -> Result<()> {
         if self.has_job_inputs(job_id).await {
-            self.del_job_inputs(job_id).await?;
+            let _ = self.del_job_inputs(job_id).await;
         }
         if self.has_job_result(job_id).await {
-            self.del_job_result(job_id).await?;
+            let _ = self.del_job_result(job_id).await;
         }
         Ok(())
     }
 
-    async fn job_failure(&self, job_id: &str, reason: &str, server: ServerDetails) -> Result<()> {
-        let send_res = if let Some(sndr) = self.jobs.lock().await.remove(job_id) {
-            sndr.send(if server.alive {
-                RunJobResponse::JobFailed {
-                    reason: reason.to_owned(),
+    async fn job_finished(&self, job_id: &str, server: ServerDetails) -> Result<()> {
+        if let Some(sndr) = self.jobs.lock().await.remove(job_id) {
+            let job_result = self.get_job_result(job_id).await.unwrap_or_else(|_| {
+                RunJobResponse::MissingJobResult {
                     server_id: server.id.clone(),
                 }
-            } else {
-                RunJobResponse::ServerShutdown {
-                    reason: reason.to_owned(),
-                    server_id: server.id.clone(),
-                }
-            })
-            .map_err(|_| anyhow!("Failed to send job result"))
+            });
+            let job_status = sndr.send(job_result).map_or_else(|_| false, |_| true);
+            self.update_status(server, Some(job_status)).await
         } else {
-            Err(anyhow!(
-                "[job_failed({job_id})]: Failed to send response for unknown job"
-            ))
-        };
-        send_res.and(self.receive_status(server, Some(false)).await)
+            Err(anyhow!("Not my job"))
+        }
     }
 
-    async fn job_success(&self, job_id: &str, server: ServerDetails) -> Result<()> {
-        let send_res = if let Some(sndr) = self.jobs.lock().await.remove(job_id) {
-            self.get_job_result(job_id)
-                .await
-                .context(format!("Failed to retrieve result for job {job_id}"))
-                .and_then(|result| {
-                    sndr.send(result)
-                        .map_err(|_| anyhow!("Failed to send job result"))
-                })
-        } else {
-            Err(anyhow!(
-                "[job_complete({job_id})]: Failed to send response for unknown job"
-            ))
-        };
-        let success = send_res.is_ok();
-        send_res.and(self.receive_status(server, Some(success)).await)
-    }
-
-    async fn receive_status(&self, details: ServerDetails, job_status: Option<bool>) -> Result<()> {
+    async fn update_status(&self, details: ServerDetails, job_status: Option<bool>) -> Result<()> {
         if let Some(success) = job_status {
             if success {
                 tracing::trace!("Received server success: {details:?}");
@@ -973,18 +950,31 @@ impl SchedulerService for Scheduler {
 
         let mut servers = self.servers.lock().await;
 
+        fn duration_from_micros(us: u128) -> Duration {
+            Duration::new(
+                (us / 1_000_000) as u64, // MICROS_PER_SEC
+                (us % 1_000_000) as u32, // MICROS_PER_SEC
+            )
+        }
+
         // Insert or update the server info
         servers
             .entry(details.id.clone())
             .and_modify(|server| {
-                server.info = details.info.clone();
-                server.jobs = details.jobs.clone();
-                server.u_time = Instant::now();
+                let t1 = server.u_time.duration_since(UNIX_EPOCH).unwrap();
+                let t2 = duration_from_micros(details.created_at);
+                if t2 >= t1 {
+                    server.info = details.info.clone();
+                    server.jobs = details.jobs.clone();
+                    server.u_time = server.u_time.checked_add(t2 - t1).unwrap();
+                }
             })
             .or_insert_with(|| ServerInfo {
                 info: details.info.clone(),
                 jobs: details.jobs.clone(),
-                u_time: Instant::now(),
+                u_time: UNIX_EPOCH
+                    .checked_add(duration_from_micros(details.created_at))
+                    .unwrap(),
             });
 
         Self::prune_servers(&mut servers);
@@ -993,87 +983,28 @@ impl SchedulerService for Scheduler {
     }
 }
 
-struct ServerState {
-    alive: bool,
-    jobs: HashMap<String, (String, String)>,
-    sys: sysinfo::System,
-}
-
 #[derive(Clone)]
-pub struct Server {
-    builder: Arc<dyn BuilderIncoming>,
-    jobs_storage: Arc<dyn sccache::cache::Storage>,
+struct ServerState {
+    id: String,
+    jobs: Arc<std::sync::Mutex<HashSet<String>>>,
     job_queue: Arc<tokio::sync::Semaphore>,
-    report_interval: Duration,
-    server_id: String,
-    state: Arc<Mutex<ServerState>>,
-    stats: dist::ServerStats,
-    task_queue: Arc<celery::Celery>,
-    fetch_toolchain: AsyncMemoize<Toolchain, PathBuf>,
+    job_stats: Arc<std::sync::Mutex<dist::JobStats>>,
+    server_stats: ServerStats,
+    sys: Arc<std::sync::Mutex<sysinfo::System>>,
 }
 
-impl Server {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        server_id: String,
-        stats: dist::ServerStats,
-        job_queue: Arc<tokio::sync::Semaphore>,
-        builder: Arc<dyn BuilderIncoming>,
-        task_queue: Arc<celery::Celery>,
-        jobs_storage: Arc<dyn sccache::cache::Storage>,
-        fetch_toolchain: AsyncMemoize<Toolchain, PathBuf>,
-    ) -> Self {
-        use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
-        Self {
-            builder,
-            jobs_storage,
-            job_queue,
-            // Report status every 1s
-            report_interval: Duration::from_secs(1),
-            server_id,
-            stats,
-            task_queue,
-            fetch_toolchain,
-            state: Arc::new(Mutex::new(ServerState {
-                alive: true,
-                jobs: Default::default(),
-                sys: System::new_with_specifics(
-                    RefreshKind::nothing()
-                        .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
-                        .with_memory(MemoryRefreshKind::nothing().with_ram()),
-                ),
-            })),
-        }
-    }
-
-    pub async fn close(&self) {
-        let task_ids = {
-            let mut state = self.state.lock().await;
-            state.alive = false;
-            state.jobs.keys().cloned().collect::<Vec<_>>()
+impl From<&ServerState> for ServerDetails {
+    fn from(state: &ServerState) -> Self {
+        let (cpu_usage, mem_avail, mem_total) = {
+            let mut sys = state.sys.lock().unwrap();
+            sys.refresh_cpu_specifics(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
+            sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+            (
+                sys.global_cpu_usage(),
+                sys.available_memory(),
+                sys.total_memory(),
+            )
         };
-        futures::future::join_all(task_ids.iter().map(|task_id| {
-            self.job_failure(task_id, "sccache-dist build server shutdown")
-                .boxed()
-        }))
-        .await;
-    }
-
-    fn state_to_details(&self, state: &mut ServerState) -> ServerDetails {
-        let running = (self.stats.occupancy as i64 - self.job_queue.available_permits() as i64)
-            .max(0) as usize;
-        let fetched = state.jobs.len() - running;
-
-        state
-            .sys
-            .refresh_cpu_specifics(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
-        state
-            .sys
-            .refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
-
-        let cpu_usage = state.sys.global_cpu_usage();
-        let mem_avail = state.sys.available_memory();
-        let mem_total = state.sys.total_memory();
 
         // Record cpu_usage
         metrics::histogram!("sccache::server::cpu_usage_ratio").record(cpu_usage);
@@ -1082,112 +1013,99 @@ impl Server {
         // Record mem_total
         metrics::histogram!("sccache::server::mem_total_bytes").record(mem_total as f64);
 
+        let ServerStats {
+            num_cpus,
+            occupancy,
+            pre_fetch,
+            ..
+        } = state.server_stats;
+
+        let dist::JobStats {
+            accepted,
+            finished,
+            loading,
+            ..
+        } = *state.job_stats.lock().unwrap();
+
+        let running = occupancy.saturating_sub(state.job_queue.available_permits());
+
         ServerDetails {
-            alive: state.alive,
-            id: self.server_id.clone(),
+            id: state.id.to_owned(),
             info: dist::ServerStats {
                 cpu_usage,
                 mem_avail,
                 mem_total,
-                num_cpus: self.stats.num_cpus,
-                occupancy: self.stats.occupancy,
-                pre_fetch: self.stats.pre_fetch,
+                num_cpus,
+                occupancy,
+                pre_fetch,
             },
-            jobs: dist::JobStats { fetched, running },
+            jobs: dist::JobStats {
+                loading,
+                running,
+                accepted,
+                finished,
+            },
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::from_secs(0))
+                .as_micros(),
         }
-    }
-
-    async fn send_status(
-        &self,
-        respond_to: impl Into<Option<String>>,
-        details: ServerDetails,
-    ) -> Result<()> {
-        let respond_to = respond_to.into();
-
-        tracing::trace!("Reporting server status: {details:?}");
-
-        let task = server_to_schedulers::status::new(details);
-        let task = task.with_expires_in(60);
-        let task = if let Some(ref respond_to) = respond_to {
-            task.with_queue(respond_to)
-        } else {
-            task
-        };
-
-        self.task_queue
-            .send_task(task)
-            .await
-            .map_err(anyhow::Error::new)
-            .map(|_| ())?;
-
-        Ok(())
-    }
-
-    async fn broadcast_status(&self, details: Option<ServerDetails>) -> Result<()> {
-        // Separate these statements so `send_status().await` doesn't hold the lock on `self.state`
-        let details = if let Some(details) = details {
-            details
-        } else {
-            self.state_to_details(self.state.lock().await.deref_mut())
-        };
-        self.send_status(None, details.clone()).await
-    }
-
-    async fn get_job_inputs(&self, job_id: &str) -> Result<Vec<u8>> {
-        let start = Instant::now();
-        let mut reader = self
-            .jobs_storage
-            .get_stream(&job_inputs_key(job_id))
-            .await
-            .map_err(|err| {
-                tracing::warn!("[get_job_inputs({job_id})]: Error loading stream: {err:?}");
-                err
-            })?;
-
-        let mut inputs = vec![];
-        reader.read_to_end(&mut inputs).await.map_err(|err| {
-            tracing::warn!("[get_job_inputs({job_id})]: Error reading stream: {err:?}");
-            err
-        })?;
-
-        // Record get_job_inputs load time
-        metrics::histogram!("sccache::server::get_job_inputs_time")
-            .record(start.elapsed().as_secs_f64());
-
-        Ok(inputs)
-    }
-
-    async fn put_job_result(&self, job_id: &str, result: RunJobResponse) -> Result<()> {
-        let start = Instant::now();
-        let result = bincode_serialize(result).await?;
-        let reader = futures::io::AllowStdIo::new(result.reader());
-        pin_mut!(reader);
-
-        self.jobs_storage
-            .put_stream(&job_result_key(job_id), result.len() as u64, reader)
-            .await
-            .map_err(|err| {
-                tracing::warn!("[put_job_result({job_id})]: Error writing stream: {err:?}");
-                err
-            })?;
-
-        // Record put_job_result load time
-        metrics::histogram!("sccache::server::put_job_result_time")
-            .record(start.elapsed().as_secs_f64());
-
-        Ok(())
     }
 }
 
-#[async_trait]
-impl ServerService for Server {
-    async fn report_status(&self) -> Result<()> {
+#[derive(Clone)]
+pub struct Server {
+    builder: Arc<dyn BuilderIncoming>,
+    jobs_storage: Arc<dyn sccache::cache::Storage>,
+    report_interval: Duration,
+    server_id: String,
+    state: ServerState,
+    tasks: Arc<celery::Celery>,
+    toolchains: AsyncMulticast<Toolchain, PathBuf>,
+}
+
+impl Server {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        builder: Arc<dyn BuilderIncoming>,
+        job_queue: Arc<tokio::sync::Semaphore>,
+        jobs_storage: Arc<dyn sccache::cache::Storage>,
+        server_id: String,
+        server_stats: dist::ServerStats,
+        tasks: Arc<celery::Celery>,
+        toolchains: AsyncMulticast<Toolchain, PathBuf>,
+    ) -> Self {
+        use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+        Self {
+            builder,
+            jobs_storage,
+            // Report status every 1s
+            report_interval: Duration::from_secs(1),
+            server_id: server_id.clone(),
+            tasks,
+            toolchains,
+            state: ServerState {
+                id: server_id,
+                jobs: Default::default(),
+                job_queue,
+                job_stats: Default::default(),
+                server_stats,
+                sys: Arc::new(std::sync::Mutex::new(System::new_with_specifics(
+                    RefreshKind::nothing()
+                        .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
+                        .with_memory(MemoryRefreshKind::nothing().with_ram()),
+                ))),
+            },
+        }
+    }
+
+    pub async fn start(&self) -> Result<()> {
         tokio::spawn({
-            let this = Arc::new(self.clone());
+            let this = self.clone();
             async move {
                 loop {
                     tokio::time::sleep(
-                        this.broadcast_status(None)
+                        this.send_status()
                             .await
                             .map(|_| this.report_interval)
                             .unwrap_or(this.report_interval),
@@ -1200,160 +1118,234 @@ impl ServerService for Server {
         .map_err(anyhow::Error::new)
     }
 
-    async fn run_job(
+    pub async fn close(&self) {
+        let job_ids = self.state.jobs.lock().unwrap().drain().collect::<Vec<_>>();
+        futures::future::join_all(job_ids.iter().map(|job_id| {
+            self.job_failed(job_id, RunJobError::MissingJobResult)
+                .boxed()
+        }))
+        .await;
+    }
+
+    async fn send_status(&self) -> Result<()> {
+        self.tasks
+            .send_task(server_to_schedulers::status_update::new(From::from(
+                &self.state,
+            )))
+            .await
+            .map_err(anyhow::Error::new)
+            .map(|_| ())?;
+        Ok(())
+    }
+
+    async fn load_job(
         &self,
-        task_id: &str,
+        start: &Instant,
         job_id: &str,
-        respond_to: &str,
         toolchain: Toolchain,
-        command: CompileCommand,
-        outputs: Vec<String>,
-    ) -> Result<()> {
-        metrics::counter!("sccache::server::job_started_count").increment(1);
+    ) -> Result<(PathBuf, Vec<u8>), RunJobError> {
+        self.state.job_stats.lock().unwrap().loading += 1;
 
-        let job_start = Instant::now();
-
-        // Associate the task with the scheduler and job,
-        // then compute and report the latest server details
-        let details = {
-            let mut state = self.state.lock().await;
-            state.jobs.insert(
-                task_id.to_owned(),
-                (respond_to.to_owned(), job_id.to_owned()),
-            );
-            // Get details before releasing state lock
-            self.state_to_details(&mut state)
-        };
-
-        // Report status after accepting the job
-        self.broadcast_status(Some(details)).await?;
+        // Broadcast status after accepting the job
+        self.send_status().await?;
 
         // Load and unpack the toolchain
-        let toolchain_dir = self.fetch_toolchain.call(&toolchain).await.map_err(|err| {
-            // Record toolchain errors
-            metrics::counter!("sccache::server::toolchain_error_count").increment(1);
-            tracing::warn!("[run_job({job_id})]: Error loading toolchain: {err:?}");
-            TaskError::UnexpectedError(format!("{err:#}"))
-        })?;
-
-        // Report status after loading the toolchain
-        self.broadcast_status(None).await?;
+        let toolchain_dir = self
+            .get_toolchain_dir(job_id, toolchain)
+            .await
+            .map_err(|_| RunJobError::MissingToolchain)?;
 
         // Load job inputs into memory
-        let inputs = self.get_job_inputs(job_id).await.map_err(|err| {
-            // Record get_job_inputs errors
-            metrics::counter!("sccache::server::get_job_inputs_error_count").increment(1);
-            tracing::warn!("[run_job({job_id})]: Error retrieving job inputs: {err:?}");
-            TaskError::UnexpectedError(format!("{err:#}"))
-        })?;
-
-        // Report status after loading the inputs
-        self.broadcast_status(None).await?;
+        let inputs = self
+            .get_job_inputs(job_id)
+            .await
+            .map_err(|_| RunJobError::MissingJobInputs)?;
 
         // Record toolchain load time
         metrics::histogram!("sccache::server::job_fetched_time")
-            .record(job_start.elapsed().as_secs_f64());
+            .record(start.elapsed().as_secs_f64());
 
         metrics::counter!("sccache::server::job_fetched_count").increment(1);
 
-        let build_start = Instant::now();
+        self.state.job_stats.lock().unwrap().loading -= 1;
 
-        let result = self
+        Ok((toolchain_dir, inputs))
+    }
+
+    async fn get_toolchain_dir(&self, job_id: &str, toolchain: Toolchain) -> Result<PathBuf> {
+        // ServerToolchains retries internally, so no need to retry here
+        self.toolchains.call(toolchain).await.map_err(|err| {
+            // Record toolchain errors
+            metrics::counter!("sccache::server::toolchain_error_count").increment(1);
+            tracing::warn!("[run_job({job_id})]: Error loading toolchain: {err:?}");
+            err
+        })
+    }
+
+    async fn get_job_inputs(&self, job_id: &str) -> Result<Vec<u8>> {
+        let start = Instant::now();
+        let job_inputs_name = job_inputs_key(job_id);
+        let res = retry_with_jitter(10, || async {
+            let mut reader = self
+                .jobs_storage
+                .get_stream(&job_inputs_name)
+                .await
+                .map_err(|err| {
+                    tracing::warn!("[get_job_inputs({job_id})]: Error loading stream: {err:?}");
+                    RetryError::transient(err)
+                })?;
+
+            let mut inputs = vec![];
+            reader.read_to_end(&mut inputs).await.map_err(|err| {
+                tracing::warn!("[get_job_inputs({job_id})]: Error reading stream: {err:?}");
+                RetryError::permanent(anyhow!(err))
+            })?;
+
+            Ok(inputs)
+        })
+        .await;
+
+        // Record get_job_inputs load time after retrying
+        metrics::histogram!("sccache::server::get_job_inputs_time")
+            .record(start.elapsed().as_secs_f64());
+
+        res.map_err(|err| {
+            // Record get_job_inputs errors after retrying
+            metrics::counter!("sccache::server::get_job_inputs_error_count").increment(1);
+            tracing::warn!("[run_job({job_id})]: Error retrieving job inputs: {err:?}");
+            err
+        })
+    }
+
+    async fn run_job_build(
+        &self,
+        job_id: &str,
+        toolchain_dir: PathBuf,
+        inputs: Vec<u8>,
+        command: CompileCommand,
+        outputs: Vec<String>,
+    ) -> Result<BuildResult> {
+        let start = Instant::now();
+
+        let res = self
             .builder
-            .run_build(job_id, &toolchain_dir, command, outputs, inputs)
-            .await
-            .map_err(|err| {
-                // Record run_build errors
-                metrics::counter!("sccache::server::job_build_error_count").increment(1);
-                tracing::warn!("[run_job({job_id})]: Build error: {err:?}");
-                TaskError::ExpectedError(format!("{err:#}"))
-            });
+            .run_build(job_id, &toolchain_dir, inputs, command, outputs)
+            .await;
 
         // Record build time
         metrics::histogram!("sccache::server::job_build_time")
-            .record(build_start.elapsed().as_secs_f64());
+            .record(start.elapsed().as_secs_f64());
 
-        // Store the job result for retrieval by the scheduler
-        let result = self
-            .put_job_result(
-                job_id,
-                RunJobResponse::JobComplete {
-                    result: result?,
-                    server_id: self.server_id.clone(),
-                },
-            )
-            .await
-            .map_err(|err| {
-                // Record put_job_inputs errors
-                metrics::counter!("sccache::server::put_job_inputs_error_count").increment(1);
-                tracing::warn!("[run_job({job_id})]: Error storing job result: {err:?}");
-                TaskError::ExpectedError(format!("{err:#}"))
-            });
+        res.map_err(|err| {
+            // Record run_build errors
+            metrics::counter!("sccache::server::job_build_error_count").increment(1);
+            tracing::warn!("[run_job({job_id})]: Build error: {err:?}");
+            err
+        })
+    }
+
+    async fn put_job_result(&self, job_id: &str, result: RunJobResponse) -> Result<()> {
+        let start = Instant::now();
+        let result = bincode_serialize(result).await.map_err(|err| {
+            tracing::warn!("[put_job_result({job_id})]: Error serializing result: {err:?}");
+            err
+        })?;
+        let job_result_size = result.len() as u64;
+        let job_result_name = job_result_key(job_id);
+        let res = retry_with_jitter(10, || async {
+            let source = std::pin::pin!(futures::io::AllowStdIo::new(result.reader()));
+            self.jobs_storage
+                .put_stream(&job_result_name, job_result_size, source)
+                .await
+                .map_err(|err| {
+                    tracing::warn!("[put_job_result({job_id})]: Error writing stream: {err:?}");
+                    RetryError::transient(err)
+                })
+        })
+        .await;
+
+        // Record put_job_result load time after retrying
+        metrics::histogram!("sccache::server::put_job_result_time")
+            .record(start.elapsed().as_secs_f64());
+
+        res.map_err(|err| {
+            // Record put_job_result errors after retrying
+            metrics::counter!("sccache::server::put_job_result_error_count").increment(1);
+            tracing::warn!("[run_job({job_id})]: Error storing job result: {err:?}");
+            err
+        })
+    }
+}
+
+#[async_trait]
+impl ServerService for Server {
+    async fn run_job(
+        &self,
+        job_id: &str,
+        toolchain: Toolchain,
+        command: CompileCommand,
+        outputs: Vec<String>,
+    ) -> std::result::Result<(), RunJobError> {
+        let start = Instant::now();
+        // Add job and increment job_started count
+        self.state.job_stats.lock().unwrap().accepted += 1;
+        self.state.jobs.lock().unwrap().insert(job_id.to_owned());
+        metrics::counter!("sccache::server::job_started_count").increment(1);
+
+        let res = self
+            // Load the job toolchain and inputs
+            .load_job(&start, job_id, toolchain)
+            // Run the build
+            .and_then(|(toolchain_dir, inputs)| {
+                self.run_job_build(job_id, toolchain_dir, inputs, command, outputs)
+                    .map_err(|error| error.into())
+                    .map_ok(|result| RunJobResponse::JobComplete {
+                        result,
+                        server_id: self.server_id.clone(),
+                    })
+            })
+            // Store the job result for retrieval by a scheduler
+            .and_then(|result| self.put_job_result(job_id, result).map_err(|e| e.into()))
+            .await;
 
         // Record total run_job time
-        metrics::histogram!("sccache::server::job_time").record(job_start.elapsed().as_secs_f64());
+        metrics::histogram!("sccache::server::job_time").record(start.elapsed().as_secs_f64());
 
-        Ok(result?)
+        res
     }
 
-    async fn del_job(&self, task_id: &str) -> Option<(String, String)> {
-        self.state.lock().await.jobs.remove(task_id)
+    async fn job_failed(&self, job_id: &str, job_err: RunJobError) -> Result<()> {
+        let server_id = self.server_id.clone();
+        let _ = self
+            .put_job_result(
+                job_id,
+                match job_err {
+                    RunJobError::MissingJobInputs => RunJobResponse::MissingJobInputs { server_id },
+                    RunJobError::MissingJobResult => RunJobResponse::MissingJobResult { server_id },
+                    RunJobError::MissingToolchain => RunJobResponse::MissingToolchain { server_id },
+                    RunJobError::Err(e) => RunJobResponse::JobFailed {
+                        reason: format!("{e:#}"),
+                        server_id,
+                    },
+                },
+            )
+            .await;
+        self.job_finished(job_id).await
     }
 
-    async fn job_failure(&self, task_id: &str, reason: &str) -> Result<()> {
-        let mut state = self.state.lock().await;
-        if let Some((respond_to, job_id)) = state.jobs.remove(task_id) {
-            // Increment job_failure count
-            metrics::counter!("sccache::server::job_failed_count").increment(1);
-
-            // Get ServerDetails
-            let details = self.state_to_details(&mut state);
-            // Drop lock
-            drop(state);
-
-            self.task_queue
-                .send_task(
-                    server_to_schedulers::job_failure::new(job_id, reason.to_owned(), details)
-                        .with_queue(&respond_to)
-                        .with_expires_in(60),
-                )
-                .await
-                .map_err(anyhow::Error::new)
-                .map(|_| ())?;
-
-            Ok(())
-        } else {
-            tracing::error!("[job_failure({task_id})]: Failed to report task failure");
-            Err(anyhow!("Cannot report task failure ({task_id})"))
-        }
-    }
-
-    async fn job_success(&self, task_id: &str) -> Result<()> {
-        let mut state = self.state.lock().await;
-        if let Some((respond_to, job_id)) = state.jobs.remove(task_id) {
-            // Increment job_success count
-            metrics::counter!("sccache::server::job_success_count").increment(1);
-
-            // Get ServerDetails
-            let details = self.state_to_details(&mut state);
-            // Drop lock
-            drop(state);
-
-            self.task_queue
-                .send_task(
-                    server_to_schedulers::job_success::new(job_id, details)
-                        .with_queue(&respond_to)
-                        .with_expires_in(60),
-                )
-                .await
-                .map_err(anyhow::Error::new)
-                .map(|_| ())?;
-
-            Ok(())
-        } else {
-            tracing::error!("[job_success({task_id})]: Failed to report task success");
-            Err(anyhow!("Cannot report task success ({task_id})"))
-        }
+    async fn job_finished(&self, job_id: &str) -> Result<()> {
+        // Remove job and increment job_finished count
+        self.state.jobs.lock().unwrap().remove(job_id);
+        self.state.job_stats.lock().unwrap().finished += 1;
+        metrics::counter!("sccache::server::job_finished_count").increment(1);
+        self.tasks
+            .send_task(server_to_schedulers::job_finished::new(
+                job_id.to_owned(),
+                From::from(&self.state),
+            ))
+            .await
+            .map_err(anyhow::Error::new)
+            .map(|_| ())
     }
 }
 
@@ -1361,27 +1353,23 @@ impl ServerService for Server {
 mod scheduler_to_servers {
 
     use celery::prelude::*;
-    use sccache::dist::{CompileCommand, Toolchain};
+    use sccache::dist::{CompileCommand, RunJobError, Toolchain};
+    use sccache::errors::*;
 
     #[celery::task(
-        bind = true,
         acks_late = true,
-        max_retries = 5,
+        max_retries = 10,
         on_failure = on_run_job_failure,
         on_success = on_run_job_success,
     )]
     pub async fn run_job(
-        task: &Self,
         job_id: String,
-        respond_to: String,
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> TaskResult<()> {
-        let task_id = task.request.id.clone();
-
         tracing::debug!(
-            "[run_job({task_id}, {job_id}, {respond_to}, {}, {:?}, {:?}, {outputs:?})]",
+            "[run_job({job_id}, {}, {:?}, {:?}, {outputs:?})]",
             toolchain.archive_id,
             command.executable,
             command.arguments,
@@ -1390,7 +1378,7 @@ mod scheduler_to_servers {
         let server = match super::SERVER.get() {
             Some(server) => server,
             None => {
-                tracing::error!("sccache-dist server is not initialized");
+                tracing::debug!("sccache-dist server is not initialized");
                 return Err(TaskError::ExpectedError(
                     "sccache-dist server is not initialized".into(),
                 ));
@@ -1398,24 +1386,28 @@ mod scheduler_to_servers {
         };
 
         server
-            .run_job(&task_id, &job_id, &respond_to, toolchain, command, outputs)
+            .run_job(&job_id, toolchain, command, outputs)
             .await
-            .map_err(|e| match e.downcast_ref::<TaskError>() {
-                Some(TaskError::UnexpectedError(msg)) => {
-                    tracing::error!("[run_job({job_id})]: failed with unexpected error: {msg}");
-                    let msg = format!("Job {job_id} failed with unexpected error: {msg}");
-                    TaskError::UnexpectedError(msg.clone())
+            .map_err(|e| match e {
+                RunJobError::MissingJobInputs => {
+                    TaskError::ExpectedError("MissingJobInputs".into())
                 }
-                _ => {
-                    tracing::error!("[run_job({job_id})]: failed with expected error: {e:?}");
-                    let msg = format!("Job {job_id} failed with expected error: {e:#}");
-                    TaskError::ExpectedError(msg)
+                RunJobError::MissingJobResult => {
+                    TaskError::ExpectedError("MissingJobResult".into())
+                }
+                RunJobError::MissingToolchain => {
+                    TaskError::ExpectedError("MissingToolchain".into())
+                }
+                RunJobError::Err(e) => {
+                    tracing::debug!("[run_job({job_id})]: Failed with expected error: {e:#}");
+                    TaskError::ExpectedError(format!(
+                        "Job {job_id} failed with expected error: {e:#}"
+                    ))
                 }
             })
     }
 
     async fn on_run_job_failure(task: &run_job, err: &TaskError) {
-        let task_id = task.request().id.clone();
         let server = match super::SERVER.get() {
             Some(server) => server,
             None => {
@@ -1424,31 +1416,52 @@ mod scheduler_to_servers {
             }
         };
 
-        let reason = {
+        let job_id = &task.request().params.job_id;
+
+        let job_err = {
             if let TaskError::UnexpectedError(msg) = err {
                 // Never retry unexpected errors
-                msg
-            } else if task.request().retries < task.options().max_retries.unwrap_or(0) {
-                // Other errors may be retried.
-                // Don't report the failure to the client yet.
-                server.del_job(&task_id).await;
-                return;
+                Err(RunJobError::Err(anyhow!(msg.to_owned())))
             } else if let TaskError::ExpectedError(msg) = err {
-                msg
+                // Don't retry errors due to missing inputs, result, or toolchain
+                // Notify the client so they can be retried or compiled locally.
+                // Matching strings because that's the only data in TaskError.
+                match msg.as_ref() {
+                    "MissingJobInputs" => Err(RunJobError::MissingJobInputs),
+                    "MissingJobResult" => Err(RunJobError::MissingJobResult),
+                    "MissingToolchain" => Err(RunJobError::MissingToolchain),
+                    // Maybe retry other errors
+                    _ => Ok(RunJobError::Err(anyhow!(msg.to_owned()))),
+                }
             } else if let TaskError::Retry(_) = err {
-                "run_job max retries exceeded"
+                // Maybe retry TaskError::Retry
+                Ok(RunJobError::Err(anyhow!(
+                    "Job {job_id} exceeded the retry limit"
+                )))
             } else {
-                "run_job timed out"
+                // Maybe retry TaskError::TimeoutError
+                Ok(RunJobError::Err(anyhow!("Job {job_id} timed out")))
             }
         };
 
-        if let Err(err) = server.job_failure(&task_id, reason).await {
-            tracing::error!("[on_run_job_failure({task_id})]: {err:#}");
+        let job_err = match job_err {
+            Ok(job_err) => {
+                if task.request().retries < task.options().max_retries.unwrap_or(0) {
+                    return;
+                }
+                job_err
+            }
+            Err(job_err) => job_err,
+        };
+
+        tracing::debug!("[run_job({job_id})]: Failed with error: {job_err:#}");
+
+        if let Err(err) = server.job_failed(job_id, job_err).await {
+            tracing::error!("[on_run_job_failure({job_id})]: Error reporting job failure: {err:#}");
         }
     }
 
     async fn on_run_job_success(task: &run_job, _: &()) {
-        let task_id = task.request().id.clone();
         let server = match super::SERVER.get() {
             Some(server) => server,
             None => {
@@ -1456,9 +1469,10 @@ mod scheduler_to_servers {
                 return;
             }
         };
+        let job_id = &task.request().params.job_id;
 
-        if let Err(err) = server.job_success(&task_id).await {
-            tracing::error!("[on_run_job_success({task_id})]: {err:#}");
+        if let Err(err) = server.job_finished(job_id).await {
+            tracing::error!("[on_run_job_success({job_id})]: Error reporting job success: {err:#}");
         }
     }
 }
@@ -1469,49 +1483,38 @@ mod server_to_schedulers {
 
     use sccache::dist::ServerDetails;
 
-    // Limit retries. These are all tasks sent to a specific scheduler.
-    // If that scheduler goes offline, we want the broker to expire its
-    // messages instead of keeping them in the queue indefinitely.
-
     // Runs on scheduler to handle heartbeats from servers
     #[celery::task(max_retries = 0)]
-    pub async fn status(server: ServerDetails) -> TaskResult<()> {
+    pub async fn status_update(server: ServerDetails) -> TaskResult<()> {
         let scheduler = match super::SCHEDULER.get() {
             Some(scheduler) => scheduler,
             None => {
                 tracing::error!("sccache-dist scheduler is not initialized");
-                return Err(TaskError::ExpectedError(
+                return Err(TaskError::UnexpectedError(
                     "sccache-dist scheduler is not initialized".into(),
                 ));
             }
         };
 
-        scheduler.receive_status(server, None).await.map_err(|e| {
-            match e.downcast_ref::<TaskError>() {
-                Some(TaskError::UnexpectedError(msg)) => {
-                    tracing::error!("[receive_status]: failed with unexpected error: {msg}");
-                    let msg = format!("receive_status failed with unexpected error: {msg}");
-                    TaskError::UnexpectedError(msg.clone())
-                }
-                _ => {
-                    tracing::error!("[receive_status]: failed with expected error: {e:?}");
-                    let msg = format!("receive_status failed with expected error: {e:#}");
-                    TaskError::ExpectedError(msg)
-                }
-            }
+        scheduler.update_status(server, None).await.map_err(|e| {
+            TaskError::UnexpectedError(format!(
+                "receive_status failed with unexpected error: {e:#}"
+            ))
         })
     }
 
-    #[celery::task(max_retries = 0)]
-    pub async fn job_failure(
-        job_id: String,
-        reason: String,
-        server: ServerDetails,
-    ) -> TaskResult<()> {
+    // Retry the task until it lands on the scheduler that owns the job.
+    //
+    // While a less efficient, this avoids needing to create scheduler-specific
+    // queues that live on in the message broker after a scheduler instance is
+    // torn down. Ideally rust-celery would provide a mechanism for destroying
+    // queues on shutdown.
+    #[celery::task(acks_late = true, max_retries = 500)]
+    pub async fn job_finished(job_id: String, server: ServerDetails) -> TaskResult<()> {
         let scheduler = match super::SCHEDULER.get() {
             Some(scheduler) => scheduler,
             None => {
-                tracing::error!("sccache-dist scheduler is not initialized");
+                tracing::debug!("sccache-dist scheduler is not initialized");
                 return Err(TaskError::ExpectedError(
                     "sccache-dist scheduler is not initialized".into(),
                 ));
@@ -1519,47 +1522,8 @@ mod server_to_schedulers {
         };
 
         scheduler
-            .job_failure(&job_id, &reason, server)
+            .job_finished(&job_id, server)
             .await
-            .map_err(|e| match e.downcast_ref::<TaskError>() {
-                Some(TaskError::UnexpectedError(msg)) => {
-                    tracing::error!("[job_failure({job_id})]: failed with unexpected error: {msg}");
-                    let msg = format!("Job {job_id} failed with unexpected error: {msg}");
-                    TaskError::UnexpectedError(msg.clone())
-                }
-                _ => {
-                    tracing::error!("[job_failure({job_id})]: failed with expected error: {e:?}");
-                    let msg = format!("Job {job_id} failed with expected error: {e:#}");
-                    TaskError::ExpectedError(msg)
-                }
-            })
-    }
-
-    #[celery::task(max_retries = 0)]
-    pub async fn job_success(job_id: String, server: ServerDetails) -> TaskResult<()> {
-        let scheduler = match super::SCHEDULER.get() {
-            Some(scheduler) => scheduler,
-            None => {
-                tracing::error!("sccache-dist scheduler is not initialized");
-                return Err(TaskError::ExpectedError(
-                    "sccache-dist scheduler is not initialized".into(),
-                ));
-            }
-        };
-
-        scheduler.job_success(&job_id, server).await.map_err(|e| {
-            match e.downcast_ref::<TaskError>() {
-                Some(TaskError::UnexpectedError(msg)) => {
-                    tracing::error!("[job_success({job_id})]: failed with unexpected error: {msg}");
-                    let msg = format!("Job {job_id} failed with unexpected error: {msg}");
-                    TaskError::UnexpectedError(msg.clone())
-                }
-                _ => {
-                    tracing::error!("[job_success({job_id})]: failed with expected error: {e:?}");
-                    let msg = format!("Job {job_id} failed with expected error: {e:#}");
-                    TaskError::ExpectedError(msg)
-                }
-            }
-        })
+            .map_err(|_| TaskError::ExpectedError("Unknown job".into()))
     }
 }

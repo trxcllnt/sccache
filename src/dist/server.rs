@@ -22,7 +22,7 @@ mod internal {
         TypedHeader,
     };
 
-    use futures::{pin_mut, TryStreamExt};
+    use futures::TryStreamExt;
 
     use hyper_util::rt::{TokioExecutor, TokioIo};
 
@@ -380,7 +380,7 @@ mod internal {
                          _: AuthenticatedClient,
                          Extension(state): Extension<Arc<SchedulerState>>,
                          Path(archive_id): Path<String>| async move {
-                            if state.service.has_toolchain(Toolchain { archive_id }).await {
+                            if state.service.has_toolchain(&Toolchain { archive_id }).await {
                                 (StatusCode::OK).into_response()
                             } else {
                                 (StatusCode::NOT_FOUND).into_response()
@@ -400,10 +400,12 @@ mod internal {
                          Extension(state): Extension<Arc<SchedulerState>>,
                          Path(archive_id): Path<String>,
                          RequestBodyAsyncRead(toolchain): RequestBodyAsyncRead| async move {
-                            pin_mut!(toolchain);
+                            let tc = Toolchain { archive_id };
+                            let src = std::pin::pin!(toolchain);
+                            let len = get_content_length(&headers);
                             state
                                 .service
-                                .put_toolchain(Toolchain { archive_id }, get_content_length(&headers), toolchain)
+                                .put_toolchain(&tc, len, src)
                                 .await
                                 .map_or_else(
                                     anyhow_to_response(method, uri),
@@ -425,7 +427,7 @@ mod internal {
                          Path(archive_id): Path<String>| async move {
                             state
                                 .service
-                                .del_toolchain(Toolchain { archive_id })
+                                .del_toolchain(&Toolchain { archive_id })
                                 .await
                                 .map_or_else(
                                     anyhow_to_response(method, uri),
@@ -469,8 +471,9 @@ mod internal {
                          Extension(state): Extension<Arc<SchedulerState>>,
                          Path(job_id): Path<String>,
                          RequestBodyAsyncRead(inputs): RequestBodyAsyncRead| async move {
-                            pin_mut!(inputs);
-                            state.service.put_job(&job_id, get_content_length(&headers), inputs).await.map_or_else(
+                            let src = std::pin::pin!(inputs);
+                            let len = get_content_length(&headers);
+                            state.service.put_job(&job_id, len, src).await.map_or_else(
                                 anyhow_to_response(method, uri),
                                 result_to_response(headers),
                             )

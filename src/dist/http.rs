@@ -16,7 +16,7 @@
 pub use self::client::Client;
 #[cfg(feature = "dist-server")]
 pub use self::{
-    common::{AsyncMemoize, AsyncMemoizeFn},
+    common::{AsyncMulticast, AsyncMulticastFn},
     server::{retry_with_jitter, ClientAuthCheck, ClientVisibleMsg},
 };
 
@@ -31,11 +31,9 @@ mod common {
     use std::cmp::Eq;
     use std::collections::HashMap;
     use std::hash::Hash;
-    use std::ops::DerefMut;
     use std::sync::Arc;
 
     use crate::errors::*;
-    use crate::lru_disk_cache::LruCache;
 
     pub async fn bincode_deserialize<T>(bytes: Vec<u8>) -> Result<T>
     where
@@ -134,58 +132,46 @@ mod common {
     }
 
     #[async_trait]
-    pub trait AsyncMemoizeFn<'a, K: Eq + Hash, V> {
+    pub trait AsyncMulticastFn<'a, K: Eq + Hash, V> {
         async fn call(&self, args: &K) -> Result<V>;
     }
 
     #[derive(Clone)]
-    pub struct AsyncMemoize<K: Eq + Hash, V> {
-        run_f: Arc<dyn for<'a> AsyncMemoizeFn<'a, K, V> + Send + Sync>,
-        state: Arc<
-            Mutex<(
-                LruCache<K, V>,
-                HashMap<K, tokio::sync::broadcast::Sender<V>>,
-            )>,
-        >,
+    pub struct AsyncMulticast<K: Eq + Hash, V> {
+        run_f: Arc<dyn for<'a> AsyncMulticastFn<'a, K, V> + Send + Sync>,
+        state: Arc<Mutex<HashMap<K, tokio::sync::broadcast::Sender<V>>>>,
     }
 
-    impl<K, V> AsyncMemoize<K, V>
+    impl<K, V> AsyncMulticast<K, V>
     where
         K: Clone + std::fmt::Debug + Eq + Hash + Send + Sync + 'static,
         V: Clone + Send + Sync + 'static,
     {
-        pub fn new<F>(capacity: u64, run_f: F) -> Self
+        pub fn new<F>(run_f: F) -> Self
         where
-            F: for<'a> AsyncMemoizeFn<'a, K, V> + Send + Sync + 'static,
+            F: for<'a> AsyncMulticastFn<'a, K, V> + Send + Sync + 'static,
         {
             Self {
                 run_f: Arc::new(run_f),
-                state: Arc::new(Mutex::new((LruCache::new(capacity), HashMap::new()))),
+                state: Arc::new(Mutex::new(HashMap::new())),
             }
         }
 
-        pub async fn call(&self, args: &K) -> Result<V> {
+        pub async fn call(&self, args: K) -> Result<V> {
             // Lock state
             let mut state = self.state.lock().await;
-            let (results, pending) = state.deref_mut();
 
-            // Return result if cached
-            if let Some(val) = results.get(args) {
-                return Ok(val.clone());
-            }
-
-            let mut recv = if let Some(sndr) = pending.get(args) {
+            let mut recv = if let Some(sndr) = state.get(&args) {
                 // Return shared broadcast receiver if pending
                 sndr.subscribe()
             } else {
                 // Create broadcast sender/receiver on first call
                 let (sndr, recv) = tokio::sync::broadcast::channel(1);
 
-                pending.insert(args.clone(), sndr);
+                state.insert(args.clone(), sndr);
 
                 // Run the function on a worker thread
                 tokio::runtime::Handle::current().spawn({
-                    let args = args.clone();
                     let run_f = self.run_f.clone();
                     let state = self.state.clone();
                     async move {
@@ -197,24 +183,14 @@ mod common {
                             Ok(val) => val,
                             Err(err) => {
                                 // TODO: Broadcast this error instead of just closing the channel
-                                error!("AsyncMemoize error: {err:?}");
-                                state.lock().await.1.remove(&args);
+                                error!("AsyncMulticast error: {err:?}");
+                                state.lock().await.remove(&args);
                                 return;
                             }
                         };
 
                         // Notify receivers
-                        let sndr = {
-                            // Lock state to store result and notify
-                            let mut state = state.lock().await;
-                            let (results, pending) = state.deref_mut();
-                            if results.capacity() > 0 {
-                                results.insert(args.clone(), val.clone());
-                            }
-                            pending.remove(&args)
-                        };
-
-                        if let Some(sndr) = sndr {
+                        if let Some(sndr) = state.lock().await.remove(&args) {
                             let _ = sndr.send(val);
                         }
                     }
@@ -316,7 +292,7 @@ mod client {
     };
     use crate::util::new_reqwest_client;
 
-    use futures::lock::Mutex;
+    use tokio_util::compat::FuturesAsyncReadCompatExt;
 
     use std::sync::Arc;
     use std::time::Duration;
@@ -325,45 +301,56 @@ mod client {
     use reqwest::Body;
     use std::path::{Path, PathBuf};
 
-    use super::common::{bincode_req_fut, AsyncMemoize, AsyncMemoizeFn, ReqwestRequestBuilderExt};
+    use super::common::{
+        bincode_req_fut, AsyncMulticast, AsyncMulticastFn, ReqwestRequestBuilderExt,
+    };
     use super::urls;
     use crate::errors::*;
 
     struct SubmitToolchainFn {
-        client: Arc<Mutex<reqwest::Client>>,
+        client: Arc<reqwest::Client>,
         auth_token: String,
         scheduler_url: reqwest::Url,
+        client_toolchains: Arc<cache::ClientToolchains>,
     }
 
     #[async_trait]
-    impl AsyncMemoizeFn<'_, (Toolchain, PathBuf), SubmitToolchainResult> for SubmitToolchainFn {
-        async fn call(&self, (tc, path): &(Toolchain, PathBuf)) -> Result<SubmitToolchainResult> {
+    impl AsyncMulticastFn<'_, Toolchain, SubmitToolchainResult> for SubmitToolchainFn {
+        async fn call(&self, tc: &Toolchain) -> Result<SubmitToolchainResult> {
+            debug!("Uploading toolchain {:?}", tc.archive_id);
+
             let Self {
                 client,
                 auth_token,
                 scheduler_url,
+                client_toolchains,
             } = self;
-            let url = urls::scheduler_submit_toolchain(scheduler_url, &tc.archive_id);
-            let req = client
-                .lock()
-                .await
-                .put(url)
-                .bearer_auth(auth_token)
-                .body(Body::wrap_stream(tokio_util::io::ReaderStream::new(
-                    tokio::fs::File::open(path).await?,
-                )));
-            bincode_req_fut::<SubmitToolchainResult>(req).await
+
+            match client_toolchains.get_toolchain(tc) {
+                Err(e) => Err(e),
+                Ok(None) => Err(anyhow!("Couldn't find toolchain locally")),
+                Ok(Some(file)) => {
+                    let body = futures::io::AllowStdIo::new(file);
+                    let body = tokio_util::io::ReaderStream::new(body.compat());
+                    let url = urls::scheduler_submit_toolchain(scheduler_url, &tc.archive_id);
+                    let req = client
+                        .put(url)
+                        .bearer_auth(auth_token)
+                        .body(Body::wrap_stream(body));
+                    bincode_req_fut::<SubmitToolchainResult>(req).await
+                }
+            }
         }
     }
 
     pub struct Client {
         auth_token: String,
-        client: Arc<Mutex<reqwest::Client>>,
+        client: Arc<reqwest::Client>,
         max_retries: f64,
         pool: tokio::runtime::Handle,
         rewrite_includes_only: bool,
         scheduler_url: reqwest::Url,
-        submit_toolchain_reqs: AsyncMemoize<(Toolchain, PathBuf), SubmitToolchainResult>,
+        submit_toolchain_reqs: AsyncMulticast<Toolchain, SubmitToolchainResult>,
         tc_cache: Arc<cache::ClientToolchains>,
     }
 
@@ -380,20 +367,18 @@ mod client {
             rewrite_includes_only: bool,
             net: &config::DistNetworking,
         ) -> Result<Self> {
-            let client = new_reqwest_client(Some(net.clone()));
-            let client = Arc::new(Mutex::new(client));
-            let client_toolchains =
+            let client = Arc::new(new_reqwest_client(Some(net.clone())));
+            let client_toolchains = Arc::new(
                 cache::ClientToolchains::new(cache_dir, cache_size, toolchain_configs)
-                    .context("failed to initialise client toolchains")?;
-
-            let submit_toolchain_reqs = AsyncMemoize::new(
-                0,
-                SubmitToolchainFn {
-                    client: client.clone(),
-                    auth_token: auth_token.clone(),
-                    scheduler_url: scheduler_url.clone(),
-                },
+                    .context("failed to initialise client toolchains")?,
             );
+
+            let submit_toolchain_reqs = AsyncMulticast::new(SubmitToolchainFn {
+                client: client.clone(),
+                auth_token: auth_token.clone(),
+                scheduler_url: scheduler_url.clone(),
+                client_toolchains: client_toolchains.clone(),
+            });
 
             Ok(Self {
                 auth_token: auth_token.clone(),
@@ -403,7 +388,7 @@ mod client {
                 rewrite_includes_only,
                 scheduler_url: scheduler_url.clone(),
                 submit_toolchain_reqs,
-                tc_cache: Arc::new(client_toolchains),
+                tc_cache: client_toolchains,
             })
         }
     }
@@ -411,30 +396,26 @@ mod client {
     #[async_trait]
     impl dist::Client for Client {
         async fn new_job(&self, toolchain: Toolchain, inputs: &[u8]) -> Result<NewJobResponse> {
-            let req = self
-                .client
-                .lock()
-                .await
-                .post(urls::scheduler_new_job(&self.scheduler_url))
-                .bearer_auth(self.auth_token.clone())
-                .bincode(&NewJobRequest {
-                    inputs: inputs.to_vec(),
-                    toolchain,
-                })?;
-
-            bincode_req_fut(req).await
+            bincode_req_fut(
+                self.client
+                    .post(urls::scheduler_new_job(&self.scheduler_url))
+                    .bearer_auth(self.auth_token.clone())
+                    .bincode(&NewJobRequest {
+                        inputs: inputs.to_vec(),
+                        toolchain,
+                    })?,
+            )
+            .await
         }
 
         async fn put_job(&self, job_id: &str, inputs: &[u8]) -> Result<()> {
-            let req = self
-                .client
-                .lock()
-                .await
-                .put(urls::scheduler_put_job(&self.scheduler_url, job_id))
-                .bearer_auth(self.auth_token.clone())
-                .body(inputs.to_vec());
-
-            bincode_req_fut(req).await
+            bincode_req_fut(
+                self.client
+                    .put(urls::scheduler_put_job(&self.scheduler_url, job_id))
+                    .bearer_auth(self.auth_token.clone())
+                    .body(inputs.to_vec()),
+            )
+            .await
         }
 
         async fn run_job(
@@ -445,53 +426,44 @@ mod client {
             command: CompileCommand,
             outputs: Vec<String>,
         ) -> Result<RunJobResponse> {
-            let req = self
-                .client
-                .lock()
-                .await
-                .post(urls::scheduler_run_job(&self.scheduler_url, job_id))
-                .bearer_auth(self.auth_token.clone())
-                .timeout(timeout)
-                .bincode(&RunJobRequest {
-                    command,
-                    outputs,
-                    toolchain,
-                })?;
-
-            bincode_req_fut(req).await
+            bincode_req_fut(
+                self.client
+                    .post(urls::scheduler_run_job(&self.scheduler_url, job_id))
+                    .bearer_auth(self.auth_token.clone())
+                    .timeout(timeout)
+                    .bincode(&RunJobRequest {
+                        command,
+                        outputs,
+                        toolchain,
+                    })?,
+            )
+            .await
         }
 
         async fn del_job(&self, job_id: &str) -> Result<()> {
-            let req = self
-                .client
-                .lock()
-                .await
-                .delete(urls::scheduler_del_job(&self.scheduler_url, job_id))
-                .bearer_auth(self.auth_token.clone());
-
-            bincode_req_fut(req).await
+            bincode_req_fut(
+                self.client
+                    .delete(urls::scheduler_del_job(&self.scheduler_url, job_id))
+                    .bearer_auth(self.auth_token.clone()),
+            )
+            .await
         }
 
         async fn get_status(&self) -> Result<SchedulerStatus> {
-            let req = self
-                .client
-                .lock()
-                .await
-                .get(urls::scheduler_status(&self.scheduler_url))
-                .bearer_auth(self.auth_token.clone());
-            bincode_req_fut(req).await
+            bincode_req_fut(
+                self.client
+                    .get(urls::scheduler_status(&self.scheduler_url))
+                    .bearer_auth(self.auth_token.clone()),
+            )
+            .await
         }
 
         async fn put_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
-            match self.tc_cache.get_toolchain(&tc) {
-                Ok(Some(toolchain_file)) => {
-                    self.submit_toolchain_reqs
-                        .call(&(tc, toolchain_file.path().to_path_buf()))
-                        .await
-                }
-                Ok(None) => return Err(anyhow!("couldn't find toolchain locally")),
-                Err(e) => return Err(e),
-            }
+            let id = tc.archive_id.clone();
+            self.submit_toolchain_reqs
+                .call(tc)
+                .await
+                .map_err(|_| anyhow!("Failed to submit toolchain {id:?}"))
         }
 
         async fn put_toolchain_local(

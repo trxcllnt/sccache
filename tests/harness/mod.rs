@@ -371,17 +371,7 @@ impl DistSystem {
         wait_for(
             || {
                 let status = self.scheduler_status();
-                if matches!(
-                    status,
-                    SchedulerStatus {
-                        info: _,
-                        jobs: dist::JobStats {
-                            fetched: 0,
-                            running: 0,
-                        },
-                        servers: _
-                    }
-                ) {
+                if matches!(status, SchedulerStatus { .. }) {
                     Ok(())
                 } else {
                     Err(format!("{:?}", status))

@@ -751,8 +751,8 @@ pub fn storage_from_config(
             #[cfg(feature = "s3")]
             CacheType::S3(ref c) => {
                 debug!(
-                    "Init s3 cache with bucket {}, endpoint {:?}",
-                    c.bucket, c.endpoint
+                    "Init s3 cache with endpoint {:?}, bucket {:?}, and key prefix: {:?}",
+                    c.endpoint, c.bucket, c.key_prefix
                 );
 
                 let storage = S3Cache::build(

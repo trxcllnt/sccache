@@ -109,7 +109,6 @@ pub struct OverlayBuilder {
     bubblewrap: PathBuf,
     dir: PathBuf,
     job_queue: Arc<tokio::sync::Semaphore>,
-    runtime: tokio::runtime::Handle,
 }
 
 impl OverlayBuilder {
@@ -117,7 +116,6 @@ impl OverlayBuilder {
         bubblewrap: PathBuf,
         dir: PathBuf,
         job_queue: Arc<tokio::sync::Semaphore>,
-        runtime: &tokio::runtime::Handle,
     ) -> Result<Self> {
         tracing::info!("Creating overlay builder");
 
@@ -165,7 +163,6 @@ impl OverlayBuilder {
             bubblewrap,
             dir,
             job_queue,
-            runtime: runtime.clone(),
         };
         ret.cleanup().await?;
         tokio::fs::create_dir_all(&ret.dir)
@@ -219,7 +216,6 @@ impl OverlayBuilder {
         output_paths: Vec<String>,
         overlay: OverlaySpec,
         job_queue: &tokio::sync::Semaphore,
-        runtime: &tokio::runtime::Handle,
     ) -> Result<BuildResult> {
         tracing::trace!("[perform_build({job_id})]: Compile environment: {env_vars:?}");
         tracing::trace!("[perform_build({job_id})]: Compile command: {executable:?} {arguments:?}");
@@ -413,7 +409,7 @@ impl OverlayBuilder {
         let job_slot = job_queue.acquire().await?;
 
         // Run build in a blocking background thread
-        let res = runtime
+        let res = tokio::runtime::Handle::current()
             .spawn_blocking(move || {
                 // Explicitly launch a new thread outside tokio's thread pool,
                 // so that our overlayfs and tmpfs are unmounted when it dies.
@@ -463,9 +459,9 @@ impl BuilderIncoming for OverlayBuilder {
         &self,
         job_id: &str,
         toolchain_dir: &Path,
+        inputs: Vec<u8>,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs: Vec<u8>,
     ) -> Result<BuildResult> {
         tracing::debug!("[run_build({job_id})]: Preparing overlay");
 
@@ -484,7 +480,6 @@ impl BuilderIncoming for OverlayBuilder {
             outputs,
             overlay.clone(),
             self.job_queue.as_ref(),
-            &self.runtime,
         )
         .await;
 
@@ -741,9 +736,9 @@ impl BuilderIncoming for DockerBuilder {
         &self,
         job_id: &str,
         toolchain_dir: &Path,
+        inputs: Vec<u8>,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs: Vec<u8>,
     ) -> Result<BuildResult> {
         tracing::debug!("[run_build({})]: Performing build in container", job_id);
 
