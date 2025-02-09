@@ -524,9 +524,9 @@ impl BuilderIncoming for PotBuilder {
         &self,
         job_id: &str,
         toolchain_dir: &Path,
+        inputs: Vec<u8>,
         command: CompileCommand,
         outputs: Vec<String>,
-        inputs: Vec<u8>,
     ) -> Result<BuildResult> {
         tracing::debug!("[run_build({job_id})]: Finding container");
 
