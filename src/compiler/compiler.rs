@@ -436,7 +436,19 @@ where
         pool: tokio::runtime::Handle,
     ) -> Result<(CompileResult, process::Output)> {
         let out_pretty = self.output_pretty().into_owned();
-        debug!("[{}]: get_cached_or_compile: {:?}", out_pretty, arguments);
+        if log_enabled!(log::Level::Debug) {
+            // [<file>] get_cached_or_compile: "/path/to/exe" <args...>
+            debug!(
+                "[{}]: get_cached_or_compile: {}",
+                out_pretty,
+                [
+                    &[format!("{:?}", self.get_executable().as_path().display())],
+                    &dist::osstrings_to_strings(&arguments).unwrap_or_default()[..]
+                ]
+                .concat()
+                .join(" ")
+            );
+        }
         let start = Instant::now();
         let may_dist = dist_client.is_some();
         let rewrite_includes_only = match dist_client {
@@ -682,6 +694,8 @@ where
     fn box_clone(&self) -> Box<dyn CompilerHasher<T>>;
 
     fn language(&self) -> Language;
+
+    fn get_executable(&self) -> PathBuf;
 }
 
 #[cfg(not(feature = "dist-client"))]

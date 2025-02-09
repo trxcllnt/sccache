@@ -363,6 +363,10 @@ where
     T: CommandCreatorSync,
     I: CCompilerImpl,
 {
+    fn get_executable(&self) -> PathBuf {
+        self.executable.clone()
+    }
+
     async fn generate_hash_key(
         self: Box<Self>,
         creator: &T,
