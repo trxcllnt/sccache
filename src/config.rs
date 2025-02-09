@@ -340,7 +340,7 @@ pub enum CacheType {
     OSS(OSSCacheConfig),
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CacheConfigs {
     pub azure: Option<AzureCacheConfig>,
@@ -1507,7 +1507,7 @@ pub mod server {
             .collect()
     }
 
-    #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
     #[serde(tag = "type")]
     #[serde(deny_unknown_fields)]
     pub enum BuilderType {
@@ -1531,7 +1531,7 @@ pub mod server {
         },
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
     #[serde(tag = "type")]
     #[serde(deny_unknown_fields)]
     pub enum SchedulerAuth {
@@ -1543,7 +1543,7 @@ pub mod server {
         Token { token: String },
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
     #[serde(default)]
     #[serde(deny_unknown_fields)]
     pub struct FileConfig {
@@ -2081,6 +2081,66 @@ no_credentials = true
                 ..Default::default()
             },
             server_startup_timeout_ms: Some(10000),
+        }
+    )
+}
+
+#[test]
+#[cfg(feature = "dist-server")]
+fn server_toml_parse() {
+    use server::BuilderType;
+    const CONFIG_STR: &str = r#"
+    # This is where client toolchains will be stored.
+    cache_dir = "/tmp/toolchains"
+    # Dedicate (nproc * 1.25) CPUs to building
+    max_per_core_load = 1.25
+    # Prefetch (nproc * 1) jobs
+    max_per_core_prefetch = 1
+    server_id = "server-1"
+    # The maximum size of the toolchain cache, in bytes.
+    # If unspecified the default is 10GB.
+    toolchain_cache_size = 10737418240
+
+    [builder]
+    type = "overlay"
+    # The directory under which a sandboxed filesystem will be created for builds.
+    build_dir = "/tmp/build"
+    # The path to the bubblewrap version 0.3.0+ `bwrap` binary.
+    bwrap_path = "/usr/bin/bwrap"
+
+    [message_broker]
+    amqp = "amqp://127.0.0.1:5672//"
+
+    [metrics]
+    type = "push"
+    endpoint = "http://127.0.0.1:9091/metrics/job/server"
+    interval = 1000
+    username = "sccache"
+    password = "sccache"
+
+    "#;
+
+    let server_config: server::FileConfig = toml::from_str(CONFIG_STR).expect("Is valid toml.");
+    assert_eq!(
+        server_config,
+        server::FileConfig {
+            builder: BuilderType::Overlay {
+                build_dir: PathBuf::from("/tmp/build"),
+                bwrap_path: PathBuf::from("/usr/bin/bwrap"),
+            },
+            cache_dir: PathBuf::from("/tmp/toolchains"),
+            max_per_core_load: Some(1.25),
+            max_per_core_prefetch: Some(1.0),
+            message_broker: Some(MessageBroker::AMQP("amqp://127.0.0.1:5672//".into())),
+            metrics: Some(MetricsConfig::Gateway {
+                endpoint: "http://127.0.0.1:9091/metrics/job/server".into(),
+                interval: 1000,
+                username: Some("sccache".into()),
+                password: Some("sccache".into())
+            }),
+            server_id: Some("server-1".into()),
+            toolchain_cache_size: Some(10737418240),
+            ..Default::default()
         }
     )
 }
