@@ -113,33 +113,39 @@ impl DiskCache {
         F: FnOnce(&Path) -> Fut,
         Fut: std::future::Future<Output = std::io::Result<u64>>,
     {
-        // HACK: This is basically a reimplementation of `insert_with`, but
-        // done in a way that drops the lru lock while `with_fn` is executing.
-        // This is so concurrent insertions aren't serialized by the lru lock.
+        // Separate lru locks so concurrent insertions aren't serialized
 
-        // Dummy insert so the entry is created in the LRU
-        let (abs_path, size) = self
+        let tmp = self
             .lru
             .lock()
             .await
             .get_or_init()?
-            .insert_with(key, size, |_| async { Ok(size) })
-            .await?;
+            .prepare_dir(key, size)?;
+
+        let tmp_path = tmp.as_path();
 
         // Do the actual I/O now that the LRU lock dropped
-        if let Err(err) = with_fn(&abs_path).await {
-            // Clean up if it fails
-            error!("DiskCache: Failed to insert entry \"{key}\":\n{err:?}");
-            crate::lru_disk_cache::remove_entry_from_disk_async(&abs_path)
+        let res = with_fn(tmp_path).await;
+
+        // Clean up and commit the dir
+        match res {
+            Ok(_) => self
+                .lru
+                .lock()
                 .await
-                .unwrap_or_else(|e| {
-                    error!(
-                        "DiskCache: Error removing entry for failed insertion {abs_path:?}:\n{e:?}"
-                    )
-                });
-            Err(err.into())
-        } else {
-            Ok((abs_path, size))
+                .get_or_init()?
+                .commit_dir(Ok(tmp))
+                .await
+                .map_err(|e| e.into()),
+            Err(err) => {
+                self.lru
+                    .lock()
+                    .await
+                    .get_or_init()?
+                    .commit_dir(Err(tmp))
+                    .await?;
+                Err(err.into())
+            }
         }
     }
 }

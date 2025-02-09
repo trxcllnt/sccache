@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use filetime::{set_file_times, FileTime};
 pub use lru_cache::{LruCache, Meter};
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempDir};
 use walkdir::WalkDir;
 
 use crate::util::OsStrExt;
@@ -92,7 +92,10 @@ fn get_all_entries<P: AsRef<Path>>(path: P) -> Box<dyn Iterator<Item = (PathBuf,
         .into_iter()
         .filter_map(|e| e.ok())
         .filter_map(|e| {
-            if e.depth() == 3 || e.file_type().is_file() {
+            if e.depth() == 3
+                || e.file_type().is_file()
+                || e.file_name().starts_with(TEMPFILE_PREFIX)
+            {
                 Some(e)
             } else {
                 None
@@ -156,7 +159,7 @@ impl From<io::Error> for Error {
 }
 
 /// A convenience `Result` type
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Trait objects can't be bounded by more than one non-builtin trait.
 pub trait ReadSeek: Read + Seek + Send {}
@@ -175,8 +178,23 @@ pub struct LruDiskCacheAddEntry {
 }
 
 impl LruDiskCacheAddEntry {
+    pub fn as_path(&self) -> &Path {
+        self.file.path()
+    }
     pub fn as_file_mut(&mut self) -> &mut std::fs::File {
         self.file.as_file_mut()
+    }
+}
+
+pub struct LruDiskCacheDirEntry {
+    file: TempDir,
+    key: OsString,
+    size: u64,
+}
+
+impl LruDiskCacheDirEntry {
+    pub fn as_path(&self) -> &Path {
+        self.file.path()
     }
 }
 
@@ -352,6 +370,15 @@ impl LruDiskCache {
             })
     }
 
+    fn cleanup_pending<'a, K: AsRef<OsStr> + 'a>(&mut self, key: K, size: u64) {
+        self.pending
+            .iter()
+            .position(|k| k == key.as_ref())
+            .map(|i| self.pending.remove(i))
+            .unwrap();
+        self.pending_size -= size;
+    }
+
     /// Add an entry by calling `with_fn` with the path for `key`.
     pub async fn insert_with<K, F, Fut>(
         &mut self,
@@ -430,6 +457,25 @@ impl LruDiskCache {
             .map_err(Into::into)
     }
 
+    /// Prepare the insertion of a directory at path `key`. The resulting entry must be
+    /// committed with `LruDiskCache::commit_dir`.
+    pub fn prepare_dir<'a, K: AsRef<OsStr> + 'a>(
+        &mut self,
+        key: K,
+        size: u64,
+    ) -> Result<LruDiskCacheDirEntry> {
+        // Ensure we have enough space for the advertized space.
+        self.make_space(size)?;
+        let key = self.key_to_rel_path(key).into_os_string();
+        self.pending.push(key.clone());
+        self.pending_size += size;
+        tempfile::Builder::new()
+            .prefix(TEMPFILE_PREFIX)
+            .tempdir_in(&self.root)
+            .map(|file| LruDiskCacheDirEntry { file, key, size })
+            .map_err(Into::into)
+    }
+
     /// Commit an entry coming from `LruDiskCache::prepare_add`.
     pub fn commit(&mut self, entry: LruDiskCacheAddEntry) -> Result<()> {
         let LruDiskCacheAddEntry {
@@ -442,17 +488,33 @@ impl LruDiskCache {
         // If the file is larger than the size that had been advertized, ensure
         // we have enough space for it.
         self.make_space(real_size.saturating_sub(size))?;
-        self.pending
-            .iter()
-            .position(|k| k == &key)
-            .map(|i| self.pending.remove(i))
-            .unwrap();
-        self.pending_size -= size;
+        self.cleanup_pending(&key, size);
         let abs_path = self.rel_to_abs_path(&key);
         fs::create_dir_all(abs_path.parent().unwrap())?;
         file.persist(abs_path).map_err(|e| e.error)?;
         self.lru.insert(key, real_size);
         Ok(())
+    }
+
+    /// Commit an entry coming from `LruDiskCache::prepare_dir`.
+    pub async fn commit_dir(
+        &mut self,
+        entry: Result<LruDiskCacheDirEntry, LruDiskCacheDirEntry>,
+    ) -> Result<(PathBuf, u64)> {
+        match entry {
+            Err(entry) => {
+                self.cleanup_pending(&entry.key, entry.size);
+                Err(Error::FileNotInCache)
+            }
+            Ok(entry) => {
+                self.cleanup_pending(&entry.key, entry.size);
+                let abs_path = self.rel_to_abs_path(&entry.key);
+                tokio::fs::create_dir_all(abs_path.parent().unwrap()).await?;
+                tokio::fs::rename(entry.as_path(), &abs_path).await?;
+                self.lru.insert(entry.key, entry.size);
+                Ok((abs_path, entry.size))
+            }
+        }
     }
 
     /// Return `true` if a file with path `key` is in the cache. Entries created
