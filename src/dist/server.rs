@@ -26,7 +26,6 @@ mod internal {
 
     use hyper_util::rt::{TokioExecutor, TokioIo};
 
-    use metrics_exporter_prometheus::PrometheusHandle;
     use serde_json::json;
 
     use std::{io, net::SocketAddr, str::FromStr, sync::Arc, time::Instant};
@@ -40,12 +39,10 @@ mod internal {
         trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
     };
 
-    use crate::{
-        config::MetricsConfig,
-        dist::{
-            http::{bincode_deserialize, ClientAuthCheck},
-            NewJobRequest, RunJobRequest, SchedulerService, Toolchain,
-        },
+    use crate::dist::{
+        http::{bincode_deserialize, ClientAuthCheck},
+        metrics::Metrics,
+        NewJobRequest, RunJobRequest, SchedulerService, Toolchain,
     };
 
     use crate::errors::*;
@@ -184,11 +181,11 @@ mod internal {
         )
     }
 
-    fn with_metrics(app: Router, config: MetricsConfig, handle: PrometheusHandle) -> Router {
-        let app = if let MetricsConfig::ListenPath { path } = config {
+    fn with_metrics(app: Router, metrics: Metrics) -> Router {
+        let app = if let Some(path) = metrics.listen_path() {
             app.route(
-                &path.unwrap_or("/metrics".to_owned()),
-                routing::get(move || std::future::ready(handle.render())),
+                &path,
+                routing::get(move || std::future::ready(metrics.render())),
             )
         } else {
             app
@@ -337,8 +334,8 @@ mod internal {
     }
 
     impl Scheduler {
-        pub fn new<S: SchedulerService + 'static>(
-            service: Arc<S>,
+        pub fn new(
+            service: Arc<dyn SchedulerService>,
             client_auth: Box<dyn ClientAuthCheck>,
         ) -> Self {
             Self {
@@ -523,18 +520,14 @@ mod internal {
             self,
             addr: SocketAddr,
             max_body_size: usize,
-            metrics: Option<(MetricsConfig, PrometheusHandle)>,
+            metrics: Metrics,
         ) -> Result<()> {
             let app = Self::make_router()
                 .fallback(|| async move { (StatusCode::NOT_FOUND, "404") })
                 .layer(DefaultBodyLimit::max(max_body_size))
                 .layer(Extension(self.state.clone()));
 
-            let app = if let Some((config, handle)) = metrics {
-                with_metrics(app, config, handle)
-            } else {
-                app
-            };
+            let app = with_metrics(app, metrics);
 
             let app = with_request_tracing(app);
 
@@ -542,7 +535,7 @@ mod internal {
 
             let listener = TcpListener::bind(addr).await.unwrap();
 
-            tracing::info!("Scheduler listening for clients on {}", addr);
+            tracing::info!("sccache: Scheduler listening for clients on {}", addr);
 
             loop {
                 let (tcp_stream, remote_addr) = listener.accept().await.unwrap();

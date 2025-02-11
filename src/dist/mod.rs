@@ -31,9 +31,13 @@ pub mod client_auth;
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 pub mod http;
 #[cfg(feature = "dist-server")]
+pub mod metrics;
+#[cfg(feature = "dist-server")]
 pub mod server;
 #[cfg(test)]
 mod test;
+#[cfg(feature = "dist-server")]
+pub mod token_check;
 
 #[cfg(feature = "dist-server")]
 pub use crate::dist::cache::ServerToolchains;
@@ -571,7 +575,8 @@ pub struct ServerDetails {
     // #[serde(flatten)]
     pub info: ServerStats,
     pub jobs: JobStats,
-    pub created_at: u128,
+    // (secs, nanos)
+    pub created_at: (u64, u32),
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
