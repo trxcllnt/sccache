@@ -78,11 +78,11 @@ memmap2 = "0.9.4"
 # metrics = { version = "0.24", default-features = false, optional = true }
 # metrics-exporter-prometheus = { version = "0.16", default-features = true, optional = true }
 metrics = { git = "https://github.com/trxcllnt/metrics-rs.git", branch = "fix/515", default-features = false, optional = true }
+metrics-exporter-dogstatsd = { git = "https://github.com/trxcllnt/metrics-rs.git", branch = "fix/515", default-features = false, optional = true }
 metrics-exporter-prometheus = { git = "https://github.com/trxcllnt/metrics-rs.git", branch = "fix/515", default-features = false, optional = true, features = [
   "http-listener",
   "push-gateway",
 ] }
-metrics-exporter-dogstatsd = { git = "https://github.com/trxcllnt/metrics-rs.git", branch = "fix/515", default-features = false, optional = true }
 
 mime = "0.3"
 num_cpus = "1.16"
