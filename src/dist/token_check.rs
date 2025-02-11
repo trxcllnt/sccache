@@ -1,9 +1,12 @@
+use crate::{
+    config::{scheduler::ClientAuth, INSECURE_DIST_CLIENT_TOKEN},
+    dist::http::{ClientAuthCheck, ClientVisibleMsg},
+    util::{new_reqwest_client, BASE64_URL_SAFE_ENGINE},
+};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use base64::Engine;
 use futures::lock::Mutex;
-use sccache::dist::http::{ClientAuthCheck, ClientVisibleMsg};
-use sccache::util::{new_reqwest_client, BASE64_URL_SAFE_ENGINE};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::result::Result as StdResult;
@@ -376,5 +379,27 @@ impl ValidJWTCheck {
         let _tokendata = jwt::decode::<Claims>(token, &pkcs1, &validation)
             .context("Unable to validate and decode jwt")?;
         Ok(())
+    }
+}
+
+impl From<ClientAuth> for Box<dyn ClientAuthCheck> {
+    fn from(client_auth: ClientAuth) -> Box<dyn ClientAuthCheck> {
+        match client_auth {
+            ClientAuth::Insecure => Box::new(EqCheck::new(INSECURE_DIST_CLIENT_TOKEN.to_owned())),
+            ClientAuth::Token { token } => Box::new(EqCheck::new(token)),
+            ClientAuth::JwtValidate {
+                audience,
+                issuer,
+                jwks_url,
+            } => Box::new(
+                ValidJWTCheck::new(audience, issuer, &jwks_url)
+                    .context("Failed to create a checker for valid JWTs")
+                    .unwrap(),
+            ),
+            ClientAuth::Mozilla { required_groups } => Box::new(MozillaCheck::new(required_groups)),
+            ClientAuth::ProxyToken { url, cache_secs } => {
+                Box::new(ProxyTokenCheck::new(url, cache_secs))
+            }
+        }
     }
 }
