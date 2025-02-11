@@ -398,7 +398,7 @@ impl DistClientContainer {
                     Ok(res) => {
                         info!(
                             "Successfully created dist client with {:?} cores across {:?} servers",
-                            res.info.num_cpus,
+                            res.info.occupancy,
                             res.servers.len()
                         );
                         DistClientState::Some(Box::new(config), Arc::new(dist_client))
