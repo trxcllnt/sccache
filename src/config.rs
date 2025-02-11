@@ -1228,21 +1228,59 @@ impl MessageBroker {
 
 #[cfg(feature = "dist-server")]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DogStatsDAggregationMode {
+    #[serde(rename = "aggressive")]
+    Aggressive,
+    #[serde(rename = "conservative")]
+    Conservative,
+}
+
+#[cfg(feature = "dist-server")]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DogStatsDMetricsConfig {
+    pub remote_addr: String,
+    // Write timeout (in milliseconds) for forwarding metrics to dogstatsd
+    pub write_timeout: Option<u64>,
+    // Maximum payload length for forwarding metrics
+    pub maximum_payload_length: Option<usize>,
+    // The aggregation mode for the exporter
+    pub aggregation_mode: Option<DogStatsDAggregationMode>,
+    // The flush interval of the aggregator
+    pub flush_interval: Option<u64>,
+    // Whether or not to enable telemetry for the exporter
+    pub telemetry: Option<bool>,
+    // Whether or not to enable histogram sampling
+    pub histogram_sampling: Option<bool>,
+    // The reservoir size for histogram sampling
+    pub histogram_reservoir_size: Option<usize>,
+    // Whether or not to send histograms as distributions
+    pub histograms_as_distributions: Option<bool>,
+}
+
+#[cfg(feature = "dist-server")]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 #[serde(deny_unknown_fields)]
-pub enum MetricsConfig {
+pub enum PrometheusMetricsConfig {
     #[serde(rename = "bind")]
     ListenAddr { addr: Option<std::net::SocketAddr> },
     #[serde(rename = "path")]
     ListenPath { path: Option<String> },
     #[serde(rename = "push")]
-    Gateway {
+    PushGateway {
         endpoint: String,
         // Interval (in milliseconds) to push metrics to prometheus
-        interval: u64,
+        interval: Option<u64>,
         username: Option<String>,
         password: Option<String>,
     },
+}
+
+#[cfg(feature = "dist-server")]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MetricsConfigs {
+    pub dogstatsd: Option<DogStatsDMetricsConfig>,
+    pub prometheus: Option<PrometheusMetricsConfig>,
 }
 
 #[cfg(feature = "dist-server")]
@@ -1285,15 +1323,8 @@ pub mod scheduler {
     use super::{
         config_from_env, default_disk_cache_dir, default_disk_cache_size, number_from_env_var,
         try_read_config_file, CacheConfigs, CacheModeConfig, DiskCacheConfig, MessageBroker,
-        MetricsConfig, StorageConfig,
+        MetricsConfigs, StorageConfig,
     };
-
-    // pub fn default_remember_server_error_timeout() -> u64 {
-    //     std::env::var("SCCACHE_DIST_REMEMBER_SERVER_ERROR_TIMEOUT")
-    //         .ok()
-    //         .and_then(|s| s.parse().ok())
-    //         .unwrap_or(300)
-    // }
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     #[serde(tag = "type")]
@@ -1327,7 +1358,7 @@ pub mod scheduler {
         pub jobs: CacheConfigs,
         pub max_body_size: Option<usize>,
         pub message_broker: Option<MessageBroker>,
-        pub metrics: Option<MetricsConfig>,
+        pub metrics: MetricsConfigs,
         pub public_addr: SocketAddr,
         pub scheduler_id: Option<String>,
         pub toolchains: CacheConfigs,
@@ -1349,7 +1380,7 @@ pub mod scheduler {
                 },
                 max_body_size: None,
                 message_broker: None,
-                metrics: None,
+                metrics: Default::default(),
                 public_addr: SocketAddr::from_str("0.0.0.0:10500").unwrap(),
                 scheduler_id: None,
                 toolchains: CacheConfigs {
@@ -1372,7 +1403,7 @@ pub mod scheduler {
         pub jobs: StorageConfig,
         pub max_body_size: usize,
         pub message_broker: Option<MessageBroker>,
-        pub metrics: Option<MetricsConfig>,
+        pub metrics: MetricsConfigs,
         pub public_addr: SocketAddr,
         pub scheduler_id: String,
         pub toolchains: StorageConfig,
@@ -1470,7 +1501,7 @@ pub mod server {
     use super::{
         config_from_env, default_disk_cache_dir, default_disk_cache_size, number_from_env_var,
         try_read_config_file, CacheConfigs, CacheModeConfig, DiskCacheConfig, MessageBroker,
-        MetricsConfig, StorageConfig,
+        MetricsConfigs, PrometheusMetricsConfig, StorageConfig,
     };
     use serde::{Deserialize, Serialize};
     use std::env;
@@ -1553,7 +1584,7 @@ pub mod server {
         pub max_per_core_load: Option<f64>,
         pub max_per_core_prefetch: Option<f64>,
         pub message_broker: Option<MessageBroker>,
-        pub metrics: Option<MetricsConfig>,
+        pub metrics: MetricsConfigs,
         pub server_id: Option<String>,
         pub toolchain_cache_size: Option<u64>,
         pub toolchains: CacheConfigs,
@@ -1576,7 +1607,7 @@ pub mod server {
                 max_per_core_load: None,
                 max_per_core_prefetch: None,
                 message_broker: None,
-                metrics: None,
+                metrics: Default::default(),
                 server_id: None,
                 toolchain_cache_size: None,
                 toolchains: CacheConfigs {
@@ -1600,7 +1631,7 @@ pub mod server {
         pub max_per_core_load: f64,
         pub max_per_core_prefetch: f64,
         pub message_broker: Option<MessageBroker>,
-        pub metrics: Option<MetricsConfig>,
+        pub metrics: MetricsConfigs,
         pub server_id: String,
         pub toolchain_cache_size: u64,
         pub toolchains: StorageConfig,
@@ -1633,8 +1664,8 @@ pub mod server {
                 })
                 .unwrap_or_default();
 
-            if let Some(MetricsConfig::ListenPath { .. }) = metrics {
-                return Err(anyhow!("Invalid config `metrics.type=\"path\"`. Choose `metrics.type = \"addr\"` or `metrics.type = \"push\"`"));
+            if let Some(PrometheusMetricsConfig::ListenPath { .. }) = metrics.prometheus {
+                return Err(anyhow!("Invalid config `metrics.prometheus.type=\"path\"`. Choose `type = \"addr\"` or `type = \"push\"`"));
             }
 
             let mut jobs_storage = CacheConfigs::default();
@@ -2111,7 +2142,7 @@ fn server_toml_parse() {
     [message_broker]
     amqp = "amqp://127.0.0.1:5672//"
 
-    [metrics]
+    [metrics.prometheus]
     type = "push"
     endpoint = "http://127.0.0.1:9091/metrics/job/server"
     interval = 1000
@@ -2132,12 +2163,15 @@ fn server_toml_parse() {
             max_per_core_load: Some(1.25),
             max_per_core_prefetch: Some(1.0),
             message_broker: Some(MessageBroker::AMQP("amqp://127.0.0.1:5672//".into())),
-            metrics: Some(MetricsConfig::Gateway {
-                endpoint: "http://127.0.0.1:9091/metrics/job/server".into(),
-                interval: 1000,
-                username: Some("sccache".into()),
-                password: Some("sccache".into())
-            }),
+            metrics: MetricsConfigs {
+                prometheus: Some(PrometheusMetricsConfig::PushGateway {
+                    endpoint: "http://127.0.0.1:9091/metrics/job/server".into(),
+                    interval: Some(1000),
+                    username: Some("sccache".into()),
+                    password: Some("sccache".into())
+                }),
+                ..Default::default()
+            },
             server_id: Some("server-1".into()),
             toolchain_cache_size: Some(10737418240),
             ..Default::default()
