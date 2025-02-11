@@ -44,14 +44,14 @@ use tokio_retry2::RetryError;
 
 use crate::{job_inputs_key, job_result_key};
 
-const HAS_JOB_INPUTS_TIME: &str = "sccache_scheduler_has_job_inputs_time";
-const HAS_JOB_RESULT_TIME: &str = "sccache_scheduler_has_job_result_time";
-const GET_JOB_RESULT_TIME: &str = "sccache_scheduler_get_job_result_time";
-const DEL_JOB_INPUTS_TIME: &str = "sccache_scheduler_del_job_inputs_time";
-const DEL_JOB_RESULT_TIME: &str = "sccache_scheduler_del_job_result_time";
-const PUT_JOB_INPUTS_TIME: &str = "sccache_scheduler_put_job_inputs_time";
-const PUT_TOOLCHAIN_TIME: &str = "sccache_scheduler_put_toolchain_time";
-const DEL_TOOLCHAIN_TIME: &str = "sccache_scheduler_del_toolchain_time";
+const HAS_JOB_INPUTS_TIME: &str = "sccache::scheduler::has_job_inputs_time";
+const HAS_JOB_RESULT_TIME: &str = "sccache::scheduler::has_job_result_time";
+const GET_JOB_RESULT_TIME: &str = "sccache::scheduler::get_job_result_time";
+const DEL_JOB_INPUTS_TIME: &str = "sccache::scheduler::del_job_inputs_time";
+const DEL_JOB_RESULT_TIME: &str = "sccache::scheduler::del_job_result_time";
+const PUT_JOB_INPUTS_TIME: &str = "sccache::scheduler::put_job_inputs_time";
+const PUT_TOOLCHAIN_TIME: &str = "sccache::scheduler::put_toolchain_time";
+const DEL_TOOLCHAIN_TIME: &str = "sccache::scheduler::del_toolchain_time";
 
 pub struct SchedulerMetrics {
     metrics: Metrics,
