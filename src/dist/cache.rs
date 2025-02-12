@@ -479,7 +479,7 @@ mod server {
     use crate::cache::disk::DiskCache;
     use crate::cache::{cache, Storage};
     use crate::dist::http::retry_with_jitter;
-    use crate::dist::metrics::{Action, Metrics};
+    use crate::dist::metrics::{Metrics, TimeRecorder};
     use crate::dist::Toolchain;
     use crate::errors::*;
 
@@ -500,50 +500,28 @@ mod server {
             Self { metrics }
         }
 
-        pub async fn load<F>(&self, func: F) -> F::Result
-        where
-            F: Action,
-        {
-            self.metrics.histogram(TC_LOAD, &[], func).await
+        pub fn load_timer(&self) -> TimeRecorder {
+            self.metrics.timer(TC_LOAD, &[])
         }
 
-        pub async fn load_inflated<F>(&self, func: F) -> F::Result
-        where
-            F: Action,
-        {
-            self.metrics.histogram(TC_LOAD_INFLATED, &[], func).await
+        pub fn load_inflated_timer(&self) -> TimeRecorder {
+            self.metrics.timer(TC_LOAD_INFLATED, &[])
         }
 
-        pub async fn load_deflated<F>(&self, func: F) -> F::Result
-        where
-            F: Action,
-        {
-            self.metrics.histogram(TC_LOAD_DEFLATED, &[], func).await
+        pub fn load_deflated_timer(&self) -> TimeRecorder {
+            self.metrics.timer(TC_LOAD_DEFLATED, &[])
         }
 
-        pub async fn load_deflated_size<F>(&self, func: F) -> F::Result
-        where
-            F: Action,
-        {
-            self.metrics
-                .histogram(TC_LOAD_DEFLATED_SIZE, &[], func)
-                .await
+        pub fn load_deflated_size_timer(&self) -> TimeRecorder {
+            self.metrics.timer(TC_LOAD_DEFLATED_SIZE, &[])
         }
 
-        pub async fn load_inflated_size<F>(&self, func: F) -> F::Result
-        where
-            F: Action,
-        {
-            self.metrics
-                .histogram(TC_LOAD_INFLATED_SIZE, &[], func)
-                .await
+        pub fn load_inflated_size_timer(&self) -> TimeRecorder {
+            self.metrics.timer(TC_LOAD_INFLATED_SIZE, &[])
         }
 
-        pub async fn unpack_inflated<F>(&self, func: F) -> F::Result
-        where
-            F: Action,
-        {
-            self.metrics.histogram(TC_UNPACK_INFLATED, &[], func).await
+        pub fn unpack_inflated_timer(&self) -> TimeRecorder {
+            self.metrics.timer(TC_UNPACK_INFLATED, &[])
         }
     }
 
@@ -575,95 +553,77 @@ mod server {
 
         pub async fn load(&self, tc: &Toolchain) -> Result<PathBuf> {
             // Record toolchain load time after retrying
-            self.metrics
-                .load(|| async {
-                    retry_with_jitter(10, || async {
-                        // Load and cache the deflated toolchain.
-                        // Inflate, unpack, and cache it in a directory.
-                        // Return the path to the unpacked toolchain dir.
-                        self.load_inflated_toolchain(tc).await.map_err(|err| {
-                            tracing::warn!(
-                                "ServerToolchains({})]: Error loading toolchain, retrying: {err:?}",
-                                &tc.archive_id
-                            );
-                            RetryError::transient(err)
-                        })
-                    })
-                    .await
+            let _timer = self.metrics.load_timer();
+            retry_with_jitter(10, || async {
+                // Load and cache the deflated toolchain.
+                // Inflate, unpack, and cache it in a directory.
+                // Return the path to the unpacked toolchain dir.
+                self.load_inflated_toolchain(tc).await.map_err(|err| {
+                    tracing::warn!(
+                        "ServerToolchains({})]: Error loading toolchain, retrying: {err:?}",
+                        &tc.archive_id
+                    );
+                    RetryError::transient(err)
                 })
-                .await
+            })
+            .await
         }
 
         async fn load_inflated_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
             // Record toolchain load_inflated time
-            self.metrics
-                .load_inflated(|| async {
-                    if let Ok((inflated_path, _)) = self.cache.entry(&tc.archive_id).await {
-                        // Return early if the toolchain is already loaded and unpacked
-                        Ok(inflated_path)
-                    } else {
-                        // Load the compressed toolchain
-                        let deflated_path = self.load_deflated_toolchain(tc).await?;
-                        // Compute the toolchain's inflated size
-                        let inflated_size =
-                            self.load_inflated_toolchain_size(&deflated_path).await?;
-                        // Inflate and unpack the toolchain archive
-                        let inflated_path = self
-                            .unpack_inflated_toolchain(
-                                &deflated_path,
-                                &tc.archive_id,
-                                inflated_size,
-                            )
-                            .await?;
-                        Ok(inflated_path)
-                    }
-                })
-                .await
+            let _timer = self.metrics.load_inflated_timer();
+            if let Ok((inflated_path, _)) = self.cache.entry(&tc.archive_id).await {
+                // Return early if the toolchain is already loaded and unpacked
+                Ok(inflated_path)
+            } else {
+                // Load the compressed toolchain
+                let deflated_path = self.load_deflated_toolchain(tc).await?;
+                // Compute the toolchain's inflated size
+                let inflated_size = self.load_inflated_toolchain_size(&deflated_path).await?;
+                // Inflate and unpack the toolchain archive
+                let inflated_path = self
+                    .unpack_inflated_toolchain(&deflated_path, &tc.archive_id, inflated_size)
+                    .await?;
+                Ok(inflated_path)
+            }
         }
 
         async fn load_deflated_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
             // Record toolchain load_deflated time
-            self.metrics
-                .load_deflated(|| async {
-                    let deflated_key = format!("{}.tgz", tc.archive_id);
-                    if !self.cache.has(&deflated_key).await {
-                        let deflated_size = self.load_deflated_toolchain_size(tc).await?;
-                        let reader = self.store.get_stream(&tc.archive_id).await?;
-                        self.cache
-                            .put_stream(&deflated_key, deflated_size, std::pin::pin!(reader))
-                            .await?;
-                    }
-                    self.cache.entry(&deflated_key).await.map(|(path, _)| path)
-                })
-                .await
+            let _timer = self.metrics.load_deflated_timer();
+            let deflated_key = format!("{}.tgz", tc.archive_id);
+            if !self.cache.has(&deflated_key).await {
+                let deflated_size = self.load_deflated_toolchain_size(tc).await?;
+                let reader = self.store.get_stream(&tc.archive_id).await?;
+                self.cache
+                    .put_stream(&deflated_key, deflated_size, std::pin::pin!(reader))
+                    .await?;
+            }
+            self.cache.entry(&deflated_key).await.map(|(path, _)| path)
         }
 
         async fn load_deflated_toolchain_size(&self, tc: &Toolchain) -> Result<u64> {
             // Record toolchain load_deflated_size time
-            self.metrics
-                .load_deflated_size(|| async { self.store.size(&tc.archive_id).await })
-                .await
+            let _timer = self.metrics.load_deflated_size_timer();
+            self.store.size(&tc.archive_id).await
         }
 
         async fn load_inflated_toolchain_size(&self, deflated_path: &Path) -> Result<u64> {
             // Record toolchain load_inflated_size time
-            self.metrics
-                .load_inflated_size(|| async {
-                    let deflated_file = tokio::fs::File::open(&deflated_path).await?;
-                    let gunzip_reader = GzipDecoder::new(BufReader::new(deflated_file));
-                    let inflated_size = async_tar::Archive::new(gunzip_reader.compat())
-                        .entries()?
-                        .fold(0, |inflated_size, entry| async move {
-                            if let Ok(inflated_entry_size) = entry.and_then(|e| e.header().size()) {
-                                inflated_size + inflated_entry_size
-                            } else {
-                                inflated_size
-                            }
-                        })
-                        .await;
-                    Ok(inflated_size)
+            let _timer = self.metrics.load_inflated_size_timer();
+            let deflated_file = tokio::fs::File::open(&deflated_path).await?;
+            let gunzip_reader = GzipDecoder::new(BufReader::new(deflated_file));
+            let inflated_size = async_tar::Archive::new(gunzip_reader.compat())
+                .entries()?
+                .fold(0, |inflated_size, entry| async move {
+                    if let Ok(inflated_entry_size) = entry.and_then(|e| e.header().size()) {
+                        inflated_size + inflated_entry_size
+                    } else {
+                        inflated_size
+                    }
                 })
-                .await
+                .await;
+            Ok(inflated_size)
         }
 
         async fn unpack_inflated_toolchain(
@@ -673,29 +633,26 @@ mod server {
             inflated_size: u64,
         ) -> Result<PathBuf> {
             // Record toolchain unpack_inflated time
-            self.metrics
-                .unpack_inflated(|| async {
-                    self.cache
-                        .insert_with(inflated_key, inflated_size, |inflated_path: &Path| {
-                            let deflated_path = deflated_path.to_owned();
-                            let inflated_path = inflated_path.to_owned();
-                            async move {
-                                // Ensure the inflated dir exists first
-                                tokio::fs::create_dir_all(&inflated_path).await?;
-                                let deflated_file = tokio::fs::File::open(&deflated_path).await?;
-                                let gunzip_reader = GzipDecoder::new(BufReader::new(deflated_file));
-                                let targz_archive = async_tar::Archive::new(gunzip_reader.compat());
-                                // Unpack the tgz into the inflated dir
-                                targz_archive
-                                    .unpack(&inflated_path)
-                                    .await
-                                    .map(|_| inflated_size)
-                            }
-                        })
-                        .await
-                        .map(|(path, _)| path)
+            let _timer = self.metrics.unpack_inflated_timer();
+            self.cache
+                .insert_with(inflated_key, inflated_size, |inflated_path: &Path| {
+                    let deflated_path = deflated_path.to_owned();
+                    let inflated_path = inflated_path.to_owned();
+                    async move {
+                        // Ensure the inflated dir exists first
+                        tokio::fs::create_dir_all(&inflated_path).await?;
+                        let deflated_file = tokio::fs::File::open(&deflated_path).await?;
+                        let gunzip_reader = GzipDecoder::new(BufReader::new(deflated_file));
+                        let targz_archive = async_tar::Archive::new(gunzip_reader.compat());
+                        // Unpack the tgz into the inflated dir
+                        targz_archive
+                            .unpack(&inflated_path)
+                            .await
+                            .map(|_| inflated_size)
+                    }
                 })
                 .await
+                .map(|(path, _)| path)
         }
     }
 }

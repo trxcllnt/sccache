@@ -89,7 +89,7 @@ impl Tasks {
                         .default_queue(default_queue)
                         .task_route(RunJob::NAME, &to_servers)
                         .task_route(JobFinished::NAME, &to_schedulers)
-                        .task_route(ServerUpdate::NAME, &to_schedulers)
+                        .task_route(StatusUpdate::NAME, &to_schedulers)
                         .task_content_type(MessageContentType::MsgPack)
                         .prefetch_count(prefetch_count)
                         // Wait at most 1s before retrying failed tasks
@@ -127,7 +127,7 @@ impl Tasks {
 
         // Tasks the scheduler receives
         tasks.app.register_task::<JobFinished>().await?;
-        tasks.app.register_task::<ServerUpdate>().await?;
+        tasks.app.register_task::<StatusUpdate>().await?;
 
         Ok(tasks)
     }
@@ -149,7 +149,7 @@ impl Tasks {
 
 #[async_trait]
 impl SchedulerTasks for Tasks {
-    fn set_scheduler(scheduler: Arc<dyn SchedulerService>) -> Result<()> {
+    fn set_scheduler(&self, scheduler: Arc<dyn SchedulerService>) -> Result<()> {
         SCHEDULER
             .set(scheduler.clone())
             .map_err(|err| anyhow!("{err:#}"))
@@ -187,7 +187,7 @@ impl SchedulerTasks for Tasks {
 
 #[async_trait]
 impl ServerTasks for Tasks {
-    fn set_server(server: Arc<dyn ServerService>) -> Result<()> {
+    fn set_server(&self, server: Arc<dyn ServerService>) -> Result<()> {
         SERVER.set(server.clone()).map_err(|err| anyhow!("{err:#}"))
     }
 
@@ -199,7 +199,7 @@ impl ServerTasks for Tasks {
         &self,
         server: ServerDetails,
     ) -> std::result::Result<AsyncResult, CeleryError> {
-        self.app.send_task(ServerUpdate::new(server)).await
+        self.app.send_task(StatusUpdate::new(server)).await
     }
 
     async fn job_finished(
@@ -456,23 +456,23 @@ impl Task for JobFinished {
     }
 }
 
-struct ServerUpdate {
+struct StatusUpdate {
     request: Request<Self>,
     options: TaskOptions,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct ServerUpdateParams {
+struct StatusUpdateParams {
     server: ServerDetails,
 }
 
-impl ServerUpdate {
+impl StatusUpdate {
     fn new(server: ServerDetails) -> Signature<Self> {
-        Signature::<Self>::new(ServerUpdateParams { server })
+        Signature::<Self>::new(StatusUpdateParams { server })
     }
 }
 
-impl ServerUpdate {
+impl StatusUpdate {
     fn scheduler(&self) -> Result<&Arc<dyn SchedulerService>> {
         match SCHEDULER.get() {
             Some(scheduler) => Ok(scheduler),
@@ -485,11 +485,11 @@ impl ServerUpdate {
 }
 
 #[async_trait]
-impl Task for ServerUpdate {
+impl Task for StatusUpdate {
     const NAME: &'static str = "status_update";
     const ARGS: &'static [&'static str] = &["server"];
 
-    type Params = ServerUpdateParams;
+    type Params = StatusUpdateParams;
     type Returns = ();
 
     fn from_request(request: Request<Self>, mut options: TaskOptions) -> Self {

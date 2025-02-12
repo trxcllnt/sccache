@@ -593,10 +593,11 @@ pub struct ServerStats {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobStats {
-    pub accepted: usize,
-    pub finished: usize,
-    pub loading: usize,
-    pub running: usize,
+    pub accepted: u64,
+    pub finished: u64,
+    pub loading: u64,
+    pub pending: u64,
+    pub running: u64,
 }
 
 // SubmitToolchain

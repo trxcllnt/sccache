@@ -24,7 +24,7 @@ use sccache::{
     dist::{
         self,
         http::{bincode_deserialize, retry_with_jitter},
-        metrics::{Action, Metrics},
+        metrics::{Metrics, TimeRecorder},
         CompileCommand, JobStats, NewJobRequest, NewJobResponse, RunJobRequest, RunJobResponse,
         SchedulerService, SchedulerStatus, ServerDetails, ServerStats, ServerStatus,
         SubmitToolchainResult, Toolchain,
@@ -62,75 +62,49 @@ impl SchedulerMetrics {
         Self { metrics }
     }
 
-    pub async fn has_job_inputs<F>(&self, func: F) -> F::Result
-    where
-        F: Action,
-    {
-        self.metrics.histogram(HAS_JOB_INPUTS_TIME, &[], func).await
+    pub fn has_job_inputs_timer(&self) -> TimeRecorder {
+        self.metrics.timer(HAS_JOB_INPUTS_TIME, &[])
     }
 
-    pub async fn has_job_result<F>(&self, func: F) -> F::Result
-    where
-        F: Action,
-    {
-        self.metrics.histogram(HAS_JOB_RESULT_TIME, &[], func).await
+    pub fn has_job_result_timer(&self) -> TimeRecorder {
+        self.metrics.timer(HAS_JOB_RESULT_TIME, &[])
     }
 
-    pub async fn get_job_result<F>(&self, func: F) -> F::Result
-    where
-        F: Action,
-    {
-        self.metrics.histogram(GET_JOB_RESULT_TIME, &[], func).await
+    pub fn get_job_result_timer(&self) -> TimeRecorder {
+        self.metrics.timer(GET_JOB_RESULT_TIME, &[])
     }
 
-    pub async fn del_job_inputs<F>(&self, func: F) -> F::Result
-    where
-        F: Action,
-    {
-        self.metrics.histogram(DEL_JOB_INPUTS_TIME, &[], func).await
+    pub fn del_job_inputs_timer(&self) -> TimeRecorder {
+        self.metrics.timer(DEL_JOB_INPUTS_TIME, &[])
     }
 
-    pub async fn del_job_result<F>(&self, func: F) -> F::Result
-    where
-        F: Action,
-    {
-        self.metrics.histogram(DEL_JOB_RESULT_TIME, &[], func).await
+    pub fn del_job_result_timer(&self) -> TimeRecorder {
+        self.metrics.timer(DEL_JOB_RESULT_TIME, &[])
     }
 
-    pub async fn put_job_inputs<F>(&self, func: F) -> F::Result
-    where
-        F: Action,
-    {
-        self.metrics.histogram(PUT_JOB_INPUTS_TIME, &[], func).await
+    pub fn put_job_inputs_timer(&self) -> TimeRecorder {
+        self.metrics.timer(PUT_JOB_INPUTS_TIME, &[])
     }
 
-    pub async fn put_toolchain<F>(&self, func: F) -> F::Result
-    where
-        F: Action,
-    {
-        self.metrics.histogram(PUT_TOOLCHAIN_TIME, &[], func).await
+    pub fn put_toolchain_timer(&self) -> TimeRecorder {
+        self.metrics.timer(PUT_TOOLCHAIN_TIME, &[])
     }
 
-    pub async fn del_toolchain<F>(&self, func: F) -> F::Result
-    where
-        F: Action,
-    {
-        self.metrics.histogram(DEL_TOOLCHAIN_TIME, &[], func).await
+    pub fn del_toolchain_timer(&self) -> TimeRecorder {
+        self.metrics.timer(DEL_TOOLCHAIN_TIME, &[])
     }
 }
 
 #[async_trait]
 pub trait SchedulerTasks: Send + Sync {
-    fn set_scheduler(scheduler: Arc<dyn SchedulerService>) -> Result<()>
-    where
-        Self: Sized;
-
     fn app(&self) -> &Arc<celery::Celery>;
 
     fn get_job_time_limit(&self) -> u32;
     fn set_job_time_limit(self, job_time_limit: u32) -> Self
     where
         Self: Sized;
+
+    fn set_scheduler(&self, scheduler: Arc<dyn SchedulerService>) -> Result<()>;
 
     async fn run_job(
         &self,
@@ -176,7 +150,7 @@ impl Scheduler {
             toolchains,
         });
 
-        crate::tasks::Tasks::set_scheduler(this.clone())?;
+        this.tasks.set_scheduler(this.clone())?;
 
         Ok(this)
     }
@@ -201,63 +175,53 @@ impl Scheduler {
 
     async fn has_job_inputs(&self, job_id: &str) -> bool {
         // Record has_job_inputs time
-        self.metrics
-            .has_job_inputs(|| async { self.jobs_storage.has(&job_inputs_key(job_id)).await })
-            .await
+        let _timer = self.metrics.has_job_inputs_timer();
+        self.jobs_storage.has(&job_inputs_key(job_id)).await
     }
 
     async fn has_job_result(&self, job_id: &str) -> bool {
         // Record has_job_result time
-        self.metrics
-            .has_job_result(|| async { self.jobs_storage.has(&job_result_key(job_id)).await })
-            .await
+        let _timer = self.metrics.has_job_result_timer();
+        self.jobs_storage.has(&job_result_key(job_id)).await
     }
 
     async fn get_job_result(&self, job_id: &str) -> Result<RunJobResponse> {
         // Record get_job_result time
-        self.metrics
-            .get_job_result(|| async {
-                // Retrieve the result (with retry)
-                let result = retry_with_jitter(10, || async {
-                    let mut reader = self
-                        .jobs_storage
-                        .get_stream(&job_result_key(job_id))
-                        .await
-                        .map_err(|err| {
-                            tracing::warn!(
-                                "[get_job_result({job_id})]: Error loading stream: {err:?}"
-                            );
-                            RetryError::transient(err)
-                        })?;
+        let _timer = self.metrics.get_job_result_timer();
+        // Retrieve the result (with retry)
+        let result = retry_with_jitter(10, || async {
+            let mut reader = self
+                .jobs_storage
+                .get_stream(&job_result_key(job_id))
+                .await
+                .map_err(|err| {
+                    tracing::warn!("[get_job_result({job_id})]: Error loading stream: {err:?}");
+                    RetryError::transient(err)
+                })?;
 
-                    let mut result = vec![];
-                    reader.read_to_end(&mut result).await.map_err(|err| {
-                        tracing::warn!("[get_job_result({job_id})]: Error reading stream: {err:?}");
-                        RetryError::permanent(anyhow!(err))
-                    })?;
+            let mut result = vec![];
+            reader.read_to_end(&mut result).await.map_err(|err| {
+                tracing::warn!("[get_job_result({job_id})]: Error reading stream: {err:?}");
+                RetryError::permanent(anyhow!(err))
+            })?;
 
-                    Ok::<_, RetryError<Error>>(result)
-                })
-                .await?;
+            Ok::<_, RetryError<Error>>(result)
+        })
+        .await?;
 
-                // Deserialize the result
-                bincode_deserialize(result).await.map_err(|err| {
-                    tracing::warn!(
-                        "[get_job_result({job_id})]: Error deserializing result: {err:?}"
-                    );
-                    err
-                })
-            })
-            .await
+        // Deserialize the result
+        bincode_deserialize(result).await.map_err(|err| {
+            tracing::warn!("[get_job_result({job_id})]: Error deserializing result: {err:?}");
+            err
+        })
     }
 
     async fn del_job_inputs(&self, job_id: &str) -> Result<()> {
         // Record del_job_inputs time
-        self.metrics
-            .del_job_inputs(|| async {
-                // Delete the inputs
-                self.jobs_storage.del(&job_inputs_key(job_id)).await
-            })
+        let _timer = self.metrics.del_job_inputs_timer();
+        // Delete the inputs
+        self.jobs_storage
+            .del(&job_inputs_key(job_id))
             .await
             .map_err(|e| {
                 tracing::warn!("[del_job_inputs({job_id})]: Error deleting job inputs: {e:?}");
@@ -267,11 +231,10 @@ impl Scheduler {
 
     async fn del_job_result(&self, job_id: &str) -> Result<()> {
         // Record del_job_result time
-        self.metrics
-            .del_job_result(|| async {
-                // Delete the result
-                self.jobs_storage.del(&job_result_key(job_id)).await
-            })
+        let _timer = self.metrics.del_job_result_timer();
+        // Delete the result
+        self.jobs_storage
+            .del(&job_result_key(job_id))
             .await
             .map_err(|e| {
                 tracing::warn!("[del_job_result({job_id})]: Error deleting job result: {e:?}");
@@ -286,13 +249,10 @@ impl Scheduler {
         inputs: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<()> {
         // Record put_job_inputs time
-        self.metrics
-            .put_job_inputs(|| async {
-                // Store the job inputs
-                self.jobs_storage
-                    .put_stream(&job_inputs_key(job_id), inputs_size, inputs)
-                    .await
-            })
+        let _timer = self.metrics.put_job_inputs_timer();
+        // Store the job inputs
+        self.jobs_storage
+            .put_stream(&job_inputs_key(job_id), inputs_size, inputs)
             .await
             .map_err(|e| {
                 tracing::warn!("[put_job_inputs({job_id})]: Error writing stream: {e:?}");
@@ -340,10 +300,21 @@ impl SchedulerService for Scheduler {
             })
             .unwrap(),
             jobs: dist::JobStats {
-                accepted: servers.iter().map(|server| server.jobs.accepted).sum(),
-                finished: servers.iter().map(|server| server.jobs.finished).sum(),
-                loading: servers.iter().map(|server| server.jobs.loading).sum(),
-                running: servers.iter().map(|server| server.jobs.running).sum(),
+                accepted: servers
+                    .iter()
+                    .fold(0u64, |acc, server| acc.saturating_add(server.jobs.accepted)),
+                finished: servers
+                    .iter()
+                    .fold(0u64, |acc, server| acc.saturating_add(server.jobs.finished)),
+                loading: servers
+                    .iter()
+                    .fold(0u64, |acc, server| acc.saturating_add(server.jobs.loading)),
+                pending: servers
+                    .iter()
+                    .fold(0u64, |acc, server| acc.saturating_add(server.jobs.pending)),
+                running: servers
+                    .iter()
+                    .fold(0u64, |acc, server| acc.saturating_add(server.jobs.running)),
             },
             servers,
         })
@@ -359,16 +330,14 @@ impl SchedulerService for Scheduler {
         toolchain_size: u64,
         toolchain_reader: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<SubmitToolchainResult> {
-        self.metrics
-            .put_toolchain(|| async {
-                // Upload toolchain to toolchains storage (S3, GCS, etc.)
-                self.toolchains
-                    .put_stream(&toolchain.archive_id, toolchain_size, toolchain_reader)
-                    .await
-                    .context("Failed to put toolchain")
-                    .map(|_| SubmitToolchainResult::Success)
-            })
+        // Record put_toolchain time
+        let _timer = self.metrics.put_toolchain_timer();
+        // Upload toolchain to toolchains storage (S3, GCS, etc.)
+        self.toolchains
+            .put_stream(&toolchain.archive_id, toolchain_size, toolchain_reader)
             .await
+            .context("Failed to put toolchain")
+            .map(|_| SubmitToolchainResult::Success)
             .map_err(|err| {
                 tracing::error!("[put_toolchain({})]: {err:?}", toolchain.archive_id);
                 err
@@ -376,15 +345,13 @@ impl SchedulerService for Scheduler {
     }
 
     async fn del_toolchain(&self, toolchain: &Toolchain) -> Result<()> {
-        self.metrics
-            .del_toolchain(|| async {
-                // Delete the toolchain from toolchains storage (S3, GCS, etc.)
-                self.toolchains
-                    .del(&toolchain.archive_id)
-                    .await
-                    .context("Failed to delete toolchain")
-            })
+        // Record del_toolchain time
+        let _timer = self.metrics.del_toolchain_timer();
+        // Delete the toolchain from toolchains storage (S3, GCS, etc.)
+        self.toolchains
+            .del(&toolchain.archive_id)
             .await
+            .context("Failed to delete toolchain")
             .map_err(|err| {
                 tracing::error!("[del_toolchain({})]: {err:?}", toolchain.archive_id);
                 err

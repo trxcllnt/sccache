@@ -27,26 +27,6 @@ use crate::{
 };
 use metrics_exporter_dogstatsd::{AggregationMode, DogStatsDBuilder};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use std::future::Future;
-
-/// An action can be run multiple times and produces a future.
-pub trait Action {
-    /// The future that this action produces.
-    type Future: Future<Output = Self::Result>;
-    /// The item that the future may resolve with.
-    type Result;
-
-    fn run(self) -> Self::Future;
-}
-
-impl<T, Fut: Future<Output = T>, Func: FnOnce() -> Fut> Action for Func {
-    type Result = T;
-    type Future = Fut;
-
-    fn run(self) -> Self::Future {
-        self()
-    }
-}
 
 fn merge_labels(
     global_labels: &[(String, String)],
@@ -60,6 +40,41 @@ fn merge_labels(
         all_labels.push((k.to_owned(), v.to_owned()));
     }
     all_labels
+}
+
+pub struct IncrementRecorder {
+    name: String,
+    labels: Vec<(String, String)>,
+}
+
+impl Drop for IncrementRecorder {
+    fn drop(&mut self) {
+        metrics::counter!(self.name.clone(), &self.labels).increment(1);
+    }
+}
+
+pub struct HistoRecorder {
+    name: String,
+    value: f64,
+    labels: Vec<(String, String)>,
+}
+
+impl Drop for HistoRecorder {
+    fn drop(&mut self) {
+        metrics::histogram!(self.name.clone(), &self.labels).record(self.value);
+    }
+}
+
+pub struct TimeRecorder {
+    name: String,
+    start: Instant,
+    labels: Vec<(String, String)>,
+}
+
+impl Drop for TimeRecorder {
+    fn drop(&mut self) {
+        metrics::histogram!(self.name.clone(), &self.labels).record(self.start.elapsed());
+    }
 }
 
 #[derive(Clone)]
@@ -106,9 +121,17 @@ impl Metrics {
         global_labels: Vec<(String, String)>,
     ) -> Result<Self> {
         Ok(Self {
-            global_labels: Arc::new(global_labels),
-            inner: Arc::new(PrometheusMetrics::new(config)?),
+            global_labels: Arc::new(vec![]),
+            inner: Arc::new(PrometheusMetrics::new(config, global_labels)?),
         })
+    }
+
+    pub fn labels(&self, labels: &[(&str, &str)]) -> Vec<(String, String)> {
+        self.global_labels
+            .iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .chain(labels.iter().map(|&(k, v)| (k.to_owned(), v.to_owned())))
+            .collect::<Vec<_>>()
     }
 
     pub fn render(&self) -> String {
@@ -119,27 +142,32 @@ impl Metrics {
         self.inner.listen_path()
     }
 
-    pub async fn counter<F>(&self, name: &str, labels: &[(&str, &str)], func: F) -> F::Result
-    where
-        F: Action,
-    {
-        let labels = merge_labels(self.global_labels.as_slice(), labels);
-        let metric = metrics::counter!(name.to_owned(), &labels);
-        let res = func.run().await;
-        metric.increment(1);
-        res
+    pub fn count<'a>(&self, name: &'a str, labels: &'a [(&'a str, &'a str)]) -> IncrementRecorder {
+        IncrementRecorder {
+            name: name.to_owned(),
+            labels: merge_labels(self.global_labels.as_ref(), labels),
+        }
     }
 
-    pub async fn histogram<F>(&self, name: &str, labels: &[(&str, &str)], func: F) -> F::Result
-    where
-        F: Action,
-    {
-        let labels = merge_labels(self.global_labels.as_slice(), labels);
-        let metric = metrics::histogram!(name.to_owned(), &labels);
-        let start = Instant::now();
-        let res = func.run().await;
-        metric.record(start.elapsed().as_secs_f64());
-        res
+    pub fn histo<T: metrics::IntoF64>(
+        &self,
+        name: &str,
+        labels: &[(&str, &str)],
+        value: T,
+    ) -> HistoRecorder {
+        HistoRecorder {
+            name: name.to_owned(),
+            value: value.into_f64(),
+            labels: merge_labels(self.global_labels.as_ref(), labels),
+        }
+    }
+
+    pub fn timer(&self, name: &str, labels: &[(&str, &str)]) -> TimeRecorder {
+        TimeRecorder {
+            name: name.to_owned(),
+            start: Instant::now(),
+            labels: merge_labels(self.global_labels.as_ref(), labels),
+        }
     }
 }
 
@@ -216,8 +244,15 @@ struct PrometheusMetrics {
 }
 
 impl PrometheusMetrics {
-    pub fn new(config: PrometheusMetricsConfig) -> Result<Self> {
-        let builder = PrometheusBuilder::new();
+    pub fn new(
+        config: PrometheusMetricsConfig,
+        global_labels: Vec<(String, String)>,
+    ) -> Result<Self> {
+        let builder = global_labels
+            .iter()
+            .fold(PrometheusBuilder::new(), |builder, (key, val)| {
+                builder.add_global_label(key, val)
+            });
 
         let (recorder, exporter, listen_path) = match config {
             PrometheusMetricsConfig::ListenAddr { ref addr } => {

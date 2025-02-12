@@ -30,7 +30,7 @@ use sccache::{
     dist::{
         self,
         http::{bincode_serialize, retry_with_jitter, AsyncMulticast, AsyncMulticastFn},
-        metrics::{Action, Metrics},
+        metrics::{IncrementRecorder, Metrics, TimeRecorder},
         BuildResult, BuilderIncoming, CompileCommand, RunJobError, RunJobResponse, ServerDetails,
         ServerService, ServerToolchains, Toolchain,
     },
@@ -84,79 +84,62 @@ impl ServerMetrics {
         let cpu_usage = sys.global_cpu_usage();
         let mem_avail = sys.available_memory();
         let mem_total = sys.total_memory();
-        metrics::histogram!(CPU_USAGE_RATIO).record(cpu_usage);
-        metrics::histogram!(MEM_AVAIL_BYTES).record(mem_avail as f64);
-        metrics::histogram!(MEM_TOTAL_BYTES).record(mem_total as f64);
+        self.metrics.histo(CPU_USAGE_RATIO, &[], cpu_usage);
+        self.metrics.histo(MEM_AVAIL_BYTES, &[], mem_avail as f64);
+        self.metrics.histo(MEM_TOTAL_BYTES, &[], mem_total as f64);
         (cpu_usage, mem_avail, mem_total)
     }
 
-    pub fn inc_toolchain_error_count(&self) {
-        metrics::counter!(TOOLCHAIN_ERROR_COUNT).increment(1);
+    pub fn inc_toolchain_error_count(&self) -> IncrementRecorder {
+        self.metrics.count(TOOLCHAIN_ERROR_COUNT, &[])
     }
 
-    pub fn inc_get_job_inputs_error_count(&self) {
-        metrics::counter!(GET_JOB_INPUTS_ERROR_COUNT).increment(1);
+    pub fn inc_get_job_inputs_error_count(&self) -> IncrementRecorder {
+        self.metrics.count(GET_JOB_INPUTS_ERROR_COUNT, &[])
     }
 
-    pub fn inc_job_build_error_count(&self) {
-        metrics::counter!(JOB_BUILD_ERROR_COUNT).increment(1);
+    pub fn inc_job_build_error_count(&self) -> IncrementRecorder {
+        self.metrics.count(JOB_BUILD_ERROR_COUNT, &[])
     }
 
-    pub fn inc_put_job_result_error_count(&self) {
-        metrics::counter!(PUT_JOB_RESULT_ERROR_COUNT).increment(1);
+    pub fn inc_put_job_result_error_count(&self) -> IncrementRecorder {
+        self.metrics.count(PUT_JOB_RESULT_ERROR_COUNT, &[])
     }
 
-    pub fn inc_job_started_count(&self) {
-        metrics::counter!(JOB_STARTED_COUNT).increment(1);
+    pub fn inc_job_started_count(&self) -> IncrementRecorder {
+        self.metrics.count(JOB_STARTED_COUNT, &[])
     }
 
-    pub fn inc_job_finished_count(&self) {
-        metrics::counter!(JOB_FINISHED_COUNT).increment(1);
+    pub fn inc_job_finished_count(&self) -> IncrementRecorder {
+        self.metrics.count(JOB_FINISHED_COUNT, &[])
     }
 
-    pub async fn get_job_inputs<F>(&self, func: F) -> F::Result
-    where
-        F: Action,
-    {
-        self.metrics.histogram(GET_JOB_INPUTS_TIME, &[], func).await
+    pub fn get_job_inputs_timer(&self) -> TimeRecorder {
+        self.metrics.timer(GET_JOB_INPUTS_TIME, &[])
     }
 
-    pub async fn put_job_result<F>(&self, func: F) -> F::Result
-    where
-        F: Action,
-    {
-        self.metrics.histogram(PUT_JOB_RESULT_TIME, &[], func).await
+    pub fn put_job_result_timer(&self) -> TimeRecorder {
+        self.metrics.timer(PUT_JOB_RESULT_TIME, &[])
     }
 
-    pub async fn load_job<F>(&self, func: F) -> F::Result
-    where
-        F: Action,
-    {
-        self.metrics.histogram(LOAD_JOB_TIME, &[], func).await
+    pub fn load_job_timer(&self) -> TimeRecorder {
+        self.metrics.timer(LOAD_JOB_TIME, &[])
     }
 
-    pub async fn run_build<F>(&self, func: F) -> F::Result
-    where
-        F: Action,
-    {
-        self.metrics.histogram(RUN_BUILD_TIME, &[], func).await
+    pub fn run_build_timer(&self) -> TimeRecorder {
+        self.metrics.timer(RUN_BUILD_TIME, &[])
     }
 
-    pub async fn run_job<F>(&self, func: F) -> F::Result
-    where
-        F: Action,
-    {
-        self.metrics.histogram(RUN_JOB_TIME, &[], func).await
+    pub fn run_job_timer(&self) -> TimeRecorder {
+        self.metrics.timer(RUN_JOB_TIME, &[])
     }
 }
 
 #[async_trait]
 pub trait ServerTasks: Send + Sync {
-    fn set_server(server: Arc<dyn ServerService>) -> Result<()>
-    where
-        Self: Sized;
-
     fn app(&self) -> &Arc<celery::Celery>;
+
+    fn set_server(&self, server: Arc<dyn ServerService>) -> Result<()>;
 
     async fn status_update(
         &self,
@@ -204,13 +187,16 @@ impl From<&ServerState> for ServerDetails {
         let dist::JobStats {
             accepted,
             finished,
+            pending,
             loading,
             ..
         } = *state.job_stats.lock().unwrap();
 
         let running = state
             .occupancy
-            .saturating_sub(state.job_queue.available_permits());
+            .saturating_sub(state.job_queue.available_permits()) as u64;
+
+        let pending = pending.saturating_sub(loading).saturating_sub(running);
 
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -229,6 +215,7 @@ impl From<&ServerState> for ServerDetails {
             },
             jobs: dist::JobStats {
                 loading,
+                pending,
                 running,
                 accepted,
                 finished,
@@ -285,7 +272,7 @@ impl Server {
             toolchains: AsyncMulticast::new(LoadToolchainFn { toolchains }),
         });
 
-        crate::tasks::Tasks::set_server(this.clone())?;
+        this.tasks.set_server(this.clone())?;
 
         Ok(this)
     }
@@ -357,35 +344,51 @@ impl Server {
         job_id: &str,
         toolchain: Toolchain,
     ) -> std::result::Result<(PathBuf, Vec<u8>), RunJobError> {
-        self.state.job_stats.lock().unwrap().loading += 1;
-
         // Record load_job time
-        let (toolchain_dir, inputs) = self
-            .state
-            .metrics
-            .load_job(|| async {
-                // Broadcast status after accepting the job
-                self.send_status()
-                    .await
-                    .map_err(|_| RunJobError::MissingJobResult)?;
+        let _timer = self.state.metrics.load_job_timer();
 
-                // Load and unpack the toolchain
-                let toolchain_dir = self
-                    .get_toolchain_dir(job_id, toolchain)
-                    .await
-                    .map_err(|_| RunJobError::MissingToolchain)?;
+        {
+            let mut stats = self.state.job_stats.lock().unwrap();
+            stats.pending = stats.pending.saturating_add(1);
+            stats.loading = stats.loading.saturating_add(1);
+        }
 
-                // Load job inputs into memory
-                let inputs = self
-                    .get_job_inputs(job_id)
-                    .await
-                    .map_err(|_| RunJobError::MissingJobInputs)?;
+        // Broadcast status after accepting the job
+        self.send_status()
+            .await
+            .map_err(|_| RunJobError::MissingJobResult)
+            .map_err(|e| {
+                let mut stats = self.state.job_stats.lock().unwrap();
+                stats.loading = stats.loading.saturating_sub(1);
+                e
+            })?;
 
-                Ok::<_, RunJobError>((toolchain_dir, inputs))
-            })
-            .await?;
+        // Load and unpack the toolchain
+        let toolchain_dir = self
+            .get_toolchain_dir(job_id, toolchain)
+            .await
+            .map_err(|_| RunJobError::MissingToolchain)
+            .map_err(|e| {
+                let mut stats = self.state.job_stats.lock().unwrap();
+                stats.loading = stats.loading.saturating_sub(1);
+                e
+            })?;
 
-        self.state.job_stats.lock().unwrap().loading -= 1;
+        // Load job inputs into memory
+        let inputs = self
+            .get_job_inputs(job_id)
+            .await
+            .map_err(|_| RunJobError::MissingJobInputs)
+            .map_err(|e| {
+                let mut stats = self.state.job_stats.lock().unwrap();
+                stats.loading = stats.loading.saturating_sub(1);
+                e
+            })?;
+
+        {
+            let mut stats = self.state.job_stats.lock().unwrap();
+            stats.loading = stats.loading.saturating_sub(1);
+        }
 
         Ok((toolchain_dir, inputs))
     }
@@ -401,38 +404,33 @@ impl Server {
     }
 
     async fn get_job_inputs(&self, job_id: &str) -> Result<Vec<u8>> {
-        self.state
-            .metrics
-            .get_job_inputs(|| async {
-                retry_with_jitter(10, || async {
-                    let mut reader = self
-                        .jobs_storage
-                        .get_stream(&job_inputs_key(job_id))
-                        .await
-                        .map_err(|err| {
-                            tracing::warn!(
-                                "[get_job_inputs({job_id})]: Error loading stream: {err:?}"
-                            );
-                            RetryError::transient(err)
-                        })?;
-
-                    let mut inputs = vec![];
-                    reader.read_to_end(&mut inputs).await.map_err(|err| {
-                        tracing::warn!("[get_job_inputs({job_id})]: Error reading stream: {err:?}");
-                        RetryError::permanent(anyhow!(err))
-                    })?;
-
-                    Ok(inputs)
-                })
+        // Record get_job_inputs time
+        let _timer = self.state.metrics.get_job_inputs_timer();
+        retry_with_jitter(10, || async {
+            let mut reader = self
+                .jobs_storage
+                .get_stream(&job_inputs_key(job_id))
                 .await
-            })
-            .await
-            .map_err(|err| {
-                // Record get_job_inputs errors after retrying
-                self.state.metrics.inc_get_job_inputs_error_count();
-                tracing::warn!("[run_job({job_id})]: Error retrieving job inputs: {err:?}");
-                err
-            })
+                .map_err(|err| {
+                    tracing::warn!("[get_job_inputs({job_id})]: Error loading stream: {err:?}");
+                    RetryError::transient(err)
+                })?;
+
+            let mut inputs = vec![];
+            reader.read_to_end(&mut inputs).await.map_err(|err| {
+                tracing::warn!("[get_job_inputs({job_id})]: Error reading stream: {err:?}");
+                RetryError::permanent(anyhow!(err))
+            })?;
+
+            Ok(inputs)
+        })
+        .await
+        .map_err(|err| {
+            // Record get_job_inputs errors after retrying
+            self.state.metrics.inc_get_job_inputs_error_count();
+            tracing::warn!("[run_job({job_id})]: Error retrieving job inputs: {err:?}");
+            err
+        })
     }
 
     async fn run_build(
@@ -444,13 +442,9 @@ impl Server {
         outputs: Vec<String>,
     ) -> Result<BuildResult> {
         // Record build time
-        self.state
-            .metrics
-            .run_build(|| async {
-                self.builder
-                    .run_build(job_id, &toolchain_dir, inputs, command, outputs)
-                    .await
-            })
+        let _timer = self.state.metrics.run_build_timer();
+        self.builder
+            .run_build(job_id, &toolchain_dir, inputs, command, outputs)
             .await
             .map_err(|err| {
                 // Record run_build errors
@@ -462,37 +456,31 @@ impl Server {
 
     async fn put_job_result(&self, job_id: &str, result: RunJobResponse) -> Result<()> {
         // Record put_job_result load time after retrying
-        self.state
-            .metrics
-            .put_job_result(|| async {
-                let result = bincode_serialize(result).await.map_err(|err| {
-                    tracing::warn!("[put_job_result({job_id})]: Error serializing result: {err:?}");
-                    err
-                })?;
-                retry_with_jitter(10, || async {
-                    self.jobs_storage
-                        .put_stream(
-                            &job_result_key(job_id),
-                            result.len() as u64,
-                            std::pin::pin!(futures::io::AllowStdIo::new(result.reader())),
-                        )
-                        .await
-                        .map_err(|err| {
-                            tracing::warn!(
-                                "[put_job_result({job_id})]: Error writing stream: {err:?}"
-                            );
-                            RetryError::transient(err)
-                        })
-                })
+        let _timer = self.state.metrics.put_job_result_timer();
+        let result = bincode_serialize(result).await.map_err(|err| {
+            tracing::warn!("[put_job_result({job_id})]: Error serializing result: {err:?}");
+            err
+        })?;
+        retry_with_jitter(10, || async {
+            self.jobs_storage
+                .put_stream(
+                    &job_result_key(job_id),
+                    result.len() as u64,
+                    std::pin::pin!(futures::io::AllowStdIo::new(result.reader())),
+                )
                 .await
-            })
-            .await
-            .map_err(|err| {
-                // Record put_job_result errors after retrying
-                self.state.metrics.inc_put_job_result_error_count();
-                tracing::warn!("[run_job({job_id})]: Error storing job result: {err:?}");
-                err
-            })
+                .map_err(|err| {
+                    tracing::warn!("[put_job_result({job_id})]: Error writing stream: {err:?}");
+                    RetryError::transient(err)
+                })
+        })
+        .await
+        .map_err(|err| {
+            // Record put_job_result errors after retrying
+            self.state.metrics.inc_put_job_result_error_count();
+            tracing::warn!("[run_job({job_id})]: Error storing job result: {err:?}");
+            err
+        })
     }
 }
 
@@ -505,32 +493,43 @@ impl ServerService for Server {
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> std::result::Result<(), RunJobError> {
+        // Record total run_job time
+        let _timer = self.state.metrics.run_job_timer();
+
         // Add job and increment job_started count
-        self.state.job_stats.lock().unwrap().accepted += 1;
         self.state.jobs.lock().unwrap().insert(job_id.to_owned());
         self.state.metrics.inc_job_started_count();
-        // Record total run_job time
-        self.state
-            .metrics
-            .run_job(|| async {
-                // Load the job toolchain and inputs
-                let (toolchain_dir, inputs) = self.load_job(job_id, toolchain).await?;
+        {
+            let mut stats = self.state.job_stats.lock().unwrap();
+            stats.accepted = stats.accepted.saturating_add(1);
+        }
 
-                // Run the build
-                let result = self
-                    .run_build(job_id, toolchain_dir, inputs, command, outputs)
-                    .await
-                    .map(|result| RunJobResponse::JobComplete {
-                        result,
-                        server_id: self.state.id.clone(),
-                    })?;
+        // Load the job toolchain and inputs
+        let (toolchain_dir, inputs) = self.load_job(job_id, toolchain).await?;
 
-                // Store the job result for retrieval by a scheduler
-                self.put_job_result(job_id, result)
-                    .await
-                    .map_err(|e| e.into())
-            })
+        // Run the build
+        let result = self
+            .run_build(job_id, toolchain_dir, inputs, command, outputs)
             .await
+            .map(|result| RunJobResponse::JobComplete {
+                result,
+                server_id: self.state.id.clone(),
+            })
+            .map_err(|e| {
+                let mut stats = self.state.job_stats.lock().unwrap();
+                stats.pending = stats.pending.saturating_sub(1);
+                e
+            })?;
+
+        {
+            let mut stats = self.state.job_stats.lock().unwrap();
+            stats.pending = stats.pending.saturating_sub(1);
+        }
+
+        // Store the job result for retrieval by a scheduler
+        self.put_job_result(job_id, result)
+            .await
+            .map_err(|e| e.into())
     }
 
     async fn job_failed(&self, job_id: &str, job_err: RunJobError) -> Result<()> {
@@ -553,10 +552,14 @@ impl ServerService for Server {
     }
 
     async fn job_finished(&self, job_id: &str) -> Result<()> {
-        // Remove job and increment job_finished count
+        // Increment job_finished counts and remove job
         self.state.jobs.lock().unwrap().remove(job_id);
-        self.state.job_stats.lock().unwrap().finished += 1;
+        {
+            let mut stats = self.state.job_stats.lock().unwrap();
+            stats.finished = stats.finished.saturating_add(1);
+        }
         self.state.metrics.inc_job_finished_count();
+
         self.tasks
             .job_finished(job_id.to_owned(), From::from(&self.state))
             .await
