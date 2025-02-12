@@ -21,7 +21,7 @@ use futures::{AsyncReadExt, FutureExt};
 use std::{
     collections::HashSet,
     path::PathBuf,
-    sync::Arc,
+    sync::{atomic::AtomicU64, Arc},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -30,12 +30,11 @@ use sccache::{
     dist::{
         self,
         http::{bincode_serialize, retry_with_jitter, AsyncMulticast, AsyncMulticastFn},
-        metrics::{IncrementRecorder, Metrics, TimeRecorder},
+        metrics::{CountRecorder, GaugeRecorder, Metrics, TimeRecorder},
         BuildResult, BuilderIncoming, CompileCommand, RunJobError, RunJobResponse, ServerDetails,
         ServerService, ServerToolchains, Toolchain,
     },
     errors::*,
-    util::daemonize,
 };
 
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
@@ -51,29 +50,35 @@ const TOOLCHAIN_ERROR_COUNT: &str = "sccache::server::toolchain_error_count";
 const GET_JOB_INPUTS_ERROR_COUNT: &str = "sccache::server::get_job_inputs_error_count";
 const JOB_BUILD_ERROR_COUNT: &str = "sccache::server::job_build_error_count";
 const PUT_JOB_RESULT_ERROR_COUNT: &str = "sccache::server::put_job_result_error_count";
-const JOB_STARTED_COUNT: &str = "sccache::server::job_started_count";
+const JOB_ACCEPTED_COUNT: &str = "sccache::server::job_accepted_count";
 const JOB_FINISHED_COUNT: &str = "sccache::server::job_finished_count";
+const JOB_PENDING_COUNT: &str = "sccache::server::job_pending_count";
+const JOB_LOADING_COUNT: &str = "sccache::server::job_loading_count";
 const GET_JOB_INPUTS_TIME: &str = "sccache::server::get_job_inputs_time";
 const PUT_JOB_RESULT_TIME: &str = "sccache::server::put_job_result_time";
 const LOAD_JOB_TIME: &str = "sccache::server::load_job_time";
 const RUN_BUILD_TIME: &str = "sccache::server::run_build_time";
 const RUN_JOB_TIME: &str = "sccache::server::run_job_time";
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ServerMetrics {
+    jobs_accepted: Arc<AtomicU64>,
+    jobs_finished: Arc<AtomicU64>,
+    jobs_pending: Arc<GaugeRecorder>,
+    jobs_loading: Arc<GaugeRecorder>,
     metrics: Metrics,
     sysinfo: Arc<std::sync::Mutex<sysinfo::System>>,
 }
 
 impl ServerMetrics {
     pub fn new(metrics: Metrics) -> Self {
+        let jobs_pending = Arc::new(metrics.gauge(JOB_PENDING_COUNT, &[]));
+        let jobs_loading = Arc::new(metrics.gauge(JOB_LOADING_COUNT, &[]));
         Self {
             metrics,
-            sysinfo: Arc::new(std::sync::Mutex::new(System::new_with_specifics(
-                RefreshKind::nothing()
-                    .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
-                    .with_memory(MemoryRefreshKind::nothing().with_ram()),
-            ))),
+            jobs_pending,
+            jobs_loading,
+            ..Default::default()
         }
     }
 
@@ -90,27 +95,31 @@ impl ServerMetrics {
         (cpu_usage, mem_avail, mem_total)
     }
 
-    pub fn inc_toolchain_error_count(&self) -> IncrementRecorder {
+    pub fn inc_toolchain_error_count(&self) -> CountRecorder {
         self.metrics.count(TOOLCHAIN_ERROR_COUNT, &[])
     }
 
-    pub fn inc_get_job_inputs_error_count(&self) -> IncrementRecorder {
+    pub fn inc_get_job_inputs_error_count(&self) -> CountRecorder {
         self.metrics.count(GET_JOB_INPUTS_ERROR_COUNT, &[])
     }
 
-    pub fn inc_job_build_error_count(&self) -> IncrementRecorder {
+    pub fn inc_job_build_error_count(&self) -> CountRecorder {
         self.metrics.count(JOB_BUILD_ERROR_COUNT, &[])
     }
 
-    pub fn inc_put_job_result_error_count(&self) -> IncrementRecorder {
+    pub fn inc_put_job_result_error_count(&self) -> CountRecorder {
         self.metrics.count(PUT_JOB_RESULT_ERROR_COUNT, &[])
     }
 
-    pub fn inc_job_started_count(&self) -> IncrementRecorder {
-        self.metrics.count(JOB_STARTED_COUNT, &[])
+    pub fn inc_job_accepted_count(&self) -> CountRecorder {
+        self.jobs_accepted
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.metrics.count(JOB_ACCEPTED_COUNT, &[])
     }
 
-    pub fn inc_job_finished_count(&self) -> IncrementRecorder {
+    pub fn inc_job_finished_count(&self) -> CountRecorder {
+        self.jobs_finished
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.metrics.count(JOB_FINISHED_COUNT, &[])
     }
 
@@ -132,6 +141,23 @@ impl ServerMetrics {
 
     pub fn run_job_timer(&self) -> TimeRecorder {
         self.metrics.timer(RUN_JOB_TIME, &[])
+    }
+}
+
+impl Default for ServerMetrics {
+    fn default() -> Self {
+        Self {
+            jobs_accepted: Default::default(),
+            jobs_finished: Default::default(),
+            jobs_loading: Default::default(),
+            jobs_pending: Default::default(),
+            metrics: Metrics::default(),
+            sysinfo: Arc::new(std::sync::Mutex::new(System::new_with_specifics(
+                RefreshKind::nothing()
+                    .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
+                    .with_memory(MemoryRefreshKind::nothing().with_ram()),
+            ))),
+        }
     }
 }
 
@@ -158,7 +184,6 @@ pub struct ServerState {
     pub id: String,
     pub jobs: Arc<std::sync::Mutex<HashSet<String>>>,
     pub job_queue: Arc<tokio::sync::Semaphore>,
-    pub job_stats: Arc<std::sync::Mutex<dist::JobStats>>,
     pub metrics: ServerMetrics,
     pub num_cpus: usize,
     pub occupancy: usize,
@@ -171,7 +196,6 @@ impl Default for ServerState {
             id: Default::default(),
             job_queue: Arc::new(tokio::sync::Semaphore::new(1)),
             jobs: Default::default(),
-            job_stats: Default::default(),
             metrics: Default::default(),
             num_cpus: 1,
             occupancy: 1,
@@ -184,19 +208,20 @@ impl From<&ServerState> for ServerDetails {
     fn from(state: &ServerState) -> Self {
         let (cpu_usage, mem_avail, mem_total) = state.metrics.system_metrics();
 
-        let dist::JobStats {
-            accepted,
-            finished,
-            pending,
-            loading,
-            ..
-        } = *state.job_stats.lock().unwrap();
-
         let running = state
             .occupancy
             .saturating_sub(state.job_queue.available_permits()) as u64;
 
-        let pending = pending.saturating_sub(loading).saturating_sub(running);
+        let loading = state.metrics.jobs_loading.value();
+        let pending = state.metrics.jobs_pending.value().saturating_sub(running);
+        let accepted = state
+            .metrics
+            .jobs_accepted
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let finished = state
+            .metrics
+            .jobs_finished
+            .load(std::sync::atomic::Ordering::SeqCst);
 
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -256,7 +281,6 @@ pub struct Server {
 }
 
 impl Server {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         builder: Arc<dyn BuilderIncoming>,
         jobs_storage: Arc<dyn Storage>,
@@ -279,6 +303,7 @@ impl Server {
 
     pub async fn start(&self, report_interval: Duration) -> Result<()> {
         self.tasks.app().display_pretty().await;
+
         tracing::info!(
             "sccache: Server `{}` initialized to run {} parallel build jobs and prefetch up to {} job(s) in the background",
             self.state.id,
@@ -286,7 +311,7 @@ impl Server {
             self.state.pre_fetch,
         );
 
-        daemonize()?;
+        sccache::util::daemonize()?;
 
         let celery = self.tasks.app().consume();
         let status = self.start_updates(report_interval);
@@ -346,49 +371,24 @@ impl Server {
     ) -> std::result::Result<(PathBuf, Vec<u8>), RunJobError> {
         // Record load_job time
         let _timer = self.state.metrics.load_job_timer();
-
-        {
-            let mut stats = self.state.job_stats.lock().unwrap();
-            stats.pending = stats.pending.saturating_add(1);
-            stats.loading = stats.loading.saturating_add(1);
-        }
+        let _loading = self.state.metrics.jobs_loading.increment();
 
         // Broadcast status after accepting the job
         self.send_status()
             .await
-            .map_err(|_| RunJobError::MissingJobResult)
-            .map_err(|e| {
-                let mut stats = self.state.job_stats.lock().unwrap();
-                stats.loading = stats.loading.saturating_sub(1);
-                e
-            })?;
+            .map_err(|_| RunJobError::MissingJobResult)?;
 
         // Load and unpack the toolchain
         let toolchain_dir = self
             .get_toolchain_dir(job_id, toolchain)
             .await
-            .map_err(|_| RunJobError::MissingToolchain)
-            .map_err(|e| {
-                let mut stats = self.state.job_stats.lock().unwrap();
-                stats.loading = stats.loading.saturating_sub(1);
-                e
-            })?;
+            .map_err(|_| RunJobError::MissingToolchain)?;
 
         // Load job inputs into memory
         let inputs = self
             .get_job_inputs(job_id)
             .await
-            .map_err(|_| RunJobError::MissingJobInputs)
-            .map_err(|e| {
-                let mut stats = self.state.job_stats.lock().unwrap();
-                stats.loading = stats.loading.saturating_sub(1);
-                e
-            })?;
-
-        {
-            let mut stats = self.state.job_stats.lock().unwrap();
-            stats.loading = stats.loading.saturating_sub(1);
-        }
+            .map_err(|_| RunJobError::MissingJobInputs)?;
 
         Ok((toolchain_dir, inputs))
     }
@@ -498,14 +498,13 @@ impl ServerService for Server {
 
         // Add job and increment job_started count
         self.state.jobs.lock().unwrap().insert(job_id.to_owned());
-        self.state.metrics.inc_job_started_count();
-        {
-            let mut stats = self.state.job_stats.lock().unwrap();
-            stats.accepted = stats.accepted.saturating_add(1);
-        }
+        self.state.metrics.inc_job_accepted_count();
 
         // Load the job toolchain and inputs
         let (toolchain_dir, inputs) = self.load_job(job_id, toolchain).await?;
+
+        // Increment the pending gauge
+        let pending = self.state.metrics.jobs_pending.increment();
 
         // Run the build
         let result = self
@@ -514,17 +513,10 @@ impl ServerService for Server {
             .map(|result| RunJobResponse::JobComplete {
                 result,
                 server_id: self.state.id.clone(),
-            })
-            .map_err(|e| {
-                let mut stats = self.state.job_stats.lock().unwrap();
-                stats.pending = stats.pending.saturating_sub(1);
-                e
             })?;
 
-        {
-            let mut stats = self.state.job_stats.lock().unwrap();
-            stats.pending = stats.pending.saturating_sub(1);
-        }
+        // Decrement the pending gauge
+        drop(pending);
 
         // Store the job result for retrieval by a scheduler
         self.put_job_result(job_id, result)
@@ -552,12 +544,8 @@ impl ServerService for Server {
     }
 
     async fn job_finished(&self, job_id: &str) -> Result<()> {
-        // Increment job_finished counts and remove job
+        // Remove job and increment job_finished counts
         self.state.jobs.lock().unwrap().remove(job_id);
-        {
-            let mut stats = self.state.job_stats.lock().unwrap();
-            stats.finished = stats.finished.saturating_add(1);
-        }
         self.state.metrics.inc_job_finished_count();
 
         self.tasks

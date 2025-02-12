@@ -202,7 +202,6 @@ impl OverlayBuilder {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn perform_build(
         job_id: &str,
         bubblewrap: PathBuf,

@@ -15,7 +15,7 @@
 use std::{
     net::SocketAddr,
     str::FromStr,
-    sync::Arc,
+    sync::{atomic::AtomicU64, Arc},
     time::{Duration, Instant},
 };
 
@@ -42,14 +42,51 @@ fn merge_labels(
     all_labels
 }
 
-pub struct IncrementRecorder {
+pub struct CountRecorder {
     name: String,
     labels: Vec<(String, String)>,
 }
 
-impl Drop for IncrementRecorder {
+impl Drop for CountRecorder {
     fn drop(&mut self) {
         metrics::counter!(self.name.clone(), &self.labels).increment(1);
+    }
+}
+
+#[derive(Default)]
+pub struct GaugeRecorder {
+    name: String,
+    labels: Vec<(String, String)>,
+    value: AtomicU64,
+}
+
+pub struct GaugeRecorderIncrement<'a> {
+    name: &'a String,
+    labels: &'a [(String, String)],
+    value: &'a AtomicU64,
+}
+
+impl Drop for GaugeRecorderIncrement<'_> {
+    fn drop(&mut self) {
+        self.value.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        metrics::gauge!(self.name.clone(), self.labels).decrement(1);
+    }
+}
+
+impl GaugeRecorder {
+    pub fn increment(&self) -> GaugeRecorderIncrement<'_> {
+        let value = &self.value;
+        value.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        metrics::gauge!(self.name.clone(), &self.labels).increment(1);
+        GaugeRecorderIncrement {
+            name: &self.name,
+            labels: &self.labels,
+            value,
+        }
+    }
+
+    pub fn value(&self) -> u64 {
+        self.value.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -95,35 +132,21 @@ impl Default for Metrics {
 impl Metrics {
     pub fn new(config: MetricsConfigs, global_labels: Vec<(String, String)>) -> Result<Self> {
         if let Some(config) = config.dogstatsd {
-            Self::new_dogstatsd(config, global_labels)
+            Ok(Self {
+                global_labels: Arc::new(global_labels),
+                inner: Arc::new(DogStatsDMetrics::new(config)?),
+            })
         } else if let Some(config) = config.prometheus {
-            Self::new_prometheus(config, global_labels)
+            Ok(Self {
+                global_labels: Arc::new(vec![]),
+                inner: Arc::new(PrometheusMetrics::new(config, global_labels)?),
+            })
         } else {
             Ok(Self {
                 global_labels: Arc::new(global_labels),
                 inner: Arc::new(NoopMetrics {}),
             })
         }
-    }
-
-    fn new_dogstatsd(
-        config: DogStatsDMetricsConfig,
-        global_labels: Vec<(String, String)>,
-    ) -> Result<Self> {
-        Ok(Self {
-            global_labels: Arc::new(global_labels),
-            inner: Arc::new(DogStatsDMetrics::new(config)?),
-        })
-    }
-
-    fn new_prometheus(
-        config: PrometheusMetricsConfig,
-        global_labels: Vec<(String, String)>,
-    ) -> Result<Self> {
-        Ok(Self {
-            global_labels: Arc::new(vec![]),
-            inner: Arc::new(PrometheusMetrics::new(config, global_labels)?),
-        })
     }
 
     pub fn labels(&self, labels: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -142,8 +165,16 @@ impl Metrics {
         self.inner.listen_path()
     }
 
-    pub fn count<'a>(&self, name: &'a str, labels: &'a [(&'a str, &'a str)]) -> IncrementRecorder {
-        IncrementRecorder {
+    pub fn gauge<'a>(&self, name: &'a str, labels: &'a [(&'a str, &'a str)]) -> GaugeRecorder {
+        GaugeRecorder {
+            name: name.to_owned(),
+            labels: merge_labels(self.global_labels.as_ref(), labels),
+            value: AtomicU64::new(0),
+        }
+    }
+
+    pub fn count<'a>(&self, name: &'a str, labels: &'a [(&'a str, &'a str)]) -> CountRecorder {
+        CountRecorder {
             name: name.to_owned(),
             labels: merge_labels(self.global_labels.as_ref(), labels),
         }

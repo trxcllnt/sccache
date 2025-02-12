@@ -30,7 +30,6 @@ use sccache::{
         SubmitToolchainResult, Toolchain,
     },
     errors::*,
-    util::daemonize,
 };
 
 use std::{
@@ -158,7 +157,7 @@ impl Scheduler {
     pub async fn start(&self) -> Result<()> {
         self.tasks.app().display_pretty().await;
         tracing::info!("sccache: Scheduler `{}` initialized", self.scheduler_id);
-        daemonize()?;
+        sccache::util::daemonize()?;
         self.tasks.app().consume().await.map_err(|e| e.into())
     }
 
