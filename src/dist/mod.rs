@@ -490,6 +490,7 @@ pub enum RunJobError {
     MissingJobInputs,
     MissingJobResult,
     MissingToolchain,
+    ServerTerminated,
 }
 
 impl std::fmt::Display for RunJobError {
@@ -498,6 +499,7 @@ impl std::fmt::Display for RunJobError {
             Self::MissingJobInputs => write!(f, "Missing job inputs"),
             Self::MissingJobResult => write!(f, "Missing job result"),
             Self::MissingToolchain => write!(f, "Missing tool chain"),
+            Self::ServerTerminated => write!(f, "Server terminated"),
             Self::Err(e) => e.fmt(f),
         }
     }
@@ -519,6 +521,9 @@ pub enum RunJobResponse {
         server_id: String,
     },
     MissingToolchain {
+        server_id: String,
+    },
+    ServerTerminated {
         server_id: String,
     },
     JobComplete {

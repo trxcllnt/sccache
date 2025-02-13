@@ -974,6 +974,12 @@ where
                 // Don't break because these errors can be retried
                 Err(anyhow!("Missing distributed compilation job toolchain"))
             }
+            // Server shutdown before job finished
+            Ok(dist::RunJobResponse::ServerTerminated { server_id }) => {
+                warn!("[{out_pretty}, {job_id}, {server_id}]: Build server shutdown");
+                // Don't break because these errors can be retried
+                Err(anyhow!("Build server shutdown"))
+            }
             // Other (e.g. client network, timeout, etc.) errors
             Err(err) => {
                 // Don't break because these errors can be retried

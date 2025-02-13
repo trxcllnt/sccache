@@ -527,7 +527,7 @@ impl ServerService for Server {
         // Store the job result for retrieval by a scheduler
         self.put_job_result(job_id, result)
             .await
-            .map_err(|e| e.into())
+            .map_err(|_| RunJobError::MissingJobResult)
     }
 
     async fn job_failed(&self, job_id: &str, job_err: RunJobError) -> Result<()> {
@@ -539,6 +539,7 @@ impl ServerService for Server {
                     RunJobError::MissingJobInputs => RunJobResponse::MissingJobInputs { server_id },
                     RunJobError::MissingJobResult => RunJobResponse::MissingJobResult { server_id },
                     RunJobError::MissingToolchain => RunJobResponse::MissingToolchain { server_id },
+                    RunJobError::ServerTerminated => RunJobResponse::ServerTerminated { server_id },
                     RunJobError::Err(e) => RunJobResponse::JobFailed {
                         reason: format!("{e:#}"),
                         server_id,

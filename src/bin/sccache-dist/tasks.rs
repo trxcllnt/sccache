@@ -321,14 +321,15 @@ impl Task for RunJob {
                 // Never retry unexpected errors
                 Err(RunJobError::Err(anyhow!(msg.to_owned())))
             } else if let TaskError::ExpectedError(msg) = err {
-                // Don't retry errors due to missing toolchain, inputs, or result.
+                // Don't retry errors due to missing toolchain or inputs.
                 // Notify the client so they can be retried or compiled locally.
                 // Matching strings because that's the only data in TaskError.
                 match msg.as_ref() {
                     "MissingJobInputs" => Err(RunJobError::MissingJobInputs),
-                    "MissingJobResult" => Err(RunJobError::MissingJobResult),
                     "MissingToolchain" => Err(RunJobError::MissingToolchain),
                     // Maybe retry other errors
+                    "MissingJobResult" => Ok(RunJobError::MissingJobResult),
+                    "ServerTerminated" => Ok(RunJobError::ServerTerminated),
                     _ => Ok(RunJobError::Err(anyhow!(msg.to_owned()))),
                 }
             } else if let TaskError::Retry(_) = err {
