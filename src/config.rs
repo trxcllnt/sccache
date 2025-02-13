@@ -1580,6 +1580,7 @@ pub mod server {
     pub struct FileConfig {
         pub builder: BuilderType,
         pub cache_dir: PathBuf,
+        pub heartbeat_interval_ms: Option<u64>,
         pub jobs: CacheConfigs,
         pub max_per_core_load: Option<f64>,
         pub max_per_core_prefetch: Option<f64>,
@@ -1595,6 +1596,7 @@ pub mod server {
             Self {
                 builder: BuilderType::Docker,
                 cache_dir: Default::default(),
+                heartbeat_interval_ms: None,
                 jobs: CacheConfigs {
                     disk: Some(DiskCacheConfig {
                         dir: default_disk_cache_dir().join("jobs"),
@@ -1627,6 +1629,7 @@ pub mod server {
     pub struct Config {
         pub builder: BuilderType,
         pub cache_dir: PathBuf,
+        pub heartbeat_interval_ms: u64,
         pub jobs: StorageConfig,
         pub max_per_core_load: f64,
         pub max_per_core_prefetch: f64,
@@ -1643,6 +1646,7 @@ pub mod server {
                 message_broker,
                 builder,
                 cache_dir,
+                heartbeat_interval_ms,
                 jobs,
                 max_per_core_load,
                 max_per_core_prefetch,
@@ -1676,6 +1680,13 @@ pub mod server {
             toolchains_storage.merge(toolchains);
             toolchains_storage.merge(config_from_env("SCCACHE_DIST_TOOLCHAINS_")?.cache);
 
+            let heartbeat_interval_ms =
+                number_from_env_var("SCCACHE_DIST_SERVER_HEARTBEAT_INTERVAL")
+                    .transpose()?
+                    .or(heartbeat_interval_ms)
+                    // Default to 5s
+                    .unwrap_or(5000);
+
             let max_per_core_load = number_from_env_var("SCCACHE_DIST_MAX_PER_CORE_LOAD")
                 .transpose()?
                 .or(max_per_core_load)
@@ -1703,6 +1714,7 @@ pub mod server {
             Ok(Self {
                 builder,
                 cache_dir,
+                heartbeat_interval_ms,
                 jobs: jobs_storage.into(),
                 max_per_core_load,
                 max_per_core_prefetch,
@@ -1724,6 +1736,7 @@ pub mod server {
             Self {
                 builder: server_config.builder.clone(),
                 cache_dir: server_config.cache_dir.clone(),
+                heartbeat_interval_ms: Some(server_config.heartbeat_interval_ms),
                 jobs: server_config.jobs.into(),
                 max_per_core_load: Some(server_config.max_per_core_load),
                 max_per_core_prefetch: Some(server_config.max_per_core_prefetch),

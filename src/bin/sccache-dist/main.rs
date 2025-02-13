@@ -159,6 +159,7 @@ fn run(command: Command) -> Result<()> {
                     message_broker,
                     builder,
                     cache_dir,
+                    heartbeat_interval_ms,
                     jobs,
                     max_per_core_load,
                     max_per_core_prefetch,
@@ -234,8 +235,10 @@ fn run(command: Command) -> Result<()> {
                         ),
                     )?;
 
-                    // Report status every 1s
-                    server.start(Duration::from_secs(1)).await?;
+                    // Report status every `heartbeat_interval_ms` milliseconds
+                    server
+                        .start(Duration::from_millis(heartbeat_interval_ms))
+                        .await?;
 
                     server.close().await?;
 
