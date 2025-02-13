@@ -92,8 +92,9 @@ impl Tasks {
                         .task_route(StatusUpdate::NAME, &to_schedulers)
                         .task_content_type(MessageContentType::MsgPack)
                         .prefetch_count(prefetch_count)
-                        // Wait at most 1s before retrying failed tasks
-                        .task_max_retry_delay(1)
+                        // Immediately retry failed tasks
+                        .task_min_retry_delay(0)
+                        .task_max_retry_delay(0)
                         // Don't retry tasks that fail with unexpected errors
                         .task_retry_for_unexpected(false)
                         // Indefinitely retry connecting to the broker
@@ -261,15 +262,8 @@ impl Task for RunJob {
     type Returns = ();
 
     fn from_request(request: Request<Self>, mut options: TaskOptions) -> Self {
-        options.max_retries = Some(10);
         options.acks_late = Some(true);
-        match request.app.broker.safe_url().split_once("://") {
-            Some(("amqp", _)) | Some(("amqps", _)) => {
-                options.acks_on_failure_or_timeout = Some(false);
-                options.nacks_enabled = Some(true);
-            }
-            _ => {}
-        }
+        options.max_retries = Some(10);
         Self { request, options }
     }
 
@@ -423,15 +417,8 @@ impl Task for JobFinished {
     type Returns = ();
 
     fn from_request(request: Request<Self>, mut options: TaskOptions) -> Self {
-        options.max_retries = Some(500);
         options.acks_late = Some(true);
-        match request.app.broker.safe_url().split_once("://") {
-            Some(("amqp", _)) | Some(("amqps", _)) => {
-                options.acks_on_failure_or_timeout = Some(false);
-                options.nacks_enabled = Some(true);
-            }
-            _ => {}
-        }
+        options.max_retries = Some(500);
         Self { request, options }
     }
 
@@ -493,8 +480,8 @@ impl Task for StatusUpdate {
     type Returns = ();
 
     fn from_request(request: Request<Self>, mut options: TaskOptions) -> Self {
-        options.max_retries = Some(0);
         options.acks_late = Some(false);
+        options.max_retries = Some(0);
         Self { request, options }
     }
 
