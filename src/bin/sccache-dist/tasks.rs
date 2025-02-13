@@ -431,8 +431,7 @@ impl Task for JobFinished {
     type Returns = ();
 
     fn from_request(request: Request<Self>, mut options: TaskOptions) -> Self {
-        options.acks_late = Some(true);
-        options.max_retries = Some(50);
+        options.max_retries = Some(0);
         Self { request, options }
     }
 
