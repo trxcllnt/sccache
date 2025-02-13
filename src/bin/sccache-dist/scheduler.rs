@@ -41,7 +41,7 @@ use std::{
 
 use tokio_retry2::RetryError;
 
-use crate::{job_inputs_key, job_result_key};
+use crate::{job_inputs_key, job_result_key, to_scheduler_queue};
 
 const HAS_JOB_INPUTS_TIME: &str = "sccache::scheduler::has_job_inputs_time";
 const HAS_JOB_RESULT_TIME: &str = "sccache::scheduler::has_job_result_time";
@@ -107,6 +107,7 @@ pub trait SchedulerTasks: Send + Sync {
 
     async fn run_job(
         &self,
+        reply_to: String,
         job_id: String,
         toolchain: Toolchain,
         command: CompileCommand,
@@ -125,6 +126,7 @@ pub struct Scheduler {
     jobs_storage: Arc<dyn Storage>,
     jobs: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<RunJobResponse>>>>,
     metrics: SchedulerMetrics,
+    queue_name: String,
     scheduler_id: String,
     servers: Arc<Mutex<HashMap<String, ServerInfo>>>,
     tasks: Arc<dyn SchedulerTasks>,
@@ -135,7 +137,7 @@ impl Scheduler {
     pub fn new(
         jobs_storage: Arc<dyn Storage>,
         metrics: SchedulerMetrics,
-        scheduler_id: String,
+        scheduler_id: &str,
         tasks: impl SchedulerTasks + 'static,
         toolchains: Arc<dyn Storage>,
     ) -> Result<Arc<Self>> {
@@ -143,7 +145,8 @@ impl Scheduler {
             jobs_storage,
             jobs: Arc::new(Mutex::new(HashMap::new())),
             metrics,
-            scheduler_id,
+            queue_name: to_scheduler_queue(scheduler_id),
+            scheduler_id: scheduler_id.to_owned(),
             servers: Arc::new(Mutex::new(HashMap::new())),
             tasks: Arc::new(tasks),
             toolchains,
@@ -158,7 +161,13 @@ impl Scheduler {
         self.tasks.app().display_pretty().await;
         tracing::info!("sccache: Scheduler `{}` initialized", self.scheduler_id);
         sccache::util::daemonize()?;
-        self.tasks.app().consume().await.map_err(|e| e.into())
+        let celery = self.tasks.app();
+        let queues = &[&celery.default_queue.clone()[..], self.queue_name.as_ref()];
+        self.tasks
+            .app()
+            .consume_from(queues)
+            .await
+            .map_err(|e| e.into())
     }
 
     pub async fn close(&self) -> Result<()> {
@@ -422,7 +431,13 @@ impl SchedulerService for Scheduler {
 
         let res = self
             .tasks
-            .run_job(job_id.to_owned(), toolchain, command, outputs)
+            .run_job(
+                job_id.to_owned(),
+                self.queue_name.clone(),
+                toolchain,
+                command,
+                outputs,
+            )
             .await
             .map_err(anyhow::Error::new);
 

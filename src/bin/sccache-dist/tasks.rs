@@ -88,7 +88,6 @@ impl Tasks {
                     celery::CeleryBuilder::new(app_name, broker_uri)
                         .default_queue(default_queue)
                         .task_route(RunJob::NAME, &to_servers)
-                        .task_route(JobFinished::NAME, &to_schedulers)
                         .task_route(StatusUpdate::NAME, &to_schedulers)
                         .task_content_type(MessageContentType::MsgPack)
                         .prefetch_count(prefetch_count)
@@ -172,13 +171,14 @@ impl SchedulerTasks for Tasks {
     async fn run_job(
         &self,
         job_id: String,
+        reply_to: String,
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> std::result::Result<AsyncResult, CeleryError> {
         self.app
             .send_task(
-                RunJob::new(job_id, toolchain, command, outputs)
+                RunJob::new(job_id, reply_to, toolchain, command, outputs)
                     .with_time_limit(self.job_time_limit)
                     .with_expires_in(self.job_time_limit),
             )
@@ -206,9 +206,12 @@ impl ServerTasks for Tasks {
     async fn job_finished(
         &self,
         job_id: String,
+        reply_to: &str,
         server: ServerDetails,
     ) -> std::result::Result<AsyncResult, CeleryError> {
-        self.app.send_task(JobFinished::new(job_id, server)).await
+        self.app
+            .send_task(JobFinished::new(job_id, server).with_queue(reply_to))
+            .await
     }
 }
 
@@ -220,6 +223,7 @@ struct RunJob {
 #[derive(Clone, Serialize, Deserialize)]
 struct RunJobParams {
     job_id: String,
+    reply_to: String,
     toolchain: Toolchain,
     command: CompileCommand,
     outputs: Vec<String>,
@@ -228,12 +232,14 @@ struct RunJobParams {
 impl RunJob {
     fn new(
         job_id: String,
+        reply_to: String,
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> Signature<Self> {
         Signature::<Self>::new(RunJobParams {
             job_id,
+            reply_to,
             toolchain,
             command,
             outputs,
@@ -256,7 +262,8 @@ impl RunJob {
 #[async_trait]
 impl Task for RunJob {
     const NAME: &'static str = "run_job";
-    const ARGS: &'static [&'static str] = &["job_id", "toolchain", "command", "outputs"];
+    const ARGS: &'static [&'static str] =
+        &["job_id", "reply_to", "toolchain", "command", "outputs"];
 
     type Params = RunJobParams;
     type Returns = ();
@@ -278,6 +285,7 @@ impl Task for RunJob {
     async fn run(&self, params: Self::Params) -> std::result::Result<Self::Returns, TaskError> {
         let Self::Params {
             job_id,
+            reply_to,
             toolchain,
             command,
             outputs,
@@ -291,7 +299,7 @@ impl Task for RunJob {
         );
 
         self.server()
-            .map(|server| server.run_job(&job_id, toolchain, command, outputs))
+            .map(|server| server.run_job(&job_id, &reply_to, toolchain, command, outputs))
             .unwrap_or_else(|err| futures::future::err(RunJobError::Err(err)).boxed())
             .await
             .map_err(|e| match e {
@@ -304,6 +312,9 @@ impl Task for RunJob {
                 RunJobError::MissingToolchain => {
                     TaskError::ExpectedError("MissingToolchain".into())
                 }
+                RunJobError::ServerTerminated => {
+                    TaskError::ExpectedError("ServerTerminated".into())
+                }
                 RunJobError::Err(e) => {
                     tracing::debug!("[run_job({job_id})]: Failed with expected error: {e:#}");
                     TaskError::ExpectedError(format!(
@@ -315,6 +326,7 @@ impl Task for RunJob {
 
     async fn on_failure(&self, err: &TaskError) {
         let job_id = &self.request.params.job_id;
+        let reply_to = &self.request.params.reply_to;
 
         let err_res = {
             if let TaskError::UnexpectedError(msg) = err {
@@ -358,7 +370,7 @@ impl Task for RunJob {
 
         if let Err(err) = self
             .server()
-            .map(|server| server.job_failed(job_id, err).boxed())
+            .map(|server| server.job_failed(job_id, reply_to, err).boxed())
             .unwrap_or_else(|err| futures::future::err(err).boxed())
             .await
         {
@@ -368,10 +380,11 @@ impl Task for RunJob {
 
     async fn on_success(&self, _: &Self::Returns) {
         let job_id = &self.request.params.job_id;
+        let reply_to = &self.request.params.reply_to;
 
         if let Err(err) = self
             .server()
-            .map(|server| server.job_finished(job_id).boxed())
+            .map(|server| server.job_finished(job_id, reply_to).boxed())
             .unwrap_or_else(|e| futures::future::err(e).boxed())
             .await
         {

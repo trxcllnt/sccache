@@ -19,7 +19,7 @@ use celery::{error::CeleryError, task::AsyncResult};
 use futures::{AsyncReadExt, FutureExt};
 
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     path::PathBuf,
     sync::{atomic::AtomicU64, Arc},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -180,6 +180,7 @@ pub trait ServerTasks: Send + Sync {
     async fn job_finished(
         &self,
         job_id: String,
+        reply_to: &str,
         server: ServerDetails,
     ) -> std::result::Result<AsyncResult, CeleryError>;
 }
@@ -187,7 +188,7 @@ pub trait ServerTasks: Send + Sync {
 #[derive(Clone)]
 pub struct ServerState {
     pub id: String,
-    pub jobs: Arc<std::sync::Mutex<HashSet<String>>>,
+    pub jobs: Arc<std::sync::Mutex<HashMap<String, String>>>,
     pub job_queue: Arc<tokio::sync::Semaphore>,
     pub metrics: ServerMetrics,
     pub num_cpus: usize,
@@ -352,9 +353,9 @@ impl Server {
     }
 
     async fn terminate_pending_jobs(&self) {
-        let job_ids = self.state.jobs.lock().unwrap().drain().collect::<Vec<_>>();
-        futures::future::join_all(job_ids.iter().map(|job_id| {
-            self.job_failed(job_id, RunJobError::MissingJobResult)
+        let jobs = self.state.jobs.lock().unwrap().drain().collect::<Vec<_>>();
+        futures::future::join_all(jobs.iter().map(|(job_id, scheduler_id)| {
+            self.job_failed(job_id, scheduler_id, RunJobError::ServerTerminated)
                 .boxed()
         }))
         .await;
@@ -495,6 +496,7 @@ impl ServerService for Server {
     async fn run_job(
         &self,
         job_id: &str,
+        reply_to: &str,
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
@@ -503,7 +505,11 @@ impl ServerService for Server {
         let _timer = self.state.metrics.run_job_timer();
 
         // Add job and increment job_started count
-        self.state.jobs.lock().unwrap().insert(job_id.to_owned());
+        self.state
+            .jobs
+            .lock()
+            .unwrap()
+            .insert(job_id.to_owned(), reply_to.to_owned());
         self.state.metrics.inc_job_accepted_count();
 
         // Load the job toolchain and inputs
@@ -530,7 +536,7 @@ impl ServerService for Server {
             .map_err(|_| RunJobError::MissingJobResult)
     }
 
-    async fn job_failed(&self, job_id: &str, job_err: RunJobError) -> Result<()> {
+    async fn job_failed(&self, job_id: &str, reply_to: &str, job_err: RunJobError) -> Result<()> {
         let server_id = self.state.id.clone();
         let _ = self
             .put_job_result(
@@ -547,16 +553,16 @@ impl ServerService for Server {
                 },
             )
             .await;
-        self.job_finished(job_id).await
+        self.job_finished(job_id, reply_to).await
     }
 
-    async fn job_finished(&self, job_id: &str) -> Result<()> {
+    async fn job_finished(&self, job_id: &str, reply_to: &str) -> Result<()> {
         // Remove job and increment job_finished counts
         self.state.jobs.lock().unwrap().remove(job_id);
         self.state.metrics.inc_job_finished_count();
 
         self.tasks
-            .job_finished(job_id.to_owned(), From::from(&self.state))
+            .job_finished(job_id.to_owned(), reply_to, From::from(&self.state))
             .await
             .map_err(anyhow::Error::new)
             .map(|_| ())

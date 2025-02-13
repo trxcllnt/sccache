@@ -656,13 +656,14 @@ pub trait ServerService: Send + Sync {
     async fn run_job(
         &self,
         job_id: &str,
+        reply_to: &str,
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> std::result::Result<(), RunJobError>;
 
-    async fn job_failed(&self, job_id: &str, err: RunJobError) -> Result<()>;
-    async fn job_finished(&self, job_id: &str) -> Result<()>;
+    async fn job_failed(&self, job_id: &str, reply_to: &str, err: RunJobError) -> Result<()>;
+    async fn job_finished(&self, job_id: &str, reply_to: &str) -> Result<()>;
 }
 
 #[cfg(feature = "dist-server")]

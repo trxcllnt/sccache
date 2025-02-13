@@ -125,10 +125,10 @@ fn run(command: Command) -> Result<()> {
                     let scheduler = scheduler::Scheduler::new(
                         jobs_storage,
                         SchedulerMetrics::new(metrics.clone()),
-                        scheduler_id.clone(),
+                        &scheduler_id,
                         tasks::Tasks::scheduler(
                             &scheduler_id,
-                            &server_to_schedulers_queue(),
+                            &to_scheduler_queue(&scheduler_id),
                             100 * num_cpus as u16,
                             message_broker,
                         )
@@ -259,6 +259,10 @@ pub(crate) fn scheduler_to_servers_queue() -> String {
 
 pub(crate) fn server_to_schedulers_queue() -> String {
     queue_name_with_env_info("server-to-schedulers")
+}
+
+pub(crate) fn to_scheduler_queue(id: &str) -> String {
+    queue_name_with_env_info(&format!("scheduler-{id}"))
 }
 
 fn queue_name_with_env_info(prefix: &str) -> String {
