@@ -418,7 +418,7 @@ impl Task for JobFinished {
 
     fn from_request(request: Request<Self>, mut options: TaskOptions) -> Self {
         options.acks_late = Some(true);
-        options.max_retries = Some(500);
+        options.max_retries = Some(50);
         Self { request, options }
     }
 
@@ -480,7 +480,6 @@ impl Task for StatusUpdate {
     type Returns = ();
 
     fn from_request(request: Request<Self>, mut options: TaskOptions) -> Self {
-        options.acks_late = Some(false);
         options.max_retries = Some(0);
         Self { request, options }
     }

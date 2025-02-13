@@ -56,6 +56,7 @@ const JOB_PENDING_COUNT: &str = "sccache::server::job_pending_count";
 const JOB_LOADING_COUNT: &str = "sccache::server::job_loading_count";
 const GET_JOB_INPUTS_TIME: &str = "sccache::server::get_job_inputs_time";
 const PUT_JOB_RESULT_TIME: &str = "sccache::server::put_job_result_time";
+const GET_TOOLCHAIN_TIME: &str = "sccache::server::get_toolchain_time";
 const LOAD_JOB_TIME: &str = "sccache::server::load_job_time";
 const RUN_BUILD_TIME: &str = "sccache::server::run_build_time";
 const RUN_JOB_TIME: &str = "sccache::server::run_job_time";
@@ -129,6 +130,10 @@ impl ServerMetrics {
 
     pub fn put_job_result_timer(&self) -> TimeRecorder {
         self.metrics.timer(PUT_JOB_RESULT_TIME, &[])
+    }
+
+    pub fn get_toolchain_timer(&self) -> TimeRecorder {
+        self.metrics.timer(GET_TOOLCHAIN_TIME, &[])
     }
 
     pub fn load_job_timer(&self) -> TimeRecorder {
@@ -394,6 +399,7 @@ impl Server {
     }
 
     async fn get_toolchain_dir(&self, job_id: &str, toolchain: Toolchain) -> Result<PathBuf> {
+        let _timer = self.state.metrics.get_toolchain_timer();
         // ServerToolchains retries internally, so no need to retry here
         self.toolchains.call(toolchain).await.map_err(|err| {
             // Record toolchain errors
