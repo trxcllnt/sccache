@@ -41,7 +41,7 @@ use std::{
 
 use tokio_retry2::RetryError;
 
-use crate::{job_inputs_key, job_result_key, to_scheduler_queue};
+use crate::{job_inputs_key, job_result_key, server_to_schedulers_queue, to_scheduler_queue};
 
 const HAS_JOB_INPUTS_TIME: &str = "sccache::scheduler::has_job_inputs_time";
 const HAS_JOB_RESULT_TIME: &str = "sccache::scheduler::has_job_result_time";
@@ -161,11 +161,9 @@ impl Scheduler {
         self.tasks.app().display_pretty().await;
         tracing::info!("sccache: Scheduler `{}` initialized", self.scheduler_id);
         sccache::util::daemonize()?;
-        let celery = self.tasks.app();
-        let queues = &[&celery.default_queue.clone()[..], self.queue_name.as_ref()];
         self.tasks
             .app()
-            .consume_from(queues)
+            .consume_from(&[&server_to_schedulers_queue()[..], self.queue_name.as_ref()])
             .await
             .map_err(|e| e.into())
     }
