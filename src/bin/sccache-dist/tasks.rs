@@ -65,56 +65,17 @@ pub struct Tasks {
 }
 
 impl Tasks {
-    pub async fn new(
-        app_name: &str,
-        default_queue: &str,
-        prefetch_count: u16,
-        message_broker: Option<MessageBroker>,
-    ) -> Result<Self> {
-        if let Some(message_broker) = message_broker {
-            let broker_uri = match message_broker {
-                MessageBroker::AMQP(ref uri) => uri,
-                MessageBroker::Redis(ref uri) => uri,
-            };
-            // This URI can contain the username/password, so log at trace level
-            tracing::trace!("Message broker URI: {broker_uri}");
-
-            let to_servers = scheduler_to_servers_queue();
-            let to_schedulers = server_to_schedulers_queue();
-
-            Ok(Self {
-                job_time_limit: u32::MAX,
-                app: Arc::new(
-                    celery::CeleryBuilder::new(app_name, broker_uri)
-                        .default_queue(default_queue)
-                        .task_route(RunJob::NAME, &to_servers)
-                        .task_route(StatusUpdate::NAME, &to_schedulers)
-                        .task_content_type(MessageContentType::MsgPack)
-                        .prefetch_count(prefetch_count)
-                        // Immediately retry failed tasks
-                        .task_min_retry_delay(0)
-                        .task_max_retry_delay(0)
-                        // Don't retry tasks that fail with unexpected errors
-                        .task_retry_for_unexpected(false)
-                        // Indefinitely retry connecting to the broker
-                        .broker_connection_max_retries(u32::MAX)
-                        .build()
-                        .await
-                        .map_err(|err| {
-                            let err_message = match err {
-                                CeleryError::BrokerError(err) => err.to_string(),
-                                err => err.to_string(),
-                            };
-                            anyhow!("{}\n\n{}", err_message, MESSAGE_BROKER_ERROR_TEXT)
-                        })?,
-                ),
-            })
-        } else {
-            bail!(
-                "Missing required message broker configuration!\n\n{}",
-                MESSAGE_BROKER_ERROR_TEXT
-            )
-        }
+    pub async fn new(celery: celery::CeleryBuilder) -> Result<Self> {
+        Ok(Self {
+            job_time_limit: u32::MAX,
+            app: Arc::new(celery.build().await.map_err(|err| {
+                let err_message = match err {
+                    CeleryError::BrokerError(err) => err.to_string(),
+                    err => err.to_string(),
+                };
+                anyhow!("{}\n\n{}", err_message, MESSAGE_BROKER_ERROR_TEXT)
+            })?),
+        })
     }
 
     pub async fn scheduler(
@@ -123,7 +84,13 @@ impl Tasks {
         prefetch_count: u16,
         message_broker: Option<MessageBroker>,
     ) -> Result<Self> {
-        let tasks = Self::new(app_name, default_queue, prefetch_count, message_broker).await?;
+        let tasks = Self::new(
+            Self::celery(app_name, prefetch_count, message_broker)?
+                // Instruct the broker to delete this queue when the scheduler disconnects
+                .broker_declare_exclusive_queue(default_queue)
+                .default_queue(default_queue),
+        )
+        .await?;
 
         // Tasks the scheduler receives
         tasks.app.register_task::<JobFinished>().await?;
@@ -138,12 +105,58 @@ impl Tasks {
         prefetch_count: u16,
         message_broker: Option<MessageBroker>,
     ) -> Result<Self> {
-        let tasks = Self::new(app_name, default_queue, prefetch_count, message_broker).await?;
+        let tasks = Self::new(
+            Self::celery(app_name, prefetch_count, message_broker)?.default_queue(default_queue),
+        )
+        .await?;
 
         // Tasks the server receives
         tasks.app.register_task::<RunJob>().await?;
 
         Ok(tasks)
+    }
+
+    fn celery(
+        app_name: &str,
+        prefetch_count: u16,
+        message_broker: Option<MessageBroker>,
+    ) -> Result<celery::CeleryBuilder> {
+        if let Some(message_broker) = message_broker {
+            let scheduler_to_servers = scheduler_to_servers_queue();
+            let server_to_schedulers = server_to_schedulers_queue();
+            Ok(celery::CeleryBuilder::new(
+                app_name,
+                match message_broker {
+                    MessageBroker::AMQP(ref uri) => uri,
+                    MessageBroker::Redis(ref uri) => uri,
+                },
+            )
+            // Indefinitely retry connecting to the broker
+            .broker_connection_max_retries(u32::MAX)
+            // Queues with no consumers should be deleted after 60s
+            .broker_set_queue_expire_time(&scheduler_to_servers, 60 * 1000)
+            .broker_set_queue_expire_time(&server_to_schedulers, 60 * 1000)
+            // Undelivered messages should be discarded after 60s
+            .broker_set_queue_message_ttl(&scheduler_to_servers, 60 * 1000)
+            .broker_set_queue_message_ttl(&server_to_schedulers, 60 * 1000)
+            // These tasks are sent to these queues
+            .task_route(RunJob::NAME, &scheduler_to_servers)
+            .task_route(StatusUpdate::NAME, &server_to_schedulers)
+            // MessagePack is faster than JSON/Yaml/pickle etc.
+            .task_content_type(MessageContentType::MsgPack)
+            // Prefetch messages
+            .prefetch_count(prefetch_count)
+            // Immediately retry failed tasks
+            .task_min_retry_delay(0)
+            .task_max_retry_delay(0)
+            // Don't retry tasks that fail with unexpected errors
+            .task_retry_for_unexpected(false))
+        } else {
+            bail!(
+                "Missing required message broker configuration!\n\n{}",
+                MESSAGE_BROKER_ERROR_TEXT
+            )
+        }
     }
 }
 
