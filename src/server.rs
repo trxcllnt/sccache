@@ -1499,7 +1499,7 @@ where
                                     // Make sure the write guard has been dropped ASAP.
                                     drop(stats);
                                     me.dist_client.reset_state().await;
-                                    let errmsg = format!("[{:?}] http error status: {}", out_pretty, msg);
+                                    let errmsg = format!("[{out_pretty}] http error status: {msg}");
                                     error!("{}", errmsg);
                                     res.retcode = Some(1);
                                     res.stderr = errmsg.as_bytes().to_vec();
@@ -1511,12 +1511,12 @@ where
 
                                     use std::fmt::Write;
 
-                                    error!("[{:?}] fatal error: {}", out_pretty, err);
+                                    error!("[{out_pretty}] fatal error: {err}");
 
                                     let mut error = "sccache: encountered fatal error\n".to_string();
-                                    let _ = writeln!(error, "sccache: error: {}", err);
+                                    let _ = writeln!(error, "sccache: error: {err}");
                                     for e in err.chain() {
-                                        error!("[{:?}] \t{}", out_pretty, e);
+                                        error!("[{out_pretty}] \t{e}");
                                         let _ = writeln!(error, "sccache: caused by: {}", e);
                                     }
                                     //TODO: figure out a better way to communicate this?
@@ -1531,7 +1531,7 @@ where
                 if let Some(cache_write) = cache_write {
                     match cache_write.await {
                         Err(e) => {
-                            warn!("[{}]: Error executing cache write: {}", out_pretty, e);
+                            warn!("[{out_pretty}]: Error executing cache write: {e}");
                             me.stats.lock().await.cache_write_errors += 1;
                         }
                         //TODO: save cache stats!

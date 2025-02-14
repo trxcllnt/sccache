@@ -125,7 +125,7 @@ impl ParsedArguments {
     pub fn output_pretty(&self) -> Cow<'_, str> {
         self.outputs
             .get("obj")
-            .and_then(|o| o.path.file_name())
+            .map(|o| o.path.as_os_str())
             .map(|s| s.to_string_lossy())
             .unwrap_or(Cow::Borrowed("Unknown filename"))
     }
