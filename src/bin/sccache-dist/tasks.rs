@@ -465,7 +465,12 @@ impl Task for JobFinished {
             .map(|scheduler| scheduler.job_finished(&job_id, server))
             .unwrap_or_else(|err| futures::future::err(err).boxed())
             .await
-            .map_err(|_| TaskError::ExpectedError("Unknown job".into()))
+            .map_err(|e| {
+                tracing::error!("[job_finished({job_id})]: Failed with unexpected error: {e:#}");
+                TaskError::UnexpectedError(format!(
+                    "Job {job_id} failed with unexpected error: {e:#}"
+                ))
+            })
     }
 }
 
@@ -520,16 +525,20 @@ impl Task for StatusUpdate {
 
     async fn run(&self, params: Self::Params) -> std::result::Result<Self::Returns, TaskError> {
         let Self::Params { server } = params;
+        let server_id = server.id.clone();
 
-        tracing::trace!("[status_update({server:?})]");
+        tracing::trace!("[status_update({server_id})]: {server:?}");
 
         self.scheduler()
             .map(|scheduler| scheduler.update_status(server, None))
             .unwrap_or_else(|err| futures::future::err(err).boxed())
             .await
             .map_err(|e| {
+                tracing::error!(
+                    "[status_update({server_id})]: Failed with unexpected error: {e:#}"
+                );
                 TaskError::UnexpectedError(format!(
-                    "status_update failed with unexpected error: {e:#}"
+                    "Task status_update for {server_id} failed with unexpected error: {e:#}"
                 ))
             })
     }

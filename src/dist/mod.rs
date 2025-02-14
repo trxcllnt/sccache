@@ -348,6 +348,10 @@ impl ProcessOutput {
             stderr,
         })
     }
+    #[cfg(unix)]
+    pub fn success(&self) -> bool {
+        self.code == 0
+    }
     #[cfg(test)]
     pub fn fake_output(code: i32, stdout: Vec<u8>, stderr: Vec<u8>) -> Self {
         Self {

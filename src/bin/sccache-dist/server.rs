@@ -21,7 +21,10 @@ use futures::{AsyncReadExt, FutureExt};
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{
+        atomic::{AtomicBool, AtomicU64},
+        Arc,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -187,6 +190,7 @@ pub trait ServerTasks: Send + Sync {
 
 #[derive(Clone)]
 pub struct ServerState {
+    pub alive: Arc<AtomicBool>,
     pub id: String,
     pub jobs: Arc<std::sync::Mutex<HashMap<String, String>>>,
     pub job_queue: Arc<tokio::sync::Semaphore>,
@@ -199,6 +203,7 @@ pub struct ServerState {
 impl Default for ServerState {
     fn default() -> Self {
         Self {
+            alive: Default::default(),
             id: Default::default(),
             job_queue: Arc::new(tokio::sync::Semaphore::new(1)),
             jobs: Default::default(),
@@ -308,6 +313,10 @@ impl Server {
     }
 
     pub async fn start(&self, report_interval: Duration) -> Result<()> {
+        self.state
+            .alive
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
         self.tasks.app().display_pretty().await;
 
         tracing::info!(
@@ -329,8 +338,15 @@ impl Server {
     }
 
     pub async fn close(&self) -> Result<()> {
+        self.state
+            .alive
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         self.terminate_pending_jobs().await;
         self.tasks.app().close().await.map_err(|e| e.into())
+    }
+
+    fn is_alive(&self) -> bool {
+        self.state.alive.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     async fn start_updates(&self, report_interval: Duration) -> Result<()> {
@@ -404,8 +420,10 @@ impl Server {
         // ServerToolchains retries internally, so no need to retry here
         self.toolchains.call(toolchain).await.map_err(|err| {
             // Record toolchain errors
-            self.state.metrics.inc_toolchain_error_count();
-            tracing::warn!("[run_job({job_id})]: Error loading toolchain: {err:?}");
+            if self.is_alive() {
+                self.state.metrics.inc_toolchain_error_count();
+                tracing::warn!("[run_job({job_id})]: Error loading toolchain: {err:?}");
+            }
             err
         })
     }
@@ -434,8 +452,10 @@ impl Server {
         .await
         .map_err(|err| {
             // Record get_job_inputs errors after retrying
-            self.state.metrics.inc_get_job_inputs_error_count();
-            tracing::warn!("[run_job({job_id})]: Error retrieving job inputs: {err:?}");
+            if self.is_alive() {
+                self.state.metrics.inc_get_job_inputs_error_count();
+                tracing::warn!("[run_job({job_id})]: Error retrieving job inputs: {err:?}");
+            }
             err
         })
     }
@@ -455,8 +475,10 @@ impl Server {
             .await
             .map_err(|err| {
                 // Record run_build errors
-                self.state.metrics.inc_job_build_error_count();
-                tracing::warn!("[run_job({job_id})]: Build error: {err:?}");
+                if self.is_alive() {
+                    self.state.metrics.inc_job_build_error_count();
+                    tracing::warn!("[run_job({job_id})]: Build error: {err:?}");
+                }
                 err
             })
     }
@@ -484,8 +506,10 @@ impl Server {
         .await
         .map_err(|err| {
             // Record put_job_result errors after retrying
-            self.state.metrics.inc_put_job_result_error_count();
-            tracing::warn!("[run_job({job_id})]: Error storing job result: {err:?}");
+            if self.is_alive() {
+                self.state.metrics.inc_put_job_result_error_count();
+                tracing::warn!("[run_job({job_id})]: Error storing job result: {err:?}");
+            }
             err
         })
     }
@@ -522,10 +546,17 @@ impl ServerService for Server {
         let result = self
             .run_build(job_id, toolchain_dir, inputs, command, outputs)
             .await
-            .map(|result| RunJobResponse::JobComplete {
-                result,
-                server_id: self.state.id.clone(),
-            })?;
+            .map(|result| {
+                let server_id = self.state.id.clone();
+                // If the build failed because the server was terminated,
+                // report it as a server termination, not a failed build.
+                if !result.output.success() && !self.is_alive() {
+                    RunJobResponse::ServerTerminated { server_id }
+                } else {
+                    RunJobResponse::JobComplete { result, server_id }
+                }
+            })
+            .map_err(RunJobError::Err)?;
 
         // Decrement the pending gauge
         drop(pending);
@@ -538,21 +569,22 @@ impl ServerService for Server {
 
     async fn job_failed(&self, job_id: &str, reply_to: &str, job_err: RunJobError) -> Result<()> {
         let server_id = self.state.id.clone();
-        let _ = self
-            .put_job_result(
-                job_id,
-                match job_err {
-                    RunJobError::MissingJobInputs => RunJobResponse::MissingJobInputs { server_id },
-                    RunJobError::MissingJobResult => RunJobResponse::MissingJobResult { server_id },
-                    RunJobError::MissingToolchain => RunJobResponse::MissingToolchain { server_id },
-                    RunJobError::ServerTerminated => RunJobResponse::ServerTerminated { server_id },
-                    RunJobError::Err(e) => RunJobResponse::JobFailed {
-                        reason: format!("{e:#}"),
-                        server_id,
-                    },
+        let job_res = if !self.is_alive() {
+            // Errors after the server shuts down should report as a termination
+            RunJobResponse::ServerTerminated { server_id }
+        } else {
+            match job_err {
+                RunJobError::MissingJobInputs => RunJobResponse::MissingJobInputs { server_id },
+                RunJobError::MissingJobResult => RunJobResponse::MissingJobResult { server_id },
+                RunJobError::MissingToolchain => RunJobResponse::MissingToolchain { server_id },
+                RunJobError::ServerTerminated => RunJobResponse::ServerTerminated { server_id },
+                RunJobError::Err(e) => RunJobResponse::JobFailed {
+                    reason: format!("{e:#}"),
+                    server_id,
                 },
-            )
-            .await;
+            }
+        };
+        let _ = self.put_job_result(job_id, job_res).await;
         self.job_finished(job_id, reply_to).await
     }
 
