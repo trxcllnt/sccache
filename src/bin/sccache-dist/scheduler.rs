@@ -159,7 +159,7 @@ impl Scheduler {
 
     pub async fn start(&self) -> Result<()> {
         self.tasks.app().display_pretty().await;
-        tracing::info!("sccache: Scheduler `{}` initialized", self.scheduler_id);
+        tracing::info!("Scheduler `{}` initialized", self.scheduler_id);
         sccache::util::daemonize()?;
         self.tasks
             .app()

@@ -29,7 +29,8 @@ use std::{boxed::Box, sync::Arc};
 use sccache::{
     config::MessageBroker,
     dist::{
-        CompileCommand, RunJobError, SchedulerService, ServerDetails, ServerService, Toolchain,
+        CompileCommand, RunJobError, RunJobResponse, SchedulerService, ServerDetails,
+        ServerService, Toolchain,
     },
     errors::*,
 };
@@ -279,11 +280,11 @@ impl Task for RunJob {
         &["job_id", "reply_to", "toolchain", "command", "outputs"];
 
     type Params = RunJobParams;
-    type Returns = ();
+    type Returns = RunJobResponse;
 
     fn from_request(request: Request<Self>, mut options: TaskOptions) -> Self {
         options.acks_late = Some(true);
-        options.max_retries = Some(10);
+        options.max_retries = Some(0);
         Self { request, options }
     }
 
@@ -317,22 +318,19 @@ impl Task for RunJob {
             .await
             .map_err(|e| match e {
                 RunJobError::MissingJobInputs => {
-                    TaskError::ExpectedError("MissingJobInputs".into())
+                    TaskError::UnexpectedError("MissingJobInputs".into())
                 }
                 RunJobError::MissingJobResult => {
-                    TaskError::ExpectedError("MissingJobResult".into())
+                    TaskError::UnexpectedError("MissingJobResult".into())
                 }
                 RunJobError::MissingToolchain => {
-                    TaskError::ExpectedError("MissingToolchain".into())
+                    TaskError::UnexpectedError("MissingToolchain".into())
                 }
                 RunJobError::ServerTerminated => {
-                    TaskError::ExpectedError("ServerTerminated".into())
+                    TaskError::UnexpectedError("ServerTerminated".into())
                 }
                 RunJobError::Err(e) => {
-                    tracing::debug!("[run_job({job_id})]: Failed with expected error: {e:#}");
-                    TaskError::ExpectedError(format!(
-                        "Job {job_id} failed with expected error: {e:#}"
-                    ))
+                    TaskError::UnexpectedError(format!("Job {job_id} failed: {e:#}"))
                 }
             })
     }
@@ -341,45 +339,23 @@ impl Task for RunJob {
         let job_id = &self.request.params.job_id;
         let reply_to = &self.request.params.reply_to;
 
-        let err_res = {
-            if let TaskError::UnexpectedError(msg) = err {
-                // Never retry unexpected errors
-                Err(RunJobError::Err(anyhow!(msg.to_owned())))
-            } else if let TaskError::ExpectedError(msg) = err {
-                // Don't retry errors due to missing toolchain or inputs.
-                // Notify the client so they can be retried or compiled locally.
+        let err = match err {
+            TaskError::ExpectedError(msg) | TaskError::UnexpectedError(msg) => match msg.as_ref() {
+                // Notify the client so these can be retried or compiled locally.
                 // Matching strings because that's the only data in TaskError.
-                match msg.as_ref() {
-                    "MissingJobInputs" => Err(RunJobError::MissingJobInputs),
-                    "MissingToolchain" => Err(RunJobError::MissingToolchain),
-                    // Maybe retry other errors
-                    "MissingJobResult" => Ok(RunJobError::MissingJobResult),
-                    "ServerTerminated" => Ok(RunJobError::ServerTerminated),
-                    _ => Ok(RunJobError::Err(anyhow!(msg.to_owned()))),
-                }
-            } else if let TaskError::Retry(_) = err {
-                // Maybe retry TaskError::Retry
-                Ok(RunJobError::Err(anyhow!(
-                    "Job {job_id} exceeded the retry limit"
-                )))
-            } else {
-                // Maybe retry TaskError::TimeoutError
-                Ok(RunJobError::Err(anyhow!("Job {job_id} timed out")))
+                "MissingJobInputs" => RunJobError::MissingJobInputs,
+                "MissingToolchain" => RunJobError::MissingToolchain,
+                "MissingJobResult" => RunJobError::MissingJobResult,
+                "ServerTerminated" => RunJobError::ServerTerminated,
+                _ => RunJobError::Err(anyhow!(msg.to_owned())),
+            },
+            TaskError::TimeoutError => RunJobError::Err(anyhow!("Job {job_id} timed out")),
+            TaskError::Retry(_) => {
+                RunJobError::Err(anyhow!("Job {job_id} exceeded the retry limit"))
             }
         };
 
-        let err = match err_res {
-            // Maybe retry "OK" errors
-            Ok(job_err) => {
-                if self.request.retries < self.max_retries().unwrap_or(0) {
-                    return;
-                }
-                job_err
-            }
-            Err(job_err) => job_err,
-        };
-
-        tracing::debug!("[run_job({job_id})]: Failed with error: {err:#}");
+        tracing::warn!("[run_job({job_id})]: Failed: {err:#}");
 
         if let Err(err) = self
             .server()
@@ -391,13 +367,13 @@ impl Task for RunJob {
         }
     }
 
-    async fn on_success(&self, _: &Self::Returns) {
+    async fn on_success(&self, res: &Self::Returns) {
         let job_id = &self.request.params.job_id;
         let reply_to = &self.request.params.reply_to;
 
         if let Err(err) = self
             .server()
-            .map(|server| server.job_finished(job_id, reply_to).boxed())
+            .map(|server| server.job_finished(job_id, reply_to, res).boxed())
             .unwrap_or_else(|e| futures::future::err(e).boxed())
             .await
         {

@@ -238,11 +238,7 @@ fn run(command: Command) -> Result<()> {
                     // Report status every `heartbeat_interval_ms` milliseconds
                     server
                         .start(Duration::from_millis(heartbeat_interval_ms))
-                        .await?;
-
-                    server.close().await?;
-
-                    Ok(())
+                        .await
                 }
             }
         })

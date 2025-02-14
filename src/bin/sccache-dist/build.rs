@@ -353,20 +353,7 @@ impl OverlayBuilder {
                 .output()
                 .context("Failed to retrieve output from compile")?;
 
-            if !compile_output.status.success() {
-                tracing::warn!(
-                    "[perform_build({job_id})]: compile output status: {}",
-                    compile_output.status
-                );
-                tracing::warn!(
-                    "[perform_build({job_id})]: compile output stdout: {}",
-                    String::from_utf8_lossy(&compile_output.stdout)
-                );
-                tracing::warn!(
-                    "[perform_build({job_id})]: compile output stderr: {}",
-                    String::from_utf8_lossy(&compile_output.stderr)
-                );
-            } else {
+            if compile_output.status.success() {
                 tracing::trace!("[perform_build({job_id})]: compile output: {compile_output:?}");
             }
 
@@ -681,13 +668,7 @@ impl DockerBuilder {
         // Drop the job slot once compile is finished
         drop(job_slot);
 
-        if !compile_output.status.success() {
-            tracing::warn!(
-                "[perform_build({job_id})]: compile output:\n===========\nstdout:\n{}\n==========\n=========\nstderr:\n{}\n===============\n",
-                String::from_utf8_lossy(&compile_output.stdout),
-                String::from_utf8_lossy(&compile_output.stderr)
-            );
-        } else {
+        if compile_output.status.success() {
             tracing::trace!("[perform_build({job_id})]: compile output: {compile_output:?}");
         }
 
