@@ -56,6 +56,46 @@ pub struct SchedulerMetrics {
 
 impl SchedulerMetrics {
     pub fn new(metrics: Metrics) -> Self {
+        metrics::describe_histogram!(
+            HAS_JOB_INPUTS_TIME,
+            metrics::Unit::Seconds,
+            "The time to check if each job's inputs exists."
+        );
+        metrics::describe_histogram!(
+            HAS_JOB_RESULT_TIME,
+            metrics::Unit::Seconds,
+            "The time to check if each job's result exists."
+        );
+        metrics::describe_histogram!(
+            GET_JOB_RESULT_TIME,
+            metrics::Unit::Seconds,
+            "The time to load each job's inputs."
+        );
+        metrics::describe_histogram!(
+            DEL_JOB_INPUTS_TIME,
+            metrics::Unit::Seconds,
+            "The time to delete each job's inputs."
+        );
+        metrics::describe_histogram!(
+            DEL_JOB_RESULT_TIME,
+            metrics::Unit::Seconds,
+            "The time to delete each job's result."
+        );
+        metrics::describe_histogram!(
+            PUT_JOB_INPUTS_TIME,
+            metrics::Unit::Seconds,
+            "The time to store each job's inputs."
+        );
+        metrics::describe_histogram!(
+            PUT_TOOLCHAIN_TIME,
+            metrics::Unit::Seconds,
+            "The time to store each job's toolchain."
+        );
+        metrics::describe_histogram!(
+            DEL_TOOLCHAIN_TIME,
+            metrics::Unit::Seconds,
+            "The time to delete each job's toolchain."
+        );
         Self { metrics }
     }
 

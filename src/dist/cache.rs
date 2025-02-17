@@ -497,6 +497,36 @@ mod server {
 
     impl ServerToolchainsMetrics {
         pub fn new(metrics: Metrics) -> Self {
+            metrics::describe_histogram!(
+                TC_LOAD,
+                metrics::Unit::Seconds,
+                "The time to load a toolchain"
+            );
+            metrics::describe_histogram!(
+                TC_LOAD_INFLATED,
+                metrics::Unit::Seconds,
+                "The time to load, inflate, and unpack a toolchain"
+            );
+            metrics::describe_histogram!(
+                TC_LOAD_DEFLATED,
+                metrics::Unit::Seconds,
+                "The time to load a deflated toolchain"
+            );
+            metrics::describe_histogram!(
+                TC_LOAD_DEFLATED_SIZE,
+                metrics::Unit::Seconds,
+                "The time to calculate the deflated size of a toolchain"
+            );
+            metrics::describe_histogram!(
+                TC_LOAD_INFLATED_SIZE,
+                metrics::Unit::Seconds,
+                "The time to calculate the inflated size of a toolchain"
+            );
+            metrics::describe_histogram!(
+                TC_UNPACK_INFLATED,
+                metrics::Unit::Seconds,
+                "The time to inflate and unpack a toolchain"
+            );
             Self { metrics }
         }
 

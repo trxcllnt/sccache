@@ -46,6 +46,7 @@ use crate::{job_inputs_key, job_result_key};
 const CPU_USAGE_RATIO: &str = "sccache::server::cpu_usage_ratio";
 const MEM_AVAIL_BYTES: &str = "sccache::server::mem_avail_bytes";
 const MEM_TOTAL_BYTES: &str = "sccache::server::mem_total_bytes";
+const MEM_USED_BYTES: &str = "sccache::server::mem_used_bytes";
 const TOOLCHAIN_ERROR_COUNT: &str = "sccache::server::toolchain_error_count";
 const GET_JOB_INPUTS_ERROR_COUNT: &str = "sccache::server::get_job_inputs_error_count";
 const JOB_BUILD_ERROR_COUNT: &str = "sccache::server::job_build_error_count";
@@ -73,6 +74,97 @@ pub struct ServerMetrics {
 
 impl ServerMetrics {
     pub fn new(metrics: Metrics) -> Self {
+        metrics::describe_gauge!(
+            JOB_PENDING_COUNT,
+            metrics::Unit::Count,
+            "The number of accepted jobs that are fully loaded and queued to run/are currently running."
+        );
+        metrics::describe_gauge!(
+            JOB_LOADING_COUNT,
+            metrics::Unit::Count,
+            "The number of accepted jobs for which this server is loading inputs and toolchains."
+        );
+        metrics::describe_histogram!(
+            CPU_USAGE_RATIO,
+            metrics::Unit::Percent,
+            "The current system CPU usage percent (0-100)"
+        );
+        metrics::describe_histogram!(
+            MEM_AVAIL_BYTES,
+            metrics::Unit::Bytes,
+            "The amount of free system memory"
+        );
+        metrics::describe_histogram!(
+            MEM_TOTAL_BYTES,
+            metrics::Unit::Bytes,
+            "The total amount of system memory"
+        );
+        metrics::describe_histogram!(
+            MEM_USED_BYTES,
+            metrics::Unit::Bytes,
+            "The amount of used system memory"
+        );
+        metrics::describe_counter!(
+            TOOLCHAIN_ERROR_COUNT,
+            metrics::Unit::Count,
+            "The number of errors raised while loading toolchains."
+        );
+        metrics::describe_counter!(
+            GET_JOB_INPUTS_ERROR_COUNT,
+            metrics::Unit::Count,
+            "The number of errors raised while loading job inputs."
+        );
+        metrics::describe_counter!(
+            JOB_BUILD_ERROR_COUNT,
+            metrics::Unit::Count,
+            "The number of errors raised while running job builds."
+        );
+        metrics::describe_counter!(
+            PUT_JOB_RESULT_ERROR_COUNT,
+            metrics::Unit::Count,
+            "The number of errors raised storing job results."
+        );
+        metrics::describe_counter!(
+            JOB_ACCEPTED_COUNT,
+            metrics::Unit::Count,
+            "The total number of jobs accepted by this server (but not yet loaded or run)."
+        );
+        metrics::describe_counter!(
+            JOB_FINISHED_COUNT,
+            metrics::Unit::Count,
+            "The total number of jobs accepted, loaded, and run by this server."
+        );
+        metrics::describe_histogram!(
+            GET_JOB_INPUTS_TIME,
+            metrics::Unit::Seconds,
+            "The time to load each job's inputs"
+        );
+        metrics::describe_histogram!(
+            GET_TOOLCHAIN_TIME,
+            metrics::Unit::Seconds,
+            "The time to load each job's toolchain"
+        );
+        metrics::describe_histogram!(
+            LOAD_JOB_TIME,
+            metrics::Unit::Seconds,
+            "The time to load each job's inputs and toolchains"
+        );
+        metrics::describe_histogram!(
+            RUN_BUILD_TIME,
+            metrics::Unit::Seconds,
+            "The time to run each job's build"
+        );
+        metrics::describe_histogram!(
+            PUT_JOB_RESULT_TIME,
+            metrics::Unit::Seconds,
+            "The time to store each job's results"
+        );
+        metrics::describe_histogram!(
+            RUN_JOB_TIME,
+            metrics::Unit::Seconds,
+            "The time to load and build each job"
+        );
+
         let jobs_pending = Arc::new(metrics.gauge(JOB_PENDING_COUNT, &[]));
         let jobs_loading = Arc::new(metrics.gauge(JOB_LOADING_COUNT, &[]));
         Self {
@@ -93,6 +185,11 @@ impl ServerMetrics {
         self.metrics.histo(CPU_USAGE_RATIO, &[], cpu_usage);
         self.metrics.histo(MEM_AVAIL_BYTES, &[], mem_avail as f64);
         self.metrics.histo(MEM_TOTAL_BYTES, &[], mem_total as f64);
+        self.metrics.histo(
+            MEM_USED_BYTES,
+            &[],
+            mem_total.saturating_sub(mem_avail) as f64,
+        );
         (cpu_usage, mem_avail, mem_total)
     }
 
@@ -128,10 +225,6 @@ impl ServerMetrics {
         self.metrics.timer(GET_JOB_INPUTS_TIME, &[])
     }
 
-    pub fn put_job_result_timer(&self) -> TimeRecorder {
-        self.metrics.timer(PUT_JOB_RESULT_TIME, &[])
-    }
-
     pub fn get_toolchain_timer(&self) -> TimeRecorder {
         self.metrics.timer(GET_TOOLCHAIN_TIME, &[])
     }
@@ -142,6 +235,10 @@ impl ServerMetrics {
 
     pub fn run_build_timer(&self) -> TimeRecorder {
         self.metrics.timer(RUN_BUILD_TIME, &[])
+    }
+
+    pub fn put_job_result_timer(&self) -> TimeRecorder {
+        self.metrics.timer(PUT_JOB_RESULT_TIME, &[])
     }
 
     pub fn run_job_timer(&self) -> TimeRecorder {
