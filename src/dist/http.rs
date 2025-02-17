@@ -258,7 +258,7 @@ mod server {
     {
         Retry::spawn(
             ExponentialBackoff::from_millis(1000) // wait 1s before retrying
-                .max_interval(30000) // set max interval to 30 seconds
+                .max_interval(10000) // set max interval to 10 seconds
                 .map(tokio_retry2::strategy::jitter) // add jitter to the retry interval
                 .take(limit), // limit retries
             func,

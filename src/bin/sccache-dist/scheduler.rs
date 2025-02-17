@@ -23,7 +23,7 @@ use sccache::{
     cache::Storage,
     dist::{
         self,
-        http::{bincode_deserialize, retry_with_jitter},
+        http::bincode_deserialize,
         metrics::{Metrics, TimeRecorder},
         CompileCommand, JobStats, NewJobRequest, NewJobResponse, RunJobRequest, RunJobResponse,
         SchedulerService, SchedulerStatus, ServerDetails, ServerStats, ServerStatus,
@@ -38,8 +38,6 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-
-use tokio_retry2::RetryError;
 
 use crate::{job_inputs_key, job_result_key, server_to_schedulers_queue, to_scheduler_queue};
 
@@ -194,26 +192,21 @@ impl Scheduler {
     async fn get_job_result(&self, job_id: &str) -> Result<RunJobResponse> {
         // Record get_job_result time
         let _timer = self.metrics.get_job_result_timer();
-        // Retrieve the result (with retry)
-        let result = retry_with_jitter(10, || async {
-            let mut reader = self
-                .jobs_storage
-                .get_stream(&job_result_key(job_id))
-                .await
-                .map_err(|err| {
-                    tracing::warn!("[get_job_result({job_id})]: Error loading stream: {err:?}");
-                    RetryError::transient(err)
-                })?;
-
-            let mut result = vec![];
-            reader.read_to_end(&mut result).await.map_err(|err| {
-                tracing::warn!("[get_job_result({job_id})]: Error reading stream: {err:?}");
-                RetryError::permanent(anyhow!(err))
+        // Retrieve the result
+        let mut reader = self
+            .jobs_storage
+            .get_stream(&job_result_key(job_id))
+            .await
+            .map_err(|err| {
+                tracing::warn!("[get_job_result({job_id})]: Error loading stream: {err:?}");
+                err
             })?;
 
-            Ok::<_, RetryError<Error>>(result)
-        })
-        .await?;
+        let mut result = vec![];
+        reader.read_to_end(&mut result).await.map_err(|err| {
+            tracing::warn!("[get_job_result({job_id})]: Error reading stream: {err:?}");
+            err
+        })?;
 
         // Deserialize the result
         bincode_deserialize(result).await.map_err(|err| {

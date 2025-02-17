@@ -459,27 +459,24 @@ impl Server {
     async fn get_job_inputs(&self, job_id: &str) -> Result<Vec<u8>> {
         // Record get_job_inputs time
         let _timer = self.state.metrics.get_job_inputs_timer();
-        retry_with_jitter(10, || async {
-            if !self.is_alive() {
-                return Err(RetryError::permanent(anyhow!("Server terminated")));
-            }
+        async {
             let mut reader = self
                 .jobs_storage
                 .get_stream(&job_inputs_key(job_id))
                 .await
                 .map_err(|err| {
                     tracing::warn!("[get_job_inputs({job_id})]: Error loading stream: {err:?}");
-                    RetryError::transient(err)
+                    err
                 })?;
 
             let mut inputs = vec![];
             reader.read_to_end(&mut inputs).await.map_err(|err| {
                 tracing::warn!("[get_job_inputs({job_id})]: Error reading stream: {err:?}");
-                RetryError::permanent(anyhow!(err))
+                err
             })?;
 
             Ok(inputs)
-        })
+        }
         .await
         .map_err(|err| {
             // Record get_job_inputs errors after retrying
@@ -521,7 +518,7 @@ impl Server {
             tracing::warn!("[put_job_result({job_id})]: Error serializing result: {err:?}");
             err
         })?;
-        retry_with_jitter(10, || async {
+        retry_with_jitter(3, || async {
             self.jobs_storage
                 .put_stream(
                     &job_result_key(job_id),

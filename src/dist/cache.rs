@@ -554,7 +554,7 @@ mod server {
         pub async fn load(&self, tc: &Toolchain) -> Result<PathBuf> {
             // Record toolchain load time after retrying
             let _timer = self.metrics.load_timer();
-            retry_with_jitter(10, || async {
+            retry_with_jitter(3, || async {
                 // Load and cache the deflated toolchain.
                 // Inflate, unpack, and cache it in a directory.
                 // Return the path to the unpacked toolchain dir.
