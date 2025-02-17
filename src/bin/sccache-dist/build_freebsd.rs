@@ -399,14 +399,7 @@ impl PotBuilder {
         // Canonicalize output path as either absolute or relative to cwd
         let output_paths_absolute = output_paths
             .iter()
-            .map(|path| {
-                let path = Path::new(path);
-                if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    cwd.join(path)
-                }
-            })
+            .map(|path| cwd.join(Path::new(path)))
             .collect::<Vec<_>>();
 
         tracing::trace!("[perform_build({job_id})]: creating output directories");

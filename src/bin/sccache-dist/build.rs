@@ -185,7 +185,7 @@ impl OverlayBuilder {
         job_id: &str,
         toolchain_dir: &Path,
     ) -> Result<OverlaySpec> {
-        let build_dir = self.dir.join(job_id);
+        let build_dir = self.dir.join(uuid::Uuid::new_v4().simple().to_string());
 
         tracing::trace!(
             "[prepare_overlay_dirs({job_id})]: Creating build directory: {build_dir:?}"
@@ -273,14 +273,7 @@ impl OverlayBuilder {
             // Canonicalize output path as either absolute or relative to cwd
             let output_paths_absolute = output_paths
                 .iter()
-                .map(|path| {
-                    let path = Path::new(path);
-                    if path.is_absolute() {
-                        path.to_path_buf()
-                    } else {
-                        cwd.join(path)
-                    }
-                })
+                .map(|path| cwd.join(Path::new(path)))
                 .collect::<Vec<_>>();
 
             {
@@ -368,8 +361,8 @@ impl OverlayBuilder {
                         Ok(output) => outputs.push((path.clone(), output)),
                         Err(err) => {
                             tracing::error!(
-                                    "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, overlay={path:?}: {err}"
-                                )
+                                "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, overlay={path:?}: {err}"
+                            )
                         }
                     },
                     Err(e) => {
@@ -553,14 +546,7 @@ impl DockerBuilder {
         // Canonicalize output path as either absolute or relative to cwd
         let output_paths_absolute = output_paths
             .iter()
-            .map(|path| {
-                let path = Path::new(path);
-                if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    cwd.join(path)
-                }
-            })
+            .map(|path| cwd.join(Path::new(path)))
             .collect::<Vec<_>>();
 
         // Collect host CWD, input, and output dir paths
@@ -683,8 +669,8 @@ impl DockerBuilder {
                     Ok(output) => outputs.push((path.clone(), output)),
                     Err(err) => {
                         tracing::error!(
-                                "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, container={path:?}: {err}"
-                            )
+                            "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, container={path:?}: {err}"
+                        )
                     }
                 },
                 Err(e) => {
