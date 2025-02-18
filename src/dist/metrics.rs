@@ -303,6 +303,7 @@ impl PrometheusMetrics {
                 ref interval,
                 ref username,
                 ref password,
+                ref http_method,
             } => {
                 let interval = Duration::from_millis(interval.unwrap_or(10_000));
                 tracing::info!(
@@ -311,7 +312,19 @@ impl PrometheusMetrics {
                 );
                 let (recorder, exporter) = builder
                     .set_bucket_count(std::num::NonZeroU32::new(3).unwrap())
-                    .with_push_gateway(endpoint, interval, username.clone(), password.clone())?
+                    .with_push_gateway(
+                        endpoint,
+                        interval,
+                        username.clone(),
+                        password.clone(),
+                        http_method.clone().map(|m| {
+                            if m.to_uppercase() == "POST" {
+                                hyper::Method::POST
+                            } else {
+                                hyper::Method::PUT
+                            }
+                        }),
+                    )?
                     .build()?;
                 (recorder, exporter, None)
             }

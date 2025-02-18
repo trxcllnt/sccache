@@ -1273,6 +1273,7 @@ pub enum PrometheusMetricsConfig {
         interval: Option<u64>,
         username: Option<String>,
         password: Option<String>,
+        http_method: Option<String>,
     },
 }
 
@@ -2181,7 +2182,8 @@ fn server_toml_parse() {
                     endpoint: "http://127.0.0.1:9091/metrics/job/server".into(),
                     interval: Some(1000),
                     username: Some("sccache".into()),
-                    password: Some("sccache".into())
+                    password: Some("sccache".into()),
+                    http_method: None,
                 }),
                 ..Default::default()
             },

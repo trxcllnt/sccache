@@ -75,11 +75,9 @@ linked-hash-map = "0.5"
 log = "0.4"
 memchr = "2"
 memmap2 = "0.9.4"
-# metrics = { version = "0.24", default-features = false, optional = true }
-# metrics-exporter-prometheus = { version = "0.16", default-features = true, optional = true }
-metrics = { git = "https://github.com/trxcllnt/metrics-rs.git", branch = "fix/515", default-features = false, optional = true }
-metrics-exporter-dogstatsd = { git = "https://github.com/trxcllnt/metrics-rs.git", branch = "fix/515", default-features = false, optional = true }
-metrics-exporter-prometheus = { git = "https://github.com/trxcllnt/metrics-rs.git", branch = "fix/515", default-features = false, optional = true, features = [
+metrics = { git = "https://github.com/trxcllnt/metrics-rs.git", branch = "sccache", default-features = false, optional = true }
+metrics-exporter-dogstatsd = { git = "https://github.com/trxcllnt/metrics-rs.git", branch = "sccache", default-features = false, optional = true }
+metrics-exporter-prometheus = { git = "https://github.com/trxcllnt/metrics-rs.git", branch = "sccache", default-features = false, optional = true, features = [
   "http-listener",
   "push-gateway",
 ] }
