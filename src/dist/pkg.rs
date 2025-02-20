@@ -45,17 +45,18 @@ pub trait OutputsRepackager {
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "linux", target_arch = "aarch64"),
 )))]
-#[async_trait]
 mod toolchain_imp {
     use super::ToolchainPackager;
+    use async_trait::async_trait;
     use fs_err as fs;
 
     use crate::errors::*;
 
     // Distributed client, but an unsupported platform for toolchain packaging so
     // create a failing implementation that will conflict with any others.
+    #[async_trait]
     impl<T: Send> ToolchainPackager for T {
-        async fn write_pkg(self: Box<Self>, _f: fs::File) -> Result<()> {
+        async fn write_pkg(self: Box<Self>, _f: fs::File) -> Result<String> {
             bail!("Automatic packaging not supported on this platform")
         }
     }
@@ -68,7 +69,6 @@ mod toolchain_imp {
 mod toolchain_imp {
     use super::SimplifyPath;
     use fs_err as fs;
-    // use futures::AsyncWriteExt;
     use std::collections::BTreeMap;
     use std::ffi::OsString;
     use std::io::{Read, Write};

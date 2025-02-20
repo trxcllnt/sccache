@@ -294,6 +294,10 @@ mod client {
     mod test {
         use crate::config;
         use crate::test::utils::create_file;
+        #[cfg(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+        ))]
         use async_trait::async_trait;
         use std::io::Write;
 
@@ -310,6 +314,10 @@ mod client {
             all(target_os = "linux", target_arch = "aarch64"),
         ))]
         #[async_trait]
+        #[cfg(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+        ))]
         impl crate::dist::pkg::ToolchainPackager for PanicToolchainPackager {
             async fn write_pkg(
                 self: Box<Self>,

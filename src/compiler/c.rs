@@ -1319,6 +1319,10 @@ struct CToolchainPackager {
     all(target_os = "linux", target_arch = "aarch64"),
 ))]
 #[async_trait]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+))]
 impl pkg::ToolchainPackager for CToolchainPackager {
     async fn write_pkg(self: Box<Self>, f: fs::File) -> Result<String> {
         use std::os::unix::ffi::OsStringExt;
