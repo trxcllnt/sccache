@@ -1318,8 +1318,9 @@ struct CToolchainPackager {
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "linux", target_arch = "aarch64"),
 ))]
+#[async_trait]
 impl pkg::ToolchainPackager for CToolchainPackager {
-    fn write_pkg(self: Box<Self>, f: fs::File) -> Result<()> {
+    async fn write_pkg(self: Box<Self>, f: fs::File) -> Result<String> {
         use std::os::unix::ffi::OsStringExt;
 
         debug!("Generating toolchain {}", self.executable.display());
@@ -1539,7 +1540,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
         }
 
         // Bundle into a compressed tarfile.
-        package_builder.into_compressed_tar(f)
+        package_builder.into_compressed_tar(f).await
     }
 }
 

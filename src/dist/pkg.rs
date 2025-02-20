@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::dist;
+use async_trait::async_trait;
 use fs_err as fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -26,8 +27,9 @@ use crate::errors::*;
 ))]
 pub use self::toolchain_imp::*;
 
+#[async_trait]
 pub trait ToolchainPackager: Send {
-    fn write_pkg(self: Box<Self>, f: fs::File) -> Result<()>;
+    async fn write_pkg(self: Box<Self>, f: fs::File) -> Result<String>;
 }
 
 pub trait InputsPackager: Send {
@@ -43,6 +45,7 @@ pub trait OutputsRepackager {
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "linux", target_arch = "aarch64"),
 )))]
+#[async_trait]
 mod toolchain_imp {
     use super::ToolchainPackager;
     use fs_err as fs;
@@ -52,7 +55,7 @@ mod toolchain_imp {
     // Distributed client, but an unsupported platform for toolchain packaging so
     // create a failing implementation that will conflict with any others.
     impl<T: Send> ToolchainPackager for T {
-        fn write_pkg(self: Box<Self>, _f: fs::File) -> Result<()> {
+        async fn write_pkg(self: Box<Self>, _f: fs::File) -> Result<()> {
             bail!("Automatic packaging not supported on this platform")
         }
     }
@@ -65,6 +68,7 @@ mod toolchain_imp {
 mod toolchain_imp {
     use super::SimplifyPath;
     use fs_err as fs;
+    // use futures::AsyncWriteExt;
     use std::collections::BTreeMap;
     use std::ffi::OsString;
     use std::io::{Read, Write};
@@ -186,7 +190,15 @@ mod toolchain_imp {
             Ok(())
         }
 
-        pub fn into_compressed_tar<W: Write + Send + 'static>(self, writer: W) -> Result<()> {
+        pub async fn into_compressed_tar<W: Write + Send + 'static>(
+            self,
+            writer: W,
+        ) -> Result<String> {
+            use crate::util::Digest;
+
+            let mut digest = Digest::new();
+            let pool = tokio::runtime::Handle::current();
+
             use gzp::{
                 deflate::Gzip,
                 par::compress::{Compression, ParCompress, ParCompressBuilder},
@@ -202,22 +214,29 @@ mod toolchain_imp {
                 .from_writer(writer);
             let mut builder = tar::Builder::new(par);
 
-            for (tar_path, dir_path) in dir_set {
-                builder.append_dir(tar_path, dir_path)?
+            for (tar_path, dir_path) in dir_set.iter() {
+                builder.append_dir(tar_path, dir_path)?;
+                digest.update(dir_path.to_string_lossy().as_bytes());
             }
-            for (tar_path, file_path) in file_set {
+            for (tar_path, file_path) in file_set.iter() {
                 let file = &mut fs::File::open(file_path)?;
-                builder.append_file(tar_path, file.file_mut())?
+                builder.append_file(tar_path, file.file_mut())?;
+                digest.update(Digest::file(file_path, &pool).await?.as_bytes());
             }
-            for (from_path, to_path) in symlinks {
+            for (from_path, to_path) in symlinks.iter() {
                 let mut header = tar::Header::new_gnu();
-                header.set_entry_type(tar::EntryType::Symlink);
                 header.set_size(0);
+                header.set_entry_type(tar::EntryType::Symlink);
+                digest.update(to_path.to_string_lossy().as_bytes());
+                digest.update(from_path.to_string_lossy().as_bytes());
                 // Leave `to_path` as absolute, assuming the tar will be used in a chroot-like
                 // environment.
-                builder.append_link(&mut header, tar_safe_path(from_path), to_path)?
+                builder.append_link(&mut header, tar_safe_path(from_path.into()), to_path)?;
             }
-            builder.finish().map_err(Into::into)
+            builder
+                .finish()
+                .map_err(Into::into)
+                .map(|_| digest.finish())
         }
 
         /// Simplify the path and strip the leading slash.

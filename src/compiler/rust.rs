@@ -2200,8 +2200,9 @@ struct RustToolchainPackager {
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "linux", target_arch = "aarch64"),
 ))]
+#[async_trait]
 impl pkg::ToolchainPackager for RustToolchainPackager {
-    fn write_pkg(self: Box<Self>, f: fs::File) -> Result<()> {
+    async fn write_pkg(self: Box<Self>, f: fs::File) -> Result<String> {
         info!(
             "Packaging Rust compiler for sysroot {}",
             self.sysroot.display()
@@ -2221,7 +2222,7 @@ impl pkg::ToolchainPackager for RustToolchainPackager {
             package_builder.add_dir_contents(&libs_path)?
         }
 
-        package_builder.into_compressed_tar(f)
+        package_builder.into_compressed_tar(f).await
     }
 }
 

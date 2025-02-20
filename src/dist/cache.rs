@@ -8,10 +8,10 @@ mod client {
 
     use anyhow::{bail, Context, Error, Result};
     use fs_err as fs;
+    use futures::lock::Mutex;
     use std::collections::{HashMap, HashSet};
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
 
     use crate::config;
     use crate::dist::pkg::ToolchainPackager;
@@ -20,12 +20,8 @@ mod client {
     use crate::lru_disk_cache::LruDiskCache;
     use crate::util::Digest;
 
-    fn path_key(path: &Path) -> Result<String> {
-        file_key(fs::File::open(path)?)
-    }
-
-    fn file_key<R: Read>(rdr: R) -> Result<String> {
-        Digest::reader_sync(rdr)
+    async fn path_key(path: &Path) -> Result<String> {
+        Digest::file(path, &tokio::runtime::Handle::current()).await
     }
 
     #[derive(Clone, Debug)]
@@ -168,10 +164,10 @@ mod client {
 
         // Get the bytes of a toolchain tar
         // TODO: by this point the toolchain should be known to exist
-        pub fn get_toolchain(&self, tc: &Toolchain) -> Result<Option<fs::File>> {
+        pub async fn get_toolchain(&self, tc: &Toolchain) -> Result<Option<fs::File>> {
             // TODO: be more relaxed about path casing and slashes on Windows
             let file = if let Some(custom_tc_archive) =
-                self.custom_toolchain_archives.lock().unwrap().get(tc)
+                self.custom_toolchain_archives.lock().await.get(tc)
             {
                 fs::File::open(custom_tc_archive).with_context(|| {
                     format!(
@@ -180,7 +176,7 @@ mod client {
                     )
                 })?
             } else {
-                match self.cache.lock().unwrap().get_file(&tc.archive_id) {
+                match self.cache.lock().await.get_file(&tc.archive_id) {
                     Ok(file) => file,
                     Err(LruError::FileNotInCache) => return Ok(None),
                     Err(e) => return Err(e).context("error while retrieving toolchain from cache"),
@@ -189,7 +185,7 @@ mod client {
             Ok(Some(file))
         }
         // If the toolchain doesn't already exist, create it and insert into the cache
-        pub fn put_toolchain(
+        pub async fn put_toolchain(
             &self,
             compiler_path: &Path,
             weak_key: &str,
@@ -201,39 +197,39 @@ mod client {
                     compiler_path.display()
                 )
             }
-            if let Some(tc_and_paths) = self.get_custom_toolchain(compiler_path) {
+            if let Some(tc_and_paths) = self.get_custom_toolchain(compiler_path).await {
                 debug!("Using custom toolchain for {:?}", compiler_path);
                 let (tc, compiler_path, archive) = tc_and_paths?;
                 return Ok((tc, Some((compiler_path, archive))));
             }
             // Only permit one toolchain creation at a time. Not an issue if there are multiple attempts
             // to create the same toolchain, just a waste of time
-            let mut cache = self.cache.lock().unwrap();
-            if let Some(archive_id) = self.weak_to_strong(weak_key) {
+            let mut cache = self.cache.lock().await;
+            if let Some(archive_id) = self.weak_to_strong(weak_key).await {
                 trace!("Using cached toolchain {} -> {}", weak_key, archive_id);
                 return Ok((Toolchain { archive_id }, None));
             }
             debug!("Weak key {} appears to be new", weak_key);
             let tmpfile = tempfile::NamedTempFile::new_in(self.cache_dir.join("toolchain_tmp"))?;
-            toolchain_packager
+            let archive_id = toolchain_packager
                 .write_pkg(fs_err::File::from_parts(tmpfile.reopen()?, tmpfile.path()))
+                .await
                 .context("Could not package toolchain")?;
-            let tc = Toolchain {
-                archive_id: path_key(tmpfile.path())?,
-            };
+            let tc = Toolchain { archive_id };
             cache.insert_file(&tc.archive_id, tmpfile.path())?;
-            self.record_weak(weak_key.to_owned(), tc.archive_id.clone())?;
+            self.record_weak(weak_key.to_owned(), tc.archive_id.clone())
+                .await?;
             Ok((tc, None))
         }
 
-        pub fn get_custom_toolchain(
+        pub async fn get_custom_toolchain(
             &self,
             compiler_path: &Path,
         ) -> Option<Result<(Toolchain, String, PathBuf)>> {
             match self
                 .custom_toolchain_paths
                 .lock()
-                .unwrap()
+                .await
                 .get_mut(compiler_path)
             {
                 Some((custom_tc, Some(tc))) => Some(Ok((
@@ -242,7 +238,7 @@ mod client {
                     custom_tc.archive.clone(),
                 ))),
                 Some((custom_tc, maybe_tc @ None)) => {
-                    let archive_id = match path_key(&custom_tc.archive) {
+                    let archive_id = match path_key(&custom_tc.archive).await {
                         Ok(archive_id) => archive_id,
                         Err(e) => return Some(Err(e)),
                     };
@@ -252,7 +248,7 @@ mod client {
                     if let Some(old_path) = self
                         .custom_toolchain_archives
                         .lock()
-                        .unwrap()
+                        .await
                         .insert(tc.clone(), custom_tc.archive.clone())
                     {
                         // Log a warning if the user has identical toolchains at two different locations - it's
@@ -275,15 +271,16 @@ mod client {
             }
         }
 
-        fn weak_to_strong(&self, weak_key: &str) -> Option<String> {
+        async fn weak_to_strong(&self, weak_key: &str) -> Option<String> {
             self.weak_map
                 .lock()
-                .unwrap()
+                .await
                 .get(weak_key)
                 .map(String::to_owned)
         }
-        fn record_weak(&self, weak_key: String, key: String) -> Result<()> {
-            let mut weak_map = self.weak_map.lock().unwrap();
+
+        async fn record_weak(&self, weak_key: String, key: String) -> Result<()> {
+            let mut weak_map = self.weak_map.lock().await;
             weak_map.insert(weak_key, key);
             let weak_map_path = self.cache_dir.join("weak_map.json");
             fs::File::create(weak_map_path)
@@ -297,6 +294,7 @@ mod client {
     mod test {
         use crate::config;
         use crate::test::utils::create_file;
+        use async_trait::async_trait;
         use std::io::Write;
 
         use super::ClientToolchains;
@@ -311,14 +309,18 @@ mod client {
             all(target_os = "linux", target_arch = "x86_64"),
             all(target_os = "linux", target_arch = "aarch64"),
         ))]
+        #[async_trait]
         impl crate::dist::pkg::ToolchainPackager for PanicToolchainPackager {
-            fn write_pkg(self: Box<Self>, _f: super::fs::File) -> crate::errors::Result<()> {
+            async fn write_pkg(
+                self: Box<Self>,
+                _f: super::fs::File,
+            ) -> crate::errors::Result<String> {
                 panic!("should not have called packager")
             }
         }
 
-        #[test]
-        fn test_client_toolchains_custom() {
+        #[tokio::test]
+        async fn test_client_toolchains_custom() {
             let td = tempfile::Builder::new()
                 .prefix("sccache")
                 .tempdir()
@@ -344,12 +346,13 @@ mod client {
                     "weak_key",
                     PanicToolchainPackager::new(),
                 )
+                .await
                 .unwrap();
             assert!(newpath.unwrap() == ("/my/compiler/in_archive".to_string(), ct1));
         }
 
-        #[test]
-        fn test_client_toolchains_custom_multiuse_archive() {
+        #[tokio::test]
+        async fn test_client_toolchains_custom_multiuse_archive() {
             let td = tempfile::Builder::new()
                 .prefix("sccache")
                 .tempdir()
@@ -389,6 +392,7 @@ mod client {
                     "weak_key",
                     PanicToolchainPackager::new(),
                 )
+                .await
                 .unwrap();
             assert!(newpath.unwrap() == ("/my/compiler/in_archive".to_string(), ct1.clone()));
             let (_tc, newpath) = client_toolchains
@@ -397,6 +401,7 @@ mod client {
                     "weak_key2",
                     PanicToolchainPackager::new(),
                 )
+                .await
                 .unwrap();
             assert!(newpath.unwrap() == ("/my/compiler2/in_archive".to_string(), ct1.clone()));
             let (_tc, newpath) = client_toolchains
@@ -405,12 +410,13 @@ mod client {
                     "weak_key2",
                     PanicToolchainPackager::new(),
                 )
+                .await
                 .unwrap();
             assert!(newpath.unwrap() == ("/my/compiler/in_archive".to_string(), ct1));
         }
 
-        #[test]
-        fn test_client_toolchains_nodist() {
+        #[tokio::test]
+        async fn test_client_toolchains_nodist() {
             let td = tempfile::Builder::new()
                 .prefix("sccache")
                 .tempdir()
@@ -431,6 +437,7 @@ mod client {
                     "weak_key",
                     PanicToolchainPackager::new()
                 )
+                .await
                 .is_err());
         }
 

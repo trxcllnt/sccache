@@ -778,9 +778,12 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             let pool = runtime.handle().clone();
             runtime.block_on(async move {
                 compiler::get_compiler_info(creator, &executable, &cwd, &args, &env, &pool, None)
+                    .await?
+                    .0
+                    .get_toolchain_packager()
+                    .write_pkg(out_file)
                     .await
-                    .map(|compiler| compiler.0.get_toolchain_packager())
-                    .and_then(|packager| packager.write_pkg(out_file))
+                    .map(|_| ())
             })?
         }
         #[cfg(not(feature = "dist-client"))]

@@ -159,9 +159,6 @@ pub struct DistClientContainer {
 
 #[cfg(feature = "dist-client")]
 pub struct DistClientConfig {
-    // Reusable items tied to an SccacheServer instance
-    pool: tokio::runtime::Handle,
-
     // From the static dist configuration
     scheduler_url: Option<config::HTTPUrl>,
     auth: config::DistAuth,
@@ -218,7 +215,6 @@ impl DistClientContainer {
 impl DistClientContainer {
     fn new(config: &Config, pool: &tokio::runtime::Handle) -> Self {
         let config = DistClientConfig {
-            pool: pool.clone(),
             scheduler_url: config.dist.scheduler_url.clone(),
             auth: config.dist.auth.clone(),
             max_retries: config.dist.max_retries,
@@ -380,7 +376,6 @@ impl DistClientContainer {
                 let auth_token = try_or_fail_with_message!(auth_token
                     .context("could not load client auth token, run |sccache --dist-auth|"));
                 let dist_client = dist::http::Client::new(
-                    &config.pool,
                     url,
                     &config.cache_dir.join("client"),
                     config.toolchain_cache_size,
@@ -984,7 +979,6 @@ where
             stats: Arc::default(),
             dist_client: Arc::new(DistClientContainer::new_with_state(DistClientState::Some(
                 Box::new(DistClientConfig {
-                    pool: rt.clone(),
                     scheduler_url: None,
                     auth: config::DistAuth::Token { token: "".into() },
                     max_retries: 0f64,
@@ -1150,7 +1144,7 @@ where
 
         let dist_info = match me1.dist_client.get_client().await {
             Ok(Some(ref client)) => {
-                if let Some(archive) = client.get_custom_toolchain(&resolved_compiler_path) {
+                if let Some(archive) = client.get_custom_toolchain(&resolved_compiler_path).await {
                     match metadata(&archive)
                         .map(|attr| FileTime::from_last_modification_time(&attr))
                     {

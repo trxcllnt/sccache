@@ -326,7 +326,7 @@ mod client {
                 client_toolchains,
             } = self;
 
-            match client_toolchains.get_toolchain(tc) {
+            match client_toolchains.get_toolchain(tc).await {
                 Err(e) => Err(e),
                 Ok(None) => Err(anyhow!("Couldn't find toolchain locally")),
                 Ok(Some(file)) => {
@@ -347,7 +347,6 @@ mod client {
         auth_token: String,
         client: Arc<reqwest::Client>,
         max_retries: f64,
-        pool: tokio::runtime::Handle,
         rewrite_includes_only: bool,
         scheduler_url: reqwest::Url,
         submit_toolchain_reqs: AsyncMulticast<Toolchain, SubmitToolchainResult>,
@@ -357,7 +356,6 @@ mod client {
     impl Client {
         #[allow(clippy::too_many_arguments)]
         pub async fn new(
-            pool: &tokio::runtime::Handle,
             scheduler_url: reqwest::Url,
             cache_dir: &Path,
             cache_size: u64,
@@ -384,7 +382,6 @@ mod client {
                 auth_token: auth_token.clone(),
                 client,
                 max_retries,
-                pool: pool.clone(),
                 rewrite_includes_only,
                 scheduler_url: scheduler_url.clone(),
                 submit_toolchain_reqs,
@@ -472,15 +469,9 @@ mod client {
             weak_key: String,
             toolchain_packager: Box<dyn ToolchainPackager>,
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
-            let compiler_path = compiler_path.to_owned();
-            let weak_key = weak_key.to_owned();
-            let tc_cache = self.tc_cache.clone();
-
-            self.pool
-                .spawn_blocking(move || {
-                    tc_cache.put_toolchain(&compiler_path, &weak_key, toolchain_packager)
-                })
-                .await?
+            self.tc_cache
+                .put_toolchain(&compiler_path, &weak_key, toolchain_packager)
+                .await
         }
 
         fn max_retries(&self) -> f64 {
@@ -491,8 +482,8 @@ mod client {
             self.rewrite_includes_only
         }
 
-        fn get_custom_toolchain(&self, exe: &Path) -> Option<PathBuf> {
-            match self.tc_cache.get_custom_toolchain(exe) {
+        async fn get_custom_toolchain(&self, exe: &Path) -> Option<PathBuf> {
+            match self.tc_cache.get_custom_toolchain(exe).await {
                 Some(Ok((_, _, path))) => Some(path),
                 _ => None,
             }

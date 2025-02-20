@@ -715,5 +715,5 @@ pub trait Client: Send + Sync {
     ) -> Result<(Toolchain, Option<(String, PathBuf)>)>;
     fn max_retries(&self) -> f64;
     fn rewrite_includes_only(&self) -> bool;
-    fn get_custom_toolchain(&self, exe: &Path) -> Option<PathBuf>;
+    async fn get_custom_toolchain(&self, exe: &Path) -> Option<PathBuf>;
 }
