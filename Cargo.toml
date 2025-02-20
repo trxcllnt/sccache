@@ -131,8 +131,8 @@ zstd = "0.13"
 
 # dist-server only
 async-compression = { version = "0.4", features = [
+  "futures-io",
   "gzip",
-  "tokio",
   "zlib",
 ], optional = true }
 async-tar = { version = "0.5", optional = true }

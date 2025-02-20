@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use anyhow::{bail, Context, Result};
-use async_compression::tokio::bufread::ZlibDecoder as ZlibDecoderAsync;
+use async_compression::futures::bufread::ZlibDecoder as ZlibDecoderAsync;
 use async_trait::async_trait;
 use bytes::Buf;
 use futures::lock::Mutex;
@@ -23,7 +23,6 @@ use std::collections::{hash_map, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
-use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use uuid::Uuid;
 
 #[async_trait]
@@ -387,8 +386,8 @@ impl PotBuilder {
         {
             let reader = inputs.reader();
             let reader = futures::io::AllowStdIo::new(reader);
-            let reader = ZlibDecoderAsync::new(reader.compat());
-            async_tar::Archive::new(reader.compat())
+            let reader = ZlibDecoderAsync::new(reader);
+            async_tar::Archive::new(reader)
                 .unpack(&jail_root)
                 .await
                 .context("Failed to unpack inputs to tempdir")?;

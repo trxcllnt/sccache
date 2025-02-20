@@ -465,12 +465,10 @@ mod client {
 
 #[cfg(feature = "dist-server")]
 mod server {
-    use async_compression::tokio::bufread::GzipDecoder;
+    use async_compression::futures::bufread::GzipDecoder;
 
-    use futures::StreamExt;
-    use tokio::io::BufReader;
+    use futures::{io::BufReader, StreamExt};
     use tokio_retry2::RetryError;
-    use tokio_util::compat::TokioAsyncReadCompatExt;
 
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
@@ -641,9 +639,12 @@ mod server {
         async fn load_inflated_toolchain_size(&self, deflated_path: &Path) -> Result<u64> {
             // Record toolchain load_inflated_size time
             let _timer = self.metrics.load_inflated_size_timer();
-            let deflated_file = tokio::fs::File::open(&deflated_path).await?;
-            let gunzip_reader = GzipDecoder::new(BufReader::new(deflated_file));
-            let inflated_size = async_tar::Archive::new(gunzip_reader.compat())
+            let deflated_file = tokio::fs::File::open(&deflated_path)
+                .await?
+                .into_std()
+                .await;
+            let buffer_reader = BufReader::new(futures::io::AllowStdIo::new(deflated_file));
+            let inflated_size = async_tar::Archive::new(GzipDecoder::new(buffer_reader))
                 .entries()?
                 .fold(0, |inflated_size, entry| async move {
                     if let Ok(inflated_entry_size) = entry.and_then(|e| e.header().size()) {
@@ -671,9 +672,14 @@ mod server {
                     async move {
                         // Ensure the inflated dir exists first
                         tokio::fs::create_dir_all(&inflated_path).await?;
-                        let deflated_file = tokio::fs::File::open(&deflated_path).await?;
-                        let gunzip_reader = GzipDecoder::new(BufReader::new(deflated_file));
-                        let targz_archive = async_tar::Archive::new(gunzip_reader.compat());
+                        let deflated_file = tokio::fs::File::open(&deflated_path)
+                            .await?
+                            .into_std()
+                            .await;
+                        let buffer_reader =
+                            BufReader::new(futures::io::AllowStdIo::new(deflated_file));
+                        let targz_archive =
+                            async_tar::Archive::new(GzipDecoder::new(buffer_reader));
                         // Unpack the tgz into the inflated dir
                         targz_archive
                             .unpack(&inflated_path)

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use anyhow::{anyhow, bail, Context, Error, Result};
-use async_compression::tokio::bufread::ZlibDecoder as ZlibDecoderAsync;
+use async_compression::futures::bufread::ZlibDecoder as ZlibDecoderAsync;
 use async_trait::async_trait;
 use bytes::Buf;
 use flate2::read::ZlibDecoder as ZlibDecoderSync;
@@ -603,14 +603,14 @@ impl DockerBuilder {
             tracing::trace!("[perform_build({job_id})]: copying in inputs");
             let inputs_rdr = inputs.reader();
             let inputs_rdr = futures::io::AllowStdIo::new(inputs_rdr);
-            let mut inputs_rdr = ZlibDecoderAsync::new(inputs_rdr.compat());
+            let inputs_rdr = ZlibDecoderAsync::new(inputs_rdr);
 
             let mut cmd = tokio::process::Command::new("docker");
             cmd.arg("cp")
                 .arg("-")
                 .arg(format!("{c_name}:/"))
                 .check_piped(|mut stdin| async move {
-                    tokio::io::copy(&mut inputs_rdr, &mut stdin).await?;
+                    tokio::io::copy(&mut inputs_rdr.compat(), &mut stdin).await?;
                     Ok(())
                 })
                 .await
