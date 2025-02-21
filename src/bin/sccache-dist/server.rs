@@ -52,6 +52,7 @@ const GET_JOB_INPUTS_ERROR_COUNT: &str = "sccache::server::get_job_inputs_error_
 const JOB_BUILD_ERROR_COUNT: &str = "sccache::server::job_build_error_count";
 const PUT_JOB_RESULT_ERROR_COUNT: &str = "sccache::server::put_job_result_error_count";
 const JOB_ACCEPTED_COUNT: &str = "sccache::server::job_accepted_count";
+const JOB_LOADED_COUNT: &str = "sccache::server::job_loaded_count";
 const JOB_FINISHED_COUNT: &str = "sccache::server::job_finished_count";
 const JOB_PENDING_COUNT: &str = "sccache::server::job_pending_count";
 const JOB_LOADING_COUNT: &str = "sccache::server::job_loading_count";
@@ -65,6 +66,7 @@ const RUN_JOB_TIME: &str = "sccache::server::run_job_time";
 #[derive(Clone)]
 pub struct ServerMetrics {
     jobs_accepted: Arc<AtomicU64>,
+    jobs_loaded: Arc<AtomicU64>,
     jobs_finished: Arc<AtomicU64>,
     jobs_pending: Arc<GaugeRecorder>,
     jobs_loading: Arc<GaugeRecorder>,
@@ -75,14 +77,14 @@ pub struct ServerMetrics {
 impl ServerMetrics {
     pub fn new(metrics: Metrics) -> Self {
         metrics::describe_gauge!(
-            JOB_PENDING_COUNT,
-            metrics::Unit::Count,
-            "The number of accepted jobs that are fully loaded and queued to run/are currently running."
-        );
-        metrics::describe_gauge!(
             JOB_LOADING_COUNT,
             metrics::Unit::Count,
             "The number of accepted jobs for which this server is loading inputs and toolchains."
+        );
+        metrics::describe_gauge!(
+            JOB_PENDING_COUNT,
+            metrics::Unit::Count,
+            "The number of accepted jobs that are fully loaded and queued to run/are currently running."
         );
         metrics::describe_histogram!(
             CPU_USAGE_RATIO,
@@ -128,6 +130,11 @@ impl ServerMetrics {
             JOB_ACCEPTED_COUNT,
             metrics::Unit::Count,
             "The total number of jobs accepted by this server (but not yet loaded or run)."
+        );
+        metrics::describe_counter!(
+            JOB_LOADED_COUNT,
+            metrics::Unit::Count,
+            "The total number of jobs loaded by this server (but not yet run)."
         );
         metrics::describe_counter!(
             JOB_FINISHED_COUNT,
@@ -215,6 +222,12 @@ impl ServerMetrics {
         self.metrics.count(JOB_ACCEPTED_COUNT, &[])
     }
 
+    pub fn inc_job_loaded_count(&self) -> CountRecorder {
+        self.jobs_loaded
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.metrics.count(JOB_LOADED_COUNT, &[])
+    }
+
     pub fn inc_job_finished_count(&self) -> CountRecorder {
         self.jobs_finished
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -250,6 +263,7 @@ impl Default for ServerMetrics {
     fn default() -> Self {
         Self {
             jobs_accepted: Default::default(),
+            jobs_loaded: Default::default(),
             jobs_finished: Default::default(),
             jobs_loading: Default::default(),
             jobs_pending: Default::default(),
@@ -650,18 +664,23 @@ impl Server {
         // Record total run_job time
         let _timer = self.state.metrics.run_job_timer();
 
-        // Add job and increment job_started count
+        // Add job
         self.state
             .jobs
             .lock()
             .unwrap()
             .insert(job_id.to_owned(), reply_to.to_owned());
+
+        // Increment the job_started counter
         self.state.metrics.inc_job_accepted_count();
 
         // Load the job toolchain and inputs
         let (toolchain_dir, inputs) = self.load_job(job_id, toolchain).await?;
 
-        // Increment the pending gauge
+        // Increment the job_loaded counter
+        self.state.metrics.inc_job_loaded_count();
+
+        // Increment the jobs_pending gauge
         let _pending = self.state.metrics.jobs_pending.increment();
 
         // Run the build
@@ -725,7 +744,7 @@ impl ServerService for Server {
     }
 
     async fn job_finished(&self, job_id: &str, reply_to: &str, res: &RunJobResponse) -> Result<()> {
-        // Remove job and increment job_finished counts
+        // Remove job and increment the job_finished counter
         self.state.jobs.lock().unwrap().remove(job_id);
         self.state.metrics.inc_job_finished_count();
 
