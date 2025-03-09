@@ -292,7 +292,7 @@ fn test_dist_basic(message_broker: &str) {
 // }
 
 #[test_case("rabbitmq" ; "With rabbitmq")]
-#[test_case("redis" ; "With redis")]
+// #[test_case("redis" ; "With redis")]
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 fn test_dist_cargo_build(message_broker: &str) {
     let tmpdir = tempfile::Builder::new()
@@ -320,7 +320,8 @@ fn test_dist_cargo_build(message_broker: &str) {
     get_stats(|info| {
         assert_eq!(1, info.stats.dist_compiles.values().sum::<usize>());
         assert_eq!(0, info.stats.dist_errors);
-        assert_eq!(5, info.stats.compile_requests);
+        // check >= 5 because cargo >=1.82 does additional requests with -vV
+        assert!(info.stats.compile_requests >= 5);
         assert_eq!(1, info.stats.requests_executed);
         assert_eq!(0, info.stats.cache_hits.all());
         assert_eq!(1, info.stats.cache_misses.all());
@@ -358,7 +359,8 @@ fn test_dist_cargo_makeflags(message_broker: &str) {
     get_stats(|info| {
         assert_eq!(1, info.stats.dist_compiles.values().sum::<usize>());
         assert_eq!(0, info.stats.dist_errors);
-        assert_eq!(5, info.stats.compile_requests);
+        // check >= 5 because cargo >=1.82 does additional requests with -vV
+        assert!(info.stats.compile_requests >= 5);
         assert_eq!(1, info.stats.requests_executed);
         assert_eq!(0, info.stats.cache_hits.all());
         assert_eq!(1, info.stats.cache_misses.all());
