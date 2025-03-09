@@ -303,7 +303,19 @@ impl LruDiskCache {
             // TODO: check that files are removable during `init`, so that this is only
             // due to outside interference.
             remove_entry_from_disk(&abs_path).unwrap_or_else(|e| {
-                error!("LruDiskCache: Error removing entry {abs_path:?}:\n{e:?}")
+                if let Error::Io(e) = e {
+                    // Sometimes the file has already been removed
+                    // this seems to happen when the max cache size has been reached
+                    // https://github.com/mozilla/sccache/issues/2092
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        debug!(
+                            "Error removing file from cache as it was not found: `{:?}`",
+                            abs_path
+                        );
+                    } else {
+                        error!("LruDiskCache: Error removing entry {abs_path:?}:\n{e:?}")
+                    }
+                }
             });
         }
         Ok(())

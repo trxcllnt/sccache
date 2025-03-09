@@ -829,7 +829,7 @@ pub struct HashToDigest<'a> {
     pub digest: &'a mut Digest,
 }
 
-impl<'a> Hasher for HashToDigest<'a> {
+impl Hasher for HashToDigest<'_> {
     fn write(&mut self, bytes: &[u8]) {
         self.digest.update(bytes)
     }
@@ -1029,7 +1029,7 @@ pub fn ascii_unescape_default(s: &[u8]) -> std::io::Result<Vec<u8>> {
                             "incomplete hex escape",
                         ));
                     }
-                    let v = unhex(s[offset])? << 4 | unhex(s[offset + 1])?;
+                    let v = (unhex(s[offset])? << 4) | unhex(s[offset + 1])?;
                     out.push(v);
                     offset += 1;
                 }
@@ -1046,6 +1046,10 @@ pub fn ascii_unescape_default(s: &[u8]) -> std::io::Result<Vec<u8>> {
         offset += 1;
     }
     Ok(out)
+}
+
+pub fn num_cpus() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
 
 #[cfg(test)]

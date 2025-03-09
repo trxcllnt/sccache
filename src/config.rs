@@ -316,6 +316,7 @@ pub struct S3CacheConfig {
     pub endpoint: Option<String>,
     pub use_ssl: Option<bool>,
     pub server_side_encryption: Option<bool>,
+    pub enable_virtual_host_style: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -669,7 +670,7 @@ pub fn try_read_config_file<T: DeserializeOwned>(path: &Path) -> Result<Option<T
         }
     }
 
-    let res = if path.extension().map_or(false, |e| e == "json") {
+    let res = if path.extension().is_some_and(|e| e == "json") {
         serde_json::from_str(&string)
             .with_context(|| format!("Failed to load json config file from {}", path.display()))?
     } else {
@@ -732,6 +733,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         let server_side_encryption = bool_from_env_var(&envvar("S3_SERVER_SIDE_ENCRYPTION"))?;
         let endpoint = env::var(envvar("ENDPOINT")).ok();
         let key_prefix = key_prefix_from_env_var(&envvar("S3_KEY_PREFIX"));
+        let enable_virtual_host_style = bool_from_env_var(&envvar("S3_ENABLE_VIRTUAL_HOST_STYLE"))?;
 
         Some(S3CacheConfig {
             bucket,
@@ -741,6 +743,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             endpoint,
             use_ssl,
             server_side_encryption,
+            enable_virtual_host_style,
         })
     } else {
         None
@@ -2091,7 +2094,8 @@ no_credentials = true
                     use_ssl: Some(true),
                     key_prefix: "s3prefix".into(),
                     no_credentials: true,
-                    server_side_encryption: Some(false)
+                    server_side_encryption: Some(false),
+                    enable_virtual_host_style: None,
                 }),
                 webdav: Some(WebdavCacheConfig {
                     endpoint: "http://127.0.0.1:8080".to_string(),

@@ -448,7 +448,7 @@ pub fn start_server(config: &Config, addr: &crate::net::SocketAddr) -> Result<()
     let client = Client::new();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .worker_threads(2 * std::thread::available_parallelism().unwrap().get())
+        .worker_threads(2 * util::num_cpus())
         .build()?;
     let pool = runtime.handle().clone();
     let dist_client = DistClientContainer::new(config, &pool);

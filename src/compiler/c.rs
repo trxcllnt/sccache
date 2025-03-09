@@ -286,10 +286,13 @@ where
             .read_dir()
             .ok()
             .map(|f| {
-                f.flatten()
-                    .filter(|f| f.path().extension().map_or(false, |ext| ext == "bc"))
+                let mut device_libs = f
+                    .flatten()
+                    .filter(|f| f.path().extension().is_some_and(|ext| ext == "bc"))
                     .map(|f| f.path())
-                    .collect()
+                    .collect::<Vec<_>>();
+                device_libs.sort_unstable();
+                device_libs
             })
             .unwrap_or_default()
     }
@@ -1277,7 +1280,7 @@ impl pkg::InputsPackager for CInputsPackager {
             if !super::CAN_DIST_DYLIBS
                 && input_path
                     .extension()
-                    .map_or(false, |ext| ext == std::env::consts::DLL_EXTENSION)
+                    .is_some_and(|ext| ext == std::env::consts::DLL_EXTENSION)
             {
                 bail!(
                     "Cannot distribute dylib input {} on this platform",
