@@ -131,6 +131,7 @@ impl CCompilerImpl for Gcc {
 ArgData! { pub
     TooHardFlag,
     TooHard(OsString),
+    NotCompilationFlag,
     DiagnosticsColor(OsString),
     DiagnosticsColorFlag,
     NoDiagnosticsColorFlag,
@@ -283,7 +284,7 @@ where
     let mut preprocessor_args = vec![];
     let mut dependency_args = vec![];
     let mut extra_hash_files = vec![];
-    let mut compilation = false;
+    let mut compilation = kind == CCompilerKind::Nvcc;
     let mut multiple_input = false;
     let mut multiple_input_files = Vec::new();
     let mut pedantic_flag = false;
@@ -339,6 +340,7 @@ where
         }
 
         match arg.get_data() {
+            Some(NotCompilationFlag) => return CompilerArguments::NotCompilation,
             Some(TooHardFlag) | Some(TooHard(_)) => {
                 cannot_cache!(arg.flag_str().expect("Can't be Argument::Raw/UnknownFlag",))
             }
@@ -478,7 +480,7 @@ where
             | Some(XClang(_))
             | Some(DepTarget(_))
             | Some(SerializeDiagnostics(_)) => continue,
-            Some(TooHardFlag) | Some(TooHard(_)) => unreachable!(),
+            Some(NotCompilationFlag) | Some(TooHardFlag) | Some(TooHard(_)) => unreachable!(),
             None => match arg {
                 Argument::Raw(_) => continue,
                 Argument::UnknownFlag(_) => &mut common_args,
@@ -516,7 +518,7 @@ where
             | Some(TooHard(_)) => cannot_cache!(arg
                 .flag_str()
                 .unwrap_or("Can't handle complex arguments through clang",)),
-            None => match arg {
+            Some(NotCompilationFlag) | None => match arg {
                 Argument::Raw(_) if follows_plugin_arg => &mut common_args,
                 Argument::Raw(flag) => cannot_cache!(
                     "Can't handle Raw arguments with -Xclang",
@@ -905,10 +907,21 @@ where
             let mut language: Option<String> =
                 language_to_arg(parsed_args.language).map(|lang| lang.into());
             if !rewrite_includes_only {
-                match parsed_args.language {
-                    Language::C => language = Some("cpp-output".into()),
-                    Language::GenericHeader | Language::CHeader | Language::CxxHeader => {}
-                    _ => language.as_mut()?.push_str("-cpp-output"),
+                if let CCompilerKind::Nvhpc = kind {
+                    // -x=c|cpp|c++|i|cpp-output|asm|assembler|ASM|assembler-with-cpp|none
+                    // Specify the language for any following input files, instead of letting
+                    // the compiler choose based on suffix. Turn off with -x none
+                    match parsed_args.language {
+                        Language::C | Language::Cxx => language = Some("cpp-output".into()),
+                        Language::GenericHeader | Language::CHeader | Language::CxxHeader => {}
+                        _ => *(language.as_mut()?) = "none".into(),
+                    }
+                } else {
+                    match parsed_args.language {
+                        Language::C => language = Some("cpp-output".into()),
+                        Language::GenericHeader | Language::CHeader | Language::CxxHeader => {}
+                        _ => language.as_mut()?.push_str("-cpp-output"),
+                    }
                 }
             }
 

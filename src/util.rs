@@ -932,20 +932,57 @@ pub fn daemonize() -> Result<()> {
     Ok(())
 }
 
-/// Disable connection pool to avoid broken connection between runtime
-///
-/// # TODO
-///
-/// We should refactor sccache current model to make sure that we only have
-/// one tokio runtime and keep reqwest alive inside it.
-///
-/// ---
-///
-/// More details could be found at https://github.com/mozilla/sccache/pull/1563
 #[cfg(any(feature = "dist-server", feature = "dist-client"))]
-pub fn new_reqwest_blocking_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .pool_max_idle_per_host(0)
+pub fn new_reqwest_client(config: Option<crate::config::DistNetworking>) -> reqwest::Client {
+    let config = config.unwrap_or_default();
+    let request_timeout = Duration::from_secs(config.request_timeout);
+    let connect_timeout = Duration::from_secs(config.connect_timeout);
+
+    let builder = reqwest::Client::builder()
+        // HTTP/2
+        .http2_prior_knowledge() // force HTTP/2
+        // Timeouts
+        .timeout(request_timeout)
+        .connect_timeout(connect_timeout);
+
+    // Connection pool
+    let builder = if config.connection_pool {
+        // This has to be at least as long as `request_timeout`, otherwise
+        // reqwest will close idle connections before build jobs are done.
+        //
+        // Users should set their load balancer's idle timeout to the same
+        // value as `request_timeout` (AWS's ALB default is 60s).
+        builder.pool_idle_timeout(request_timeout)
+    } else {
+        // Disable connection pool
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("close"),
+        );
+        builder.pool_max_idle_per_host(0).default_headers(headers)
+    };
+
+    // keepalive
+    let builder = if config.keepalive.enabled {
+        let builder = if config.keepalive.timeout > 0 {
+            builder.http2_keep_alive_timeout(Duration::from_secs(config.keepalive.timeout))
+        } else {
+            builder
+        };
+
+        if config.keepalive.interval > 0 {
+            builder
+                .http2_keep_alive_while_idle(true)
+                .http2_keep_alive_interval(Duration::from_secs(config.keepalive.interval))
+        } else {
+            builder
+        }
+    } else {
+        builder
+    };
+
+    builder
         .build()
         .expect("http client must build with success")
 }
@@ -992,7 +1029,7 @@ pub fn ascii_unescape_default(s: &[u8]) -> std::io::Result<Vec<u8>> {
                             "incomplete hex escape",
                         ));
                     }
-                    let v = unhex(s[offset])? << 4 | unhex(s[offset + 1])?;
+                    let v = (unhex(s[offset])? << 4) | unhex(s[offset + 1])?;
                     out.push(v);
                     offset += 1;
                 }

@@ -31,6 +31,63 @@ may request compilation from Linux, Windows or macOS. Linux compilations will
 attempt to automatically package the compiler in use, while Windows and macOS
 users will need to specify a toolchain for cross-compilation ahead of time.
 
+## Message Brokers
+
+The sccache-dist scheduler and servers communicate via an external message
+broker, either an AMQP v0.9.1 implementation (like RabbitMQ) or Redis.
+
+The message broker is a third-party service, and is responsible for reliable
+message delivery, acknowledgement, retries, and reporting failures.
+
+All major CSPs provide managed AMQP or Redis services, or you can deploy
+RabbitMQ or Redis as part of your infrastructure.
+
+### Managed Message Broker Services
+
+Here is a (non-exhaustive) list of managed message broker services available
+in popular cloud service providers.
+
+RabbitMQ:
+* [AWS AMQ](https://docs.aws.amazon.com/amazon-mq/latest/developer-guide/welcome.html)
+* [GCP RabbitMQ Connector](https://cloud.google.com/integration-connectors/docs/connectors/rabbitmq/configure)
+* [CloudAMQP](https://www.cloudamqp.com/) and [CloudAMQP on GCP](https://www.cloudamqp.com/docs/google-GCP-marketplace-rabbitmq.html)
+
+Valkey/Redis:
+* [AWS ElastiCache for Redis](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/WhatIs.html)
+* [GCP Memorystore](https://cloud.google.com/memorystore/?hl=en)
+* [Azure Managed Redis](https://learn.microsoft.com/en-us/azure/azure-cache-for-redis/managed-redis/managed-redis-overview)
+
+### Running locally
+
+For local development or custom deployments, you can run the message broker locally.
+
+#### RabbitMQ
+To run `sccache-dist` locally with RabbitMQ as the message broker, either:
+1. Run the `rabbitmq` docker container:
+  ```shell
+  docker run --rm --name sccache-dist-rabbitmq -p 5672:5672 rabbitmq:latest
+  ```
+2. Install and run the RabbitMQ service (instructions [here](https://www.rabbitmq.com/docs/platforms))
+
+Then configure `sccache-dist` to use your `rabbitmq` instance via either:
+* Setting the `AMQP_ADDR=amqp://127.0.0.1:5672//` environment variable
+* Adding `message_broker.amqp = "amqp://127.0.0.1:5672//"` to your scheduler config file
+
+*Note:* The two slashes at the end of `amqp` address above is not a typo.
+
+#### Redis
+
+To run `sccache-dist` locally with Redis as the message broker, either:
+1. Run the `redis` docker container:
+  ```shell
+  docker run --rm --name sccache-dist-redis -p 6379:6379 redis:latest
+  ```
+2. Install and run the RabbitMQ service (instructions [here](https://redis.io/docs/latest/operate/oss_and_stack/install/install-redis/))
+
+Then configure `sccache-dist` to use your `rabbitmq` instance via either:
+* Setting the `REDIS_ADDR=redis://127.0.0.1:6379/` environment variable
+* Adding `message_broker.redis = "redis://127.0.0.1:6379"` to your scheduler config file
+
 ## Communication
 
 The HTTP implementation of sccache has the following API, where all HTTP body content is encoded using [`bincode`](http://docs.rs/bincode):
@@ -45,13 +102,14 @@ The HTTP implementation of sccache has the following API, where all HTTP body co
       - Returns a digest and PEM for the temporary server HTTPS certificate.
    - `POST /api/v1/scheduler/heartbeat_server`
       - Called (repeatedly) by servers to register as available for jobs.
-   - `POST /api/v1/scheduler/job_state`
-      - Called by servers to inform the scheduler of the state of the job.
    - `GET /api/v1/scheduler/status`
       - Returns information about the scheduler.
  - `server`
+   - `POST /api/v1/distserver/reserve_job`
+      - Called by the scheduler to reserve a new job on this server.
+      - Returns a server-specific job id, the number of jobs assigned to this server (but not yet running), and the number of jobs this server is actively running.
    - `POST /api/v1/distserver/assign_job`
-      - Called by the scheduler to inform of a new job being assigned to this server.
+      - Called by the scheduler assign a reserved job to this server.
       - Returns whether the toolchain is already on the server or needs submitting.
    - `POST /api/v1/distserver/submit_toolchain`
       - Called by the client to submit a toolchain.

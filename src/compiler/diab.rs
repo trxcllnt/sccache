@@ -285,9 +285,7 @@ where
         None => cannot_cache!("unknown source language"),
     };
 
-    let output = output_arg
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(&input).with_extension("o"));
+    let output = output_arg.unwrap_or_else(|| Path::new(&input).with_extension("o"));
 
     let mut outputs = HashMap::new();
     outputs.insert(

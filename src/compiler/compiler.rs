@@ -62,6 +62,7 @@ use crate::errors::*;
     feature = "dist-client",
     any(
         all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
         target_os = "freebsd"
     )
 ))]
@@ -70,6 +71,7 @@ pub const CAN_DIST_DYLIBS: bool = true;
     feature = "dist-client",
     not(any(
         all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
         target_os = "freebsd"
     ))
 ))]
@@ -90,9 +92,16 @@ where
     fn get_arguments(&self) -> Vec<OsString>;
     fn get_env_vars(&self) -> Vec<(OsString, OsString)>;
     fn get_cwd(&self) -> PathBuf;
+    fn box_clone(&self) -> Box<dyn CompileCommand<T>>;
 }
 
-#[derive(Debug)]
+impl<T: CommandCreatorSync> Clone for Box<dyn CompileCommand<T>> {
+    fn clone(&self) -> Box<dyn CompileCommand<T>> {
+        self.box_clone()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct CCompileCommand<I>
 where
     I: CompileCommandImpl,
@@ -139,10 +148,14 @@ where
     ) -> Result<process::Output> {
         self.cmd.execute(service, creator).await
     }
+
+    fn box_clone(&self) -> Box<dyn CompileCommand<T>> {
+        CCompileCommand::<I>::new(self.cmd.clone())
+    }
 }
 
 #[async_trait]
-pub trait CompileCommandImpl: Send + Sync + 'static {
+pub trait CompileCommandImpl: Send + Sync + Clone + 'static {
     fn get_executable(&self) -> PathBuf;
     fn get_arguments(&self) -> Vec<OsString>;
     fn get_env_vars(&self) -> Vec<(OsString, OsString)>;
@@ -157,7 +170,7 @@ pub trait CompileCommandImpl: Send + Sync + 'static {
         T: CommandCreatorSync;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SingleCompileCommand {
     pub executable: PathBuf,
     pub arguments: Vec<OsString>,
@@ -423,7 +436,19 @@ where
         pool: tokio::runtime::Handle,
     ) -> Result<(CompileResult, process::Output)> {
         let out_pretty = self.output_pretty().into_owned();
-        debug!("[{}]: get_cached_or_compile: {:?}", out_pretty, arguments);
+        if log_enabled!(log::Level::Debug) {
+            // [<file>] get_cached_or_compile: "/path/to/exe" <args...>
+            debug!(
+                "[{}]: get_cached_or_compile: {}",
+                out_pretty,
+                [
+                    &[format!("{:?}", self.get_executable().as_path().display())],
+                    &dist::osstrings_to_strings(&arguments).unwrap_or_default()[..]
+                ]
+                .concat()
+                .join(" ")
+            );
+        }
         let start = Instant::now();
         let may_dist = dist_client.is_some();
         let rewrite_includes_only = match dist_client {
@@ -442,7 +467,7 @@ where
                 cache_control,
             )
             .await;
-        debug!(
+        trace!(
             "[{}]: generate_hash_key took {}",
             out_pretty,
             fmt_duration_as_secs(&start.elapsed())
@@ -460,7 +485,7 @@ where
                 weak_toolchain_key,
             }) => (key, compilation, weak_toolchain_key),
         };
-        debug!("[{}]: Hash key: {}", out_pretty, key);
+        trace!("[{}]: Hash key: {}", out_pretty, key);
         // If `ForceRecache` is enabled, we won't check the cache.
         let start = Instant::now();
         let cache_status = async {
@@ -493,7 +518,7 @@ where
 
         let lookup = match cache_status.await {
             (Ok(Ok(Cache::Hit(mut entry))), duration) => {
-                debug!(
+                trace!(
                     "[{}]: Cache hit in {}",
                     out_pretty,
                     fmt_duration_as_secs(&duration)
@@ -527,7 +552,7 @@ where
                 Ok(CacheLookupResult::Miss(MissType::Normal))
             }
             (Ok(Ok(Cache::None)), duration) => {
-                debug!(
+                trace!(
                     "[{}]: Cache none in {}",
                     out_pretty,
                     fmt_duration_as_secs(&duration)
@@ -535,7 +560,7 @@ where
                 Ok(CacheLookupResult::Miss(MissType::ForcedNoCache))
             }
             (Ok(Ok(Cache::Recache)), duration) => {
-                debug!(
+                trace!(
                     "[{}]: Cache recache in {}",
                     out_pretty,
                     fmt_duration_as_secs(&duration)
@@ -552,7 +577,7 @@ where
                 Ok(CacheLookupResult::Miss(MissType::CacheReadError))
             }
             (Err(_), duration) => {
-                debug!(
+                trace!(
                     "[{}]: Cache timed out {}",
                     out_pretty,
                     fmt_duration_as_secs(&duration)
@@ -577,11 +602,12 @@ where
                     compilation,
                     weak_toolchain_key,
                     out_pretty.clone(),
+                    &pool,
                 )
                 .await?;
                 let duration_compilation = start.elapsed();
                 if !compiler_result.status.success() {
-                    debug!(
+                    trace!(
                         "[{}]: Compiled in {}, but failed, not storing in cache",
                         out_pretty,
                         fmt_duration_as_secs(&duration_compilation)
@@ -593,7 +619,7 @@ where
                 }
                 if miss_type == MissType::ForcedNoCache {
                     // Do not cache
-                    debug!(
+                    trace!(
                         "[{}]: Compiled in {}, but not caching",
                         out_pretty,
                         fmt_duration_as_secs(&duration_compilation)
@@ -605,7 +631,7 @@ where
                 }
                 if cacheable != Cacheable::Yes {
                     // Not cacheable
-                    debug!(
+                    trace!(
                         "[{}]: Compiled in {}, but not cacheable",
                         out_pretty,
                         fmt_duration_as_secs(&duration_compilation)
@@ -615,7 +641,7 @@ where
                         compiler_result,
                     ));
                 }
-                debug!(
+                trace!(
                     "[{}]: Compiled in {}, storing in cache",
                     out_pretty,
                     fmt_duration_as_secs(&duration_compilation)
@@ -627,7 +653,7 @@ where
 
                 entry.put_stdout(&compiler_result.stdout)?;
                 entry.put_stderr(&compiler_result.stderr)?;
-                debug!(
+                trace!(
                     "[{}]: Created cache artifact in {}",
                     out_pretty,
                     fmt_duration_as_secs(&start_create_artifact.elapsed())
@@ -640,7 +666,7 @@ where
                     let start = Instant::now();
                     match storage.put(&key, entry).await {
                         Ok(_) => {
-                            debug!("[{}]: Stored in cache successfully!", out_pretty2);
+                            trace!("[{}]: Stored in cache successfully!", out_pretty2);
                             Ok(CacheWriteInfo {
                                 object_file_pretty: out_pretty2,
                                 duration: start.elapsed(),
@@ -668,9 +694,12 @@ where
     fn box_clone(&self) -> Box<dyn CompilerHasher<T>>;
 
     fn language(&self) -> Language;
+
+    fn get_executable(&self) -> PathBuf;
 }
 
 #[cfg(not(feature = "dist-client"))]
+#[allow(clippy::too_many_arguments)]
 async fn dist_or_local_compile<T>(
     service: &server::SccacheService<T>,
     _dist_client: Option<Arc<dyn dist::Client>>,
@@ -679,6 +708,7 @@ async fn dist_or_local_compile<T>(
     compilation: Box<dyn Compilation<T>>,
     _weak_toolchain_key: String,
     out_pretty: String,
+    _pool: &tokio::runtime::Handle,
 ) -> Result<(Cacheable, DistType, process::Output)>
 where
     T: CommandCreatorSync,
@@ -688,7 +718,7 @@ where
         .generate_compile_commands(&mut path_transformer, true)
         .context("Failed to generate compile commands")?;
 
-    debug!("[{}]: Compiling locally", out_pretty);
+    trace!("[{}]: Compiling locally", out_pretty);
     compile_cmd
         .execute(&service, &creator)
         .await
@@ -696,6 +726,7 @@ where
 }
 
 #[cfg(feature = "dist-client")]
+#[allow(clippy::too_many_arguments)]
 async fn dist_or_local_compile<T>(
     service: &server::SccacheService<T>,
     dist_client: Option<Arc<dyn dist::Client>>,
@@ -704,12 +735,11 @@ async fn dist_or_local_compile<T>(
     compilation: Box<dyn Compilation<T>>,
     weak_toolchain_key: String,
     out_pretty: String,
+    pool: &tokio::runtime::Handle,
 ) -> Result<(Cacheable, DistType, process::Output)>
 where
     T: CommandCreatorSync,
 {
-    use std::io;
-
     let rewrite_includes_only = match dist_client {
         Some(ref client) => client.rewrite_includes_only(),
         _ => false,
@@ -722,7 +752,7 @@ where
     let dist_client = match dist_compile_cmd.clone().and(dist_client) {
         Some(dc) => dc,
         None => {
-            debug!("[{}]: Compiling locally", out_pretty);
+            trace!("[{}]: Compiling locally", out_pretty);
             return compile_cmd
                 .execute(service, &creator)
                 .await
@@ -730,152 +760,21 @@ where
         }
     };
 
-    debug!("[{}]: Attempting distributed compilation", out_pretty);
-    let out_pretty2 = out_pretty.clone();
-
-    let local_executable = compile_cmd.get_executable();
-    let local_executable2 = compile_cmd.get_executable();
-
-    let do_dist_compile = async move {
-        let mut dist_compile_cmd =
-            dist_compile_cmd.context("Could not create distributed compile command")?;
-        debug!("[{}]: Creating distributed compile request", out_pretty);
-        let dist_output_paths = compilation
-            .outputs()
-            .map(|output| path_transformer.as_dist_abs(&cwd.join(output.path)))
-            .collect::<Option<_>>()
-            .context("Failed to adapt an output path for distributed compile")?;
-        let (inputs_packager, toolchain_packager, outputs_rewriter) =
-            compilation.into_dist_packagers(path_transformer)?;
-
-        debug!(
-            "[{}]: Identifying dist toolchain for {:?}",
-            out_pretty, local_executable
-        );
-        let (dist_toolchain, maybe_dist_compile_executable) = dist_client
-            .put_toolchain(local_executable, weak_toolchain_key, toolchain_packager)
-            .await?;
-        let mut tc_archive = None;
-        if let Some((dist_compile_executable, archive_path)) = maybe_dist_compile_executable {
-            dist_compile_cmd.executable = dist_compile_executable;
-            tc_archive = Some(archive_path);
-        }
-
-        debug!("[{}]: Requesting allocation", out_pretty);
-        let jares = dist_client.do_alloc_job(dist_toolchain.clone()).await?;
-        let job_alloc = match jares {
-            dist::AllocJobResult::Success {
-                job_alloc,
-                need_toolchain: true,
-            } => {
-                debug!(
-                    "[{}]: Sending toolchain {} for job {}",
-                    out_pretty, dist_toolchain.archive_id, job_alloc.job_id
-                );
-
-                match dist_client
-                    .do_submit_toolchain(job_alloc.clone(), dist_toolchain)
-                    .await
-                    .map_err(|e| e.context("Could not submit toolchain"))?
-                {
-                    dist::SubmitToolchainResult::Success => Ok(job_alloc),
-                    dist::SubmitToolchainResult::JobNotFound => {
-                        bail!("Job {} not found on server", job_alloc.job_id)
-                    }
-                    dist::SubmitToolchainResult::CannotCache => bail!(
-                        "Toolchain for job {} could not be cached by server",
-                        job_alloc.job_id
-                    ),
-                }
-            }
-            dist::AllocJobResult::Success {
-                job_alloc,
-                need_toolchain: false,
-            } => Ok(job_alloc),
-            dist::AllocJobResult::Fail { msg } => {
-                Err(anyhow!("Failed to allocate job").context(msg))
-            }
-        }?;
-        let job_id = job_alloc.job_id;
-        let server_id = job_alloc.server_id;
-        debug!("[{}]: Running job", out_pretty);
-        let ((job_id, server_id), (jres, path_transformer)) = dist_client
-            .do_run_job(
-                job_alloc,
-                dist_compile_cmd,
-                dist_output_paths,
-                inputs_packager,
-            )
-            .await
-            .map(move |res| ((job_id, server_id), res))
-            .with_context(|| {
-                format!(
-                    "could not run distributed compilation job on {:?}",
-                    server_id
-                )
-            })?;
-
-        let jc = match jres {
-            dist::RunJobResult::Complete(jc) => jc,
-            dist::RunJobResult::JobNotFound => bail!("Job {} not found on server", job_id),
-        };
-        debug!(
-            "fetched {:?}",
-            jc.outputs
-                .iter()
-                .map(|(p, bs)| (p, bs.lens().to_string()))
-                .collect::<Vec<_>>()
-        );
-        let mut output_paths: Vec<PathBuf> = vec![];
-        macro_rules! try_or_cleanup {
-            ($v:expr) => {{
-                match $v {
-                    Ok(v) => v,
-                    Err(e) => {
-                        // Do our best to clear up. We may end up deleting a file that we just wrote over
-                        // the top of, but it's better to clear up too much than too little
-                        for local_path in output_paths.iter() {
-                            if let Err(e) = fs::remove_file(local_path) {
-                                if e.kind() != io::ErrorKind::NotFound {
-                                    warn!("{} while attempting to clear up {}", e, local_path.display())
-                                }
-                            }
-                        }
-                        return Err(e)
-                    },
-                }
-            }};
-        }
-
-        for (path, output_data) in jc.outputs {
-            let len = output_data.lens().actual;
-            let local_path = try_or_cleanup!(path_transformer
-                .to_local(&path)
-                .with_context(|| format!("unable to transform output path {}", path)));
-            output_paths.push(local_path);
-            // Do this first so cleanup works correctly
-            let local_path = output_paths.last().expect("nothing in vec after push");
-
-            let mut file = try_or_cleanup!(File::create(local_path)
-                .with_context(|| format!("Failed to create output file {}", local_path.display())));
-            let count = try_or_cleanup!(io::copy(&mut output_data.into_reader(), &mut file)
-                .with_context(|| format!("Failed to write output to {}", local_path.display())));
-
-            assert!(count == len);
-        }
-        let extra_inputs = match tc_archive {
-            Some(p) => vec![p],
-            None => vec![],
-        };
-        try_or_cleanup!(outputs_rewriter
-            .handle_outputs(&path_transformer, &output_paths, &extra_inputs)
-            .with_context(|| "failed to rewrite outputs from compile"));
-        Ok((DistType::Ok(server_id), jc.output.into()))
-    };
-
-    use futures::TryFutureExt;
-    do_dist_compile
-        .or_else(move |e| async move {
+    match dist_compile(
+        path_transformer.clone(),
+        dist_client.clone(),
+        cwd.clone(),
+        compilation.clone(),
+        weak_toolchain_key.clone(),
+        compile_cmd.clone(),
+        dist_compile_cmd.clone(),
+        out_pretty.clone(),
+        pool,
+    )
+    .await
+    {
+        Ok((dt, o)) => Ok((cacheable, dt, o)),
+        Err(e) => {
             if let Some(HttpClientError(_)) = e.downcast_ref::<HttpClientError>() {
                 Err(e)
             } else if let Some(lru_disk_cache::Error::FileTooLarge) =
@@ -884,24 +783,329 @@ where
                 Err(anyhow!(
                     "Could not cache dist toolchain for {:?} locally.
                  Increase `toolchain_cache_size` or decrease the toolchain archive size.",
-                    local_executable2
+                    compile_cmd.get_executable()
                 ))
             } else {
                 // `{:#}` prints the error and the causes in a single line.
                 let errmsg = format!("{:#}", e);
                 warn!(
                     "[{}]: Could not perform distributed compile, falling back to local: {}",
-                    out_pretty2, errmsg
+                    out_pretty, errmsg
                 );
 
                 compile_cmd
                     .execute(service, &creator)
                     .await
-                    .map(|o| (DistType::Error, o))
+                    .map(|o| (cacheable, DistType::Error, o))
             }
+        }
+    }
+}
+
+#[cfg(feature = "dist-client")]
+#[allow(clippy::too_many_arguments)]
+async fn dist_compile<T>(
+    mut path_transformer: dist::PathTransformer,
+    dist_client: Arc<dyn dist::Client>,
+    cwd: PathBuf,
+    compilation: Box<dyn Compilation<T>>,
+    weak_toolchain_key: String,
+    compile_cmd: Box<dyn CompileCommand<T>>,
+    dist_compile_cmd: Option<dist::CompileCommand>,
+    out_pretty: String,
+    pool: &tokio::runtime::Handle,
+) -> Result<(DistType, std::process::Output)>
+where
+    T: CommandCreatorSync,
+{
+    use std::io;
+
+    use crate::dist::NewJobResponse;
+
+    let mut dist_compile_cmd =
+        dist_compile_cmd.context("Could not create distributed compile command")?;
+
+    trace!("[{out_pretty}]: Creating distributed compile request");
+
+    let dist_output_paths: Vec<String> = compilation
+        .outputs()
+        .map(|output| path_transformer.as_dist_abs(&cwd.join(output.path)))
+        .collect::<Option<_>>()
+        .context("Failed to adapt an output path for distributed compile")?;
+
+    let (inputs_packager, toolchain_packager, outputs_rewriter) =
+        compilation.into_dist_packagers(path_transformer)?;
+
+    trace!(
+        "[{out_pretty}]: Identifying dist toolchain for {:?}",
+        compile_cmd.get_executable()
+    );
+    let (dist_toolchain, maybe_dist_compile_executable) = dist_client
+        .put_toolchain_local(
+            compile_cmd.get_executable(),
+            weak_toolchain_key,
+            toolchain_packager,
+        )
+        .await?;
+
+    let mut tc_archive = None;
+
+    if let Some((dist_compile_executable, archive_path)) = maybe_dist_compile_executable {
+        dist_compile_cmd.executable = dist_compile_executable;
+        tc_archive = Some(archive_path);
+    }
+
+    debug!("[{out_pretty}]: Serializing job inputs");
+
+    // TODO: Make this use asyncio
+    let (job_inputs, path_transformer) = pool
+        .spawn_blocking(move || -> Result<_> {
+            let mut job_inputs = vec![];
+            let mut compressor =
+                flate2::write::ZlibEncoder::new(&mut job_inputs, flate2::Compression::fast());
+            let path_transformer = inputs_packager
+                .write_inputs(&mut compressor)
+                .context("Could not write inputs for compilation")?;
+            compressor.flush().context("failed to flush compressor")?;
+            trace!(
+                "Compressed inputs from {} -> {}",
+                compressor.total_in(),
+                compressor.total_out()
+            );
+            compressor.finish().context("failed to finish compressor")?;
+            Ok((job_inputs, path_transformer))
         })
-        .map_ok(move |(dt, o)| (cacheable, dt, o))
-        .await
+        .await??;
+
+    debug!("[{out_pretty}]: Requesting job allocation");
+
+    let NewJobResponse {
+        mut has_toolchain,
+        job_id,
+        timeout,
+    } = dist_client
+        .new_job(dist_toolchain.clone(), &job_inputs)
+        .await?;
+
+    debug!("[{out_pretty}, {job_id}]: Received job allocation");
+
+    let dist_retry_limit = dist_client.max_retries() + 1.0;
+    let mut num_dist_attempts = 1.0f64;
+    let mut has_inputs = true;
+
+    let dist_compile_res = loop {
+        if !has_toolchain {
+            debug!(
+                "[{out_pretty}, {job_id}]: Submitting toolchain {:?}",
+                dist_toolchain.archive_id,
+            );
+            match dist_client
+                .put_toolchain(dist_toolchain.clone())
+                .await
+                .map_err(|e| e.context("Could not submit toolchain"))?
+            {
+                dist::SubmitToolchainResult::Success => {
+                    trace!(
+                        "[{out_pretty}]: Successfully sent toolchain `{}`",
+                        dist_toolchain.archive_id,
+                    );
+                }
+                dist::SubmitToolchainResult::Error { message } => {
+                    trace!(
+                        "[{out_pretty}]: Failed sending toolchain `{}`: {message}",
+                        dist_toolchain.archive_id,
+                    );
+                    // Break because we can't run a job without a toolchain
+                    break Err(anyhow!(message));
+                }
+            }
+        }
+
+        if !has_inputs {
+            debug!("[{out_pretty}, {job_id}]: Resubmitting job inputs");
+            dist_client
+                .put_job(&job_id, &job_inputs)
+                .await
+                .map_err(|e| e.context("Could not submit job inputs"))?;
+        }
+
+        debug!("[{out_pretty}, {job_id}]: Running job");
+
+        let job_result = dist_client
+            .run_job(
+                &job_id,
+                Duration::from_secs(timeout as u64),
+                dist_toolchain.clone(),
+                dist_compile_cmd.clone(),
+                dist_output_paths.clone(),
+            )
+            .await;
+
+        let job_result = match job_result {
+            // Success
+            Ok(dist::RunJobResponse::JobComplete { result, server_id }) => Ok((result, server_id)),
+            // Failure
+            Ok(dist::RunJobResponse::JobFailed { reason, server_id }) => {
+                warn!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation job failed: {reason}");
+                // Break because JobFailed responses are not retryable
+                break Err(anyhow!(reason));
+            }
+            // Missing inputs (S3 cleared, Redis rebooted, etc.)
+            Ok(dist::RunJobResponse::MissingJobInputs { server_id }) => {
+                has_inputs = false;
+                debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job inputs");
+                // Don't break because these errors can be retried
+                Err(anyhow!("Missing distributed compilation job inputs"))
+            }
+            // Missing result (S3 cleared, Redis rebooted, etc.),
+            // or build server failed to write the job result due
+            // to e.g. network error, server shutdown, etc.
+            Ok(dist::RunJobResponse::MissingJobResult { server_id }) => {
+                warn!(
+                    "[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job result"
+                );
+                // Don't break because these errors can be retried
+                Err(anyhow!("Missing distributed compilation job result"))
+            }
+            // Missing toolchain (S3 cleared, Redis rebooted, etc.)
+            Ok(dist::RunJobResponse::MissingToolchain { server_id }) => {
+                has_toolchain = false;
+                debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job toolchain");
+                // Don't break because these errors can be retried
+                Err(anyhow!("Missing distributed compilation job toolchain"))
+            }
+            // Server shutdown before job finished
+            Ok(dist::RunJobResponse::ServerTerminated { server_id }) => {
+                warn!("[{out_pretty}, {job_id}, {server_id}]: Build server shutdown");
+                // Don't break because these errors can be retried
+                Err(anyhow!("Build server shutdown"))
+            }
+            // Other (e.g. client network, timeout, etc.) errors
+            Err(err) => {
+                // Don't break because these errors can be retried
+                Err(anyhow!(err))
+            }
+        };
+
+        match job_result {
+            // Maybe retry errors
+            Err(err) => {
+                if num_dist_attempts < dist_retry_limit {
+                    warn!(
+                        "[{out_pretty}]: Distributed compilation error ({num_dist_attempts} of {dist_retry_limit}), retrying: {err:#}"
+                    );
+                    num_dist_attempts += 1.0;
+                    continue;
+                }
+
+                warn!("[{out_pretty}, {job_id}]: Could not run distributed compilation job: {err}");
+
+                break Err(err);
+            }
+            Ok((result, server_id)) => {
+                // Don't need this in memory anymore
+                drop(job_inputs);
+
+                debug!(
+                    "[{out_pretty}, {job_id}]: Fetched {:?}",
+                    result
+                        .outputs
+                        .iter()
+                        .map(|(p, bs)| (p, bs.lens().to_string()))
+                        .collect::<Vec<_>>()
+                );
+
+                let mut output_paths: Vec<PathBuf> = vec![];
+
+                macro_rules! try_or_cleanup {
+                    ($v:expr) => {{
+                        match $v {
+                            Ok(v) => v,
+                            Err(e) => {
+                                // Do our best to clear up. We may end up deleting a file that we just wrote over
+                                // the top of, but it's better to clear up too much than too little
+                                for local_path in output_paths.iter() {
+                                    if let Err(e) = fs::remove_file(local_path) {
+                                        if e.kind() != io::ErrorKind::NotFound {
+                                            warn!("[{out_pretty}, {job_id}]: {e} while attempting to remove `{}`", local_path.display())
+                                        }
+                                    }
+                                }
+                                break Err(e)
+                            },
+                        }
+                    }};
+                }
+
+                let mut result_outputs_iter = result.outputs.into_iter();
+
+                // loop instead of for so we can break with the Err instead of
+                // returning to ensure we still delete the job (below) in case
+                // of client errors.
+                let unpack_outputs_res = loop {
+                    if let Some((path, output_data)) = result_outputs_iter.next() {
+                        let len = output_data.lens().actual;
+                        let local_path = try_or_cleanup!(path_transformer
+                            .to_local(&path)
+                            .with_context(|| format!(
+                                "[{out_pretty}, {job_id}]: unable to transform output path {path}"
+                            )));
+
+                        // Do this first so cleanup works correctly
+                        output_paths.push(local_path.clone());
+
+                        // TODO: Make this use asyncio
+                        let mut file = try_or_cleanup!(File::create(&local_path).with_context(
+                            || format!("Failed to create output file {}", local_path.display())
+                        ));
+                        let count =
+                            try_or_cleanup!(io::copy(&mut output_data.into_reader(), &mut file)
+                                .with_context(|| format!(
+                                    "Failed to write output to {}",
+                                    local_path.display()
+                                )));
+
+                        if count != len {
+                            break Err(anyhow!("Expected {len} outputs, but received {count}"));
+                        }
+                    } else {
+                        break Ok(());
+                    }
+                };
+
+                if let Err(err) = unpack_outputs_res {
+                    break Err(err);
+                }
+
+                let extra_inputs = tc_archive.map(|p| vec![p]).unwrap_or(vec![]);
+                try_or_cleanup!(outputs_rewriter
+                    .handle_outputs(&path_transformer, &output_paths, &extra_inputs)
+                    .with_context(|| "Failed to rewrite outputs from compile"));
+
+                break Ok((
+                    DistType::Ok(server_id),
+                    std::process::Output::from(result.output),
+                ));
+            }
+        }
+    };
+
+    // Inform the scheduler we've received and unpacked the result.
+    // This is its chance to clean up after the job.
+    //
+    // It's possible a network error occurs and the scheduler isn't notified
+    // it should delete job artifacts. To mitigate this, sccache-dist servers
+    // should use storage backends that are configured to delete job artifacts
+    // after some reasonable time, like 3-24hrs.
+    //
+    // Intentionally ignore errors so otherwise successful builds don't fail.
+    //
+    // Not unwrapping `dist_compile_res` so that even if the job fails or the
+    // client encounters errors downloading/unpacking the result, the scheduler
+    // is still told to delete the job artifacts.
+    let _ = dist_client.del_job(&job_id).await;
+
+    dist_compile_res
 }
 
 impl<T: CommandCreatorSync> Clone for Box<dyn CompilerHasher<T>> {
@@ -939,6 +1143,14 @@ where
     /// Each item is a descriptive (and unique) name of the output paired with
     /// the path where it'll show up.
     fn outputs<'a>(&'a self) -> Box<dyn Iterator<Item = FileObjectSource> + 'a>;
+
+    fn box_clone(&self) -> Box<dyn Compilation<T>>;
+}
+
+impl<T: CommandCreatorSync> Clone for Box<dyn Compilation<T>> {
+    fn clone(&self) -> Box<dyn Compilation<T>> {
+        self.box_clone()
+    }
 }
 
 #[cfg(feature = "dist-client")]
@@ -1014,7 +1226,7 @@ pub enum DistType {
     /// Distribution was not enabled.
     NoDist,
     /// Distributed compile success.
-    Ok(dist::ServerId),
+    Ok(String),
     /// Distributed compile failed.
     Error,
 }
@@ -1277,7 +1489,7 @@ where
         .await
         .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
     } else if is_nvidia_cicc(executable) {
-        debug!("Found cicc");
+        trace!("Found cicc");
         return CCompiler::new(
             Cicc {
                 // TODO: Use nvcc --version
@@ -1289,7 +1501,7 @@ where
         .await
         .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
     } else if is_nvidia_ptxas(executable) {
-        debug!("Found ptxas");
+        trace!("Found ptxas");
         return CCompiler::new(
             Ptxas {
                 // TODO: Use nvcc --version
@@ -2234,7 +2446,6 @@ LLVM version: 6.0",
         let storage = DiskCache::new(
             f.tempdir.path().join("cache"),
             u64::MAX,
-            &pool,
             PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: preprocessor_cache_mode,
                 ..Default::default()
@@ -2365,7 +2576,6 @@ LLVM version: 6.0",
         let storage = DiskCache::new(
             f.tempdir.path().join("cache"),
             u64::MAX,
-            &pool,
             PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: preprocessor_cache_mode,
                 ..Default::default()
@@ -2669,7 +2879,6 @@ LLVM version: 6.0",
         let storage = DiskCache::new(
             f.tempdir.path().join("cache"),
             u64::MAX,
-            &pool,
             PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: preprocessor_cache_mode,
                 ..Default::default()
@@ -2799,7 +3008,6 @@ LLVM version: 6.0",
         let storage = DiskCache::new(
             f.tempdir.path().join("cache"),
             u64::MAX,
-            &pool,
             PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: preprocessor_cache_mode,
                 ..Default::default()
@@ -2897,7 +3105,6 @@ LLVM version: 6.0",
         let storage = DiskCache::new(
             f.tempdir.path().join("cache"),
             u64::MAX,
-            &pool,
             PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: preprocessor_cache_mode,
                 ..Default::default()
@@ -2997,15 +3204,15 @@ LLVM version: 6.0",
 #[cfg(test)]
 #[cfg(feature = "dist-client")]
 mod test_dist {
-    use crate::dist::pkg;
     use crate::dist::{
-        self, AllocJobResult, CompileCommand, JobAlloc, JobComplete, JobId, OutputData,
-        PathTransformer, ProcessOutput, RunJobResult, SchedulerStatusResult, ServerId,
-        SubmitToolchainResult, Toolchain,
+        self, CompileCommand, NewJobResponse, OutputData, ProcessOutput, RunJobResponse,
+        SchedulerStatus, SubmitToolchainResult, Toolchain,
     };
+    use crate::dist::{pkg, BuildResult};
     use async_trait::async_trait;
     use std::path::{Path, PathBuf};
     use std::sync::{atomic::AtomicBool, Arc};
+    use std::time::Duration;
 
     use crate::errors::*;
 
@@ -3018,29 +3225,32 @@ mod test_dist {
     }
     #[async_trait]
     impl dist::Client for ErrorPutToolchainClient {
-        async fn do_alloc_job(&self, _: Toolchain) -> Result<AllocJobResult> {
+        async fn new_job(&self, _: Toolchain, _: &[u8]) -> Result<NewJobResponse> {
             unreachable!()
         }
-        async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
+        async fn put_job(&self, _: &str, _: &[u8]) -> Result<()> {
             unreachable!()
         }
-        async fn do_submit_toolchain(
+        async fn del_job(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn get_status(&self) -> Result<SchedulerStatus> {
+            unreachable!()
+        }
+        async fn put_toolchain(&self, _: Toolchain) -> Result<SubmitToolchainResult> {
+            unreachable!()
+        }
+        async fn run_job(
             &self,
-            _: JobAlloc,
+            _: &str,
+            _: Duration,
             _: Toolchain,
-        ) -> Result<SubmitToolchainResult> {
-            unreachable!()
-        }
-        async fn do_run_job(
-            &self,
-            _: JobAlloc,
             _: CompileCommand,
             _: Vec<String>,
-            _: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(RunJobResult, PathTransformer)> {
+        ) -> Result<RunJobResponse> {
             unreachable!()
         }
-        async fn put_toolchain(
+        async fn put_toolchain_local(
             &self,
             _: PathBuf,
             _: String,
@@ -3048,10 +3258,13 @@ mod test_dist {
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
             Err(anyhow!("MOCK: put toolchain failure"))
         }
+        fn max_retries(&self) -> f64 {
+            0f64
+        }
         fn rewrite_includes_only(&self) -> bool {
             false
         }
-        fn get_custom_toolchain(&self, _exe: &Path) -> Option<PathBuf> {
+        async fn get_custom_toolchain(&self, _exe: &Path) -> Option<PathBuf> {
             None
         }
     }
@@ -3071,30 +3284,33 @@ mod test_dist {
     }
     #[async_trait]
     impl dist::Client for ErrorAllocJobClient {
-        async fn do_alloc_job(&self, tc: Toolchain) -> Result<AllocJobResult> {
+        async fn new_job(&self, tc: Toolchain, _: &[u8]) -> Result<NewJobResponse> {
             assert_eq!(self.tc, tc);
             Err(anyhow!("MOCK: alloc job failure"))
         }
-        async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
+        async fn put_job(&self, _: &str, _: &[u8]) -> Result<()> {
             unreachable!()
         }
-        async fn do_submit_toolchain(
+        async fn del_job(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn get_status(&self) -> Result<SchedulerStatus> {
+            unreachable!()
+        }
+        async fn put_toolchain(&self, _: Toolchain) -> Result<SubmitToolchainResult> {
+            unreachable!()
+        }
+        async fn run_job(
             &self,
-            _: JobAlloc,
+            _: &str,
+            _: Duration,
             _: Toolchain,
-        ) -> Result<SubmitToolchainResult> {
-            unreachable!()
-        }
-        async fn do_run_job(
-            &self,
-            _: JobAlloc,
             _: CompileCommand,
             _: Vec<String>,
-            _: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(RunJobResult, PathTransformer)> {
+        ) -> Result<RunJobResponse> {
             unreachable!()
         }
-        async fn put_toolchain(
+        async fn put_toolchain_local(
             &self,
             _: PathBuf,
             _: String,
@@ -3102,10 +3318,13 @@ mod test_dist {
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
             Ok((self.tc.clone(), None))
         }
+        fn max_retries(&self) -> f64 {
+            0f64
+        }
         fn rewrite_includes_only(&self) -> bool {
             false
         }
-        fn get_custom_toolchain(&self, _exe: &Path) -> Option<PathBuf> {
+        async fn get_custom_toolchain(&self, _exe: &Path) -> Option<PathBuf> {
             None
         }
     }
@@ -3128,42 +3347,42 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for ErrorSubmitToolchainClient {
-        async fn do_alloc_job(&self, tc: Toolchain) -> Result<AllocJobResult> {
+        async fn new_job(&self, tc: Toolchain, _: &[u8]) -> Result<NewJobResponse> {
             assert!(!self
                 .has_started
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
             assert_eq!(self.tc, tc);
-            Ok(AllocJobResult::Success {
-                job_alloc: JobAlloc {
-                    auth: "abcd".to_owned(),
-                    job_id: JobId(0),
-                    server_id: ServerId::new(([0, 0, 0, 0], 1).into()),
-                },
-                need_toolchain: true,
+
+            Ok(NewJobResponse {
+                has_toolchain: false,
+                job_id: "job_id".into(),
+                timeout: 10,
             })
         }
-        async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
+        async fn put_job(&self, _: &str, _: &[u8]) -> Result<()> {
+            unreachable!()
+        }
+        async fn del_job(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!("fn do_get_status is not used for this test. qed")
         }
-        async fn do_submit_toolchain(
-            &self,
-            job_alloc: JobAlloc,
-            tc: Toolchain,
-        ) -> Result<SubmitToolchainResult> {
-            assert_eq!(job_alloc.job_id, JobId(0));
+        async fn put_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
             assert_eq!(self.tc, tc);
             Err(anyhow!("MOCK: submit toolchain failure"))
         }
-        async fn do_run_job(
+        async fn run_job(
             &self,
-            _: JobAlloc,
+            _: &str,
+            _: Duration,
+            _: Toolchain,
             _: CompileCommand,
             _: Vec<String>,
-            _: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(RunJobResult, PathTransformer)> {
-            unreachable!("fn do_run_job is not used for this test. qed")
+        ) -> Result<RunJobResponse> {
+            unreachable!("fn run_job is not used for this test. qed")
         }
-        async fn put_toolchain(
+        async fn put_toolchain_local(
             &self,
             _: PathBuf,
             _: String,
@@ -3171,10 +3390,13 @@ mod test_dist {
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
             Ok((self.tc.clone(), None))
         }
+        fn max_retries(&self) -> f64 {
+            0f64
+        }
         fn rewrite_includes_only(&self) -> bool {
             false
         }
-        fn get_custom_toolchain(&self, _exe: &Path) -> Option<PathBuf> {
+        async fn get_custom_toolchain(&self, _exe: &Path) -> Option<PathBuf> {
             None
         }
     }
@@ -3197,44 +3419,46 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for ErrorRunJobClient {
-        async fn do_alloc_job(&self, tc: Toolchain) -> Result<AllocJobResult> {
+        async fn new_job(&self, tc: Toolchain, _: &[u8]) -> Result<NewJobResponse> {
             assert!(!self
                 .has_started
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
             assert_eq!(self.tc, tc);
-            Ok(AllocJobResult::Success {
-                job_alloc: JobAlloc {
-                    auth: "abcd".to_owned(),
-                    job_id: JobId(0),
-                    server_id: ServerId::new(([0, 0, 0, 0], 1).into()),
-                },
-                need_toolchain: true,
+
+            Ok(NewJobResponse {
+                has_toolchain: false,
+                job_id: "job_id".into(),
+                timeout: 10,
             })
         }
-        async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
+        async fn put_job(&self, _: &str, _: &[u8]) -> Result<()> {
             unreachable!()
         }
-        async fn do_submit_toolchain(
-            &self,
-            job_alloc: JobAlloc,
-            tc: Toolchain,
-        ) -> Result<SubmitToolchainResult> {
-            assert_eq!(job_alloc.job_id, JobId(0));
+        async fn del_job(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn get_status(&self) -> Result<SchedulerStatus> {
+            unreachable!()
+        }
+        async fn put_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
             assert_eq!(self.tc, tc);
             Ok(SubmitToolchainResult::Success)
         }
-        async fn do_run_job(
+        async fn run_job(
             &self,
-            job_alloc: JobAlloc,
+            job_id: &str,
+            timeout: Duration,
+            tc: Toolchain,
             command: CompileCommand,
             _: Vec<String>,
-            _: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(RunJobResult, PathTransformer)> {
-            assert_eq!(job_alloc.job_id, JobId(0));
+        ) -> Result<RunJobResponse> {
+            assert_eq!(job_id, "job_id");
+            assert_eq!(timeout, Duration::from_secs(10));
+            assert_eq!(self.tc, tc);
             assert_eq!(command.executable, "/overridden/compiler");
             Err(anyhow!("MOCK: run job failure"))
         }
-        async fn put_toolchain(
+        async fn put_toolchain_local(
             &self,
             _: PathBuf,
             _: String,
@@ -3248,10 +3472,13 @@ mod test_dist {
                 )),
             ))
         }
+        fn max_retries(&self) -> f64 {
+            0f64
+        }
         fn rewrite_includes_only(&self) -> bool {
             false
         }
-        fn get_custom_toolchain(&self, _exe: &Path) -> Option<PathBuf> {
+        async fn get_custom_toolchain(&self, _exe: &Path) -> Option<PathBuf> {
             None
         }
     }
@@ -3277,46 +3504,44 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for OneshotClient {
-        async fn do_alloc_job(&self, tc: Toolchain) -> Result<AllocJobResult> {
+        async fn new_job(&self, tc: Toolchain, _: &[u8]) -> Result<NewJobResponse> {
             assert!(!self
                 .has_started
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
             assert_eq!(self.tc, tc);
-
-            Ok(AllocJobResult::Success {
-                job_alloc: JobAlloc {
-                    auth: "abcd".to_owned(),
-                    job_id: JobId(0),
-                    server_id: ServerId::new(([0, 0, 0, 0], 1).into()),
-                },
-                need_toolchain: true,
+            Ok(NewJobResponse {
+                has_toolchain: false,
+                job_id: "job_id".into(),
+                timeout: 10,
             })
         }
-        async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
+        async fn put_job(&self, _: &str, _: &[u8]) -> Result<()> {
+            unreachable!()
+        }
+        async fn del_job(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!("fn do_get_status is not used for this test. qed")
         }
-        async fn do_submit_toolchain(
-            &self,
-            job_alloc: JobAlloc,
-            tc: Toolchain,
-        ) -> Result<SubmitToolchainResult> {
-            assert_eq!(job_alloc.job_id, JobId(0));
+        async fn put_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
             assert_eq!(self.tc, tc);
 
             Ok(SubmitToolchainResult::Success)
         }
-        async fn do_run_job(
+        async fn run_job(
             &self,
-            job_alloc: JobAlloc,
+            job_id: &str,
+            timeout: Duration,
+            tc: Toolchain,
             command: CompileCommand,
             outputs: Vec<String>,
-            inputs_packager: Box<dyn pkg::InputsPackager>,
-        ) -> Result<(RunJobResult, PathTransformer)> {
-            assert_eq!(job_alloc.job_id, JobId(0));
+        ) -> Result<RunJobResponse> {
+            assert_eq!(job_id, "job_id");
+            assert_eq!(timeout, Duration::from_secs(10));
+            assert_eq!(self.tc, tc);
             assert_eq!(command.executable, "/overridden/compiler");
 
-            let mut inputs = vec![];
-            let path_transformer = inputs_packager.write_inputs(&mut inputs).unwrap();
             let outputs = outputs
                 .into_iter()
                 .map(|name| {
@@ -3325,13 +3550,16 @@ mod test_dist {
                     (name, data)
                 })
                 .collect();
-            let result = RunJobResult::Complete(JobComplete {
-                output: self.output.clone(),
-                outputs,
-            });
-            Ok((result, path_transformer))
+            let result = RunJobResponse::JobComplete {
+                server_id: "".into(),
+                result: BuildResult {
+                    output: self.output.clone(),
+                    outputs,
+                },
+            };
+            Ok(result)
         }
-        async fn put_toolchain(
+        async fn put_toolchain_local(
             &self,
             _: PathBuf,
             _: String,
@@ -3345,10 +3573,13 @@ mod test_dist {
                 )),
             ))
         }
+        fn max_retries(&self) -> f64 {
+            0f64
+        }
         fn rewrite_includes_only(&self) -> bool {
             false
         }
-        fn get_custom_toolchain(&self, _exe: &Path) -> Option<PathBuf> {
+        async fn get_custom_toolchain(&self, _exe: &Path) -> Option<PathBuf> {
             None
         }
     }

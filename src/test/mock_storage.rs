@@ -16,6 +16,7 @@ use crate::cache::{Cache, CacheWrite, PreprocessorCacheModeConfig, Storage};
 use crate::errors::*;
 use async_trait::async_trait;
 use futures::channel::mpsc;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -57,6 +58,30 @@ impl Storage for MockStorage {
 
         next.expect("MockStorage get called but no get results available")
     }
+    async fn get_stream(&self, key: &str) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>> {
+        if let Some(delay) = self.delay {
+            sleep(delay).await;
+        }
+        let next = self.rx.lock().await.try_next().unwrap();
+        let next = next.expect("MockStorage get called but no get results available")?;
+        match next {
+            Cache::Hit(file) => {
+                let reader = file.into_inner();
+                let reader = futures::io::AllowStdIo::new(reader);
+                Ok(Box::new(reader) as Box<dyn futures::AsyncRead + Send + Unpin>)
+            }
+            _ => Err(anyhow!("No cache entry for key `{key}`")),
+        }
+    }
+    async fn del(&self, _key: &str) -> Result<()> {
+        if let Some(delay) = self.delay {
+            sleep(delay).await;
+        }
+        Ok(())
+    }
+    async fn has(&self, _key: &str) -> bool {
+        false
+    }
     async fn put(&self, _key: &str, _entry: CacheWrite) -> Result<Duration> {
         Ok(if let Some(delay) = self.delay {
             sleep(delay).await;
@@ -65,7 +90,30 @@ impl Storage for MockStorage {
             Duration::from_secs(0)
         })
     }
-    fn location(&self) -> String {
+    async fn put_stream(
+        &self,
+        _key: &str,
+        _size: u64,
+        _source: Pin<&mut (dyn futures::AsyncRead + Send)>,
+    ) -> Result<()> {
+        if let Some(delay) = self.delay {
+            sleep(delay).await;
+        }
+        Ok(())
+    }
+    async fn size(&self, _key: &str) -> Result<u64> {
+        if let Some(delay) = self.delay {
+            sleep(delay).await;
+        }
+        let next = self.rx.lock().await.try_next().unwrap();
+        if let Some(Ok(Cache::Hit(next))) = next {
+            let mut next = next.into_inner();
+            let mut data = vec![];
+            return Ok(next.read_to_end(&mut data)? as u64);
+        }
+        Ok(0)
+    }
+    async fn location(&self) -> String {
         "Mock Storage".to_string()
     }
     async fn current_size(&self) -> Result<Option<u64>> {
