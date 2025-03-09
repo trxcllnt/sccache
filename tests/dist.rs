@@ -320,7 +320,7 @@ fn test_dist_cargo_build(message_broker: &str) {
     get_stats(|info| {
         assert_eq!(1, info.stats.dist_compiles.values().sum::<usize>());
         assert_eq!(0, info.stats.dist_errors);
-        assert_eq!(7, info.stats.compile_requests);
+        assert_eq!(5, info.stats.compile_requests);
         assert_eq!(1, info.stats.requests_executed);
         assert_eq!(0, info.stats.cache_hits.all());
         assert_eq!(1, info.stats.cache_misses.all());
@@ -358,7 +358,7 @@ fn test_dist_cargo_makeflags(message_broker: &str) {
     get_stats(|info| {
         assert_eq!(1, info.stats.dist_compiles.values().sum::<usize>());
         assert_eq!(0, info.stats.dist_errors);
-        assert_eq!(7, info.stats.compile_requests);
+        assert_eq!(5, info.stats.compile_requests);
         assert_eq!(1, info.stats.requests_executed);
         assert_eq!(0, info.stats.cache_hits.all());
         assert_eq!(1, info.stats.cache_misses.all());
