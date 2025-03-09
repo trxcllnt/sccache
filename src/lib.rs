@@ -34,7 +34,7 @@ pub mod cache;
 mod client;
 mod cmdline;
 mod commands;
-mod compiler;
+pub mod compiler;
 pub mod config;
 pub mod dist;
 mod jobserver;
