@@ -893,6 +893,19 @@ where
     let mut num_dist_attempts = 1.0f64;
     let mut has_inputs = true;
 
+    let mut maybe_retry = |err: &Error| {
+        if num_dist_attempts < dist_retry_limit {
+            debug!(
+                "[{out_pretty}]: Distributed compilation error ({num_dist_attempts} of {dist_retry_limit}), retrying: {err:#}"
+            );
+            num_dist_attempts += 1.0;
+            std::ops::ControlFlow::Continue(())
+        } else {
+            warn!("[{out_pretty}, {job_id}]: Could not run distributed compilation job: {err}");
+            std::ops::ControlFlow::Break(())
+        }
+    };
+
     let dist_compile_res = loop {
         if !has_toolchain {
             debug!(
@@ -902,17 +915,23 @@ where
             match dist_client
                 .put_toolchain(dist_toolchain.clone())
                 .await
-                .map_err(|e| e.context("Could not submit toolchain"))?
+                .map_err(|e| e.context("Could not submit toolchain"))
             {
-                dist::SubmitToolchainResult::Success => {
+                // Maybe retry network errors
+                Err(err) => {
+                    if maybe_retry(&err).is_break() {
+                        break Err(err);
+                    }
+                }
+                Ok(dist::SubmitToolchainResult::Success) => {
                     trace!(
-                        "[{out_pretty}]: Successfully sent toolchain `{}`",
+                        "[{out_pretty}]: Successfully submitted toolchain `{}`",
                         dist_toolchain.archive_id,
                     );
                 }
-                dist::SubmitToolchainResult::Error { message } => {
-                    trace!(
-                        "[{out_pretty}]: Failed sending toolchain `{}`: {message}",
+                Ok(dist::SubmitToolchainResult::Error { message }) => {
+                    warn!(
+                        "[{out_pretty}]: Failed submitting toolchain `{}`: {message}",
                         dist_toolchain.archive_id,
                     );
                     // Break because we can't run a job without a toolchain
@@ -923,10 +942,19 @@ where
 
         if !has_inputs {
             debug!("[{out_pretty}, {job_id}]: Resubmitting job inputs");
-            dist_client
+            match dist_client
                 .put_job(&job_id, &job_inputs)
                 .await
-                .map_err(|e| e.context("Could not submit job inputs"))?;
+                .map_err(|e| e.context("Could not submit job inputs"))
+            {
+                Ok(_) => {}
+                // Maybe retry network errors
+                Err(err) => {
+                    if maybe_retry(&err).is_break() {
+                        break Err(err);
+                    }
+                }
+            }
         }
 
         debug!("[{out_pretty}, {job_id}]: Running job");
@@ -990,17 +1018,9 @@ where
         match job_result {
             // Maybe retry errors
             Err(err) => {
-                if num_dist_attempts < dist_retry_limit {
-                    warn!(
-                        "[{out_pretty}]: Distributed compilation error ({num_dist_attempts} of {dist_retry_limit}), retrying: {err:#}"
-                    );
-                    num_dist_attempts += 1.0;
-                    continue;
+                if maybe_retry(&err).is_break() {
+                    break Err(err);
                 }
-
-                warn!("[{out_pretty}, {job_id}]: Could not run distributed compilation job: {err}");
-
-                break Err(err);
             }
             Ok((result, server_id)) => {
                 // Don't need this in memory anymore
@@ -1100,9 +1120,9 @@ where
     //
     // Intentionally ignore errors so otherwise successful builds don't fail.
     //
-    // Not unwrapping `dist_compile_res` so that even if the job fails or the
-    // client encounters errors downloading/unpacking the result, the scheduler
-    // is still told to delete the job artifacts.
+    // Don't unwrap `dist_compile_res` until after this, so even if the job
+    // failed or the client encounters errors downloading/unpacking the result,
+    // we still call `del_job` to tell the scheduler to delete the job artifacts.
     let _ = dist_client.del_job(&job_id).await;
 
     dist_compile_res
