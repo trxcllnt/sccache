@@ -1,8 +1,11 @@
 use fs_err as fs;
-#[cfg(any(feature = "dist-client", feature = "dist-server"))]
-use sccache::config::HTTPUrl;
-use sccache::dist::{self, SchedulerStatus};
 use sccache::server::ServerInfo;
+#[cfg(any(feature = "dist-client", feature = "dist-server"))]
+use sccache::{
+    cache::storage_from_config,
+    config::{CacheType, DiskCacheConfig, HTTPUrl},
+    dist,
+};
 use std::env;
 use std::io::Write;
 use std::net::{self, SocketAddr};
@@ -18,10 +21,7 @@ use nix::{
         signal::Signal,
         wait::{WaitPidFlag, WaitStatus},
     },
-    unistd::{
-        // ForkResult,
-        Pid,
-    },
+    unistd::{ForkResult, Pid},
 };
 #[cfg(feature = "dist-server")]
 use sccache::config::MessageBroker;
@@ -203,14 +203,14 @@ pub fn sccache_client_cfg(
 #[cfg(feature = "dist-server")]
 fn sccache_scheduler_cfg(
     tmpdir: &Path,
-    message_broker: MessageBroker,
+    message_broker: &MessageBroker,
 ) -> sccache::config::scheduler::Config {
     let jobs_path = "server-jobs";
     let toolchains_path = "server-toolchains";
     fs::create_dir(tmpdir.join(toolchains_path)).unwrap();
 
     let mut config = sccache::config::scheduler::Config::load(None).unwrap();
-    config.message_broker = Some(message_broker);
+    config.message_broker = Some(message_broker.clone());
     config.public_addr = SocketAddr::from(([0, 0, 0, 0], SCHEDULER_PORT));
     config.client_auth = sccache::config::scheduler::ClientAuth::Insecure;
     config.jobs.fallback.dir = Path::new(CONFIGS_CONTAINER_PATH).join(jobs_path);
@@ -221,7 +221,7 @@ fn sccache_scheduler_cfg(
 #[cfg(feature = "dist-server")]
 fn sccache_server_cfg(
     tmpdir: &Path,
-    message_broker: MessageBroker,
+    message_broker: &MessageBroker,
     // server_ip: IpAddr,
 ) -> sccache::config::server::Config {
     let relpath = "server-cache";
@@ -231,7 +231,7 @@ fn sccache_server_cfg(
     fs::create_dir(tmpdir.join(toolchains_path)).unwrap_or_default();
 
     let mut config = sccache::config::server::Config::load(None).unwrap();
-    config.message_broker = Some(message_broker);
+    config.message_broker = Some(message_broker.clone());
     config.builder = sccache::config::server::BuilderType::Overlay {
         build_dir: BUILD_DIR_CONTAINER_PATH.into(),
         bwrap_path: DIST_IMAGE_BWRAP_PATH.into(),
@@ -243,18 +243,24 @@ fn sccache_server_cfg(
     config
 }
 
-// #[cfg(feature = "dist-server")]
-// pub enum ServerHandle {
-//     Container { cid: String, url: HTTPUrl },
-//     // Process { pid: Pid, url: HTTPUrl },
-// }
+#[cfg(feature = "dist-server")]
+pub enum ServerHandle {
+    Container {
+        id: String,
+    },
+    Process {
+        id: String,
+        #[allow(dead_code)]
+        pid: Pid,
+    },
+}
 
 #[cfg(feature = "dist-server")]
 pub struct DistSystem {
     sccache_dist: PathBuf,
     tmpdir: PathBuf,
 
-    message_broker_name: Option<String>,
+    message_broker_names: Option<Vec<String>>,
     scheduler_name: Option<String>,
     server_names: Vec<String>,
     server_pids: Vec<Pid>,
@@ -287,7 +293,7 @@ impl DistSystem {
             sccache_dist: sccache_dist.to_owned(),
             tmpdir,
 
-            message_broker_name: None,
+            message_broker_names: None,
             scheduler_name: None,
             server_names: vec![],
             server_pids: vec![],
@@ -331,12 +337,16 @@ impl DistSystem {
 
         thread::sleep(Duration::from_secs(5));
 
-        self.message_broker_name = Some(message_broker_name);
+        if let Some(message_broker_names) = self.message_broker_names.as_mut() {
+            message_broker_names.push(message_broker_name);
+        } else {
+            self.message_broker_names = Some(vec![message_broker_name]);
+        }
     }
 
     pub fn scheduler_cfg(
         &self,
-        message_broker: MessageBroker,
+        message_broker: &MessageBroker,
     ) -> sccache::config::scheduler::Config {
         sccache_scheduler_cfg(&self.tmpdir, message_broker)
     }
@@ -361,7 +371,7 @@ impl DistSystem {
                 "-e",
                 "SCCACHE_NO_DAEMON=1",
                 "-e",
-                "SCCACHE_LOG=sccache=debug,tower_http=debug,axum::rejection=trace",
+                "SCCACHE_LOG=sccache=info,tower_http=debug,axum::rejection=trace",
                 "-e",
                 "RUST_BACKTRACE=1",
                 "--network",
@@ -380,9 +390,9 @@ impl DistSystem {
                 "-c",
                 &format!(
                     r#"
-                    set -o errexit &&
-                    exec /sccache-dist scheduler --config {cfg}
-                "#,
+                        set -o errexit &&
+                        exec /sccache-dist scheduler --config {cfg}
+                    "#,
                     cfg = scheduler_cfg_container_path.to_str().unwrap()
                 ),
             ])
@@ -398,7 +408,7 @@ impl DistSystem {
         wait_for(
             || {
                 let status = self.scheduler_status();
-                if matches!(status, SchedulerStatus { .. }) {
+                if matches!(status, dist::SchedulerStatus { .. }) {
                     Ok(())
                 } else {
                     Err(format!("{:?}", status))
@@ -409,11 +419,11 @@ impl DistSystem {
         );
     }
 
-    pub fn server_cfg(&self, message_broker: MessageBroker) -> sccache::config::server::Config {
+    pub fn server_cfg(&self, message_broker: &MessageBroker) -> sccache::config::server::Config {
         sccache_server_cfg(&self.tmpdir, message_broker)
     }
 
-    pub fn add_server(&mut self, server_cfg: sccache::config::server::Config) {
+    pub fn add_server(&mut self, server_cfg: sccache::config::server::Config) -> ServerHandle {
         let server_cfg_relpath = format!("server-cfg-{}.json", self.server_names.len());
         let server_cfg_path = self.tmpdir.join(&server_cfg_relpath);
         let server_cfg_container_path = Path::new(CONFIGS_CONTAINER_PATH).join(server_cfg_relpath);
@@ -423,6 +433,7 @@ impl DistSystem {
             .unwrap();
 
         let server_name = make_container_name("server");
+
         let output = Command::new("docker")
             .args([
                 "run",
@@ -431,9 +442,11 @@ impl DistSystem {
                 "--name",
                 &server_name,
                 "-e",
+                &format!("SCCACHE_DIST_SERVER_ID={server_name}"),
+                "-e",
                 "SCCACHE_NO_DAEMON=1",
                 "-e",
-                "SCCACHE_LOG=sccache=debug,tower_http=debug,axum::rejection=trace",
+                "SCCACHE_LOG=sccache=info,tower_http=debug,axum::rejection=trace",
                 "-e",
                 "RUST_BACKTRACE=1",
                 "--network",
@@ -465,125 +478,161 @@ impl DistSystem {
 
         self.server_names.push(server_name.clone());
 
-        // let url = HTTPUrl::from_url(
-        //     reqwest::Url::parse(&format!("https://{}:{}", server_ip, SERVER_PORT)).unwrap(),
-        // );
-        // let handle = ServerHandle::Container {
-        //     cid: server_name,
-        //     url,
-        // };
-        // self.wait_server_ready(&handle);
-        // handle
+        let handle = ServerHandle::Container { id: server_name };
+        self.wait_server_ready(&handle);
+        handle
     }
 
-    // pub fn add_custom_server<S: dist::ServerIncoming + 'static>(
-    //     &mut self,
-    //     handler: S,
-    // ) -> ServerHandle {
-    //     let server_addr = {
-    //         let ip = IpAddr::from_str("127.0.0.1").unwrap();
-    //         let listener = net::TcpListener::bind(SocketAddr::from((ip, 0))).unwrap();
-    //         listener.local_addr().unwrap()
-    //     };
+    pub fn add_custom_server<B: dist::BuilderIncoming + 'static>(
+        &mut self,
+        server_id: &str,
+        message_broker: &MessageBroker,
+        builder: B,
+        storage: Option<CacheType>,
+    ) -> ServerHandle {
+        let server_id = server_id.to_owned();
+        let builder = std::sync::Arc::new(builder);
+        let message_broker = message_broker.clone();
 
-    //     let runtime = tokio::runtime::Builder::new_current_thread()
-    //         .enable_all()
-    //         .worker_threads(1)
-    //         .build()
-    //         .unwrap();
+        match unsafe { nix::unistd::fork() }.unwrap() {
+            ForkResult::Parent { child } => {
+                self.server_pids.push(child);
 
-    //     let token = create_server_token(ServerId::new(server_addr), DIST_SERVER_TOKEN);
-    //     let server = dist::http::Server::new(
-    //         server_addr,
-    //         server_addr,
-    //         self.scheduler_url().to_url(),
-    //         token,
-    //         1f64,
-    //         1,
-    //         handler,
-    //     )
-    //     .unwrap();
+                let handle = ServerHandle::Process {
+                    pid: child,
+                    id: server_id.to_owned(),
+                };
 
-    //     let pid = match unsafe { nix::unistd::fork() }.unwrap() {
-    //         ForkResult::Parent { child } => {
-    //             self.server_pids.push(child);
-    //             child
-    //         }
-    //         ForkResult::Child => {
-    //             env::set_var("SCCACHE_LOG", "sccache=debug");
-    //             env_logger::try_init().unwrap();
+                self.wait_server_ready(&handle);
 
-    //             runtime.block_on(async move {
-    //                 match server.start().await {
-    //                     Ok(_) => {}
-    //                     Err(err) => panic!("Err: {err}"),
-    //                 }
-    //             });
+                handle
+            }
+            ForkResult::Child => {
+                println!("Child forked");
 
-    //             unreachable!();
-    //         }
-    //     };
+                env::set_var("SCCACHE_NO_DAEMON", "1");
 
-    //     let url =
-    //         HTTPUrl::from_url(reqwest::Url::parse(&format!("https://{}", server_addr)).unwrap());
-    //     let handle = ServerHandle::Process { pid, url };
-    //     self.wait_server_ready(&handle);
-    //     handle
-    // }
+                if env::var("SCCACHE_LOG").is_err() {
+                    env::set_var("SCCACHE_LOG", "sccache=debug");
+                }
 
-    // pub fn restart_server(&mut self, handle: &ServerHandle) {
-    //     match handle {
-    //         ServerHandle::Container { cid, url: _ } => {
-    //             let output = Command::new("docker")
-    //                 .args(["restart", cid])
-    //                 .output()
-    //                 .unwrap();
-    //             check_output(&output);
-    //         } // ServerHandle::Process { pid: _, url: _ } => {
-    //           //     // TODO: pretty easy, just no need yet
-    //           //     panic!("restart not yet implemented for pids")
-    //           // }
-    //     }
-    //     self.wait_server_ready(handle)
-    // }
+                dist::init_logging();
 
-    // pub fn wait_server_ready(&mut self, handle: &ServerHandle) {
-    //     let url = match handle {
-    //         ServerHandle::Container { cid: _, url } => url.clone(), //
-    //         // ServerHandle::Process { pid: _, url } => {
-    //         //     url.clone()
-    //         // }
-    //     };
-    //     wait_for_http(url, Duration::from_millis(100), MAX_STARTUP_WAIT);
-    //     wait_for(
-    //         || {
-    //             let status = self.scheduler_status();
-    //             if matches!(
-    //                 status,
-    //                 SchedulerStatusResult {
-    //                     num_servers: 1,
-    //                     num_cpus: _,
-    //                     active: 0,
-    //                     assigned: 0,
-    //                     servers: _
-    //                 }
-    //             ) {
-    //                 Ok(())
-    //             } else {
-    //                 Err(format!("{:?}", status))
-    //             }
-    //         },
-    //         Duration::from_millis(100),
-    //         MAX_STARTUP_WAIT,
-    //     );
-    // }
+                let ncpu = 4;
+
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(ncpu)
+                    .build()
+                    .unwrap();
+
+                runtime.block_on(async {
+                    println!("Starting server");
+
+                    let job_queue = std::sync::Arc::new(tokio::sync::Semaphore::new(ncpu));
+                    let state = dist::server::ServerState {
+                        id: server_id.to_owned(),
+                        job_queue,
+                        num_cpus: ncpu,
+                        occupancy: ncpu,
+                        pre_fetch: ncpu,
+                        ..Default::default()
+                    };
+
+                    let tasks = dist::tasks::Tasks::server(
+                        &server_id,
+                        &dist::scheduler_to_servers_queue(),
+                        ncpu as u16,
+                        Some(message_broker.clone()),
+                    )
+                    .await
+                    .unwrap();
+
+                    let toolchains = dist::ServerToolchains::new(
+                        self.tmpdir.join("tc"),
+                        u32::MAX as u64,
+                        storage_from_config(
+                            &storage,
+                            &DiskCacheConfig {
+                                dir: self.tmpdir.join("server-toolchains"),
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap(),
+                        Default::default(),
+                    );
+
+                    let server = dist::server::Server::new(
+                        builder,
+                        storage_from_config(
+                            &storage,
+                            &DiskCacheConfig {
+                                dir: self.tmpdir.join("server-jobs"),
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap(),
+                        state,
+                        tasks,
+                        toolchains,
+                    )
+                    .unwrap();
+
+                    match server.start(Duration::from_secs(1)).await {
+                        Ok(_) => {}
+                        Err(err) => panic!("Err: {err}"),
+                    }
+
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                });
+
+                std::process::exit(0);
+            }
+        }
+    }
+
+    pub fn restart_server(&mut self, handle: &ServerHandle) {
+        match handle {
+            ServerHandle::Container { id: cid } => {
+                let output = Command::new("docker")
+                    .args(["restart", cid])
+                    .output()
+                    .unwrap();
+                check_output(&output);
+            }
+            ServerHandle::Process { pid: _, id: _ } => {
+                // TODO: pretty easy, just no need yet
+                panic!("restart not yet implemented for pids")
+            }
+        }
+        self.wait_server_ready(handle)
+    }
+
+    pub fn wait_server_ready(&mut self, handle: &ServerHandle) {
+        let server_id = match handle {
+            ServerHandle::Container { id } => id,
+            ServerHandle::Process { id, .. } => id,
+        };
+        wait_for(
+            || {
+                let status = self.scheduler_status();
+                if status.servers.iter().any(|server| &server.id == server_id) {
+                    Ok(())
+                } else {
+                    Err(format!("{:?}", status))
+                }
+            },
+            Duration::from_millis(100),
+            MAX_STARTUP_WAIT,
+        );
+    }
 
     pub fn scheduler_url(&self) -> HTTPUrl {
         let url = format!("http://127.0.0.1:{}", SCHEDULER_PORT);
         HTTPUrl::from_url(reqwest::Url::parse(&url).unwrap())
     }
 
-    fn scheduler_status(&self) -> SchedulerStatus {
+    fn scheduler_status(&self) -> dist::SchedulerStatus {
         let mut req = reqwest::blocking::Client::builder().build().unwrap().get(
             dist::http::urls::scheduler_status(&self.scheduler_url().to_url()),
         );
@@ -651,7 +700,7 @@ impl Drop for DistSystem {
 
         for &pid in self.server_pids.iter() {
             droperr!(nix::sys::signal::kill(pid, Signal::SIGINT));
-            thread::sleep(Duration::from_millis(100));
+            thread::sleep(MAX_STARTUP_WAIT);
             let mut killagain = true; // Default to trying to kill again, e.g. if there was an error waiting on the pid
             droperr!(
                 nix::sys::wait::waitpid(pid, Some(WaitPidFlag::WNOHANG)).map(|ws| {
@@ -676,19 +725,21 @@ impl Drop for DistSystem {
         }
 
         // Kill the message broker last
-        if let Some(message_broker_name) = self.message_broker_name.as_ref() {
-            droperr!(Command::new("docker")
-                .args(["logs", message_broker_name])
-                .output()
-                .map(|o| logs.push((message_broker_name, o))));
-            droperr!(Command::new("docker")
-                .args(["kill", message_broker_name])
-                .output()
-                .map(|o| outputs.push((message_broker_name, o))));
-            droperr!(Command::new("docker")
-                .args(["rm", "-f", message_broker_name])
-                .output()
-                .map(|o| outputs.push((message_broker_name, o))));
+        if let Some(message_broker_names) = self.message_broker_names.as_ref() {
+            for message_broker_name in message_broker_names.iter() {
+                droperr!(Command::new("docker")
+                    .args(["logs", message_broker_name])
+                    .output()
+                    .map(|o| logs.push((message_broker_name, o))));
+                droperr!(Command::new("docker")
+                    .args(["kill", message_broker_name])
+                    .output()
+                    .map(|o| outputs.push((message_broker_name, o))));
+                droperr!(Command::new("docker")
+                    .args(["rm", "-f", message_broker_name])
+                    .output()
+                    .map(|o| outputs.push((message_broker_name, o))));
+            }
         }
 
         for (

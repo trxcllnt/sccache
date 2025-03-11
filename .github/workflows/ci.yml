@@ -204,7 +204,7 @@ jobs:
             container: '{"image": "messense/rust-musl-cross:x86_64-musl"}'
           - os: ubuntu-22.04
             binary: sccache-dist
-            extra_args: --no-default-features --features="cloud-storage,dist-server"
+            extra_args: --no-default-features --features="dist-server"
             target: x86_64-unknown-linux-musl
             container: '{"image": "messense/rust-musl-cross:x86_64-musl"}'
           - os: ubuntu-22.04
@@ -212,7 +212,7 @@ jobs:
             container: '{"image": "messense/rust-musl-cross:aarch64-musl"}'
           - os: ubuntu-22.04
             binary: sccache-dist
-            extra_args: --no-default-features --features="cloud-storage,dist-server"
+            extra_args: --no-default-features --features="dist-server"
             target: aarch64-unknown-linux-musl
             container: '{"image": "messense/rust-musl-cross:aarch64-musl"}'
           - os: ubuntu-22.04

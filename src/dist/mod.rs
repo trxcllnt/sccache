@@ -33,7 +33,11 @@ pub mod http;
 #[cfg(feature = "dist-server")]
 pub mod metrics;
 #[cfg(feature = "dist-server")]
+pub mod scheduler;
+#[cfg(feature = "dist-server")]
 pub mod server;
+#[cfg(feature = "dist-server")]
+pub mod tasks;
 #[cfg(test)]
 mod test;
 #[cfg(feature = "dist-server")]
@@ -41,6 +45,71 @@ pub mod token_check;
 
 #[cfg(feature = "dist-server")]
 pub use crate::dist::cache::ServerToolchains;
+
+#[cfg(feature = "dist-server")]
+pub(crate) fn job_inputs_key(job_id: &str) -> String {
+    format!("{job_id}-inputs")
+}
+
+#[cfg(feature = "dist-server")]
+pub fn job_result_key(job_id: &str) -> String {
+    format!("{job_id}-result")
+}
+
+#[cfg(feature = "dist-server")]
+pub fn scheduler_to_servers_queue() -> String {
+    queue_name_with_env_info("scheduler-to-servers")
+}
+
+#[cfg(feature = "dist-server")]
+pub fn server_to_schedulers_queue() -> String {
+    queue_name_with_env_info("server-to-schedulers")
+}
+
+#[cfg(feature = "dist-server")]
+pub fn to_scheduler_queue(id: &str) -> String {
+    queue_name_with_env_info(&format!("scheduler-{id}"))
+}
+
+#[cfg(feature = "dist-server")]
+pub fn queue_name_with_env_info(prefix: &str) -> String {
+    format!("{prefix}-{}", env_info())
+}
+
+#[cfg(feature = "dist-server")]
+pub fn env_info() -> String {
+    let arch = std::env::var("SCCACHE_DIST_ARCH").unwrap_or(std::env::consts::ARCH.to_owned());
+    let os = std::env::var("SCCACHE_DIST_OS").unwrap_or(std::env::consts::OS.to_owned());
+    format!("{os}-{arch}")
+}
+
+#[cfg(feature = "dist-server")]
+pub fn init_logging() {
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+    if std::env::var(crate::LOGGING_ENV).is_ok() {
+        match tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_env(crate::LOGGING_ENV).unwrap_or_else(
+                    |_| {
+                        // axum logs rejections from built-in extractors with the `axum::rejection`
+                        // target, at `TRACE` level. `axum::rejection=trace` enables showing those events
+                        format!(
+                            "{}=debug,tower_http=debug,axum::rejection=trace",
+                            env!("CARGO_CRATE_NAME")
+                        )
+                        .into()
+                    },
+                ),
+            )
+            .with(tracing_subscriber::fmt::layer())
+            .try_init()
+        {
+            Ok(_) => (),
+            Err(e) => panic!("Failed to initialize logging: {:?}", e),
+        }
+    }
+}
 
 // TODO: paths (particularly outputs, which are accessed by an unsandboxed program)
 // should be some pre-sanitised AbsPath type
@@ -52,6 +121,7 @@ pub mod pkg;
 #[cfg(not(feature = "dist-client"))]
 mod pkg {
     pub trait ToolchainPackager {}
+    #[allow(dead_code)]
     pub trait InputsPackager {}
 }
 

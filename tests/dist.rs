@@ -6,21 +6,22 @@ extern crate log;
 extern crate sccache;
 extern crate serde_json;
 
-// use async_trait::async_trait;
+use async_trait::async_trait;
 
 use crate::harness::{
     cargo_command, get_stats, init_cargo, sccache_command, start_local_daemon, stop_local_daemon,
     write_json_cfg, write_source,
 };
 use assert_cmd::prelude::*;
-use sccache::config::HTTPUrl;
+use sccache::{
+    config::{CacheType, HTTPUrl, MessageBroker, RedisCacheConfig},
+    dist::{BuildResult, BuilderIncoming, CompileCommand},
+};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Output;
 
 use test_case::test_case;
-
-// use sccache::errors::*;
 
 mod harness;
 
@@ -120,8 +121,8 @@ fn test_dist_basic(message_broker: &str) {
 
     let mut system = harness::DistSystem::new(&sccache_dist, tmpdir);
     let message_broker = system.add_message_broker(message_broker);
-    system.add_scheduler(system.scheduler_cfg(message_broker.clone()));
-    system.add_server(system.server_cfg(message_broker.clone()));
+    system.add_scheduler(system.scheduler_cfg(&message_broker));
+    system.add_server(system.server_cfg(&message_broker));
 
     let sccache_cfg = dist_test_sccache_client_cfg(tmpdir, system.scheduler_url());
     let sccache_cfg_path = tmpdir.join("sccache-cfg.json");
@@ -140,159 +141,168 @@ fn test_dist_basic(message_broker: &str) {
         assert_eq!(0, info.stats.cache_hits.all());
         assert_eq!(1, info.stats.cache_misses.all());
     });
+
+    stop_local_daemon();
 }
 
-// #[test]
-// #[cfg_attr(not(feature = "dist-tests"), ignore)]
-// fn test_dist_restartedserver() {
-//     let tmpdir = tempfile::Builder::new()
-//         .prefix("sccache_dist_test")
-//         .tempdir()
-//         .unwrap();
-//     let tmpdir = tmpdir.path();
-//     let sccache_dist = harness::sccache_dist_path();
+#[test_case("rabbitmq" ; "With rabbitmq")]
+#[test_case("redis" ; "With redis")]
+#[cfg_attr(not(feature = "dist-tests"), ignore)]
+fn test_dist_restarted_server(message_broker: &str) {
+    let tmpdir = tempfile::Builder::new()
+        .prefix("sccache_dist_test")
+        .tempdir()
+        .unwrap();
+    let tmpdir = tmpdir.path();
+    let sccache_dist = harness::sccache_dist_path();
 
-//     let mut system = harness::DistSystem::new(&sccache_dist, tmpdir);
-//     system.add_scheduler();
-//     let server_handle = system.add_server();
+    let mut system = harness::DistSystem::new(&sccache_dist, tmpdir);
+    let message_broker = system.add_message_broker(message_broker);
+    system.add_scheduler(system.scheduler_cfg(&message_broker));
+    let server_handle = system.add_server(system.server_cfg(&message_broker));
 
-//     let sccache_cfg = dist_test_sccache_client_cfg(tmpdir, system.scheduler_url());
-//     let sccache_cfg_path = tmpdir.join("sccache-cfg.json");
-//     write_json_cfg(tmpdir, "sccache-cfg.json", &sccache_cfg);
-//     let sccache_cached_cfg_path = tmpdir.join("sccache-cached-cfg");
+    let sccache_cfg = dist_test_sccache_client_cfg(tmpdir, system.scheduler_url());
+    let sccache_cfg_path = tmpdir.join("sccache-cfg.json");
+    write_json_cfg(tmpdir, "sccache-cfg.json", &sccache_cfg);
+    let sccache_cached_cfg_path = tmpdir.join("sccache-cached-cfg");
 
-//     stop_local_daemon();
-//     start_local_daemon(&sccache_cfg_path, &sccache_cached_cfg_path);
-//     basic_compile(tmpdir, &sccache_cfg_path, &sccache_cached_cfg_path);
+    stop_local_daemon();
+    start_local_daemon(&sccache_cfg_path, &sccache_cached_cfg_path);
+    basic_compile(tmpdir, &sccache_cfg_path, &sccache_cached_cfg_path);
 
-//     system.restart_server(&server_handle);
-//     basic_compile(tmpdir, &sccache_cfg_path, &sccache_cached_cfg_path);
+    system.restart_server(&server_handle);
 
-//     get_stats(|info| {
-//         assert_eq!(2, info.stats.dist_compiles.values().sum::<usize>());
-//         assert_eq!(0, info.stats.dist_errors);
-//         assert_eq!(2, info.stats.compile_requests);
-//         assert_eq!(2, info.stats.requests_executed);
-//         assert_eq!(0, info.stats.cache_hits.all());
-//         assert_eq!(2, info.stats.cache_misses.all());
-//     });
-// }
+    basic_compile(tmpdir, &sccache_cfg_path, &sccache_cached_cfg_path);
 
-// #[test_case("rabbitmq" ; "with RabbitMQ")]
-// #[test_case("redis" ; "with Redis")]
-// #[cfg_attr(not(feature = "dist-tests"), ignore)]
-// fn test_dist_nobuilder(message_broker: &str) {
-//     let tmpdir = tempfile::Builder::new()
-//         .prefix("sccache_dist_test")
-//         .tempdir()
-//         .unwrap();
-//     let tmpdir = tmpdir.path();
-//     let sccache_dist = harness::sccache_dist_path();
+    get_stats(|info| {
+        assert_eq!(2, info.stats.dist_compiles.values().sum::<usize>());
+        assert_eq!(0, info.stats.dist_errors);
+        assert_eq!(2, info.stats.compile_requests);
+        assert_eq!(2, info.stats.requests_executed);
+        assert_eq!(0, info.stats.cache_hits.all());
+        assert_eq!(2, info.stats.cache_misses.all());
+    });
 
-//     let mut system = harness::DistSystem::new(&sccache_dist, tmpdir);
-//     let message_broker = system.add_message_broker(message_broker);
-//     system.add_scheduler(message_broker.clone());
-//     // system.add_server(message_broker.clone());
+    stop_local_daemon();
+}
 
-//     let sccache_cfg = dist_test_sccache_client_cfg(tmpdir, system.scheduler_url());
-//     let sccache_cfg_path = tmpdir.join("sccache-cfg.json");
-//     write_json_cfg(tmpdir, "sccache-cfg.json", &sccache_cfg);
-//     let sccache_cached_cfg_path = tmpdir.join("sccache-cached-cfg");
+#[test_case("rabbitmq" ; "with RabbitMQ")]
+#[test_case("redis" ; "with Redis")]
+#[cfg_attr(not(feature = "dist-tests"), ignore)]
+fn test_dist_no_builder_times_out(message_broker: &str) {
+    let tmpdir = tempfile::Builder::new()
+        .prefix("sccache_dist_test")
+        .tempdir()
+        .unwrap();
+    let tmpdir = tmpdir.path();
+    let sccache_dist = harness::sccache_dist_path();
 
-//     stop_local_daemon();
-//     start_local_daemon(&sccache_cfg_path, &sccache_cached_cfg_path);
-//     basic_compile(tmpdir, &sccache_cfg_path, &sccache_cached_cfg_path);
+    let mut system = harness::DistSystem::new(&sccache_dist, tmpdir);
+    let message_broker = system.add_message_broker(message_broker);
+    let mut scheduler_cfg = system.scheduler_cfg(&message_broker);
+    scheduler_cfg.job_time_limit = 10;
+    system.add_scheduler(scheduler_cfg);
 
-//     get_stats(|info| {
-//         assert_eq!(0, info.stats.dist_compiles.values().sum::<usize>());
-//         assert_eq!(1, info.stats.dist_errors);
-//         assert_eq!(1, info.stats.compile_requests);
-//         assert_eq!(1, info.stats.requests_executed);
-//         assert_eq!(0, info.stats.cache_hits.all());
-//         assert_eq!(1, info.stats.cache_misses.all());
-//     });
-// }
+    let sccache_cfg = dist_test_sccache_client_cfg(tmpdir, system.scheduler_url());
+    let sccache_cfg_path = tmpdir.join("sccache-cfg.json");
+    write_json_cfg(tmpdir, "sccache-cfg.json", &sccache_cfg);
+    let sccache_cached_cfg_path = tmpdir.join("sccache-cached-cfg");
 
-// struct FailingServer;
+    stop_local_daemon();
+    start_local_daemon(&sccache_cfg_path, &sccache_cached_cfg_path);
+    basic_compile(tmpdir, &sccache_cfg_path, &sccache_cached_cfg_path);
 
-// #[async_trait]
-// impl ServerIncoming for FailingServer {
-//     fn start_heartbeat(&self, requester: std::sync::Arc<dyn ServerOutgoing>) {
-//         tokio::spawn(async move {
-//             trace!("Performing heartbeat");
-//             match requester.do_heartbeat(0, 0).await {
-//                 Ok(sccache::dist::HeartbeatServerResult { is_new }) => {
-//                     trace!("Heartbeat success is_new={}", is_new);
-//                 }
-//                 Err(e) => {
-//                     error!("Failed to send heartbeat to server: {}", e);
-//                 }
-//             }
-//         });
-//     }
+    get_stats(|info| {
+        assert_eq!(0, info.stats.dist_compiles.values().sum::<usize>());
+        assert_eq!(1, info.stats.dist_errors);
+        assert_eq!(1, info.stats.compile_requests);
+        assert_eq!(1, info.stats.requests_executed);
+        assert_eq!(0, info.stats.cache_hits.all());
+        assert_eq!(1, info.stats.cache_misses.all());
+    });
 
-//     async fn handle_assign_job(&self, _tc: Toolchain) -> Result<AssignJobResult> {
-//         let need_toolchain = false;
-//         Ok(AssignJobResult {
-//             job_id: JobId(0),
-//             need_toolchain,
-//             num_assigned_jobs: 1,
-//             num_active_jobs: 0,
-//         })
-//     }
-//     async fn handle_submit_toolchain(
-//         &self,
-//         _job_id: JobId,
-//         _tc_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
-//     ) -> Result<SubmitToolchainResult> {
-//         panic!("should not have submitted toolchain")
-//     }
-//     async fn handle_run_job(
-//         &self,
-//         _job_id: JobId,
-//         _command: CompileCommand,
-//         _outputs: Vec<String>,
-//         _inputs_rdr: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
-//     ) -> Result<RunJobResult> {
-//         bail!("internal build failure")
-//     }
-// }
+    stop_local_daemon();
+}
 
-// #[test]
-// #[cfg_attr(not(feature = "dist-tests"), ignore)]
-// fn test_dist_failingserver() {
-//     let tmpdir = tempfile::Builder::new()
-//         .prefix("sccache_dist_test")
-//         .tempdir()
-//         .unwrap();
-//     let tmpdir = tmpdir.path();
-//     let sccache_dist = harness::sccache_dist_path();
+#[test_case("rabbitmq" ; "with RabbitMQ")]
+#[test_case("redis" ; "with Redis")]
+#[cfg_attr(not(feature = "dist-tests"), ignore)]
+fn test_dist_failing_server(message_broker: &str) {
+    struct FailingBuilder;
 
-//     let mut system = harness::DistSystem::new(&sccache_dist, tmpdir);
-//     system.add_scheduler();
-//     system.add_custom_server(FailingServer);
+    #[async_trait]
+    impl BuilderIncoming for FailingBuilder {
+        async fn run_build(
+            &self,
+            _job_id: &str,
+            _toolchain_dir: &Path,
+            _inputs: Vec<u8>,
+            _command: CompileCommand,
+            _outputs: Vec<String>,
+        ) -> anyhow::Result<BuildResult> {
+            Err(anyhow::anyhow!("server failure"))
+        }
+    }
 
-//     let sccache_cfg = dist_test_sccache_client_cfg(tmpdir, system.scheduler_url());
-//     let sccache_cfg_path = tmpdir.join("sccache-cfg.json");
-//     write_json_cfg(tmpdir, "sccache-cfg.json", &sccache_cfg);
-//     let sccache_cached_cfg_path = tmpdir.join("sccache-cached-cfg");
+    let tmpdir = tempfile::Builder::new()
+        .prefix("sccache_dist_test")
+        .tempdir()
+        .unwrap();
+    let tmpdir = tmpdir.path();
+    let sccache_dist = harness::sccache_dist_path();
+    let server_id = format!("fail-{message_broker}");
 
-//     stop_local_daemon();
-//     start_local_daemon(&sccache_cfg_path, &sccache_cached_cfg_path);
-//     basic_compile(tmpdir, &sccache_cfg_path, &sccache_cached_cfg_path);
+    let mut system = harness::DistSystem::new(&sccache_dist, tmpdir);
+    let message_broker = system.add_message_broker(message_broker);
 
-//     get_stats(|info| {
-//         assert_eq!(0, info.stats.dist_compiles.values().sum::<usize>());
-//         assert_eq!(1, info.stats.dist_errors);
-//         assert_eq!(1, info.stats.compile_requests);
-//         assert_eq!(1, info.stats.requests_executed);
-//         assert_eq!(0, info.stats.cache_hits.all());
-//         assert_eq!(1, info.stats.cache_misses.all());
-//     });
-// }
+    // Use redis as job and toolchain storage to avoid permissions issues with
+    // the scheduler docker container running as root vs. the forked custom
+    // failing server process being non-root
+    let storage = {
+        let redis_cfg = if let MessageBroker::Redis(_) = message_broker {
+            message_broker.clone()
+        } else {
+            system.add_message_broker("redis")
+        };
+        let redis_url = match redis_cfg {
+            MessageBroker::Redis(url) => url,
+            _ => unreachable!(),
+        };
+        Some(CacheType::Redis(RedisCacheConfig {
+            endpoint: Some(redis_url),
+            ..Default::default()
+        }))
+    };
+
+    let mut scheduler_cfg = system.scheduler_cfg(&message_broker);
+    scheduler_cfg.jobs.storage = storage.clone();
+    scheduler_cfg.toolchains.storage = storage.clone();
+    system.add_scheduler(scheduler_cfg);
+    system.add_custom_server(&server_id, &message_broker, FailingBuilder, storage.clone());
+
+    let sccache_cfg = dist_test_sccache_client_cfg(tmpdir, system.scheduler_url());
+    let sccache_cfg_path = tmpdir.join("sccache-cfg.json");
+    write_json_cfg(tmpdir, "sccache-cfg.json", &sccache_cfg);
+    let sccache_cached_cfg_path = tmpdir.join("sccache-cached-cfg");
+
+    stop_local_daemon();
+    start_local_daemon(&sccache_cfg_path, &sccache_cached_cfg_path);
+    basic_compile(tmpdir, &sccache_cfg_path, &sccache_cached_cfg_path);
+
+    get_stats(|info| {
+        assert_eq!(0, info.stats.dist_compiles.values().sum::<usize>());
+        assert_eq!(1, info.stats.dist_errors);
+        assert_eq!(1, info.stats.compile_requests);
+        assert_eq!(1, info.stats.requests_executed);
+        assert_eq!(0, info.stats.cache_hits.all());
+        assert_eq!(1, info.stats.cache_misses.all());
+    });
+
+    stop_local_daemon();
+}
 
 #[test_case("rabbitmq" ; "With rabbitmq")]
-// #[test_case("redis" ; "With redis")]
+#[test_case("redis" ; "With redis")]
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 fn test_dist_cargo_build(message_broker: &str) {
     let tmpdir = tempfile::Builder::new()
@@ -304,8 +314,8 @@ fn test_dist_cargo_build(message_broker: &str) {
 
     let mut system = harness::DistSystem::new(&sccache_dist, tmpdir);
     let message_broker = system.add_message_broker(message_broker);
-    system.add_scheduler(system.scheduler_cfg(message_broker.clone()));
-    system.add_server(system.server_cfg(message_broker.clone()));
+    system.add_scheduler(system.scheduler_cfg(&message_broker));
+    system.add_server(system.server_cfg(&message_broker));
 
     let sccache_cfg = dist_test_sccache_client_cfg(tmpdir, system.scheduler_url());
     let sccache_cfg_path = tmpdir.join("sccache-cfg.json");
@@ -326,6 +336,8 @@ fn test_dist_cargo_build(message_broker: &str) {
         assert_eq!(0, info.stats.cache_hits.all());
         assert_eq!(1, info.stats.cache_misses.all());
     });
+
+    stop_local_daemon();
 }
 
 #[test_case("rabbitmq" ; "With rabbitmq")]
@@ -341,8 +353,8 @@ fn test_dist_cargo_makeflags(message_broker: &str) {
 
     let mut system = harness::DistSystem::new(&sccache_dist, tmpdir);
     let message_broker = system.add_message_broker(message_broker);
-    system.add_scheduler(system.scheduler_cfg(message_broker.clone()));
-    system.add_server(system.server_cfg(message_broker.clone()));
+    system.add_scheduler(system.scheduler_cfg(&message_broker));
+    system.add_server(system.server_cfg(&message_broker));
 
     let sccache_cfg = dist_test_sccache_client_cfg(tmpdir, system.scheduler_url());
     let sccache_cfg_path = tmpdir.join("sccache-cfg.json");
@@ -365,4 +377,6 @@ fn test_dist_cargo_makeflags(message_broker: &str) {
         assert_eq!(0, info.stats.cache_hits.all());
         assert_eq!(1, info.stats.cache_misses.all());
     });
+
+    stop_local_daemon();
 }

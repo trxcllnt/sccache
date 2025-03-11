@@ -1,26 +1,25 @@
 use futures::FutureExt;
-use sccache::dist::metrics::Metrics;
-use sccache::{cache::cache::storage_from_config, config::server::BuilderType};
-use scheduler::{SchedulerMetrics, SchedulerTasks};
 
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
-
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[cfg_attr(target_os = "freebsd", path = "build_freebsd.rs")]
 mod build;
 
 mod cmdline;
 use cmdline::Command;
-mod scheduler;
-mod server;
-mod tasks;
 
 use sccache::{
-    config::{scheduler as scheduler_config, server as server_config},
-    dist::{self, BuilderIncoming, ServerToolchains},
+    cache::cache::storage_from_config,
+    config::{scheduler as scheduler_config, server as server_config, server::BuilderType},
+    dist::{
+        self, env_info,
+        metrics::Metrics,
+        scheduler::{self, SchedulerMetrics, SchedulerTasks},
+        scheduler_to_servers_queue, server, tasks, to_scheduler_queue, BuilderIncoming,
+        ServerToolchains,
+    },
     errors::*,
 };
 
@@ -31,7 +30,7 @@ use sccache::{
     target_os = "freebsd"
 ))]
 fn main() {
-    init_logging();
+    dist::init_logging();
 
     let incr_env_strs = ["CARGO_BUILD_INCREMENTAL", "CARGO_INCREMENTAL"];
     incr_env_strs
@@ -137,11 +136,8 @@ fn run(command: Command) -> Result<()> {
                         toolchains_storage,
                     )?;
 
-                    let server = dist::server::Scheduler::new(
-                        scheduler.clone(),
-                        client_auth.into(),
-                    )
-                    .serve(public_addr, max_body_size, metrics);
+                    let server = dist::http::Scheduler::new(scheduler.clone(), client_auth.into())
+                        .serve(public_addr, max_body_size, metrics);
 
                     let celery = scheduler.start();
 
@@ -242,61 +238,6 @@ fn run(command: Command) -> Result<()> {
                 }
             }
         })
-}
-
-pub(crate) fn job_inputs_key(job_id: &str) -> String {
-    format!("{job_id}-inputs")
-}
-
-pub(crate) fn job_result_key(job_id: &str) -> String {
-    format!("{job_id}-result")
-}
-
-pub(crate) fn scheduler_to_servers_queue() -> String {
-    queue_name_with_env_info("scheduler-to-servers")
-}
-
-pub(crate) fn server_to_schedulers_queue() -> String {
-    queue_name_with_env_info("server-to-schedulers")
-}
-
-pub(crate) fn to_scheduler_queue(id: &str) -> String {
-    queue_name_with_env_info(&format!("scheduler-{id}"))
-}
-
-fn queue_name_with_env_info(prefix: &str) -> String {
-    format!("{prefix}-{}", env_info())
-}
-
-fn env_info() -> String {
-    let arch = std::env::var("SCCACHE_DIST_ARCH").unwrap_or(std::env::consts::ARCH.to_owned());
-    let os = std::env::var("SCCACHE_DIST_OS").unwrap_or(std::env::consts::OS.to_owned());
-    format!("{os}-{arch}")
-}
-
-fn init_logging() {
-    if env::var(sccache::LOGGING_ENV).is_ok() {
-        match tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::EnvFilter::try_from_env(sccache::LOGGING_ENV).unwrap_or_else(
-                    |_| {
-                        // axum logs rejections from built-in extractors with the `axum::rejection`
-                        // target, at `TRACE` level. `axum::rejection=trace` enables showing those events
-                        format!(
-                            "{}=debug,tower_http=debug,axum::rejection=trace",
-                            env!("CARGO_CRATE_NAME")
-                        )
-                        .into()
-                    },
-                ),
-            )
-            .with(tracing_subscriber::fmt::layer())
-            .try_init()
-        {
-            Ok(_) => (),
-            Err(e) => panic!("Failed to initialize logging: {:?}", e),
-        }
-    }
 }
 
 async fn init_builder(
