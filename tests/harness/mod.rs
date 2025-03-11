@@ -4,7 +4,6 @@ use sccache::server::ServerInfo;
 use sccache::{
     cache::storage_from_config,
     config::{CacheType, DiskCacheConfig, HTTPUrl},
-    dist,
 };
 use std::env;
 use std::io::Write;
@@ -21,10 +20,10 @@ use nix::{
         signal::Signal,
         wait::{WaitPidFlag, WaitStatus},
     },
-    unistd::{ForkResult, Pid},
+    unistd::Pid,
 };
 #[cfg(feature = "dist-server")]
-use sccache::config::MessageBroker;
+use sccache::{config::MessageBroker, dist};
 
 use serde::Serialize;
 use uuid::Uuid;
@@ -300,6 +299,22 @@ impl DistSystem {
         }
     }
 
+    pub fn message_broker_cfg(message_broker: &str) -> MessageBroker {
+        match message_broker {
+            "rabbitmq" => MessageBroker::AMQP(Self::rabbit_mq_url()),
+            "redis" => MessageBroker::Redis(Self::redis_url()),
+            _ => unreachable!(""),
+        }
+    }
+
+    pub fn rabbit_mq_url() -> String {
+        "amqp://127.0.0.1:5672//".into()
+    }
+
+    pub fn redis_url() -> String {
+        "redis://127.0.0.1:6379/".into()
+    }
+
     pub fn add_message_broker(&mut self, message_broker: &str) -> MessageBroker {
         match message_broker {
             "rabbitmq" => self.add_rabbit_mq(),
@@ -310,12 +325,12 @@ impl DistSystem {
 
     pub fn add_rabbit_mq(&mut self) -> MessageBroker {
         self.run_message_broker("rabbitmq:4", "5672:5672");
-        MessageBroker::AMQP("amqp://127.0.0.1:5672//".into())
+        MessageBroker::AMQP(Self::rabbit_mq_url())
     }
 
     pub fn add_redis(&mut self) -> MessageBroker {
         self.run_message_broker("redis:7", "6379:6379");
-        MessageBroker::Redis("redis://127.0.0.1:6379/".into())
+        MessageBroker::Redis(Self::redis_url())
     }
 
     fn run_message_broker(&mut self, image_tag: &str, ports: &str) {
@@ -483,112 +498,17 @@ impl DistSystem {
         handle
     }
 
-    pub fn add_custom_server<B: dist::BuilderIncoming + 'static>(
-        &mut self,
-        server_id: &str,
-        message_broker: &MessageBroker,
-        builder: B,
-        storage: Option<CacheType>,
-    ) -> ServerHandle {
-        let server_id = server_id.to_owned();
-        let builder = std::sync::Arc::new(builder);
-        let message_broker = message_broker.clone();
+    pub fn add_custom_server(&mut self, server_id: &str, pid: Pid) -> ServerHandle {
+        self.server_pids.push(pid);
 
-        match unsafe { nix::unistd::fork() }.unwrap() {
-            ForkResult::Parent { child } => {
-                self.server_pids.push(child);
+        let handle = ServerHandle::Process {
+            pid,
+            id: server_id.to_owned(),
+        };
 
-                let handle = ServerHandle::Process {
-                    pid: child,
-                    id: server_id.to_owned(),
-                };
+        self.wait_server_ready(&handle);
 
-                self.wait_server_ready(&handle);
-
-                handle
-            }
-            ForkResult::Child => {
-                println!("Child forked");
-
-                env::set_var("SCCACHE_NO_DAEMON", "1");
-
-                if env::var("SCCACHE_LOG").is_err() {
-                    env::set_var("SCCACHE_LOG", "sccache=debug");
-                }
-
-                dist::init_logging();
-
-                let ncpu = 4;
-
-                let runtime = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .worker_threads(ncpu)
-                    .build()
-                    .unwrap();
-
-                runtime.block_on(async {
-                    println!("Starting server");
-
-                    let job_queue = std::sync::Arc::new(tokio::sync::Semaphore::new(ncpu));
-                    let state = dist::server::ServerState {
-                        id: server_id.to_owned(),
-                        job_queue,
-                        num_cpus: ncpu,
-                        occupancy: ncpu,
-                        pre_fetch: ncpu,
-                        ..Default::default()
-                    };
-
-                    let tasks = dist::tasks::Tasks::server(
-                        &server_id,
-                        &dist::scheduler_to_servers_queue(),
-                        ncpu as u16,
-                        Some(message_broker.clone()),
-                    )
-                    .await
-                    .unwrap();
-
-                    let toolchains = dist::ServerToolchains::new(
-                        self.tmpdir.join("tc"),
-                        u32::MAX as u64,
-                        storage_from_config(
-                            &storage,
-                            &DiskCacheConfig {
-                                dir: self.tmpdir.join("server-toolchains"),
-                                ..Default::default()
-                            },
-                        )
-                        .unwrap(),
-                        Default::default(),
-                    );
-
-                    let server = dist::server::Server::new(
-                        builder,
-                        storage_from_config(
-                            &storage,
-                            &DiskCacheConfig {
-                                dir: self.tmpdir.join("server-jobs"),
-                                ..Default::default()
-                            },
-                        )
-                        .unwrap(),
-                        state,
-                        tasks,
-                        toolchains,
-                    )
-                    .unwrap();
-
-                    match server.start(Duration::from_secs(1)).await {
-                        Ok(_) => {}
-                        Err(err) => panic!("Err: {err}"),
-                    }
-
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                });
-
-                std::process::exit(0);
-            }
-        }
+        handle
     }
 
     pub fn restart_server(&mut self, handle: &ServerHandle) {
@@ -784,6 +704,91 @@ impl Drop for DistSystem {
             panic!("Encountered failures during dist system teardown")
         }
     }
+}
+
+#[cfg(feature = "dist-server")]
+pub fn add_custom_server<B: dist::BuilderIncoming + 'static>(
+    server_id: &str,
+    message_broker: &MessageBroker,
+    builder: B,
+    storage: Option<CacheType>,
+    tmpdir: &Path,
+) -> std::result::Result<(), anyhow::Error> {
+    let server_id = server_id.to_owned();
+    let builder = std::sync::Arc::new(builder);
+    let message_broker = message_broker.clone();
+
+    env::set_var("SCCACHE_NO_DAEMON", "1");
+
+    if env::var("SCCACHE_LOG").is_err() {
+        env::set_var("SCCACHE_LOG", "sccache=debug");
+    }
+
+    dist::init_logging();
+
+    let ncpu = 4;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(ncpu)
+        .build()?;
+
+    runtime.block_on(async {
+        let job_queue = std::sync::Arc::new(tokio::sync::Semaphore::new(ncpu));
+        let state = dist::server::ServerState {
+            id: server_id.to_owned(),
+            job_queue,
+            num_cpus: ncpu,
+            occupancy: ncpu,
+            pre_fetch: ncpu,
+            ..Default::default()
+        };
+
+        let tasks = loop {
+            if let Ok(tasks) = dist::tasks::Tasks::server(
+                &server_id,
+                &dist::scheduler_to_servers_queue(),
+                ncpu as u16,
+                Some(message_broker.clone()),
+            )
+            .await
+            {
+                break tasks;
+            }
+        };
+
+        let toolchains = dist::ServerToolchains::new(
+            tmpdir.join("tc"),
+            u32::MAX as u64,
+            storage_from_config(
+                &storage,
+                &DiskCacheConfig {
+                    dir: tmpdir.join("toolchains"),
+                    ..Default::default()
+                },
+            )?,
+            Default::default(),
+        );
+
+        let server = dist::server::Server::new(
+            builder,
+            storage_from_config(
+                &storage,
+                &DiskCacheConfig {
+                    dir: tmpdir.join("jobs"),
+                    ..Default::default()
+                },
+            )?,
+            state,
+            tasks,
+            toolchains,
+        )?;
+
+        match server.start(Duration::from_secs(1)).await {
+            Ok(_) => Ok(()),
+            Err(err) => Err(err),
+        }
+    })
 }
 
 fn make_container_name(tag: &str) -> String {
