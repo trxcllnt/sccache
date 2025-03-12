@@ -2,6 +2,17 @@ name: ci
 on: [ push, pull_request ]
 
 jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    outputs:
+      has-codecov-token: ${{ steps.has-codecov-token.outputs.defined }}
+    steps:
+      - id: has-codecov-token
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        if: "${{ env.CODECOV_TOKEN != '' }}"
+        run: echo "::set-output name=defined::true"
   lint:
     name: ${{ matrix.component }} ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -268,6 +279,8 @@ jobs:
           if-no-files-found: error
 
   coverage:
+    needs: [checks]
+    if: needs.checks.outputs.has-codecov-token == 'true'
     name: coverage ${{ matrix.os }} rust ${{ matrix.rustc || 'stable' }} ${{ matrix.extra_desc }}
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.allow_failure || false }}
@@ -308,9 +321,9 @@ jobs:
           toolchain: ${{ matrix.rustc }}
           components: llvm-tools-preview
 
-      - name: Install gcc & clang for tests
+      - if: matrix.os == 'ubuntu-22.04'
+        name: Install gcc & clang for tests
         run: sudo apt-get install -y clang gcc
-        if: ${{ matrix.os == 'ubuntu-22.04' }}
 
       - if: matrix.cuda != '' && contains(fromJSON('["Linux", "Windows"]'), runner.os)
         name: Install nvcc
@@ -347,7 +360,6 @@ jobs:
           mkdir -p "${COVERAGE_REPORT_DIR}"
           grcov . -s . --binary-path $BINARY_DIR --output-type lcov --output-path "${COVERAGE_REPORT_FILE}" --branch $GRCOV_IGNORE_OPTION $GRCOV_EXCLUDE_OPTION
           echo "report=${COVERAGE_REPORT_FILE}" >> $GITHUB_OUTPUT
-
 
       - name: Upload coverage results (to Codecov.io)
         uses: codecov/codecov-action@v5
