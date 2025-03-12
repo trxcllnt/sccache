@@ -73,11 +73,12 @@ impl SccacheClient {
         // Send daemon logs to a file if SCCACHE_DEBUG is defined
         if env::var("SCCACHE_DEBUG").is_ok() {
             envvars.extend_from_slice(&[
-                ("RUST_LOG_STYLE".into(), "never".into()),
                 // Allow overriding log level
                 (
-                    "SCCACHE_LOG".into(),
-                    env::var_os("SCCACHE_LOG").unwrap_or("sccache=trace".into()),
+                    "SCCACHE_SERVER_LOG".into(),
+                    env::var_os("SCCACHE_SERVER_LOG")
+                        .or(env::var_os("SCCACHE_LOG"))
+                        .unwrap_or("sccache=trace".into()),
                 ),
                 // Allow overriding log output path
                 (
@@ -106,7 +107,15 @@ impl SccacheClient {
         trace!("sccache --start-server");
         // Don't run this with run() because on Windows `wait_with_output`
         // will hang because the internal server process is not detached.
-        if !self.cmd().arg("--start-server").status().unwrap().success() {
+        if !self
+            .cmd()
+            .arg("--start-server")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+        {
             panic!("Failed to start local daemon");
         }
         self
@@ -341,8 +350,8 @@ impl DistMessageBroker {
         self.config.clone()
     }
 
-    pub fn url(&self) -> String {
-        self.url.clone()
+    pub fn url(&self) -> HTTPUrl {
+        HTTPUrl::from_url(reqwest::Url::parse(&self.url).unwrap())
     }
 }
 
@@ -657,8 +666,6 @@ impl DistSystem {
 
         check_output(&output);
 
-        thread::sleep(Duration::from_secs(5));
-
         self.handles
             .push(DistHandle::MessageBroker(MessageBrokerHandle {
                 broker: message_broker.clone(),
@@ -697,13 +704,15 @@ impl DistSystem {
                 "-e",
                 "SCCACHE_NO_DAEMON=1",
                 "-e",
-                "SCCACHE_LOG=sccache=debug,tower_http=info,axum::rejection=trace",
+                "SCCACHE_LOG=sccache=info,tower_http=debug,axum::rejection=trace",
                 "-e",
                 "RUST_BACKTRACE=1",
                 "-e",
                 "TOKIO_WORKER_THREADS=2",
                 "--network",
                 "host",
+                "--restart",
+                "always",
                 "-v",
                 &format!("{}:/sccache-dist:z", self.sccache_dist.to_str().unwrap()),
                 "-v",
@@ -793,6 +802,8 @@ impl DistSystem {
                 "TOKIO_WORKER_THREADS=2",
                 "--network",
                 "host",
+                "--restart",
+                "always",
                 "-v",
                 &format!("{}:/sccache-dist:z", self.sccache_dist.to_str().unwrap()),
                 "-v",
@@ -839,7 +850,7 @@ impl DistSystem {
         }
         StorageConfig {
             storage: Some(CacheType::Redis(RedisCacheConfig {
-                endpoint: Some(redis.url()),
+                endpoint: Some(redis.url().to_url().to_string()),
                 ..Default::default()
             })),
             fallback: DiskCacheConfig {

@@ -446,10 +446,11 @@ pub fn start_server(config: &Config, addr: &crate::net::SocketAddr) -> Result<()
         panic_hook(info)
     }));
     let client = Client::new();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(2 * util::num_cpus())
-        .build()?;
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    if std::env::var("TOKIO_WORKER_THREADS").is_err() {
+        builder.worker_threads(2 * util::num_cpus());
+    }
+    let runtime = builder.enable_all().build()?;
     let pool = runtime.handle().clone();
     let dist_client = DistClientContainer::new(config, &pool);
 
