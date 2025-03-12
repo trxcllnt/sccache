@@ -38,8 +38,6 @@ pub mod scheduler;
 pub mod server;
 #[cfg(feature = "dist-server")]
 pub mod tasks;
-#[cfg(test)]
-mod test;
 #[cfg(feature = "dist-server")]
 pub mod token_check;
 
@@ -738,6 +736,12 @@ pub trait ServerService: Send + Sync {
 
     async fn job_failed(&self, job_id: &str, reply_to: &str, err: RunJobError) -> Result<()>;
     async fn job_finished(&self, job_id: &str, reply_to: &str, res: &RunJobResponse) -> Result<()>;
+}
+
+#[cfg(feature = "dist-server")]
+#[async_trait]
+pub trait ToolchainService: Send + Sync {
+    async fn load_toolchain(&self, tc: &Toolchain) -> Result<PathBuf>;
 }
 
 #[cfg(feature = "dist-server")]

@@ -19,10 +19,7 @@
 
 #[macro_use]
 extern crate log;
-use crate::harness::{
-    get_stats, sccache_client_cfg, sccache_command, server_info, start_local_daemon,
-    stop_local_daemon, write_json_cfg, write_source, zero_stats,
-};
+use crate::harness::{sccache_client_cfg, write_json_cfg, write_source, SccacheClient};
 use assert_cmd::prelude::*;
 use fs::File;
 use fs_err as fs;
@@ -31,7 +28,6 @@ use predicates::prelude::*;
 use regex::Regex;
 use sccache::compiler::{CCompilerKind, CompilerKind, Language};
 use sccache::server::{ServerInfo, ServerStats};
-use serial_test::serial;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -214,7 +210,7 @@ fn copy_to_tempdir(inputs: &[&str], tempdir: &Path) {
     }
 }
 
-fn test_basic_compile(compiler: Compiler, tempdir: &Path) {
+fn test_basic_compile(client: &SccacheClient, compiler: Compiler, tempdir: &Path) {
     let Compiler {
         name,
         exe,
@@ -226,7 +222,8 @@ fn test_basic_compile(compiler: Compiler, tempdir: &Path) {
 
     let out_file = tempdir.join(OUTPUT);
     trace!("compile");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cmdline(name, &exe, INPUT, OUTPUT, Vec::new()))
         .current_dir(tempdir)
         .envs(env_vars.clone())
@@ -234,18 +231,18 @@ fn test_basic_compile(compiler: Compiler, tempdir: &Path) {
         .success();
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
     trace!("request stats");
-    get_stats(|info| {
-        assert_eq!(1, info.stats.compile_requests);
-        assert_eq!(1, info.stats.requests_executed);
-        assert_eq!(0, info.stats.cache_hits.all());
-        assert_eq!(1, info.stats.cache_misses.all());
-        assert_eq!(&1, info.stats.cache_misses.get("C/C++").unwrap());
-        let adv_key = adv_key_kind("c", compiler.name);
-        assert_eq!(&1, info.stats.cache_misses.get_adv(&adv_key).unwrap());
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(1, stats.compile_requests);
+    assert_eq!(1, stats.requests_executed);
+    assert_eq!(0, stats.cache_hits.all());
+    assert_eq!(1, stats.cache_misses.all());
+    assert_eq!(&1, stats.cache_misses.get("C/C++").unwrap());
+    let adv_key = adv_key_kind("c", compiler.name);
+    assert_eq!(&1, stats.cache_misses.get_adv(&adv_key).unwrap());
     trace!("compile");
     fs::remove_file(&out_file).unwrap();
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cmdline(name, &exe, INPUT, OUTPUT, Vec::new()))
         .current_dir(tempdir)
         .envs(env_vars)
@@ -253,20 +250,19 @@ fn test_basic_compile(compiler: Compiler, tempdir: &Path) {
         .success();
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
     trace!("request stats");
-    get_stats(|info| {
-        assert_eq!(2, info.stats.compile_requests);
-        assert_eq!(2, info.stats.requests_executed);
-        assert_eq!(1, info.stats.cache_hits.all());
-        assert_eq!(1, info.stats.cache_misses.all());
-        assert_eq!(&1, info.stats.cache_hits.get("C/C++").unwrap());
-        assert_eq!(&1, info.stats.cache_misses.get("C/C++").unwrap());
-        let adv_key = adv_key_kind("c", compiler.name);
-        assert_eq!(&1, info.stats.cache_hits.get_adv(&adv_key).unwrap());
-        assert_eq!(&1, info.stats.cache_misses.get_adv(&adv_key).unwrap());
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(2, stats.compile_requests);
+    assert_eq!(2, stats.requests_executed);
+    assert_eq!(1, stats.cache_hits.all());
+    assert_eq!(1, stats.cache_misses.all());
+    assert_eq!(&1, stats.cache_hits.get("C/C++").unwrap());
+    assert_eq!(&1, stats.cache_misses.get("C/C++").unwrap());
+    let adv_key = adv_key_kind("c", compiler.name);
+    assert_eq!(&1, stats.cache_hits.get_adv(&adv_key).unwrap());
+    assert_eq!(&1, stats.cache_misses.get_adv(&adv_key).unwrap());
 }
 
-fn test_noncacheable_stats(compiler: Compiler, tempdir: &Path) {
+fn test_noncacheable_stats(client: &SccacheClient, compiler: Compiler, tempdir: &Path) {
     let Compiler {
         name,
         exe,
@@ -276,7 +272,8 @@ fn test_noncacheable_stats(compiler: Compiler, tempdir: &Path) {
     copy_to_tempdir(&[INPUT], tempdir);
 
     trace!("compile");
-    sccache_command()
+    client
+        .cmd()
         .arg(&exe)
         .arg("-E")
         .arg(INPUT)
@@ -285,15 +282,14 @@ fn test_noncacheable_stats(compiler: Compiler, tempdir: &Path) {
         .assert()
         .success();
     trace!("request stats");
-    get_stats(|info| {
-        assert_eq!(1, info.stats.compile_requests);
-        assert_eq!(0, info.stats.requests_executed);
-        assert_eq!(1, info.stats.not_cached.len());
-        assert_eq!(Some(&1), info.stats.not_cached.get("-E"));
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(1, stats.compile_requests);
+    assert_eq!(0, stats.requests_executed);
+    assert_eq!(1, stats.not_cached.len());
+    assert_eq!(Some(&1), stats.not_cached.get("-E"));
 }
 
-fn test_msvc_deps(compiler: Compiler, tempdir: &Path) {
+fn test_msvc_deps(client: &SccacheClient, compiler: Compiler, tempdir: &Path) {
     let Compiler {
         name,
         exe,
@@ -303,7 +299,8 @@ fn test_msvc_deps(compiler: Compiler, tempdir: &Path) {
     trace!("compile with /sourceDependencies");
     let mut args = compile_cmdline(name, exe, INPUT, OUTPUT, Vec::new());
     args.push("/sourceDependenciestest.o.json".into());
-    sccache_command()
+    client
+        .cmd()
         .args(&args)
         .current_dir(tempdir)
         .envs(env_vars)
@@ -324,7 +321,7 @@ fn test_msvc_deps(compiler: Compiler, tempdir: &Path) {
     assert_ne!(includes.len(), 0);
 }
 
-fn test_msvc_responsefile(compiler: Compiler, tempdir: &Path) {
+fn test_msvc_responsefile(client: &SccacheClient, compiler: Compiler, tempdir: &Path) {
     let Compiler {
         name: _,
         exe,
@@ -340,7 +337,8 @@ fn test_msvc_responsefile(compiler: Compiler, tempdir: &Path) {
     }
 
     let args = vec_from!(OsString, exe, &format!("@{cmd_file_name}"));
-    sccache_command()
+    client
+        .cmd()
         .args(&args)
         .current_dir(tempdir)
         .envs(env_vars)
@@ -351,7 +349,7 @@ fn test_msvc_responsefile(compiler: Compiler, tempdir: &Path) {
     fs::remove_file(&out_file).unwrap();
 }
 
-fn test_gcc_mp_werror(compiler: Compiler, tempdir: &Path) {
+fn test_gcc_mp_werror(client: &SccacheClient, compiler: Compiler, tempdir: &Path) {
     let Compiler {
         name,
         exe,
@@ -363,7 +361,8 @@ fn test_gcc_mp_werror(compiler: Compiler, tempdir: &Path) {
         OsString, "-MD", "-MP", "-MF", "foo.pp", "-Werror"
     ));
     // This should fail, but the error should be from the #error!
-    sccache_command()
+    client
+        .cmd()
         .args(&args)
         .current_dir(tempdir)
         .envs(env_vars)
@@ -376,14 +375,18 @@ fn test_gcc_mp_werror(compiler: Compiler, tempdir: &Path) {
         );
 }
 
-fn test_gcc_fprofile_generate_source_changes(compiler: Compiler, tempdir: &Path) {
+fn test_gcc_fprofile_generate_source_changes(
+    client: &SccacheClient,
+    compiler: Compiler,
+    tempdir: &Path,
+) {
     let Compiler {
         name,
         exe,
         env_vars,
     } = compiler;
     trace!("test -fprofile-generate with different source inputs");
-    zero_stats();
+    client.zero_stats();
     const SRC: &str = "source.c";
     write_source(
         tempdir,
@@ -401,31 +404,31 @@ int main(int argc, char** argv) {
     let mut args = compile_cmdline(name, exe, SRC, OUTPUT, Vec::new());
     args.extend(vec_from!(OsString, "-fprofile-generate"));
     trace!("compile source.c (1)");
-    sccache_command()
+    client
+        .cmd()
         .args(&args)
         .current_dir(tempdir)
         .envs(env_vars.clone())
         .assert()
         .success();
-    get_stats(|info| {
-        assert_eq!(0, info.stats.cache_hits.all());
-        assert_eq!(1, info.stats.cache_misses.all());
-        assert_eq!(&1, info.stats.cache_misses.get("C/C++").unwrap());
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(0, stats.cache_hits.all());
+    assert_eq!(1, stats.cache_misses.all());
+    assert_eq!(&1, stats.cache_misses.get("C/C++").unwrap());
     // Compile the same source again to ensure we can get a cache hit.
     trace!("compile source.c (2)");
-    sccache_command()
+    client
+        .cmd()
         .args(&args)
         .current_dir(tempdir)
         .envs(env_vars.clone())
         .assert()
         .success();
-    get_stats(|info| {
-        assert_eq!(1, info.stats.cache_hits.all());
-        assert_eq!(1, info.stats.cache_misses.all());
-        assert_eq!(&1, info.stats.cache_hits.get("C/C++").unwrap());
-        assert_eq!(&1, info.stats.cache_misses.get("C/C++").unwrap());
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(1, stats.cache_hits.all());
+    assert_eq!(1, stats.cache_misses.all());
+    assert_eq!(&1, stats.cache_hits.get("C/C++").unwrap());
+    assert_eq!(&1, stats.cache_misses.get("C/C++").unwrap());
     // Now write out a slightly different source file that will preprocess to the same thing,
     // modulo line numbers. This should not be a cache hit because line numbers are important
     // with -fprofile-generate.
@@ -444,18 +447,18 @@ int main(int argc, char** argv) {
 ",
     );
     trace!("compile source.c (3)");
-    sccache_command()
+    client
+        .cmd()
         .args(&args)
         .current_dir(tempdir)
         .envs(env_vars)
         .assert()
         .success();
-    get_stats(|info| {
-        assert_eq!(1, info.stats.cache_hits.all());
-        assert_eq!(2, info.stats.cache_misses.all());
-        assert_eq!(&1, info.stats.cache_hits.get("C/C++").unwrap());
-        assert_eq!(&2, info.stats.cache_misses.get("C/C++").unwrap());
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(1, stats.cache_hits.all());
+    assert_eq!(2, stats.cache_misses.all());
+    assert_eq!(&1, stats.cache_hits.get("C/C++").unwrap());
+    assert_eq!(&2, stats.cache_misses.get("C/C++").unwrap());
 }
 
 /* test case like this:
@@ -466,66 +469,74 @@ int main(int argc, char** argv) {
     sccache g++ -c -g -gsplit-dwarf test.cc -o test2.o   --- > cache miss
     strings test2.o |grep test2.dwo
 */
-fn test_split_dwarf_object_generate_output_dir_changes(compiler: Compiler, tempdir: &Path) {
+fn test_split_dwarf_object_generate_output_dir_changes(
+    client: &SccacheClient,
+    compiler: Compiler,
+    tempdir: &Path,
+) {
     let Compiler {
         name,
         exe,
         env_vars,
     } = compiler;
     trace!("test -g -gsplit-dwarf with different output");
-    zero_stats();
+    client.zero_stats();
     const SRC: &str = "source.c";
     write_source(tempdir, SRC, "int test(){}");
     let mut args = compile_cmdline(name, exe.clone(), SRC, "test1.o", Vec::new());
     args.extend(vec_from!(OsString, "-g"));
     args.extend(vec_from!(OsString, "-gsplit-dwarf"));
     trace!("compile source.c (1)");
-    sccache_command()
+    client
+        .cmd()
         .args(&args)
         .current_dir(tempdir)
         .envs(env_vars.clone())
         .assert()
         .success();
-    get_stats(|info| {
-        assert_eq!(0, info.stats.cache_hits.all());
-        assert_eq!(1, info.stats.cache_misses.all());
-        assert_eq!(&1, info.stats.cache_misses.get("C/C++").unwrap());
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(0, stats.cache_hits.all());
+    assert_eq!(1, stats.cache_misses.all());
+    assert_eq!(&1, stats.cache_misses.get("C/C++").unwrap());
     // Compile the same source again to ensure we can get a cache hit.
     trace!("compile source.c (2)");
-    sccache_command()
+    client
+        .cmd()
         .args(&args)
         .current_dir(tempdir)
         .envs(env_vars.clone())
         .assert()
         .success();
-    get_stats(|info| {
-        assert_eq!(1, info.stats.cache_hits.all());
-        assert_eq!(1, info.stats.cache_misses.all());
-        assert_eq!(&1, info.stats.cache_hits.get("C/C++").unwrap());
-        assert_eq!(&1, info.stats.cache_misses.get("C/C++").unwrap());
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(1, stats.cache_hits.all());
+    assert_eq!(1, stats.cache_misses.all());
+    assert_eq!(&1, stats.cache_hits.get("C/C++").unwrap());
+    assert_eq!(&1, stats.cache_misses.get("C/C++").unwrap());
     // Compile the same source again with different output
     // to ensure we can force generate new object file.
     let mut args2 = compile_cmdline(name, exe, SRC, "test2.o", Vec::new());
     args2.extend(vec_from!(OsString, "-g"));
     args2.extend(vec_from!(OsString, "-gsplit-dwarf"));
     trace!("compile source.c (2)");
-    sccache_command()
+    client
+        .cmd()
         .args(&args2)
         .current_dir(tempdir)
         .envs(env_vars.clone())
         .assert()
         .success();
-    get_stats(|info| {
-        assert_eq!(1, info.stats.cache_hits.all());
-        assert_eq!(2, info.stats.cache_misses.all());
-        assert_eq!(&1, info.stats.cache_hits.get("C/C++").unwrap());
-        assert_eq!(&2, info.stats.cache_misses.get("C/C++").unwrap());
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(1, stats.cache_hits.all());
+    assert_eq!(2, stats.cache_misses.all());
+    assert_eq!(&1, stats.cache_hits.get("C/C++").unwrap());
+    assert_eq!(&2, stats.cache_misses.get("C/C++").unwrap());
 }
 
-fn test_gcc_clang_no_warnings_from_macro_expansion(compiler: Compiler, tempdir: &Path) {
+fn test_gcc_clang_no_warnings_from_macro_expansion(
+    client: &SccacheClient,
+    compiler: Compiler,
+    tempdir: &Path,
+) {
     let Compiler {
         name,
         exe,
@@ -536,7 +547,8 @@ fn test_gcc_clang_no_warnings_from_macro_expansion(compiler: Compiler, tempdir: 
     copy_to_tempdir(&[INPUT_MACRO_EXPANSION], tempdir);
 
     trace!("compile");
-    sccache_command()
+    client
+        .cmd()
         .args(
             [
                 &compile_cmdline(name, exe, INPUT_MACRO_EXPANSION, OUTPUT, Vec::new())[..],
@@ -551,7 +563,7 @@ fn test_gcc_clang_no_warnings_from_macro_expansion(compiler: Compiler, tempdir: 
         .stderr(predicates::str::contains("warning:").from_utf8().not());
 }
 
-fn test_compile_with_define(compiler: Compiler, tempdir: &Path) {
+fn test_compile_with_define(client: &SccacheClient, compiler: Compiler, tempdir: &Path) {
     let Compiler {
         name,
         exe,
@@ -562,7 +574,8 @@ fn test_compile_with_define(compiler: Compiler, tempdir: &Path) {
     copy_to_tempdir(&[INPUT_WITH_DEFINE], tempdir);
 
     trace!("compile");
-    sccache_command()
+    client
+        .cmd()
         .args(
             [
                 &compile_cmdline(name, exe, INPUT_WITH_DEFINE, OUTPUT, Vec::new())[..],
@@ -577,7 +590,7 @@ fn test_compile_with_define(compiler: Compiler, tempdir: &Path) {
         .stderr(predicates::str::contains("warning:").from_utf8().not());
 }
 
-fn test_gcc_clang_depfile(compiler: Compiler, tempdir: &Path) {
+fn test_gcc_clang_depfile(client: &SccacheClient, compiler: Compiler, tempdir: &Path) {
     let Compiler {
         name,
         exe,
@@ -588,7 +601,8 @@ fn test_gcc_clang_depfile(compiler: Compiler, tempdir: &Path) {
     fs::copy(tempdir.join(INPUT), tempdir.join("same-content.c")).unwrap();
 
     trace!("compile");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cmdline(
             name,
             exe.clone(),
@@ -601,7 +615,8 @@ fn test_gcc_clang_depfile(compiler: Compiler, tempdir: &Path) {
         .envs(env_vars.clone())
         .assert()
         .success();
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cmdline(
             name,
             exe,
@@ -627,26 +642,31 @@ fn test_gcc_clang_depfile(compiler: Compiler, tempdir: &Path) {
     assert_ne!(first, second);
 }
 
-fn run_sccache_command_tests(compiler: Compiler, tempdir: &Path, preprocessor_cache_mode: bool) {
+fn run_sccache_command_tests(
+    client: &SccacheClient,
+    compiler: Compiler,
+    tempdir: &Path,
+    preprocessor_cache_mode: bool,
+) {
     if compiler.name != "clang++" {
-        test_basic_compile(compiler.clone(), tempdir);
+        test_basic_compile(client, compiler.clone(), tempdir);
     }
-    test_compile_with_define(compiler.clone(), tempdir);
+    test_compile_with_define(client, compiler.clone(), tempdir);
     if compiler.name == "cl.exe" {
-        test_msvc_deps(compiler.clone(), tempdir);
-        test_msvc_responsefile(compiler.clone(), tempdir);
+        test_msvc_deps(client, compiler.clone(), tempdir);
+        test_msvc_responsefile(client, compiler.clone(), tempdir);
     }
     if compiler.name == "gcc" {
-        test_gcc_mp_werror(compiler.clone(), tempdir);
-        test_gcc_fprofile_generate_source_changes(compiler.clone(), tempdir);
+        test_gcc_mp_werror(client, compiler.clone(), tempdir);
+        test_gcc_fprofile_generate_source_changes(client, compiler.clone(), tempdir);
     }
     if compiler.name == "clang" || compiler.name == "gcc" {
-        test_gcc_clang_no_warnings_from_macro_expansion(compiler.clone(), tempdir);
-        test_split_dwarf_object_generate_output_dir_changes(compiler.clone(), tempdir);
-        test_gcc_clang_depfile(compiler.clone(), tempdir);
+        test_gcc_clang_no_warnings_from_macro_expansion(client, compiler.clone(), tempdir);
+        test_split_dwarf_object_generate_output_dir_changes(client, compiler.clone(), tempdir);
+        test_gcc_clang_depfile(client, compiler.clone(), tempdir);
     }
     if compiler.name == "clang++" {
-        test_clang_multicall(compiler.clone(), tempdir);
+        test_clang_multicall(client, compiler.clone(), tempdir);
     }
 
     // If we are testing with clang-14 or later, we expect the -fminimize-whitespace flag to be used.
@@ -675,6 +695,7 @@ fn run_sccache_command_tests(compiler: Compiler, tempdir: &Path, preprocessor_ca
             ),
         };
         test_clang_cache_whitespace_normalization(
+            client,
             compiler,
             tempdir,
             !is_appleclang && major >= 14,
@@ -682,6 +703,7 @@ fn run_sccache_command_tests(compiler: Compiler, tempdir: &Path, preprocessor_ca
         );
     } else {
         test_clang_cache_whitespace_normalization(
+            client,
             compiler,
             tempdir,
             false,
@@ -701,8 +723,13 @@ struct AdditionalStats {
     cache_misses: Option<Vec<(CCompilerKind, Language, u64)>>,
 }
 
-fn test_nvcc_cuda_compiles(compiler: &Compiler, tempdir: &Path, with_debug_flags: bool) {
-    let mut stats = server_info().stats;
+fn test_nvcc_cuda_compiles(
+    client: &SccacheClient,
+    compiler: &Compiler,
+    tempdir: &Path,
+    with_debug_flags: bool,
+) {
+    let mut stats = client.stats().unwrap();
 
     let extra_args = if with_debug_flags {
         vec!["-G".into()]
@@ -727,7 +754,8 @@ fn test_nvcc_cuda_compiles(compiler: &Compiler, tempdir: &Path, with_debug_flags
                              output: &Path,
                              extra_args: &[OsString],
                              additional_stats: AdditionalStats| {
-        sccache_command()
+        client
+            .cmd()
             .args(compile_cuda_cmdline(
                 name,
                 exe,
@@ -774,7 +802,7 @@ fn test_nvcc_cuda_compiles(compiler: &Compiler, tempdir: &Path, with_debug_flags
                 cache_write_duration: stats.cache_write_duration,
                 cache_read_hit_duration: stats.cache_read_hit_duration,
                 compiler_write_duration: stats.compiler_write_duration,
-                ..server_info().stats
+                ..client.stats().unwrap()
             }
         );
     };
@@ -1397,11 +1425,12 @@ int main(int argc, char** argv) {
 }
 
 fn test_nvcc_proper_lang_stat_tracking(
+    client: &SccacheClient,
     compiler: &Compiler,
     tempdir: &Path,
     with_debug_flags: bool,
 ) {
-    let mut stats = server_info().stats;
+    let mut stats = client.stats().unwrap();
 
     let extra_args = if with_debug_flags {
         vec!["--device-debug".into()]
@@ -1422,7 +1451,8 @@ fn test_nvcc_proper_lang_stat_tracking(
     let out_file = tempdir.join(OUTPUT);
 
     trace!("compile CUDA C");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cmdline(
             name,
             exe,
@@ -1459,12 +1489,13 @@ fn test_nvcc_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
-            ..server_info().stats
+            ..client.stats().unwrap()
         }
     );
 
     trace!("compile CUDA C");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cmdline(
             name,
             exe,
@@ -1500,12 +1531,13 @@ fn test_nvcc_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
-            ..server_info().stats
+            ..client.stats().unwrap()
         }
     );
 
     trace!("compile C++");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cmdline(
             name,
             exe,
@@ -1533,12 +1565,13 @@ fn test_nvcc_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
-            ..server_info().stats
+            ..client.stats().unwrap()
         }
     );
 
     trace!("compile C++");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cmdline(
             name,
             exe,
@@ -1565,18 +1598,28 @@ fn test_nvcc_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
-            ..server_info().stats
+            ..client.stats().unwrap()
         }
     );
 }
 
-fn run_sccache_nvcc_cuda_command_tests(compiler: Compiler, tempdir: &Path, with_debug_flags: bool) {
-    test_nvcc_cuda_compiles(&compiler, tempdir, with_debug_flags);
-    test_nvcc_proper_lang_stat_tracking(&compiler, tempdir, with_debug_flags);
+fn run_sccache_nvcc_cuda_command_tests(
+    client: &SccacheClient,
+    compiler: Compiler,
+    tempdir: &Path,
+    with_debug_flags: bool,
+) {
+    test_nvcc_cuda_compiles(client, &compiler, tempdir, with_debug_flags);
+    test_nvcc_proper_lang_stat_tracking(client, &compiler, tempdir, with_debug_flags);
 }
 
-fn test_clang_cuda_compiles(compiler: &Compiler, tempdir: &Path, with_debug_flags: bool) {
-    let mut stats = server_info().stats;
+fn test_clang_cuda_compiles(
+    client: &SccacheClient,
+    compiler: &Compiler,
+    tempdir: &Path,
+    with_debug_flags: bool,
+) {
+    let mut stats = client.stats().unwrap();
 
     let extra_args = if with_debug_flags {
         vec!["-g".into(), "--cuda-noopt-device-debug".into()]
@@ -1595,7 +1638,8 @@ fn test_clang_cuda_compiles(compiler: &Compiler, tempdir: &Path, with_debug_flag
 
     let out_file = tempdir.join(OUTPUT);
     trace!("compile A");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cuda_cmdline(
             name,
             exe,
@@ -1623,13 +1667,14 @@ fn test_clang_cuda_compiles(compiler: &Compiler, tempdir: &Path, with_debug_flag
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
-            ..server_info().stats
+            ..client.stats().unwrap()
         }
     );
 
     trace!("compile A");
     fs::remove_file(&out_file).unwrap();
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cuda_cmdline(
             name,
             exe,
@@ -1655,14 +1700,15 @@ fn test_clang_cuda_compiles(compiler: &Compiler, tempdir: &Path, with_debug_flag
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
-            ..server_info().stats
+            ..client.stats().unwrap()
         }
     );
 
     // By compiling another input source we verify that the pre-processor
     // phase is correctly running and outputting text
     trace!("compile B");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cuda_cmdline(
             name,
             exe,
@@ -1690,17 +1736,18 @@ fn test_clang_cuda_compiles(compiler: &Compiler, tempdir: &Path, with_debug_flag
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
-            ..server_info().stats
+            ..client.stats().unwrap()
         }
     );
 }
 
 fn test_clang_proper_lang_stat_tracking(
+    client: &SccacheClient,
     compiler: &Compiler,
     tempdir: &Path,
     with_debug_flags: bool,
 ) {
-    let mut stats = server_info().stats;
+    let mut stats = client.stats().unwrap();
 
     let extra_args = if with_debug_flags {
         vec!["-g".into(), "--cuda-noopt-device-debug".into()]
@@ -1720,7 +1767,8 @@ fn test_clang_proper_lang_stat_tracking(
 
     let out_file = tempdir.join(OUTPUT);
     trace!("compile CUDA A");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cuda_cmdline(
             name,
             exe,
@@ -1747,12 +1795,13 @@ fn test_clang_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
-            ..server_info().stats
+            ..client.stats().unwrap()
         }
     );
 
     trace!("compile CUDA A");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cuda_cmdline(
             name,
             exe,
@@ -1777,12 +1826,13 @@ fn test_clang_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
-            ..server_info().stats
+            ..client.stats().unwrap()
         }
     );
 
     trace!("compile C++ A");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cmdline(
             name,
             exe,
@@ -1808,12 +1858,13 @@ fn test_clang_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
-            ..server_info().stats
+            ..client.stats().unwrap()
         }
     );
 
     trace!("compile C++ A");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cmdline(
             name,
             exe,
@@ -1837,21 +1888,22 @@ fn test_clang_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
-            ..server_info().stats
+            ..client.stats().unwrap()
         }
     );
 }
 
 fn run_sccache_clang_cuda_command_tests(
+    client: &SccacheClient,
     compiler: Compiler,
     tempdir: &Path,
     with_debug_flags: bool,
 ) {
-    test_clang_cuda_compiles(&compiler, tempdir, with_debug_flags);
-    test_clang_proper_lang_stat_tracking(&compiler, tempdir, with_debug_flags);
+    test_clang_cuda_compiles(client, &compiler, tempdir, with_debug_flags);
+    test_clang_proper_lang_stat_tracking(client, &compiler, tempdir, with_debug_flags);
 }
 
-fn test_hip_compiles(compiler: &Compiler, tempdir: &Path) {
+fn test_hip_compiles(client: &SccacheClient, compiler: &Compiler, tempdir: &Path) {
     let Compiler {
         name,
         exe,
@@ -1865,7 +1917,8 @@ fn test_hip_compiles(compiler: &Compiler, tempdir: &Path) {
 
     let out_file = tempdir.join(OUTPUT);
     trace!("compile A");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_hip_cmdline(
             name,
             exe,
@@ -1880,18 +1933,18 @@ fn test_hip_compiles(compiler: &Compiler, tempdir: &Path) {
         .success();
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
     trace!("request stats");
-    get_stats(|info| {
-        assert_eq!(1, info.stats.compile_requests);
-        assert_eq!(1, info.stats.requests_executed);
-        assert_eq!(0, info.stats.cache_hits.all());
-        assert_eq!(1, info.stats.cache_misses.all());
-        assert_eq!(&1, info.stats.cache_misses.get("HIP").unwrap());
-        let adv_hip_key = adv_key_kind("hip", compiler.name);
-        assert_eq!(&1, info.stats.cache_misses.get_adv(&adv_hip_key).unwrap());
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(1, stats.compile_requests);
+    assert_eq!(1, stats.requests_executed);
+    assert_eq!(0, stats.cache_hits.all());
+    assert_eq!(1, stats.cache_misses.all());
+    assert_eq!(&1, stats.cache_misses.get("HIP").unwrap());
+    let adv_hip_key = adv_key_kind("hip", compiler.name);
+    assert_eq!(&1, stats.cache_misses.get_adv(&adv_hip_key).unwrap());
     trace!("compile A");
     fs::remove_file(&out_file).unwrap();
-    sccache_command()
+    client
+        .cmd()
         .args(compile_hip_cmdline(
             name,
             exe,
@@ -1906,21 +1959,21 @@ fn test_hip_compiles(compiler: &Compiler, tempdir: &Path) {
         .success();
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
     trace!("request stats");
-    get_stats(|info| {
-        assert_eq!(2, info.stats.compile_requests);
-        assert_eq!(2, info.stats.requests_executed);
-        assert_eq!(1, info.stats.cache_hits.all());
-        assert_eq!(1, info.stats.cache_misses.all());
-        assert_eq!(&1, info.stats.cache_hits.get("HIP").unwrap());
-        assert_eq!(&1, info.stats.cache_misses.get("HIP").unwrap());
-        let adv_hip_key = adv_key_kind("hip", compiler.name);
-        assert_eq!(&1, info.stats.cache_hits.get_adv(&adv_hip_key).unwrap());
-        assert_eq!(&1, info.stats.cache_misses.get_adv(&adv_hip_key).unwrap());
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(2, stats.compile_requests);
+    assert_eq!(2, stats.requests_executed);
+    assert_eq!(1, stats.cache_hits.all());
+    assert_eq!(1, stats.cache_misses.all());
+    assert_eq!(&1, stats.cache_hits.get("HIP").unwrap());
+    assert_eq!(&1, stats.cache_misses.get("HIP").unwrap());
+    let adv_hip_key = adv_key_kind("hip", compiler.name);
+    assert_eq!(&1, stats.cache_hits.get_adv(&adv_hip_key).unwrap());
+    assert_eq!(&1, stats.cache_misses.get_adv(&adv_hip_key).unwrap());
     // By compiling another input source we verify that the pre-processor
     // phase is correctly running and outputting text
     trace!("compile B");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_hip_cmdline(
             name,
             exe,
@@ -1935,20 +1988,19 @@ fn test_hip_compiles(compiler: &Compiler, tempdir: &Path) {
         .success();
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
     trace!("request stats");
-    get_stats(|info| {
-        assert_eq!(3, info.stats.compile_requests);
-        assert_eq!(3, info.stats.requests_executed);
-        assert_eq!(1, info.stats.cache_hits.all());
-        assert_eq!(2, info.stats.cache_misses.all());
-        assert_eq!(&1, info.stats.cache_hits.get("HIP").unwrap());
-        assert_eq!(&2, info.stats.cache_misses.get("HIP").unwrap());
-        let adv_hip_key = adv_key_kind("hip", compiler.name);
-        assert_eq!(&1, info.stats.cache_hits.get_adv(&adv_hip_key).unwrap());
-        assert_eq!(&2, info.stats.cache_misses.get_adv(&adv_hip_key).unwrap());
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(3, stats.compile_requests);
+    assert_eq!(3, stats.requests_executed);
+    assert_eq!(1, stats.cache_hits.all());
+    assert_eq!(2, stats.cache_misses.all());
+    assert_eq!(&1, stats.cache_hits.get("HIP").unwrap());
+    assert_eq!(&2, stats.cache_misses.get("HIP").unwrap());
+    let adv_hip_key = adv_key_kind("hip", compiler.name);
+    assert_eq!(&1, stats.cache_hits.get_adv(&adv_hip_key).unwrap());
+    assert_eq!(&2, stats.cache_misses.get_adv(&adv_hip_key).unwrap());
 }
 
-fn test_hip_compiles_multi_targets(compiler: &Compiler, tempdir: &Path) {
+fn test_hip_compiles_multi_targets(client: &SccacheClient, compiler: &Compiler, tempdir: &Path) {
     let Compiler {
         name,
         exe,
@@ -1962,7 +2014,8 @@ fn test_hip_compiles_multi_targets(compiler: &Compiler, tempdir: &Path) {
 
     let out_file = tempdir.join(OUTPUT);
     trace!("compile A with gfx900 and gfx1030");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_hip_cmdline(
             name,
             exe,
@@ -1977,19 +2030,19 @@ fn test_hip_compiles_multi_targets(compiler: &Compiler, tempdir: &Path) {
         .success();
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
     trace!("request stats");
-    get_stats(|info| {
-        assert_eq!(1, info.stats.compile_requests);
-        assert_eq!(1, info.stats.requests_executed);
-        assert_eq!(0, info.stats.cache_hits.all());
-        assert_eq!(1, info.stats.cache_misses.all());
-        assert_eq!(&1, info.stats.cache_misses.get("HIP").unwrap());
-        let adv_hip_key = adv_key_kind("hip", compiler.name);
-        assert_eq!(&1, info.stats.cache_misses.get_adv(&adv_hip_key).unwrap());
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(1, stats.compile_requests);
+    assert_eq!(1, stats.requests_executed);
+    assert_eq!(0, stats.cache_hits.all());
+    assert_eq!(1, stats.cache_misses.all());
+    assert_eq!(&1, stats.cache_misses.get("HIP").unwrap());
+    let adv_hip_key = adv_key_kind("hip", compiler.name);
+    assert_eq!(&1, stats.cache_misses.get_adv(&adv_hip_key).unwrap());
 
     trace!("compile A with with gfx900 and gfx1030 again");
     fs::remove_file(&out_file).unwrap();
-    sccache_command()
+    client
+        .cmd()
         .args(compile_hip_cmdline(
             name,
             exe,
@@ -2004,22 +2057,22 @@ fn test_hip_compiles_multi_targets(compiler: &Compiler, tempdir: &Path) {
         .success();
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
     trace!("request stats");
-    get_stats(|info| {
-        assert_eq!(2, info.stats.compile_requests);
-        assert_eq!(2, info.stats.requests_executed);
-        assert_eq!(1, info.stats.cache_hits.all());
-        assert_eq!(1, info.stats.cache_misses.all());
-        assert_eq!(&1, info.stats.cache_hits.get("HIP").unwrap());
-        assert_eq!(&1, info.stats.cache_misses.get("HIP").unwrap());
-        let adv_hip_key = adv_key_kind("hip", compiler.name);
-        assert_eq!(&1, info.stats.cache_hits.get_adv(&adv_hip_key).unwrap());
-        assert_eq!(&1, info.stats.cache_misses.get_adv(&adv_hip_key).unwrap());
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(2, stats.compile_requests);
+    assert_eq!(2, stats.requests_executed);
+    assert_eq!(1, stats.cache_hits.all());
+    assert_eq!(1, stats.cache_misses.all());
+    assert_eq!(&1, stats.cache_hits.get("HIP").unwrap());
+    assert_eq!(&1, stats.cache_misses.get("HIP").unwrap());
+    let adv_hip_key = adv_key_kind("hip", compiler.name);
+    assert_eq!(&1, stats.cache_hits.get_adv(&adv_hip_key).unwrap());
+    assert_eq!(&1, stats.cache_misses.get_adv(&adv_hip_key).unwrap());
 
     // By compiling another input source we verify that the pre-processor
     // phase is correctly running and outputting text
     trace!("compile B with gfx900 and gfx1030");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_hip_cmdline(
             name,
             exe,
@@ -2034,28 +2087,27 @@ fn test_hip_compiles_multi_targets(compiler: &Compiler, tempdir: &Path) {
         .success();
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
     trace!("request stats");
-    get_stats(|info| {
-        assert_eq!(3, info.stats.compile_requests);
-        assert_eq!(3, info.stats.requests_executed);
-        assert_eq!(1, info.stats.cache_hits.all());
-        assert_eq!(2, info.stats.cache_misses.all());
-        assert_eq!(&1, info.stats.cache_hits.get("HIP").unwrap());
-        assert_eq!(&2, info.stats.cache_misses.get("HIP").unwrap());
-        let adv_hip_key = adv_key_kind("hip", compiler.name);
-        assert_eq!(&1, info.stats.cache_hits.get_adv(&adv_hip_key).unwrap());
-        assert_eq!(&2, info.stats.cache_misses.get_adv(&adv_hip_key).unwrap());
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(3, stats.compile_requests);
+    assert_eq!(3, stats.requests_executed);
+    assert_eq!(1, stats.cache_hits.all());
+    assert_eq!(2, stats.cache_misses.all());
+    assert_eq!(&1, stats.cache_hits.get("HIP").unwrap());
+    assert_eq!(&2, stats.cache_misses.get("HIP").unwrap());
+    let adv_hip_key = adv_key_kind("hip", compiler.name);
+    assert_eq!(&1, stats.cache_hits.get_adv(&adv_hip_key).unwrap());
+    assert_eq!(&2, stats.cache_misses.get_adv(&adv_hip_key).unwrap());
 }
 
-fn run_sccache_hip_command_tests(compiler: Compiler, tempdir: &Path) {
-    zero_stats();
-    test_hip_compiles(&compiler, tempdir);
-    zero_stats();
-    test_hip_compiles_multi_targets(&compiler, tempdir);
+fn run_sccache_hip_command_tests(client: &SccacheClient, compiler: Compiler, tempdir: &Path) {
+    client.zero_stats();
+    test_hip_compiles(client, &compiler, tempdir);
+    client.zero_stats();
+    test_hip_compiles_multi_targets(client, &compiler, tempdir);
     // test_proper_lang_stat_tracking(compiler, tempdir);
 }
 
-fn test_clang_multicall(compiler: Compiler, tempdir: &Path) {
+fn test_clang_multicall(client: &SccacheClient, compiler: Compiler, tempdir: &Path) {
     let Compiler {
         name,
         exe,
@@ -2066,7 +2118,8 @@ fn test_clang_multicall(compiler: Compiler, tempdir: &Path) {
     copy_to_tempdir(&[INPUT_CLANG_MULTICALL], tempdir);
 
     println!("compile clang_multicall");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cmdline(
             name,
             exe,
@@ -2081,6 +2134,7 @@ fn test_clang_multicall(compiler: Compiler, tempdir: &Path) {
 }
 
 fn test_clang_cache_whitespace_normalization(
+    client: &SccacheClient,
     compiler: Compiler,
     tempdir: &Path,
     hit: bool,
@@ -2095,10 +2149,11 @@ fn test_clang_cache_whitespace_normalization(
     debug!("expecting hit: {}", hit);
     // Compile a source file.
     copy_to_tempdir(&[INPUT_WITH_WHITESPACE, INPUT_WITH_WHITESPACE_ALT], tempdir);
-    zero_stats();
+    client.zero_stats();
 
     debug!("compile whitespace");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cmdline(
             name,
             &exe,
@@ -2111,15 +2166,15 @@ fn test_clang_cache_whitespace_normalization(
         .assert()
         .success();
     debug!("request stats");
-    get_stats(|info| {
-        assert_eq!(1, info.stats.compile_requests);
-        assert_eq!(1, info.stats.requests_executed);
-        assert_eq!(0, info.stats.cache_hits.all());
-        assert_eq!(1, info.stats.cache_misses.all());
-    });
+    let stats = client.stats().unwrap();
+    assert_eq!(1, stats.compile_requests);
+    assert_eq!(1, stats.requests_executed);
+    assert_eq!(0, stats.cache_hits.all());
+    assert_eq!(1, stats.cache_misses.all());
 
     debug!("compile whitespace_alt");
-    sccache_command()
+    client
+        .cmd()
         .args(compile_cmdline(
             name,
             &exe,
@@ -2133,26 +2188,24 @@ fn test_clang_cache_whitespace_normalization(
         .success();
     debug!("request stats (expecting cache hit)");
     if hit {
-        get_stats(move |info| {
-            assert_eq!(2, info.stats.compile_requests);
-            assert_eq!(2, info.stats.requests_executed);
-            if preprocessor_cache_mode {
-                // Preprocessor cache mode hashes the input file, so whitespace
-                // normalization does not work.
-                assert_eq!(0, info.stats.cache_hits.all());
-                assert_eq!(2, info.stats.cache_misses.all());
-            } else {
-                assert_eq!(1, info.stats.cache_hits.all());
-                assert_eq!(1, info.stats.cache_misses.all());
-            }
-        });
+        let stats = client.stats().unwrap();
+        assert_eq!(2, stats.compile_requests);
+        assert_eq!(2, stats.requests_executed);
+        if preprocessor_cache_mode {
+            // Preprocessor cache mode hashes the input file, so whitespace
+            // normalization does not work.
+            assert_eq!(0, stats.cache_hits.all());
+            assert_eq!(2, stats.cache_misses.all());
+        } else {
+            assert_eq!(1, stats.cache_hits.all());
+            assert_eq!(1, stats.cache_misses.all());
+        }
     } else {
-        get_stats(|info| {
-            assert_eq!(2, info.stats.compile_requests);
-            assert_eq!(2, info.stats.requests_executed);
-            assert_eq!(0, info.stats.cache_hits.all());
-            assert_eq!(2, info.stats.cache_misses.all());
-        });
+        let stats = client.stats().unwrap();
+        assert_eq!(2, stats.compile_requests);
+        assert_eq!(2, stats.requests_executed);
+        assert_eq!(0, stats.cache_hits.all());
+        assert_eq!(2, stats.cache_misses.all());
     }
 }
 
@@ -2256,7 +2309,6 @@ fn find_hip_compiler() -> Option<Compiler> {
 // are not run.
 #[test_case(true ; "with preprocessor cache")]
 #[test_case(false ; "without preprocessor cache")]
-#[serial]
 #[cfg(any(unix, target_env = "msvc"))]
 fn test_sccache_command(preprocessor_cache_mode: bool) {
     let _ = env_logger::try_init();
@@ -2268,34 +2320,29 @@ fn test_sccache_command(preprocessor_cache_mode: bool) {
     if compilers.is_empty() {
         warn!("No compilers found, skipping test");
     } else {
-        // Ensure there's no existing sccache server running.
-        stop_local_daemon();
         // Create the configurations
         let sccache_cfg = sccache_client_cfg(tempdir.path(), preprocessor_cache_mode);
         write_json_cfg(tempdir.path(), "sccache-cfg.json", &sccache_cfg);
         let sccache_cached_cfg_path = tempdir.path().join("sccache-cached-cfg");
         // Start a server.
-        trace!("start server");
-        start_local_daemon(
+        let client = SccacheClient::new(
             &tempdir.path().join("sccache-cfg.json"),
             &sccache_cached_cfg_path,
-        );
+        )
+        .start();
         for compiler in compilers {
-            run_sccache_command_tests(compiler, tempdir.path(), preprocessor_cache_mode);
-            zero_stats();
+            run_sccache_command_tests(&client, compiler, tempdir.path(), preprocessor_cache_mode);
+            client.zero_stats();
         }
-        stop_local_daemon();
     }
 }
 
 #[test]
-#[serial]
 fn test_stats_no_server() {
-    // Ensure there's no existing sccache server running.
-    stop_local_daemon();
-    get_stats(|_| {});
+    let client = SccacheClient::new_no_cfg();
+    let _ = client.stats();
     assert!(
-        !stop_local_daemon(),
+        !client.stop(),
         "Server shouldn't be running after --show-stats"
     );
 }
@@ -2304,7 +2351,6 @@ fn test_stats_no_server() {
 #[test_case(false, false ; "without preprocessor cache")]
 #[test_case(true, true ; "with preprocessor cache and device debug")]
 #[test_case(false, true ; "without preprocessor cache and device debug")]
-#[serial]
 #[cfg(any(unix, target_env = "msvc"))]
 fn test_cuda_sccache_command(preprocessor_cache_mode: bool, with_debug_flags: bool) {
     let _ = env_logger::try_init();
@@ -2331,37 +2377,38 @@ fn test_cuda_sccache_command(preprocessor_cache_mode: bool, with_debug_flags: bo
         };
         let tempdir_path = tempdir_pathbuf.as_path();
 
-        // Ensure there's no existing sccache server running.
-        stop_local_daemon();
         // Create the configurations
         let sccache_cfg = sccache_client_cfg(tempdir_path, preprocessor_cache_mode);
         write_json_cfg(tempdir_path, "sccache-cfg.json", &sccache_cfg);
         let sccache_cached_cfg_path = tempdir_path.join("sccache-cached-cfg");
-        // Start a server.
-        trace!("start server");
-        start_local_daemon(
+        // Start the server daemon on a unique port
+        let client = SccacheClient::new(
             &tempdir_path.join("sccache-cfg.json"),
             &sccache_cached_cfg_path,
-        );
+        )
+        .start();
         for compiler in compilers {
             match compiler.name {
-                "nvcc" => {
-                    run_sccache_nvcc_cuda_command_tests(compiler, tempdir_path, with_debug_flags)
-                }
-                "clang++" => {
-                    run_sccache_clang_cuda_command_tests(compiler, tempdir_path, with_debug_flags)
-                }
+                "nvcc" => run_sccache_nvcc_cuda_command_tests(
+                    &client,
+                    compiler,
+                    tempdir_path,
+                    with_debug_flags,
+                ),
+                "clang++" => run_sccache_clang_cuda_command_tests(
+                    &client,
+                    compiler,
+                    tempdir_path,
+                    with_debug_flags,
+                ),
                 _ => {}
             }
         }
-        zero_stats();
-        stop_local_daemon();
     }
 }
 
 #[test_case(true ; "with preprocessor cache")]
 #[test_case(false ; "without preprocessor cache")]
-#[serial]
 #[cfg(any(unix, target_env = "msvc"))]
 fn test_hip_sccache_command(preprocessor_cache_mode: bool) {
     let _ = env_logger::try_init();
@@ -2371,19 +2418,16 @@ fn test_hip_sccache_command(preprocessor_cache_mode: bool) {
         .unwrap();
 
     if let Some(compiler) = find_hip_compiler() {
-        stop_local_daemon();
         // Create the configurations
         let sccache_cfg = sccache_client_cfg(tempdir.path(), preprocessor_cache_mode);
         write_json_cfg(tempdir.path(), "sccache-cfg.json", &sccache_cfg);
         let sccache_cached_cfg_path = tempdir.path().join("sccache-cached-cfg");
-        // Start a server.
-        trace!("start server");
-        start_local_daemon(
+        // Start the server daemon on a unique port
+        let client = SccacheClient::new(
             &tempdir.path().join("sccache-cfg.json"),
             &sccache_cached_cfg_path,
-        );
-        run_sccache_hip_command_tests(compiler, tempdir.path());
-        zero_stats();
-        stop_local_daemon();
+        )
+        .start();
+        run_sccache_hip_command_tests(&client, compiler, tempdir.path());
     }
 }

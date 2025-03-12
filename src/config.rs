@@ -1288,7 +1288,7 @@ pub struct MetricsConfigs {
 }
 
 #[cfg(feature = "dist-server")]
-#[derive(Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct StorageConfig {
     pub storage: Option<CacheType>,
     pub fallback: DiskCacheConfig,

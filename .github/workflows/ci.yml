@@ -60,7 +60,7 @@ jobs:
     name: test ${{ matrix.os }} rust ${{ matrix.rustc || 'stable' }} ${{ matrix.extra_desc }}
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.allow_failure || false }}
-    timeout-minutes: 60
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -76,16 +76,16 @@ jobs:
             # Oldest supported version, keep in sync with README.md
             rustc: "1.75.0"
             extra_desc: dist-server
-            extra_args: --no-default-features --features="dist-tests" test_dist_ -- --test-threads 1
+            extra_args: --no-default-features --features="dist-tests" test_dist_
           - os: ubuntu-22.04
             rustc: stable
             extra_desc: dist-server
-            extra_args: --no-default-features --features="dist-tests" test_dist_ -- --test-threads 1
+            extra_args: --no-default-features --features="dist-tests" test_dist_
           - os: ubuntu-22.04
             rustc: nightly
             allow_failure: true
             extra_desc: dist-server
-            extra_args: --no-default-features --features="dist-tests,unstable" test_dist_ -- --test-threads 1
+            extra_args: --no-default-features --features="dist-tests,unstable" test_dist_
           - os: ubuntu-22.04
             rustc: stable
           - os: ubuntu-22.04
@@ -271,7 +271,7 @@ jobs:
     name: coverage ${{ matrix.os }} rust ${{ matrix.rustc || 'stable' }} ${{ matrix.extra_desc }}
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.allow_failure || false }}
-    timeout-minutes: 60
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -284,7 +284,7 @@ jobs:
           - os: ubuntu-22.04
             rustc: "1.75.0"
             extra_desc: dist-server
-            extra_args: --no-default-features --features=dist-tests test_dist_ -- --test-threads 1
+            extra_args: --no-default-features --features=dist-tests test_dist_
           - os: macos-13
             rustc: nightly
     # Disable on Windows for now as it fails with:

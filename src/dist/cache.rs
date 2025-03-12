@@ -481,6 +481,7 @@ mod client {
 #[cfg(feature = "dist-server")]
 mod server {
     use async_compression::futures::bufread::GzipDecoder;
+    use async_trait::async_trait;
 
     use futures::{io::BufReader, StreamExt};
     use tokio_retry2::RetryError;
@@ -493,7 +494,7 @@ mod server {
     use crate::cache::{cache, Storage};
     use crate::dist::http::retry_with_jitter;
     use crate::dist::metrics::{Metrics, TimeRecorder};
-    use crate::dist::Toolchain;
+    use crate::dist::{Toolchain, ToolchainService};
     use crate::errors::*;
 
     const TC_LOAD: &str = "sccache::server::toolchain::load_time";
@@ -575,6 +576,13 @@ mod server {
         metrics: ServerToolchainsMetrics,
     }
 
+    #[async_trait]
+    impl ToolchainService for ServerToolchains {
+        async fn load_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
+            self.load(tc).await
+        }
+    }
+
     impl ServerToolchains {
         pub fn new<P: AsRef<OsStr>>(
             root: P,
@@ -594,7 +602,7 @@ mod server {
             }
         }
 
-        pub async fn load(&self, tc: &Toolchain) -> Result<PathBuf> {
+        async fn load(&self, tc: &Toolchain) -> Result<PathBuf> {
             // Record toolchain load time after retrying
             let _timer = self.metrics.load_timer();
             retry_with_jitter(3, || async {
@@ -603,13 +611,20 @@ mod server {
                 // Return the path to the unpacked toolchain dir.
                 self.load_inflated_toolchain(tc).await.map_err(|err| {
                     tracing::warn!(
-                        "ServerToolchains({})]: Error loading toolchain, retrying: {err:?}",
+                        "ServerToolchains({})]: Error loading toolchain: {err:?}",
                         &tc.archive_id
                     );
                     RetryError::transient(err)
                 })
             })
             .await
+            .map_err(|err| {
+                tracing::error!(
+                    "ServerToolchains({})]: Error loading toolchain: {err:?}",
+                    &tc.archive_id
+                );
+                err
+            })
         }
 
         async fn load_inflated_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
