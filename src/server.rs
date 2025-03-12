@@ -82,7 +82,7 @@ const DIST_CLIENT_RECREATE_TIMEOUT: Duration = Duration::from_secs(30);
 pub enum ServerStartup {
     /// Server started successfully on `addr`.
     Ok { addr: String },
-    /// Server Addr already in suse
+    /// Server Addr already in use.
     AddrInUse,
     /// Timed out waiting for server startup.
     TimedOut,

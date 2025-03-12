@@ -69,7 +69,7 @@ fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Output {
 
     cargo_command()
         .current_dir(cargo_path)
-        .args(["build", "--release"])
+        .args(["build", "--release", "--jobs", "1"])
         .envs(
             client
                 .cmd()
