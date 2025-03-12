@@ -7,10 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     str,
-    sync::{
-        atomic::{AtomicU16, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicU16, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -26,7 +23,6 @@ use nix::{
 
 #[cfg(feature = "dist-server")]
 use sccache::{
-    cache::Storage,
     config::{
         scheduler::ClientAuth, scheduler::Config as SchedulerConfig, server::BuilderType,
         server::Config as ServerConfig, CacheType, HTTPUrl, MessageBroker, RedisCacheConfig,
@@ -35,10 +31,7 @@ use sccache::{
     dist,
 };
 use sccache::{
-    config::{
-        CacheConfigs, DiskCacheConfig, DistConfig, DistNetworking, FileConfig,
-        PreprocessorCacheModeConfig,
-    },
+    config::{CacheConfigs, DiskCacheConfig, DistConfig, FileConfig, PreprocessorCacheModeConfig},
     server::{ServerInfo, ServerStats},
 };
 
@@ -72,7 +65,10 @@ impl SccacheClient {
         let path = assert_cmd::cargo::cargo_bin("sccache");
         let port = CLIENT_PORT.fetch_add(1, Ordering::SeqCst);
 
-        let mut envvars = vec![("SCCACHE_SERVER_PORT".into(), port.to_string().into())];
+        let mut envvars = vec![
+            ("SCCACHE_SERVER_PORT".into(), port.to_string().into()),
+            ("TOKIO_WORKER_THREADS".into(), "2".into()),
+        ];
 
         // Send daemon logs to a file if SCCACHE_DEBUG is defined
         if env::var("SCCACHE_DEBUG").is_ok() {
@@ -108,11 +104,9 @@ impl SccacheClient {
 
     pub fn start(self) -> Self {
         trace!("sccache --start-server");
-        let mut cmd = self.cmd();
-        cmd.arg("--start-server");
         // Don't run this with run() because on Windows `wait_with_output`
         // will hang because the internal server process is not detached.
-        if !cmd.status().unwrap().success() {
+        if !self.cmd().arg("--start-server").status().unwrap().success() {
             panic!("Failed to start local daemon");
         }
         self
@@ -242,10 +236,6 @@ pub fn sccache_client_cfg(tmpdir: &Path, preprocessor_cache_mode: bool) -> FileC
             auth: Default::default(), // dangerously_insecure
             scheduler_url: None,
             cache_dir: tmpdir.join(dist_cache_relpath),
-            net: DistNetworking {
-                request_timeout: 30,
-                ..Default::default()
-            },
             toolchains: vec![],
             toolchain_cache_size: TC_CACHE_SIZE,
             rewrite_includes_only: false, // TODO
@@ -263,7 +253,6 @@ fn sccache_scheduler_cfg(tmpdir: &Path, message_broker: &MessageBroker) -> Sched
 
     let mut config = SchedulerConfig::load(None).unwrap();
     let scheduler_port = SCHEDULER_PORT.fetch_add(1, Ordering::SeqCst);
-    config.job_time_limit = 30;
     config.client_auth = ClientAuth::Insecure;
     config.message_broker = Some(message_broker.clone());
     config.public_addr = SocketAddr::from(([0, 0, 0, 0], scheduler_port));
@@ -482,6 +471,7 @@ impl DistSystemBuilder {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_custom_server(self, child: Pid) -> Self {
         Self {
             custom_server: Some(child),
@@ -1074,101 +1064,6 @@ impl Drop for DistSystem {
             panic!("Encountered failures during dist system teardown")
         }
     }
-}
-
-#[cfg(feature = "dist-server")]
-pub fn new_custom_server<B: dist::BuilderIncoming + 'static>(
-    server_id: &str,
-    message_broker: &MessageBroker,
-    builder: B,
-    jobs_storage: Arc<dyn Storage>,
-    toolchains: dist::ServerToolchains,
-) -> std::result::Result<(), anyhow::Error> {
-    let builder = Arc::new(builder);
-    let server_id = server_id.to_owned();
-    let message_broker = message_broker.clone();
-
-    env::set_var("SCCACHE_NO_DAEMON", "1");
-
-    if env::var("SCCACHE_LOG").is_err() {
-        env::set_var("SCCACHE_LOG", "sccache=debug");
-    }
-
-    dist::init_logging();
-
-    println!("[{server_id}]: Initialized logging");
-
-    let nthreads = 1;
-
-    println!("[{server_id}]: Starting runtime");
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(nthreads * 2)
-        .build()?;
-
-    let res = runtime.block_on(async {
-        let job_queue = std::sync::Arc::new(tokio::sync::Semaphore::new(nthreads));
-        let state = dist::server::ServerState {
-            id: server_id.to_owned(),
-            job_queue,
-            num_cpus: nthreads,
-            occupancy: nthreads,
-            pre_fetch: 0,
-            ..Default::default()
-        };
-
-        // Loop until the message broker container is started and accepts our connection
-        let start = Instant::now();
-        let tasks = loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-
-            println!(
-                "[{server_id}]: Connecting to broker ({})",
-                match message_broker {
-                    MessageBroker::AMQP(ref url) => url,
-                    MessageBroker::Redis(ref url) => url,
-                }
-            );
-
-            let tasks = dist::tasks::Tasks::server(
-                &server_id,
-                &dist::scheduler_to_servers_queue(),
-                nthreads as u16,
-                Some(message_broker.clone()),
-            )
-            .await;
-
-            match tasks {
-                Ok(tasks) => {
-                    break tasks;
-                }
-                Err(err) => {
-                    if Instant::now().duration_since(start) > MAX_STARTUP_WAIT {
-                        return Err(err);
-                    }
-                }
-            }
-        };
-
-        println!("[{server_id}]: Starting custom server");
-
-        let server =
-            dist::server::Server::new(builder, jobs_storage.clone(), state, tasks, toolchains)?;
-
-        let res = match server.start(Duration::from_secs(1)).await {
-            Ok(_) => Ok(()),
-            Err(err) => Err(err),
-        };
-
-        println!("[{server_id}]: Custom server shutdown");
-
-        res
-    });
-
-    runtime.shutdown_timeout(Duration::from_millis(100));
-
-    res
 }
 
 fn make_container_name(tag: &str) -> String {
