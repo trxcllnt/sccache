@@ -6,15 +6,13 @@ extern crate log;
 extern crate sccache;
 extern crate serde_json;
 
-use harness::{DistMessageBroker, DistSystem};
+use harness::DistSystem;
 
 use crate::harness::{cargo_command, init_cargo, write_source, SccacheClient};
 use assert_cmd::prelude::*;
 use sccache::config::HTTPUrl;
 use std::path::Path;
 use std::process::Output;
-
-use test_case::test_case;
 
 mod harness;
 
@@ -38,6 +36,8 @@ fn cpp_compile(client: &SccacheClient, tmpdir: &Path) {
         .arg("-o")
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
+        .env("SCCACHE_RECACHE", "1")
+        .env("TOKIO_WORKER_THREADS", "2")
         .assert()
         .success();
 }
@@ -79,18 +79,10 @@ fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Output {
         .env("RUSTC_WRAPPER", &client.path)
         .env("CARGO_TARGET_DIR", "target")
         .env("RUST_BACKTRACE", "1")
+        .env("SCCACHE_RECACHE", "1")
+        .env("TOKIO_WORKER_THREADS", "2")
         .output()
         .unwrap()
-}
-
-fn broker_and_storage(message_broker: &str) -> (DistMessageBroker, DistMessageBroker) {
-    let message_broker = DistMessageBroker::new(message_broker);
-    let storage = if message_broker.is_amqp() {
-        DistMessageBroker::new("redis")
-    } else {
-        message_broker.clone()
-    };
-    (message_broker, storage)
 }
 
 pub fn dist_test_sccache_client_cfg(
@@ -105,235 +97,312 @@ pub fn dist_test_sccache_client_cfg(
     sccache_cfg
 }
 
-#[test_case("rabbitmq" ; "With rabbitmq")]
-#[test_case("redis" ; "With redis")]
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
-fn test_dist_cargo_build(message_broker: &str) {
-    let system = DistSystem::builder()
-        .with_name(&format!("test_dist_cargo_build_{message_broker}"))
-        .with_default_message_broker(message_broker)
-        .with_default_scheduler()
-        .with_default_server()
-        .build();
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_dist_cargo_build() {
+    async fn run_test_with(message_broker: &str) {
+        let system = DistSystem::builder()
+            .with_name(&format!("test_dist_cargo_build_{message_broker}"))
+            .with_scheduler()
+            .with_server()
+            .with_message_broker(message_broker)
+            .build();
 
-    let client = system
-        .new_client(&dist_test_sccache_client_cfg(
+        let client = system.new_client(&dist_test_sccache_client_cfg(
             system.data_dir(),
             system.scheduler(0).unwrap().url(),
-        ))
-        .start();
+        ));
 
-    let output = rust_compile(&client, system.data_dir());
+        let output = rust_compile(&client, system.data_dir());
 
-    // Ensure sccache ignores inherited jobservers in CARGO_MAKEFLAGS
-    assert!(!String::from_utf8_lossy(&output.stderr)
-        .contains("warning: failed to connect to jobserver from environment variable"));
+        // Ensure sccache ignores inherited jobservers in CARGO_MAKEFLAGS
+        assert!(!String::from_utf8_lossy(&output.stderr)
+            .contains("warning: failed to connect to jobserver from environment variable"));
 
-    // Assert compilation succeeded
-    output.assert().success();
+        // Assert compilation succeeded
+        output.assert().success();
 
-    let stats = client.stats().unwrap();
-    assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
-    assert_eq!(0, stats.dist_errors);
-    // check >= 5 because cargo >=1.82 does additional requests with -vV
-    assert!(stats.compile_requests >= 5);
-    assert_eq!(1, stats.requests_executed);
-    assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(1, stats.cache_misses.all());
+        let stats = client.stats().unwrap();
+        assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
+        assert_eq!(0, stats.dist_errors);
+        // check >= 5 because cargo >=1.82 does additional requests with -vV
+        assert!(stats.compile_requests >= 5);
+        assert_eq!(1, stats.requests_executed);
+        assert_eq!(0, stats.cache_hits.all());
+        assert_eq!(1, stats.forced_recaches);
+    }
+
+    tokio::try_join!(
+        tokio::task::spawn(run_test_with("rabbitmq")),
+        tokio::task::spawn(run_test_with("redis")),
+    )
+    .unwrap();
 }
 
-#[test_case("rabbitmq" ; "With rabbitmq")]
-#[test_case("redis" ; "With redis")]
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
-fn test_dist_cpp_with_disk(message_broker: &str) {
-    let system = DistSystem::builder()
-        .with_name(&format!("test_dist_cpp_{message_broker}"))
-        .with_default_message_broker(message_broker)
-        .with_default_scheduler()
-        .with_default_server()
-        .build();
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_dist_cpp_disk_storage() {
+    async fn run_test_with(message_broker: &str) {
+        let system = DistSystem::builder()
+            .with_name(&format!("test_dist_cpp_disk_storage_{message_broker}"))
+            .with_scheduler()
+            .with_server()
+            .with_message_broker(message_broker)
+            .build();
 
-    let client = system
-        .new_client(&dist_test_sccache_client_cfg(
+        let client = system.new_client(&dist_test_sccache_client_cfg(
             system.data_dir(),
             system.scheduler(0).unwrap().url(),
-        ))
-        .start();
+        ));
 
-    cpp_compile(&client, system.data_dir());
+        cpp_compile(&client, system.data_dir());
 
-    let stats = client.stats().unwrap();
-    assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
-    assert_eq!(0, stats.dist_errors);
-    assert_eq!(1, stats.compile_requests);
-    assert_eq!(1, stats.requests_executed);
-    assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(1, stats.cache_misses.all());
+        let stats = client.stats().unwrap();
+        assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
+        assert_eq!(0, stats.dist_errors);
+        assert_eq!(1, stats.compile_requests);
+        assert_eq!(1, stats.requests_executed);
+        assert_eq!(0, stats.cache_hits.all());
+        assert_eq!(1, stats.forced_recaches);
+    }
+
+    tokio::try_join!(
+        tokio::task::spawn(run_test_with("rabbitmq")),
+        tokio::task::spawn(run_test_with("redis")),
+    )
+    .unwrap();
 }
 
-#[test_case("rabbitmq" ; "With rabbitmq")]
-#[test_case("redis" ; "With redis")]
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
-fn test_dist_cpp_with_cloud_storage(message_broker: &str) {
-    let (broker, redis) = broker_and_storage(message_broker);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_dist_cpp_cloud_storage() {
+    async fn run_test_with(message_broker: &str) {
+        let system = DistSystem::builder()
+            .with_name(&format!("test_dist_cpp_cloud_storage_{message_broker}"))
+            .with_scheduler()
+            .with_server()
+            .with_message_broker(message_broker)
+            .with_redis_storage()
+            .build();
 
-    let system = DistSystem::builder()
-        .with_name(&format!(
-            "test_dist_cpp_with_cloud_storage_{message_broker}"
-        ))
-        .with_default_scheduler()
-        .with_default_server()
-        .with_message_broker(&broker)
-        .with_server_jobs_storage(&redis)
-        .with_scheduler_jobs_storage(&redis)
-        .with_server_toolchains_storage(&redis)
-        .with_scheduler_toolchains_storage(&redis)
-        .build();
-
-    let client = system
-        .new_client(&dist_test_sccache_client_cfg(
+        let client = system.new_client(&dist_test_sccache_client_cfg(
             system.data_dir(),
             system.scheduler(0).unwrap().url(),
-        ))
-        .start();
+        ));
 
-    cpp_compile(&client, system.data_dir());
+        cpp_compile(&client, system.data_dir());
 
-    let stats = client.stats().unwrap();
-    assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
-    assert_eq!(0, stats.dist_errors);
-    assert_eq!(1, stats.compile_requests);
-    assert_eq!(1, stats.requests_executed);
-    assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(1, stats.cache_misses.all());
+        let stats = client.stats().unwrap();
+        assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
+        assert_eq!(0, stats.dist_errors);
+        assert_eq!(1, stats.compile_requests);
+        assert_eq!(1, stats.requests_executed);
+        assert_eq!(0, stats.cache_hits.all());
+        assert_eq!(1, stats.forced_recaches);
+    }
+
+    tokio::try_join!(
+        tokio::task::spawn(run_test_with("rabbitmq")),
+        tokio::task::spawn(run_test_with("redis")),
+    )
+    .unwrap();
 }
 
-#[test_case("rabbitmq" ; "With rabbitmq")]
-#[test_case("redis" ; "With redis")]
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
-fn test_dist_restarted_server(message_broker: &str) {
-    let system = DistSystem::builder()
-        .with_name(&format!("test_dist_restarted_{message_broker}"))
-        .with_default_message_broker(message_broker)
-        .with_default_scheduler()
-        .with_default_server()
-        .build();
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_dist_cpp_server_restart() {
+    async fn run_test_with(message_broker: &str) {
+        let system = DistSystem::builder()
+            .with_name(&format!("test_dist_cpp_server_restart_{message_broker}"))
+            .with_scheduler()
+            .with_server()
+            .with_message_broker(message_broker)
+            .with_redis_storage()
+            .build();
 
-    let client = system
-        .new_client(&dist_test_sccache_client_cfg(
+        let client = system.new_client(&dist_test_sccache_client_cfg(
             system.data_dir(),
             system.scheduler(0).unwrap().url(),
-        ))
-        .start();
+        ));
 
-    cpp_compile(&client, system.data_dir());
+        cpp_compile(&client, system.data_dir());
 
-    system.restart_server(system.server(0).unwrap());
+        system.restart_server(system.server(0).unwrap());
 
-    cpp_compile(&client, system.data_dir());
+        cpp_compile(&client, system.data_dir());
 
-    let stats = client.stats().unwrap();
-    assert_eq!(2, stats.dist_compiles.values().sum::<usize>());
-    assert_eq!(0, stats.dist_errors);
-    assert_eq!(2, stats.compile_requests);
-    assert_eq!(2, stats.requests_executed);
-    assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(2, stats.cache_misses.all());
+        let stats = client.stats().unwrap();
+        assert_eq!(2, stats.dist_compiles.values().sum::<usize>());
+        assert_eq!(0, stats.dist_errors);
+        assert_eq!(2, stats.compile_requests);
+        assert_eq!(2, stats.requests_executed);
+        assert_eq!(0, stats.cache_hits.all());
+        assert_eq!(2, stats.forced_recaches);
+    }
+
+    tokio::try_join!(
+        tokio::task::spawn(run_test_with("rabbitmq")),
+        tokio::task::spawn(run_test_with("redis")),
+    )
+    .unwrap();
 }
 
-#[test_case("rabbitmq" ; "with RabbitMQ")]
-#[test_case("redis" ; "with Redis")]
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
-fn test_dist_no_server_times_out(message_broker: &str) {
-    let system = DistSystem::builder()
-        .with_name(&format!("test_dist_no_server_times_out_{message_broker}"))
-        .with_default_message_broker(message_broker)
-        .with_default_scheduler()
-        .with_job_time_limit(10)
-        .build();
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_dist_cpp_no_server_times_out() {
+    async fn run_test_with(message_broker: &str) {
+        let system = DistSystem::builder()
+            .with_name(&format!(
+                "test_dist_cpp_no_server_times_out_{message_broker}"
+            ))
+            .with_scheduler()
+            .with_message_broker(message_broker)
+            .with_job_time_limit(10)
+            .with_redis_storage()
+            .build();
 
-    let client = system
-        .new_client(&dist_test_sccache_client_cfg(
+        let client = system.new_client(&dist_test_sccache_client_cfg(
             system.data_dir(),
             system.scheduler(0).unwrap().url(),
-        ))
-        .start();
+        ));
 
-    cpp_compile(&client, system.data_dir());
+        cpp_compile(&client, system.data_dir());
 
-    let stats = client.stats().unwrap();
-    assert_eq!(0, stats.dist_compiles.values().sum::<usize>());
-    assert_eq!(1, stats.dist_errors);
-    assert_eq!(1, stats.compile_requests);
-    assert_eq!(1, stats.requests_executed);
-    assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(1, stats.cache_misses.all());
+        let stats = client.stats().unwrap();
+        assert_eq!(0, stats.dist_compiles.values().sum::<usize>());
+        assert_eq!(1, stats.dist_errors);
+        assert_eq!(1, stats.compile_requests);
+        assert_eq!(1, stats.requests_executed);
+        assert_eq!(0, stats.cache_hits.all());
+        assert_eq!(1, stats.forced_recaches);
+    }
+
+    tokio::try_join!(
+        tokio::task::spawn(run_test_with("rabbitmq")),
+        tokio::task::spawn(run_test_with("redis")),
+    )
+    .unwrap();
 }
 
-#[test_case("rabbitmq" ; "with RabbitMQ")]
-#[test_case("redis" ; "with Redis")]
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
-fn test_dist_errors_on_job_load_failures(message_broker: &str) {
-    let (broker, redis) = broker_and_storage(message_broker);
-    let system = DistSystem::builder()
-        .with_name(&format!(
-            "test_dist_errors_on_job_load_failures_{message_broker}"
-        ))
-        .with_default_scheduler()
-        .with_default_server()
-        .with_message_broker(&broker)
-        // Scheduler stores jobs in redis, but Server is loading from disk
-        .with_scheduler_jobs_storage(&redis)
-        .build();
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_dist_cpp_two_servers() {
+    async fn run_test_with(message_broker: &str) {
+        let system = DistSystem::builder()
+            .with_name(&format!("test_dist_cpp_two_servers_{message_broker}"))
+            .with_scheduler()
+            .with_server()
+            .with_server()
+            .with_message_broker(message_broker)
+            .with_redis_storage()
+            .build();
 
-    let client = system
-        .new_client(&dist_test_sccache_client_cfg(
+        let client = system.new_client(&dist_test_sccache_client_cfg(
             system.data_dir(),
             system.scheduler(0).unwrap().url(),
-        ))
-        .start();
+        ));
 
-    cpp_compile(&client, system.data_dir());
+        let compile_cpp = || {
+            let client = client.clone();
+            let tmpdir = system.data_dir().to_owned();
+            move || cpp_compile(&client, &tmpdir)
+        };
 
-    let stats = client.stats().unwrap();
-    assert_eq!(0, stats.dist_compiles.values().sum::<usize>());
-    assert_eq!(1, stats.dist_errors);
-    assert_eq!(1, stats.compile_requests);
-    assert_eq!(1, stats.requests_executed);
-    assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(1, stats.cache_misses.all());
+        let _ = tokio::try_join!(
+            tokio::task::spawn_blocking(compile_cpp()),
+            tokio::task::spawn_blocking(compile_cpp()),
+            tokio::task::spawn_blocking(compile_cpp()),
+            tokio::task::spawn_blocking(compile_cpp()),
+        );
+
+        let stats = client.stats().unwrap();
+        assert_eq!(4, stats.dist_compiles.values().sum::<usize>());
+        assert_eq!(0, stats.dist_errors);
+        assert_eq!(4, stats.compile_requests);
+        assert_eq!(4, stats.requests_executed);
+        assert_eq!(0, stats.cache_hits.all());
+        assert_eq!(4, stats.forced_recaches);
+    }
+
+    tokio::try_join!(
+        tokio::task::spawn(run_test_with("rabbitmq")),
+        tokio::task::spawn(run_test_with("redis")),
+    )
+    .unwrap();
 }
 
-#[test_case("rabbitmq" ; "with RabbitMQ")]
-#[test_case("redis" ; "with Redis")]
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
-fn test_dist_errors_on_toolchain_load_failures(message_broker: &str) {
-    let (broker, redis) = broker_and_storage(message_broker);
-    let system = DistSystem::builder()
-        .with_name(&format!(
-            "test_dist_errors_on_toolchain_load_failures_{message_broker}"
-        ))
-        .with_default_scheduler()
-        .with_default_server()
-        .with_message_broker(&broker)
-        // Scheduler stores toolchains in redis, but Server is loading from disk
-        .with_scheduler_toolchains_storage(&redis)
-        .build();
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_dist_cpp_errors_on_job_load_failures() {
+    async fn run_test_with(message_broker: &str) {
+        let system = DistSystem::builder()
+            .with_name(&format!(
+                "test_dist_cpp_errors_on_job_load_failures_{message_broker}"
+            ))
+            .with_scheduler()
+            .with_server()
+            .with_message_broker(message_broker)
+            // Scheduler stores jobs in redis, but Server is loading from disk
+            .with_scheduler_jobs_redis_storage()
+            .build();
 
-    let client = system
-        .new_client(&dist_test_sccache_client_cfg(
+        let client = system.new_client(&dist_test_sccache_client_cfg(
             system.data_dir(),
             system.scheduler(0).unwrap().url(),
-        ))
-        .start();
+        ));
 
-    cpp_compile(&client, system.data_dir());
+        cpp_compile(&client, system.data_dir());
 
-    let stats = client.stats().unwrap();
-    assert_eq!(0, stats.dist_compiles.values().sum::<usize>());
-    assert_eq!(1, stats.dist_errors);
-    assert_eq!(1, stats.compile_requests);
-    assert_eq!(1, stats.requests_executed);
-    assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(1, stats.cache_misses.all());
+        let stats = client.stats().unwrap();
+        assert_eq!(0, stats.dist_compiles.values().sum::<usize>());
+        assert_eq!(1, stats.dist_errors);
+        assert_eq!(1, stats.compile_requests);
+        assert_eq!(1, stats.requests_executed);
+        assert_eq!(0, stats.cache_hits.all());
+        assert_eq!(1, stats.forced_recaches);
+    }
+
+    tokio::try_join!(
+        tokio::task::spawn(run_test_with("rabbitmq")),
+        tokio::task::spawn(run_test_with("redis")),
+    )
+    .unwrap();
+}
+
+#[cfg_attr(not(feature = "dist-tests"), ignore)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_dist_cpp_errors_on_toolchain_load_failures() {
+    async fn run_test_with(message_broker: &str) {
+        let system = DistSystem::builder()
+            .with_name(&format!(
+                "test_dist_cpp_errors_on_toolchain_load_failures_{message_broker}"
+            ))
+            .with_scheduler()
+            .with_server()
+            .with_message_broker(message_broker)
+            // Scheduler stores toolchains in redis, but Server is loading from disk
+            .with_scheduler_toolchains_redis_storage()
+            .build();
+
+        let client = system.new_client(&dist_test_sccache_client_cfg(
+            system.data_dir(),
+            system.scheduler(0).unwrap().url(),
+        ));
+
+        cpp_compile(&client, system.data_dir());
+
+        let stats = client.stats().unwrap();
+        assert_eq!(0, stats.dist_compiles.values().sum::<usize>());
+        assert_eq!(1, stats.dist_errors);
+        assert_eq!(1, stats.compile_requests);
+        assert_eq!(1, stats.requests_executed);
+        assert_eq!(0, stats.cache_hits.all());
+        assert_eq!(1, stats.forced_recaches);
+    }
+
+    tokio::try_join!(
+        tokio::task::spawn(run_test_with("rabbitmq")),
+        tokio::task::spawn(run_test_with("redis")),
+    )
+    .unwrap();
 }

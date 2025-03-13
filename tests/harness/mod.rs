@@ -1,13 +1,19 @@
+use bytes::Buf;
 use fs_err as fs;
+use itertools::Itertools;
 use std::{
+    collections::HashMap,
     env,
     ffi::OsString,
-    io::Write,
+    io::{BufRead, Write},
     net::{self, SocketAddr},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     str,
-    sync::atomic::{AtomicU16, Ordering},
+    sync::{
+        atomic::{AtomicU16, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -20,6 +26,8 @@ use nix::{
     },
     unistd::Pid,
 };
+
+use once_cell::sync::Lazy;
 
 #[cfg(feature = "dist-server")]
 use sccache::{
@@ -39,20 +47,19 @@ use serde::Serialize;
 use uuid::Uuid;
 
 const CONTAINER_NAME_PREFIX: &str = "sccache_dist";
+const CONTAINER_EXTERNAL_PATH: &str = "/sccache/external";
+const CONTAINER_INTERNAL_PATH: &str = "/sccache/internal";
 const DIST_IMAGE: &str = "sccache_dist_test_image";
 const DIST_DOCKERFILE: &str = include_str!("Dockerfile.sccache-dist");
 const DIST_IMAGE_BWRAP_PATH: &str = "/usr/bin/bwrap";
 const MAX_STARTUP_WAIT: Duration = Duration::from_secs(30);
 
-const CONFIGS_CONTAINER_PATH: &str = "/sccache-bits";
-const BUILD_DIR_CONTAINER_PATH: &str = "/sccache-bits/build-dir";
-
 const TC_CACHE_SIZE: u64 = 1024 * 1024 * 1024; // 1 gig
 
-pub static CLIENT_PORT: AtomicU16 = AtomicU16::new(4227);
+static CLIENT_PORT: AtomicU16 = AtomicU16::new(4227);
 static SCHEDULER_PORT: AtomicU16 = AtomicU16::new(10500);
-static RABBITMQ_PORT: AtomicU16 = AtomicU16::new(5673);
-static REDIS_PORT: AtomicU16 = AtomicU16::new(6380);
+static RABBITMQ_PORT: AtomicU16 = AtomicU16::new(5672);
+static REDIS_PORT: AtomicU16 = AtomicU16::new(6379);
 
 pub struct SccacheClient {
     envvars: Vec<(OsString, OsString)>,
@@ -255,44 +262,30 @@ pub fn sccache_client_cfg(tmpdir: &Path, preprocessor_cache_mode: bool) -> FileC
 }
 
 #[cfg(feature = "dist-server")]
-fn sccache_scheduler_cfg(tmpdir: &Path, message_broker: &MessageBroker) -> SchedulerConfig {
-    let jobs_path = "server-jobs";
-    let toolchains_path = "server-toolchains";
-    fs::create_dir_all(tmpdir.join(toolchains_path)).unwrap();
-
+fn sccache_scheduler_cfg(message_broker: &MessageBroker) -> SchedulerConfig {
     let mut config = SchedulerConfig::load(None).unwrap();
     let scheduler_port = SCHEDULER_PORT.fetch_add(1, Ordering::SeqCst);
     config.client_auth = ClientAuth::Insecure;
     config.message_broker = Some(message_broker.clone());
     config.public_addr = SocketAddr::from(([0, 0, 0, 0], scheduler_port));
-    config.jobs.fallback.dir = Path::new(CONFIGS_CONTAINER_PATH).join(jobs_path);
-    config.toolchains.fallback.dir = Path::new(CONFIGS_CONTAINER_PATH).join(toolchains_path);
+    config.jobs.fallback.dir = Path::new(CONTAINER_EXTERNAL_PATH).join("jobs");
+    config.toolchains.fallback.dir = Path::new(CONTAINER_EXTERNAL_PATH).join("toolchains");
     config
 }
 
 #[cfg(feature = "dist-server")]
-fn sccache_server_cfg(
-    tmpdir: &Path,
-    message_broker: &MessageBroker,
-    // server_ip: IpAddr,
-) -> ServerConfig {
-    let relpath = "server-cache";
-    let jobs_path = "server-jobs";
-    let toolchains_path = "server-toolchains";
-    fs::create_dir_all(tmpdir.join(relpath)).unwrap();
-    fs::create_dir_all(tmpdir.join(toolchains_path)).unwrap_or_default();
-
+fn sccache_server_cfg(message_broker: &MessageBroker) -> ServerConfig {
     let mut config = ServerConfig::load(None).unwrap();
     config.max_per_core_load = 0.0;
     config.max_per_core_prefetch = 0.0;
     config.message_broker = Some(message_broker.clone());
     config.builder = BuilderType::Overlay {
-        build_dir: BUILD_DIR_CONTAINER_PATH.into(),
+        build_dir: CONTAINER_EXTERNAL_PATH.into(),
         bwrap_path: DIST_IMAGE_BWRAP_PATH.into(),
     };
-    config.cache_dir = Path::new(CONFIGS_CONTAINER_PATH).join(relpath);
-    config.jobs.fallback.dir = Path::new(CONFIGS_CONTAINER_PATH).join(jobs_path);
-    config.toolchains.fallback.dir = Path::new(CONFIGS_CONTAINER_PATH).join(toolchains_path);
+    config.cache_dir = Path::new(CONTAINER_INTERNAL_PATH).to_path_buf();
+    config.jobs.fallback.dir = Path::new(CONTAINER_EXTERNAL_PATH).join("jobs");
+    config.toolchains.fallback.dir = Path::new(CONTAINER_EXTERNAL_PATH).join("toolchains");
     config.toolchain_cache_size = TC_CACHE_SIZE;
     config
 }
@@ -359,6 +352,7 @@ impl DistMessageBroker {
 #[derive(Clone)]
 pub struct MessageBrokerHandle {
     broker: DistMessageBroker,
+    #[allow(unused)]
     handle: ServerHandle,
 }
 
@@ -377,6 +371,7 @@ impl MessageBrokerHandle {
 #[derive(Clone)]
 pub struct SchedulerHandle {
     port: u16,
+    #[allow(unused)]
     handle: ServerHandle,
 }
 
@@ -399,258 +394,65 @@ impl SchedulerHandle {
 }
 
 #[cfg(feature = "dist-server")]
-#[derive(Clone)]
-pub enum ServerHandle {
-    Container {
-        id: String,
-        cid: String,
-    },
-    Process {
-        id: String,
-        #[allow(dead_code)]
-        pid: Pid,
-    },
+static DIST_SYSTEM_GLOBALS: Lazy<Arc<DistSystemGlobals>> = Lazy::new(DistSystemGlobals::new);
+static DIST_SYSTEM_GLOBALS_TEARDOWN: once_cell::sync::OnceCell<tokio::task::JoinHandle<()>> =
+    once_cell::sync::OnceCell::new();
+
+#[cfg(feature = "dist-server")]
+struct DistSystemGlobals {
+    pub dropped_handles_count: AtomicU64,
+    message_brokers: Mutex<Vec<DistHandle>>,
+    #[allow(unused)]
+    handle: &'static tokio::task::JoinHandle<()>,
+    errors: Mutex<HashMap<(u64, String), std::process::Output>>,
+    output: Mutex<HashMap<(u64, String), std::process::Output>>,
 }
 
 #[cfg(feature = "dist-server")]
-#[derive(Clone)]
-pub enum DistHandle {
-    MessageBroker(MessageBrokerHandle),
-    Scheduler(SchedulerHandle),
-    Server(ServerHandle),
-}
-
-#[cfg(feature = "dist-server")]
-pub struct DistSystemBuilder {
-    default_scheduler: bool,
-    default_server: bool,
-    dist_system_name: String,
-    job_time_limit: Option<u32>,
-    custom_server: Option<Pid>,
-    message_broker: Option<DistMessageBroker>,
-    scheduler_jobs_storage: Option<DistMessageBroker>,
-    scheduler_toolchains_storage: Option<DistMessageBroker>,
-    server_jobs_storage: Option<DistMessageBroker>,
-    server_toolchains_storage: Option<DistMessageBroker>,
-}
-
-#[cfg(feature = "dist-server")]
-impl DistSystemBuilder {
-    pub fn new() -> Self {
-        Self {
-            default_scheduler: false,
-            default_server: false,
-            custom_server: None,
-            dist_system_name: make_container_name("sccache_dist_test"),
-            job_time_limit: None,
-            message_broker: None,
-            scheduler_jobs_storage: None,
-            scheduler_toolchains_storage: None,
-            server_jobs_storage: None,
-            server_toolchains_storage: None,
-        }
-    }
-
-    pub fn with_name(self, name: &str) -> Self {
-        Self {
-            dist_system_name: name.to_owned(),
-            ..self
-        }
-    }
-
-    pub fn with_default_message_broker(self, message_broker: &str) -> Self {
-        Self {
-            message_broker: Some(DistMessageBroker::new(message_broker)),
-            ..self
-        }
-    }
-
-    pub fn with_default_scheduler(self) -> Self {
-        Self {
-            default_scheduler: true,
-            ..self
-        }
-    }
-
-    pub fn with_default_server(self) -> Self {
-        Self {
-            custom_server: None,
-            default_server: true,
-            ..self
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn with_custom_server(self, child: Pid) -> Self {
-        Self {
-            custom_server: Some(child),
-            default_server: false,
-            ..self
-        }
-    }
-
-    pub fn with_job_time_limit(self, job_time_limit: u32) -> Self {
-        Self {
-            job_time_limit: Some(job_time_limit),
-            ..self
-        }
-    }
-
-    pub fn with_message_broker(self, message_broker: &DistMessageBroker) -> Self {
-        Self {
-            message_broker: Some(message_broker.clone()),
-            ..self
-        }
-    }
-
-    pub fn with_scheduler_jobs_storage(self, redis_storage: &DistMessageBroker) -> Self {
-        Self {
-            scheduler_jobs_storage: Some(redis_storage.clone()),
-            ..self
-        }
-    }
-
-    pub fn with_scheduler_toolchains_storage(self, redis_storage: &DistMessageBroker) -> Self {
-        Self {
-            scheduler_toolchains_storage: Some(redis_storage.clone()),
-            ..self
-        }
-    }
-
-    pub fn with_server_jobs_storage(self, redis_storage: &DistMessageBroker) -> Self {
-        Self {
-            server_jobs_storage: Some(redis_storage.clone()),
-            ..self
-        }
-    }
-
-    pub fn with_server_toolchains_storage(self, redis_storage: &DistMessageBroker) -> Self {
-        Self {
-            server_toolchains_storage: Some(redis_storage.clone()),
-            ..self
-        }
-    }
-
-    pub fn build(self) -> DistSystem {
-        let name = &self.dist_system_name;
-        let mut system = DistSystem::new(name);
-        let message_broker = self.message_broker.clone().unwrap();
-
-        system.add_message_broker(&message_broker);
-
-        if self.default_scheduler {
-            let mut cfg = SchedulerConfig {
-                scheduler_id: name.to_owned(),
-                ..system.scheduler_cfg(&message_broker.config)
-            };
-            if let Some(job_time_limit) = self.job_time_limit {
-                cfg.job_time_limit = job_time_limit;
-            }
-            if let Some(jobs_storage) = self.scheduler_jobs_storage {
-                cfg.jobs = system.add_redis_storage(jobs_storage);
-            }
-            if let Some(toolchains_storage) = self.scheduler_toolchains_storage {
-                cfg.toolchains = system.add_redis_storage(toolchains_storage);
-            }
-            system.add_scheduler(cfg);
-        }
-
-        if self.default_server {
-            let mut cfg = ServerConfig {
-                server_id: name.to_owned(),
-                ..system.server_cfg(&message_broker.config)
-            };
-            if let Some(jobs_storage) = self.server_jobs_storage {
-                cfg.jobs = system.add_redis_storage(jobs_storage);
-            }
-            if let Some(toolchains_storage) = self.server_toolchains_storage {
-                cfg.toolchains = system.add_redis_storage(toolchains_storage);
-            }
-            system.add_server(cfg);
-        }
-
-        if let Some(custom_server_pid) = self.custom_server {
-            system.add_custom_server(name, custom_server_pid);
-        }
-
-        system
-    }
-}
-
-#[cfg(feature = "dist-server")]
-pub struct DistSystem {
-    handles: Vec<DistHandle>,
-    data_dir: tempfile::TempDir,
-    dist_dir: PathBuf,
-    sccache_dist: PathBuf,
-}
-
-#[cfg(feature = "dist-server")]
-impl DistSystem {
-    pub fn builder() -> DistSystemBuilder {
-        DistSystemBuilder::new()
-    }
-
-    fn new(name: &str) -> Self {
-        // Make sure the docker image is available, building it if necessary
-        let mut child = Command::new("docker")
+impl DistSystemGlobals {
+    pub fn new() -> Arc<Self> {
+        // Make sure the docker image is available, building it if necessary.
+        // This is here (and not below) so that it only happens once.
+        let mut cmd = Command::new("docker")
             .args(["build", "-q", "-t", DIST_IMAGE, "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child
-            .stdin
+
+        cmd.stdin
             .as_mut()
             .unwrap()
             .write_all(DIST_DOCKERFILE.as_bytes())
             .unwrap();
-        let output = child.wait_with_output().unwrap();
-        check_output(&output);
 
-        let data_dir = tempfile::Builder::new()
-            .prefix(&format!("sccache_dist_{name}"))
-            .tempdir()
-            .unwrap();
+        check_output(&cmd.wait_with_output().unwrap());
 
-        let dist_dir = data_dir.path().join("distsystem");
-        fs::create_dir_all(&dist_dir).unwrap();
-
-        Self {
-            handles: vec![],
-            data_dir,
-            dist_dir,
-            sccache_dist: sccache_dist_path(),
-        }
+        Arc::new(Self {
+            dropped_handles_count: AtomicU64::new(0),
+            message_brokers: Mutex::new(vec![
+                Self::add_message_broker("rabbitmq"),
+                Self::add_message_broker("redis"),
+            ]),
+            errors: Mutex::new(HashMap::new()),
+            output: Mutex::new(HashMap::new()),
+            handle: DIST_SYSTEM_GLOBALS_TEARDOWN
+                .get_or_init(|| Self::exit_after_delay(Duration::from_secs(1))),
+        })
     }
 
-    pub fn data_dir(&self) -> &Path {
-        self.data_dir.path()
-    }
+    fn add_message_broker(message_broker: &str) -> DistHandle {
+        let container_name = name_with_uuid(message_broker);
+        let message_broker = DistMessageBroker::new(message_broker);
 
-    pub fn dist_dir(&self) -> &Path {
-        self.dist_dir.as_path()
-    }
-
-    pub fn new_client(&self, client_config: &FileConfig) -> SccacheClient {
-        let data_dir = self.data_dir();
-        write_json_cfg(data_dir, "sccache-client.json", client_config);
-        SccacheClient::new(
-            &data_dir.join("sccache-client.json"),
-            &data_dir.join("sccache-cached-cfg"),
-        )
-    }
-
-    pub fn add_message_broker(&mut self, message_broker: &DistMessageBroker) -> &mut Self {
         let DistMessageBroker {
             image,
             host_port,
             container_port,
             ..
-        } = message_broker;
+        } = &message_broker;
 
-        let container_name = make_container_name("message_broker");
         let output = Command::new("docker")
             .args([
                 "run",
@@ -666,31 +468,481 @@ impl DistSystem {
 
         check_output(&output);
 
-        self.handles
-            .push(DistHandle::MessageBroker(MessageBrokerHandle {
-                broker: message_broker.clone(),
-                handle: ServerHandle::Container {
-                    id: container_name.clone(),
-                    cid: container_name,
-                },
-            }));
+        DistHandle::MessageBroker(MessageBrokerHandle {
+            broker: message_broker,
+            handle: ServerHandle::Container {
+                id: container_name.clone(),
+                cid: container_name,
+                log_outputs: false,
+            },
+        })
+    }
 
-        self
+    #[allow(unused)]
+    pub fn rabbitmq(&self) -> Option<DistMessageBroker> {
+        self.message_broker("rabbitmq")
+    }
+
+    pub fn redis(&self) -> Option<DistMessageBroker> {
+        self.message_broker("redis")
+    }
+
+    pub fn message_broker(&self, message_broker: &str) -> Option<DistMessageBroker> {
+        self.message_brokers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|component| {
+                if let DistHandle::MessageBroker(handle) = component {
+                    Some(handle)
+                } else {
+                    None
+                }
+            })
+            .find(|b| match message_broker {
+                "rabbitmq" => b.is_amqp(),
+                "redis" => b.is_redis(),
+                _ => false,
+            })
+            .map(|b| b.broker.clone())
+    }
+
+    pub fn errors(&self, idx: u64, id: &str, o: std::process::Output) {
+        self.errors
+            .lock()
+            .unwrap()
+            .insert((idx, id.to_owned()), o.clone());
+    }
+
+    pub fn output(&self, idx: u64, id: &str, o: std::process::Output) {
+        self.output
+            .lock()
+            .unwrap()
+            .insert((idx, id.to_owned()), o.clone());
+    }
+
+    fn exit_after_delay(interval: Duration) -> tokio::task::JoinHandle<()> {
+        tokio::task::spawn_blocking(move || {
+            let mut attempts = 0;
+            loop {
+                std::thread::sleep(interval);
+                if Arc::strong_count(&DIST_SYSTEM_GLOBALS) <= 1 {
+                    if attempts >= 5 {
+                        DIST_SYSTEM_GLOBALS.exit();
+                        break;
+                    }
+                    attempts += 1;
+                } else {
+                    attempts = 0;
+                }
+            }
+        })
+    }
+
+    fn exit(&self) {
+        self.message_brokers.lock().unwrap().drain(..);
+        self.print();
+    }
+
+    fn print(&self) {
+        fn print_output(prefix: &str, output: &std::process::Output) {
+            println!("\n{prefix}");
+            if !output.stdout.is_empty() {
+                println!("\n=== begin stdout {}\n", "=".repeat(43));
+                output
+                    .stdout
+                    .reader()
+                    .lines()
+                    .for_each(|line| println!("    {}", line.unwrap_or_default()));
+                println!("\n===== end stdout  {}\n", "=".repeat(43));
+            }
+            if !output.stderr.is_empty() {
+                println!("\n=== begin stderr  {}\n", "=".repeat(43));
+                output
+                    .stderr
+                    .reader()
+                    .lines()
+                    .for_each(|line| println!("    {}", line.unwrap_or_default()));
+                println!("\n===== end stderr  {}\n", "=".repeat(43));
+            }
+        }
+
+        for ((_, id), output) in self
+            .output
+            .lock()
+            .unwrap()
+            .drain()
+            .sorted_by(|a, b| a.0 .0.cmp(&b.0 .0))
+        {
+            print_output(
+                &format!(
+                    "=== server output {}\n\nid: {id}\n{}",
+                    "=".repeat(61),
+                    output.status
+                ),
+                &output,
+            );
+        }
+
+        for ((_, id), errors) in self
+            .errors
+            .lock()
+            .unwrap()
+            .drain()
+            .sorted_by(|a, b| a.0 .0.cmp(&b.0 .0))
+        {
+            print_output(
+                &format!(
+                    "=== server errors {}\n\nid: {id}\n{}",
+                    "=".repeat(61),
+                    errors.status
+                ),
+                &errors,
+            );
+        }
+    }
+}
+
+#[cfg(feature = "dist-server")]
+#[derive(Clone)]
+pub enum ServerHandle {
+    Container {
+        id: String,
+        cid: String,
+        log_outputs: bool,
+    },
+    #[allow(unused)]
+    Process {
+        id: String,
+        #[allow(dead_code)]
+        pid: Pid,
+    },
+}
+
+// If you want containers to hang around (e.g. for debugging), comment out the "docker rm -f" lines
+#[cfg(feature = "dist-server")]
+impl Drop for ServerHandle {
+    fn drop(&mut self) {
+        let drop_index = DIST_SYSTEM_GLOBALS
+            .dropped_handles_count
+            .fetch_add(1, Ordering::SeqCst);
+
+        // Panicking halfway through drop would either abort (if it's a double panic) or leave us with
+        // resources that aren't yet cleaned up. Instead, do as much as possible then decide what to do
+        // at the end - panic (if not already doing so) or let the panic continue
+        macro_rules! log_err {
+            ($e:expr) => {
+                match $e {
+                    Ok(()) => (),
+                    Err((id, err)) => {
+                        DIST_SYSTEM_GLOBALS.errors(
+                            drop_index,
+                            id,
+                            std::process::Output {
+                                status: sccache::mock_command::exit_status(1),
+                                stdout: vec![],
+                                stderr: err.into_bytes(),
+                            },
+                        );
+                    }
+                }
+            };
+        }
+
+        match self {
+            ServerHandle::Container {
+                ref id,
+                cid,
+                log_outputs,
+            } => {
+                log_err!(Command::new("docker")
+                    .args(["logs", cid])
+                    .output()
+                    .map(|o| {
+                        if *log_outputs {
+                            DIST_SYSTEM_GLOBALS.output(drop_index, cid, o);
+                        }
+                    })
+                    .map_err(|e| (id, format!("[{id}, {cid})]: {e:?}"))));
+                log_err!(Command::new("docker")
+                    .args(["kill", cid])
+                    .output()
+                    .map(|_| ())
+                    .map_err(|e| (id, format!("[{id}, {cid})]: {e:?}"))));
+                log_err!(Command::new("docker")
+                    .args(["rm", "-f", cid])
+                    .output()
+                    .map(|_| ())
+                    .map_err(|e| (id, format!("[{id}, {cid})]: {e:?}"))));
+            }
+            ServerHandle::Process { ref id, pid } => {
+                log_err!(nix::sys::signal::kill(*pid, Signal::SIGINT)
+                    .map_err(|e| (id, format!("[{id}, {pid})]: {e:?}"))));
+                thread::sleep(Duration::from_secs(5));
+                // Default to trying to kill again, e.g. if there was an error waiting on the pid
+                let mut killagain = true;
+                log_err!(nix::sys::wait::waitpid(*pid, Some(WaitPidFlag::WNOHANG))
+                    .map(|ws| {
+                        if ws != WaitStatus::StillAlive {
+                            killagain = false;
+                        }
+                    })
+                    .map_err(|e| (id, format!("[{id}, {pid})]: {e:?}"))));
+                if killagain {
+                    eprintln!("[{id}, {pid})]: process ignored SIGINT, trying SIGKILL");
+                    log_err!(nix::sys::signal::kill(*pid, Signal::SIGKILL)
+                        .map_err(|e| (id, format!("[{id}, {pid})]: {e:?}"))));
+                    log_err!(nix::sys::wait::waitpid(*pid, Some(WaitPidFlag::WNOHANG))
+                        .map_err(|e| e.to_string())
+                        .and_then(|ws| if ws == WaitStatus::StillAlive {
+                            eprintln!("[{id}, {pid})]: process still alive after SIGKILL");
+                            Err("process still alive after SIGKILL".into())
+                        } else {
+                            Ok(())
+                        })
+                        .map_err(|e| (id, format!("[{id}, {pid})]: {e}"))));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "dist-server")]
+#[derive(Clone)]
+pub enum DistHandle {
+    MessageBroker(MessageBrokerHandle),
+    Scheduler(SchedulerHandle),
+    Server(ServerHandle),
+}
+
+#[cfg(feature = "dist-server")]
+pub struct DistSystemBuilder {
+    scheduler_count: u64,
+    server_count: u64,
+    dist_system_name: String,
+    job_time_limit: Option<u32>,
+    message_broker: Option<DistMessageBroker>,
+    scheduler_jobs_redis_storage: Option<DistMessageBroker>,
+    scheduler_toolchains_redis_storage: Option<DistMessageBroker>,
+    server_jobs_redis_storage: Option<DistMessageBroker>,
+    server_toolchains_redis_storage: Option<DistMessageBroker>,
+}
+
+#[cfg(feature = "dist-server")]
+impl DistSystemBuilder {
+    pub fn new() -> Self {
+        Self {
+            dist_system_name: name_with_uuid("sccache_dist_test"),
+            job_time_limit: None,
+            message_broker: None,
+            scheduler_count: 0,
+            server_count: 0,
+            scheduler_jobs_redis_storage: None,
+            scheduler_toolchains_redis_storage: None,
+            server_jobs_redis_storage: None,
+            server_toolchains_redis_storage: None,
+        }
+    }
+
+    pub fn with_name(self, name: &str) -> Self {
+        Self {
+            dist_system_name: name.to_owned(),
+            ..self
+        }
+    }
+
+    pub fn with_scheduler(self) -> Self {
+        Self {
+            scheduler_count: self.scheduler_count + 1,
+            ..self
+        }
+    }
+
+    pub fn with_server(self) -> Self {
+        Self {
+            server_count: self.server_count + 1,
+            ..self
+        }
+    }
+
+    pub fn with_job_time_limit(self, job_time_limit: u32) -> Self {
+        Self {
+            job_time_limit: Some(job_time_limit),
+            ..self
+        }
+    }
+
+    pub fn with_message_broker(self, message_broker: &str) -> Self {
+        Self {
+            message_broker: DIST_SYSTEM_GLOBALS.message_broker(message_broker),
+            ..self
+        }
+    }
+
+    pub fn with_redis_storage(self) -> Self {
+        self.with_scheduler_jobs_redis_storage()
+            .with_scheduler_toolchains_redis_storage()
+            .with_server_jobs_redis_storage()
+            .with_server_toolchains_redis_storage()
+    }
+
+    pub fn with_scheduler_jobs_redis_storage(self) -> Self {
+        Self {
+            scheduler_jobs_redis_storage: DIST_SYSTEM_GLOBALS.redis(),
+            ..self
+        }
+    }
+
+    pub fn with_scheduler_toolchains_redis_storage(self) -> Self {
+        Self {
+            scheduler_toolchains_redis_storage: DIST_SYSTEM_GLOBALS.redis(),
+            ..self
+        }
+    }
+
+    pub fn with_server_jobs_redis_storage(self) -> Self {
+        Self {
+            server_jobs_redis_storage: DIST_SYSTEM_GLOBALS.redis(),
+            ..self
+        }
+    }
+
+    pub fn with_server_toolchains_redis_storage(self) -> Self {
+        Self {
+            server_toolchains_redis_storage: DIST_SYSTEM_GLOBALS.redis(),
+            ..self
+        }
+    }
+
+    pub fn build(self) -> DistSystem {
+        let name = &self.dist_system_name;
+        let mut system = DistSystem::new(name);
+        let message_broker = self.message_broker.unwrap();
+
+        fn storage_cfg(suffix: &str, redis: &DistMessageBroker) -> StorageConfig {
+            StorageConfig {
+                storage: Some(CacheType::Redis(RedisCacheConfig {
+                    endpoint: Some(redis.url().to_url().to_string()),
+                    ..Default::default()
+                })),
+                fallback: DiskCacheConfig {
+                    dir: Path::new(CONTAINER_INTERNAL_PATH).join(suffix),
+                    ..Default::default()
+                },
+            }
+        }
+
+        for i in 0..self.scheduler_count {
+            let mut cfg = SchedulerConfig {
+                scheduler_id: format!("{name}_scheduler_{i}"),
+                ..system.scheduler_cfg(&message_broker.config)
+            };
+            if let Some(job_time_limit) = self.job_time_limit {
+                cfg.job_time_limit = job_time_limit;
+            }
+            if let Some(redis) = self.scheduler_jobs_redis_storage.as_ref() {
+                cfg.jobs = storage_cfg("jobs", redis);
+            }
+            if let Some(redis) = self.scheduler_toolchains_redis_storage.as_ref() {
+                cfg.toolchains = storage_cfg("toolchains", redis);
+            }
+            system.add_scheduler(cfg);
+        }
+
+        for i in 0..self.server_count {
+            let mut cfg = ServerConfig {
+                server_id: format!("{name}_server_{i}"),
+                ..system.server_cfg(&message_broker.config)
+            };
+            if let Some(redis) = self.server_jobs_redis_storage.as_ref() {
+                cfg.jobs = storage_cfg("jobs", redis);
+            }
+            if let Some(redis) = self.server_toolchains_redis_storage.as_ref() {
+                cfg.toolchains = storage_cfg("toolchains", redis);
+            }
+            system.add_server(cfg);
+        }
+
+        system
+    }
+}
+
+#[cfg(feature = "dist-server")]
+pub struct DistSystem {
+    name: String,
+    handles: Vec<DistHandle>,
+    data_dir: tempfile::TempDir,
+    dist_dir: PathBuf,
+    sccache_dist: PathBuf,
+    #[allow(unused)]
+    globals: Arc<DistSystemGlobals>,
+}
+
+#[cfg(feature = "dist-server")]
+impl DistSystem {
+    pub fn builder() -> DistSystemBuilder {
+        DistSystemBuilder::new()
+    }
+
+    fn new(name: &str) -> Self {
+        let data_dir = tempfile::Builder::new()
+            .prefix(&format!("sccache_dist_{name}"))
+            .tempdir()
+            .unwrap();
+
+        let dist_dir = data_dir.path().join("distsystem");
+        fs::create_dir_all(&dist_dir).unwrap();
+
+        Self {
+            name: name.to_owned(),
+            handles: vec![],
+            data_dir,
+            dist_dir,
+            sccache_dist: sccache_dist_path(),
+            globals: Arc::clone(&DIST_SYSTEM_GLOBALS),
+        }
+    }
+
+    pub fn data_dir(&self) -> &Path {
+        self.data_dir.path()
+    }
+
+    pub fn dist_dir(&self) -> &Path {
+        self.dist_dir.as_path()
+    }
+
+    pub fn new_client(&self, client_config: &FileConfig) -> Arc<SccacheClient> {
+        let data_dir = self.data_dir();
+        write_json_cfg(data_dir, "sccache-client.json", client_config);
+        Arc::new(
+            SccacheClient::new(
+                &data_dir.join("sccache-client.json"),
+                &data_dir.join("sccache-cached-cfg"),
+            )
+            .start(),
+        )
     }
 
     pub fn scheduler_cfg(&self, message_broker: &MessageBroker) -> SchedulerConfig {
-        sccache_scheduler_cfg(self.dist_dir(), message_broker)
+        sccache_scheduler_cfg(message_broker)
     }
 
     pub fn add_scheduler(&mut self, scheduler_cfg: SchedulerConfig) -> &mut Self {
         let scheduler_id = scheduler_cfg.scheduler_id.clone();
         let scheduler_port = scheduler_cfg.public_addr.port();
-        let container_name = make_container_name(&format!("{scheduler_id}_scheduler"));
-        let scheduler_cfg_relpath = "scheduler-cfg.json";
-        let scheduler_cfg_path = self.dist_dir().join(scheduler_cfg_relpath);
-        let scheduler_cfg_container_path =
-            Path::new(CONFIGS_CONTAINER_PATH).join(scheduler_cfg_relpath);
-        fs::File::create(scheduler_cfg_path)
+        let container_name = name_with_uuid(&scheduler_id);
+        let cfg_file_name = format!("{scheduler_id}-cfg.json");
+
+        for path in [
+            &scheduler_cfg.jobs.fallback.dir,
+            &scheduler_cfg.toolchains.fallback.dir,
+        ] {
+            if let Ok(path) = path.strip_prefix(CONTAINER_EXTERNAL_PATH) {
+                fs::create_dir_all(self.dist_dir().join(path)).unwrap();
+            }
+        }
+
+        fs::File::create(self.dist_dir().join(&cfg_file_name))
             .unwrap()
             .write_all(&serde_json::to_vec(&scheduler_cfg.into_file()).unwrap())
             .unwrap();
@@ -706,6 +958,8 @@ impl DistSystem {
                 "-e",
                 "SCCACHE_LOG=sccache=info,tower_http=debug,axum::rejection=trace",
                 "-e",
+                &format!("SCCACHE_DIST_DEPLOYMENT_NAME={}", &self.name),
+                "-e",
                 "RUST_BACKTRACE=1",
                 "-e",
                 "TOKIO_WORKER_THREADS=2",
@@ -719,7 +973,7 @@ impl DistSystem {
                 &format!(
                     "{}:{}:z",
                     self.dist_dir().to_str().unwrap(),
-                    CONFIGS_CONTAINER_PATH
+                    CONTAINER_EXTERNAL_PATH
                 ),
                 "-d",
                 DIST_IMAGE,
@@ -730,7 +984,10 @@ impl DistSystem {
                         set -o errexit &&
                         exec /sccache-dist scheduler --config {cfg}
                     "#,
-                    cfg = scheduler_cfg_container_path.to_str().unwrap()
+                    cfg = Path::new(CONTAINER_EXTERNAL_PATH)
+                        .join(&cfg_file_name)
+                        .to_str()
+                        .unwrap()
                 ),
             ])
             .output()
@@ -743,6 +1000,7 @@ impl DistSystem {
             handle: ServerHandle::Container {
                 id: scheduler_id,
                 cid: container_name,
+                log_outputs: true,
             },
         }));
 
@@ -771,16 +1029,24 @@ impl DistSystem {
     }
 
     pub fn server_cfg(&self, message_broker: &MessageBroker) -> ServerConfig {
-        sccache_server_cfg(self.dist_dir(), message_broker)
+        sccache_server_cfg(message_broker)
     }
 
     pub fn add_server(&mut self, server_cfg: ServerConfig) -> &mut Self {
         let server_id = server_cfg.server_id.clone();
-        let container_name = make_container_name(&format!("{server_id}_server"));
-        let server_cfg_relpath = format!("server-cfg-{}.json", self.handles.len());
-        let server_cfg_path = self.dist_dir().join(&server_cfg_relpath);
-        let server_cfg_container_path = Path::new(CONFIGS_CONTAINER_PATH).join(server_cfg_relpath);
-        fs::File::create(server_cfg_path)
+        let container_name = name_with_uuid(&server_id);
+        let cfg_file_name = format!("{server_id}-cfg.json");
+
+        for path in [
+            &server_cfg.jobs.fallback.dir,
+            &server_cfg.toolchains.fallback.dir,
+        ] {
+            if let Ok(path) = path.strip_prefix(CONTAINER_EXTERNAL_PATH) {
+                fs::create_dir_all(self.dist_dir().join(path)).unwrap();
+            }
+        }
+
+        fs::File::create(self.dist_dir().join(&cfg_file_name))
             .unwrap()
             .write_all(&serde_json::to_vec(&server_cfg.into_file()).unwrap())
             .unwrap();
@@ -797,6 +1063,8 @@ impl DistSystem {
                 "-e",
                 "SCCACHE_LOG=sccache=debug",
                 "-e",
+                &format!("SCCACHE_DIST_DEPLOYMENT_NAME={}", &self.name),
+                "-e",
                 "RUST_BACKTRACE=1",
                 "-e",
                 "TOKIO_WORKER_THREADS=2",
@@ -810,7 +1078,7 @@ impl DistSystem {
                 &format!(
                     "{}:{}:z",
                     self.dist_dir().to_str().unwrap(),
-                    CONFIGS_CONTAINER_PATH
+                    CONTAINER_EXTERNAL_PATH
                 ),
                 "-d",
                 DIST_IMAGE,
@@ -821,7 +1089,10 @@ impl DistSystem {
                     set -o errexit &&
                     exec /sccache-dist server --config {cfg}
                 "#,
-                    cfg = server_cfg_container_path.to_str().unwrap()
+                    cfg = Path::new(CONTAINER_EXTERNAL_PATH)
+                        .join(&cfg_file_name)
+                        .to_str()
+                        .unwrap()
                 ),
             ])
             .output()
@@ -833,52 +1104,12 @@ impl DistSystem {
             .push(DistHandle::Server(ServerHandle::Container {
                 id: server_id,
                 cid: container_name,
+                log_outputs: true,
             }));
 
         self.wait_server_ready(self.servers().into_iter().last().unwrap());
 
         self
-    }
-
-    pub fn add_redis_storage(self: &mut DistSystem, redis: DistMessageBroker) -> StorageConfig {
-        if !self
-            .message_brokers()
-            .into_iter()
-            .any(|b| b.broker == redis)
-        {
-            self.add_message_broker(&redis);
-        }
-        StorageConfig {
-            storage: Some(CacheType::Redis(RedisCacheConfig {
-                endpoint: Some(redis.url().to_url().to_string()),
-                ..Default::default()
-            })),
-            fallback: DiskCacheConfig {
-                dir: self.dist_dir().join("not_used"),
-                ..Default::default()
-            },
-        }
-    }
-
-    pub fn add_custom_server(&mut self, server_id: &str, pid: Pid) -> &Self {
-        self.handles.push(DistHandle::Server(ServerHandle::Process {
-            pid,
-            id: server_id.to_owned(),
-        }));
-
-        self.wait_server_ready(self.servers().into_iter().last().unwrap());
-
-        self
-    }
-
-    fn message_brokers(&self) -> impl IntoIterator<Item = &MessageBrokerHandle> {
-        self.handles.iter().filter_map(|component| {
-            if let DistHandle::MessageBroker(handle) = component {
-                Some(handle)
-            } else {
-                None
-            }
-        })
     }
 
     fn schedulers(&self) -> impl IntoIterator<Item = &SchedulerHandle> {
@@ -899,11 +1130,6 @@ impl DistSystem {
                 None
             }
         })
-    }
-
-    #[allow(unused)]
-    pub fn message_broker(&self, message_broker_index: usize) -> Option<&MessageBrokerHandle> {
-        self.message_brokers().into_iter().nth(message_broker_index)
     }
 
     pub fn scheduler(&self, scheduler_index: usize) -> Option<&SchedulerHandle> {
@@ -958,131 +1184,12 @@ impl DistSystem {
     }
 }
 
-// If you want containers to hang around (e.g. for debugging), comment out the "rm -f" lines
-#[cfg(feature = "dist-server")]
-impl Drop for DistSystem {
-    fn drop(&mut self) {
-        let mut did_err = false;
-
-        // Panicking halfway through drop would either abort (if it's a double panic) or leave us with
-        // resources that aren't yet cleaned up. Instead, do as much as possible then decide what to do
-        // at the end - panic (if not already doing so) or let the panic continue
-        macro_rules! droperr {
-            ($e:expr) => {
-                match $e {
-                    Ok(()) => (),
-                    Err(e) => {
-                        did_err = true;
-                        eprintln!("Error with {}: {}", stringify!($e), e)
-                    }
-                }
-            };
-        }
-
-        let mut logs = vec![];
-        let mut outputs = vec![];
-        let mut exits = vec![];
-
-        let mut handles: Vec<&ServerHandle> = vec![];
-        // Kill servers first
-        handles.extend(self.servers());
-        // Then kill schedulers
-        handles.extend(self.schedulers().into_iter().map(|s| &s.handle));
-        // Message brokers last
-        handles.extend(self.message_brokers().into_iter().map(|s| &s.handle));
-
-        for handle in handles.iter() {
-            match handle {
-                ServerHandle::Container { cid, id } => {
-                    droperr!(Command::new("docker")
-                        .args(["logs", cid])
-                        .output()
-                        .map(|o| logs.push((cid, o))));
-                    droperr!(Command::new("docker")
-                        .args(["rm", "-f", cid])
-                        .output()
-                        .map(|o| outputs.push((id, o))));
-                }
-                ServerHandle::Process { id, pid } => {
-                    droperr!(nix::sys::signal::kill(*pid, Signal::SIGINT));
-                    thread::sleep(Duration::from_secs(5));
-                    let mut killagain = true; // Default to trying to kill again, e.g. if there was an error waiting on the pid
-                    droperr!(
-                        nix::sys::wait::waitpid(*pid, Some(WaitPidFlag::WNOHANG)).map(|ws| {
-                            if ws != WaitStatus::StillAlive {
-                                killagain = false;
-                                exits.push(ws)
-                            }
-                        })
-                    );
-                    if killagain {
-                        eprintln!("[{pid}, {id})]: SIGINT didn't kill process, trying SIGKILL");
-                        droperr!(nix::sys::signal::kill(*pid, Signal::SIGKILL));
-                        droperr!(nix::sys::wait::waitpid(*pid, Some(WaitPidFlag::WNOHANG))
-                            .map_err(|e| e.to_string())
-                            .and_then(|ws| if ws == WaitStatus::StillAlive {
-                                Err(format!("[{pid}, {id})]: process alive after sigkill"))
-                            } else {
-                                exits.push(ws);
-                                Ok(())
-                            }));
-                    }
-                }
-            }
-        }
-
-        for (
-            id,
-            Output {
-                status,
-                stdout,
-                stderr,
-            },
-        ) in logs
-        {
-            println!(
-                "LOGS == ({}) ==\n> {} <:\n## STDOUT\n{}\n\n## STDERR\n{}\n====",
-                status,
-                id,
-                String::from_utf8_lossy(&stdout),
-                String::from_utf8_lossy(&stderr)
-            );
-        }
-
-        for (
-            id,
-            Output {
-                status,
-                stdout,
-                stderr,
-            },
-        ) in outputs
-        {
-            println!(
-                "OUTPUTS == ({}) ==\n> {} <:\n## STDOUT\n{}\n\n## STDERR\n{}\n====",
-                status,
-                id,
-                String::from_utf8_lossy(&stdout),
-                String::from_utf8_lossy(&stderr)
-            );
-        }
-
-        for exit in exits {
-            println!("EXIT: {:?}", exit)
-        }
-
-        if did_err && !thread::panicking() {
-            panic!("Encountered failures during dist system teardown")
-        }
-    }
-}
-
-fn make_container_name(tag: &str) -> String {
+fn name_with_uuid(name: &str) -> String {
     format!(
         "{}_{}_{}",
         CONTAINER_NAME_PREFIX,
-        tag,
-        Uuid::new_v4().hyphenated()
+        name,
+        Uuid::new_v4().simple()
     )
 }
 
@@ -1115,7 +1222,7 @@ fn wait_for<F: Fn() -> Result<(), String>>(f: F, interval: Duration, max_wait: D
     let start = Instant::now();
     let mut lasterr;
     loop {
-        match f() {
+        match tokio::task::block_in_place(&f) {
             Ok(()) => return,
             Err(e) => lasterr = e,
         }

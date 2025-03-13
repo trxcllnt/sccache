@@ -76,9 +76,14 @@ pub fn queue_name_with_env_info(prefix: &str) -> String {
 
 #[cfg(feature = "dist-server")]
 pub fn env_info() -> String {
-    let arch = std::env::var("SCCACHE_DIST_ARCH").unwrap_or(std::env::consts::ARCH.to_owned());
-    let os = std::env::var("SCCACHE_DIST_OS").unwrap_or(std::env::consts::OS.to_owned());
-    format!("{os}-{arch}")
+    // "{os}-{arch}-{deployment}"
+    // "linux-amd64-redis_zone_a" etc.
+    [
+        std::env::var("SCCACHE_DIST_OS").unwrap_or(std::env::consts::OS.to_owned()),
+        std::env::var("SCCACHE_DIST_ARCH").unwrap_or(std::env::consts::ARCH.to_owned()),
+        std::env::var("SCCACHE_DIST_DEPLOYMENT_NAME").unwrap_or_default(),
+    ]
+    .join("-")
 }
 
 #[cfg(feature = "dist-server")]
