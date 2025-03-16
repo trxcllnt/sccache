@@ -822,8 +822,6 @@ where
 {
     use std::io;
 
-    use crate::dist::NewJobResponse;
-
     let mut dist_compile_cmd =
         dist_compile_cmd.context("Could not create distributed compile command")?;
 
@@ -879,23 +877,13 @@ where
         })
         .await??;
 
-    debug!("[{out_pretty}]: Requesting job allocation");
-
-    let NewJobResponse {
-        mut has_toolchain,
-        job_id,
-        timeout,
-    } = dist_client
-        .new_job(dist_toolchain.clone(), &job_inputs)
-        .await?;
-
-    debug!("[{out_pretty}, {job_id}]: Received job allocation");
-
     let dist_retry_limit = dist_client.max_retries() + 1.0;
     let mut num_dist_attempts = 1.0f64;
+    let mut has_toolchain = false;
     let mut has_inputs = true;
+    let mut job = None;
 
-    let mut maybe_retry = |err: &Error| {
+    let mut maybe_retry = |err: &Error, job_id: Option<&str>| {
         if num_dist_attempts < dist_retry_limit {
             debug!(
                 "[{out_pretty}]: Distributed compilation error ({num_dist_attempts} of {dist_retry_limit}), retrying: {err:#}"
@@ -903,12 +891,45 @@ where
             num_dist_attempts += 1.0;
             std::ops::ControlFlow::Continue(())
         } else {
-            warn!("[{out_pretty}, {job_id}]: Could not run distributed compilation job: {err}");
+            warn!(
+                "[{}]: Could not run distributed compilation job: {err}",
+                if let Some(job_id) = job_id {
+                    [&out_pretty, job_id].join(", ")
+                } else {
+                    out_pretty.clone()
+                }
+            );
             std::ops::ControlFlow::Break(())
         }
     };
 
     let dist_compile_res = loop {
+        let (job_id, timeout) = if let Some((ref job_id, timeout)) = job {
+            (job_id, timeout)
+        } else {
+            debug!("[{out_pretty}]: Requesting job allocation");
+
+            match dist_client
+                .new_job(dist_toolchain.clone(), &job_inputs)
+                .await
+            {
+                Ok(res) => {
+                    debug!("[{out_pretty}, {}]: Received job allocation", res.job_id);
+                    has_toolchain = res.has_toolchain;
+                    job = Some((res.job_id, res.timeout));
+                    continue;
+                }
+                // Maybe retry network errors
+                Err(err) => {
+                    if maybe_retry(&err, None).is_break() {
+                        break Err(err);
+                    } else {
+                        continue;
+                    }
+                }
+            }
+        };
+
         if !has_toolchain {
             debug!(
                 "[{out_pretty}, {job_id}]: Submitting toolchain {:?}",
@@ -921,7 +942,7 @@ where
             {
                 // Maybe retry network errors
                 Err(err) => {
-                    if maybe_retry(&err).is_break() {
+                    if maybe_retry(&err, Some(job_id)).is_break() {
                         break Err(err);
                     }
                 }
@@ -945,14 +966,14 @@ where
         if !has_inputs {
             debug!("[{out_pretty}, {job_id}]: Resubmitting job inputs");
             match dist_client
-                .put_job(&job_id, &job_inputs)
+                .put_job(job_id, &job_inputs)
                 .await
                 .map_err(|e| e.context("Could not submit job inputs"))
             {
                 Ok(_) => {}
                 // Maybe retry network errors
                 Err(err) => {
-                    if maybe_retry(&err).is_break() {
+                    if maybe_retry(&err, Some(job_id)).is_break() {
                         break Err(err);
                     }
                 }
@@ -963,7 +984,7 @@ where
 
         let job_result = dist_client
             .run_job(
-                &job_id,
+                job_id,
                 Duration::from_secs(timeout as u64),
                 dist_toolchain.clone(),
                 dist_compile_cmd.clone(),
@@ -987,6 +1008,13 @@ where
                 // Don't break because these errors can be retried
                 Err(anyhow!("Missing distributed compilation job inputs"))
             }
+            // Missing toolchain (S3 cleared, Redis rebooted, etc.)
+            Ok(dist::RunJobResponse::MissingToolchain { server_id }) => {
+                has_toolchain = false;
+                debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job toolchain");
+                // Don't break because these errors can be retried
+                Err(anyhow!("Missing distributed compilation job toolchain"))
+            }
             // Missing result (S3 cleared, Redis rebooted, etc.),
             // or build server failed to write the job result due
             // to e.g. network error, server shutdown, etc.
@@ -996,13 +1024,6 @@ where
                 );
                 // Don't break because these errors can be retried
                 Err(anyhow!("Missing distributed compilation job result"))
-            }
-            // Missing toolchain (S3 cleared, Redis rebooted, etc.)
-            Ok(dist::RunJobResponse::MissingToolchain { server_id }) => {
-                has_toolchain = false;
-                debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job toolchain");
-                // Don't break because these errors can be retried
-                Err(anyhow!("Missing distributed compilation job toolchain"))
             }
             // Server shutdown before job finished
             Ok(dist::RunJobResponse::ServerTerminated { server_id }) => {
@@ -1020,7 +1041,7 @@ where
         match job_result {
             // Maybe retry errors
             Err(err) => {
-                if maybe_retry(&err).is_break() {
+                if maybe_retry(&err, Some(job_id)).is_break() {
                     break Err(err);
                 }
             }
@@ -1125,7 +1146,9 @@ where
     // Don't unwrap `dist_compile_res` until after this, so even if the job
     // failed or the client encounters errors downloading/unpacking the result,
     // we still call `del_job` to tell the scheduler to delete the job artifacts.
-    let _ = dist_client.del_job(&job_id).await;
+    if let Some((ref job_id, _)) = job {
+        let _ = dist_client.del_job(job_id).await;
+    }
 
     dist_compile_res
 }
