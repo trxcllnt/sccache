@@ -1458,6 +1458,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                         exe_paths.push(path.join("cpp1"));
                         exe_paths.push(path.join("cpp2"));
                         exe_paths.push(path.join("nvcpfe"));
+                        exe_paths.push(path.join("nvdd"));
                     }
 
                     if let Some(comp_dir) = bin_dir.parent() {
@@ -1478,15 +1479,27 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                         use std::io::BufRead;
                         output.stdout.reader().lines().try_for_each(|line| {
                             let mut line = line?;
-                            if line.starts_with("CUDAROOT") {
-                                line.find('=').and_then(|idx| {
-                                    let str = line.split_off(idx + 1);
-                                    let str = str.trim_start().trim_end();
-                                    if !str.is_empty() {
-                                        dir_paths.push(PathBuf::from(str));
-                                    }
-                                    Option::<()>::None
-                                });
+                            if line.starts_with("CUDAROOT")
+                                || line.starts_with("DEFCPPINC")
+                                || line.starts_with("DEFSTDINC")
+                                || line.starts_with("GCCINC")
+                                || line.starts_with("GPPDIR")
+                                || line.starts_with("STDINC")
+                                || line.starts_with("SYSTEMINC")
+                            {
+                                dir_paths.extend_from_slice(
+                                    line.find('=')
+                                        .map(|idx| {
+                                            line.split_off(idx + 1)
+                                                .trim_start()
+                                                .trim_end()
+                                                .split(' ')
+                                                .map(PathBuf::from)
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .unwrap_or(vec![])
+                                        .as_slice(),
+                                );
                                 return Ok(());
                             }
                             if line.starts_with("HOMELOCALRC") || line.starts_with("MYLOCALRC") {
