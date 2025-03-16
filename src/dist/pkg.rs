@@ -443,7 +443,7 @@ mod toolchain_imp {
     }
 }
 
-pub fn make_tar_header(src: &Path, dest: &str) -> io::Result<tar::Header> {
+pub fn make_tar_header(src: &Path, dest: &str) -> io::Result<(tar::Header, String)> {
     let metadata_res = fs::metadata(src);
 
     let mut file_header = tar::Header::new_ustar();
@@ -473,13 +473,7 @@ pub fn make_tar_header(src: &Path, dest: &str) -> io::Result<tar::Header> {
     assert!(dest.starts_with('/'));
     let dest = dest.trim_start_matches('/');
     assert!(!dest.starts_with('/'));
-    // `set_path` converts its argument to a Path and back to bytes on Windows, so this is
-    // a bit of an inefficient round-trip. Windows path separators will also be normalised
-    // to be like Unix, and the path is (now) relative so there should be no funny results
-    // due to Windows
-    // TODO: should really use a `set_path_str` or similar
-    file_header.set_path(dest)?;
-    Ok(file_header)
+    Ok((file_header, dest.to_owned()))
 }
 
 /// Simplify a path to one without any relative components, erroring if it looks
