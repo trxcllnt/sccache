@@ -915,6 +915,7 @@ mod client {
     pub struct Client {
         auth_token: String,
         client: Arc<reqwest::Client>,
+        fallback_to_local_compile: bool,
         max_retries: f64,
         rewrite_includes_only: bool,
         scheduler_url: reqwest::Url,
@@ -930,6 +931,7 @@ mod client {
             cache_size: u64,
             toolchain_configs: &[config::DistToolchainConfig],
             auth_token: String,
+            fallback_to_local_compile: bool,
             max_retries: f64,
             rewrite_includes_only: bool,
             net: &config::DistNetworking,
@@ -950,6 +952,7 @@ mod client {
             Ok(Self {
                 auth_token: auth_token.clone(),
                 client,
+                fallback_to_local_compile,
                 max_retries,
                 rewrite_includes_only,
                 scheduler_url: scheduler_url.clone(),
@@ -1041,6 +1044,10 @@ mod client {
             self.tc_cache
                 .put_toolchain(&compiler_path, &weak_key, toolchain_packager)
                 .await
+        }
+
+        fn fallback_to_local_compile(&self) -> bool {
+            self.fallback_to_local_compile
         }
 
         fn max_retries(&self) -> f64 {

@@ -612,6 +612,7 @@ impl Default for DistNetworkingKeepalive {
 pub struct DistConfig {
     pub auth: DistAuth,
     pub cache_dir: PathBuf,
+    pub fallback_to_local_compile: bool,
     // f64 to allow `max_retries = inf`, i.e. never fallback to local compile
     pub max_retries: f64,
     pub net: DistNetworking,
@@ -629,6 +630,7 @@ impl Default for DistConfig {
         Self {
             auth: Default::default(),
             cache_dir: default_dist_cache_dir(),
+            fallback_to_local_compile: true,
             max_retries: 0f64,
             net: Default::default(),
             rewrite_includes_only: false,
@@ -1074,6 +1076,10 @@ impl Config {
 
         let mut conf = Self::from_env_and_file_configs(env_conf, file_conf);
 
+        conf.dist.fallback_to_local_compile =
+            bool_from_env_var("SCCACHE_DIST_FALLBACK_TO_LOCAL_COMPILE")?
+                .unwrap_or(conf.dist.fallback_to_local_compile);
+
         conf.dist.max_retries = number_from_env_var("SCCACHE_DIST_MAX_RETRIES")
             .transpose()?
             .unwrap_or(conf.dist.max_retries);
@@ -1111,6 +1117,7 @@ impl Config {
             dist,
             server_startup_timeout_ms,
         } = file_conf;
+
         conf_caches.merge(cache);
 
         let server_startup_timeout = server_startup_timeout_ms.map(Duration::from_millis);

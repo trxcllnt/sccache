@@ -162,6 +162,7 @@ pub struct DistClientConfig {
     // From the static dist configuration
     scheduler_url: Option<config::HTTPUrl>,
     auth: config::DistAuth,
+    fallback_to_local_compile: bool,
     max_retries: f64,
     net: config::DistNetworking,
     cache_dir: PathBuf,
@@ -217,6 +218,7 @@ impl DistClientContainer {
         let config = DistClientConfig {
             scheduler_url: config.dist.scheduler_url.clone(),
             auth: config.dist.auth.clone(),
+            fallback_to_local_compile: config.dist.fallback_to_local_compile,
             max_retries: config.dist.max_retries,
             net: config.dist.net.clone(),
             cache_dir: config.dist.cache_dir.clone(),
@@ -381,6 +383,7 @@ impl DistClientContainer {
                     config.toolchain_cache_size,
                     &config.toolchains,
                     auth_token,
+                    config.fallback_to_local_compile,
                     config.max_retries,
                     config.rewrite_includes_only,
                     &config.net,
@@ -979,6 +982,7 @@ where
                 Box::new(DistClientConfig {
                     scheduler_url: None,
                     auth: config::DistAuth::Token { token: "".into() },
+                    fallback_to_local_compile: true,
                     max_retries: 0f64,
                     net: Default::default(),
                     cache_dir: "".into(),

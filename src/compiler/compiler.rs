@@ -785,7 +785,7 @@ where
                  Increase `toolchain_cache_size` or decrease the toolchain archive size.",
                     compile_cmd.get_executable()
                 ))
-            } else {
+            } else if dist_client.fallback_to_local_compile() {
                 // `{:#}` prints the error and the causes in a single line.
                 let errmsg = format!("{:#}", e);
                 warn!(
@@ -797,6 +797,8 @@ where
                     .execute(service, &creator)
                     .await
                     .map(|o| (cacheable, DistType::Error, o))
+            } else {
+                Err(e)
             }
         }
     }
@@ -3278,6 +3280,9 @@ mod test_dist {
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
             Err(anyhow!("MOCK: put toolchain failure"))
         }
+        fn fallback_to_local_compile(&self) -> bool {
+            true
+        }
         fn max_retries(&self) -> f64 {
             0f64
         }
@@ -3337,6 +3342,9 @@ mod test_dist {
             _: Box<dyn pkg::ToolchainPackager>,
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
             Ok((self.tc.clone(), None))
+        }
+        fn fallback_to_local_compile(&self) -> bool {
+            true
         }
         fn max_retries(&self) -> f64 {
             0f64
@@ -3409,6 +3417,9 @@ mod test_dist {
             _: Box<dyn pkg::ToolchainPackager>,
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
             Ok((self.tc.clone(), None))
+        }
+        fn fallback_to_local_compile(&self) -> bool {
+            true
         }
         fn max_retries(&self) -> f64 {
             0f64
@@ -3491,6 +3502,9 @@ mod test_dist {
                     PathBuf::from("somearchiveid"),
                 )),
             ))
+        }
+        fn fallback_to_local_compile(&self) -> bool {
+            true
         }
         fn max_retries(&self) -> f64 {
             0f64
@@ -3592,6 +3606,9 @@ mod test_dist {
                     PathBuf::from("somearchiveid"),
                 )),
             ))
+        }
+        fn fallback_to_local_compile(&self) -> bool {
+            true
         }
         fn max_retries(&self) -> f64 {
             0f64
