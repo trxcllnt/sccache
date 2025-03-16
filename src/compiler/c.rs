@@ -1466,6 +1466,8 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                         if path.exists() && path.is_dir() {
                             exe_paths.push(path.join("llc"));
                             exe_paths.push(path.join("opt"));
+                            exe_paths.push(path.join("llvm-as"));
+                            exe_paths.push(path.join("llvm-link"));
                             exe_paths.push(path.join("llvm-mc"));
                         }
                     }
