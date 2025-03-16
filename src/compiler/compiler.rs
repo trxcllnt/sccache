@@ -450,7 +450,12 @@ where
             );
         }
         let start = Instant::now();
-        let may_dist = dist_client.is_some();
+        let may_dist = dist_client.is_some()
+            // Clients might want to set this when configuring
+            // so e.g. the CMake compiler checks execute locally
+            && !env_vars
+                .iter()
+                .any(|(k, _v)| k == "SCCACHE_NO_DIST_COMPILE");
         let rewrite_includes_only = match dist_client {
             Some(ref client) => client.rewrite_includes_only(),
             _ => false,
@@ -596,7 +601,7 @@ where
 
                 let (cacheable, dist_type, compiler_result) = dist_or_local_compile(
                     service,
-                    dist_client,
+                    if may_dist { dist_client } else { None },
                     creator,
                     cwd,
                     compilation,
