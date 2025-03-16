@@ -975,7 +975,9 @@ where
                 .await
                 .map_err(|e| e.context("Could not submit job inputs"))
             {
-                Ok(_) => {}
+                Ok(_) => {
+                    has_inputs = true;
+                }
                 // Maybe retry network errors
                 Err(err) => {
                     if maybe_retry(&err, Some(job_id)).is_break() {
