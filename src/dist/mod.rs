@@ -546,6 +546,7 @@ pub struct NewJobRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewJobResponse {
+    pub has_inputs: bool,
     pub has_toolchain: bool,
     pub job_id: String,
     pub timeout: u32,

@@ -826,6 +826,7 @@ where
     T: CommandCreatorSync,
 {
     use std::io;
+    use tokio_retry2::strategy::FibonacciBackoff;
 
     let mut dist_compile_cmd =
         dist_compile_cmd.context("Could not create distributed compile command")?;
@@ -885,16 +886,16 @@ where
     let dist_retry_limit = dist_client.max_retries() + 1.0;
     let mut num_dist_attempts = 1.0f64;
     let mut has_toolchain = false;
-    let mut has_inputs = true;
+    let mut has_inputs = false;
     let mut job = None;
 
-    let mut maybe_retry = |err: &Error, job_id: Option<&str>| {
+    let mut should_retry = |err: &Error, job_id: Option<&str>| {
         if num_dist_attempts < dist_retry_limit {
             debug!(
                 "[{out_pretty}]: Distributed compilation error ({num_dist_attempts} of {dist_retry_limit}), retrying: {err:#}"
             );
             num_dist_attempts += 1.0;
-            std::ops::ControlFlow::Continue(())
+            true
         } else {
             warn!(
                 "[{}]: Could not run distributed compilation job: {err}",
@@ -904,9 +905,13 @@ where
                     out_pretty.clone()
                 }
             );
-            std::ops::ControlFlow::Break(())
+            false
         }
     };
+
+    let mut retry_delay = FibonacciBackoff::from_millis(1000)
+        .max_delay(Duration::from_secs(10))
+        .map(tokio_retry2::strategy::jitter);
 
     let dist_compile_res = loop {
         let (job_id, timeout) = if let Some((ref job_id, timeout)) = job {
@@ -920,53 +925,21 @@ where
             {
                 Ok(res) => {
                     debug!("[{out_pretty}, {}]: Received job allocation", res.job_id);
+                    has_inputs = res.has_inputs;
                     has_toolchain = res.has_toolchain;
                     job = Some((res.job_id, res.timeout));
                     continue;
                 }
                 // Maybe retry network errors
                 Err(err) => {
-                    if maybe_retry(&err, None).is_break() {
-                        break Err(err);
-                    } else {
+                    if should_retry(&err, None) {
+                        tokio::time::sleep(retry_delay.next().unwrap()).await;
                         continue;
                     }
+                    break Err(err);
                 }
             }
         };
-
-        if !has_toolchain {
-            debug!(
-                "[{out_pretty}, {job_id}]: Submitting toolchain {:?}",
-                dist_toolchain.archive_id,
-            );
-            match dist_client
-                .put_toolchain(dist_toolchain.clone())
-                .await
-                .map_err(|e| e.context("Could not submit toolchain"))
-            {
-                // Maybe retry network errors
-                Err(err) => {
-                    if maybe_retry(&err, Some(job_id)).is_break() {
-                        break Err(err);
-                    }
-                }
-                Ok(dist::SubmitToolchainResult::Success) => {
-                    trace!(
-                        "[{out_pretty}]: Successfully submitted toolchain `{}`",
-                        dist_toolchain.archive_id,
-                    );
-                }
-                Ok(dist::SubmitToolchainResult::Error { message }) => {
-                    warn!(
-                        "[{out_pretty}]: Failed submitting toolchain `{}`: {message}",
-                        dist_toolchain.archive_id,
-                    );
-                    // Break because we can't run a job without a toolchain
-                    break Err(anyhow!(message));
-                }
-            }
-        }
 
         if !has_inputs {
             debug!("[{out_pretty}, {job_id}]: Resubmitting job inputs");
@@ -980,9 +953,51 @@ where
                 }
                 // Maybe retry network errors
                 Err(err) => {
-                    if maybe_retry(&err, Some(job_id)).is_break() {
-                        break Err(err);
+                    if should_retry(&err, Some(job_id)) {
+                        tokio::time::sleep(retry_delay.next().unwrap()).await;
+                        continue;
                     }
+                    break Err(err);
+                }
+            }
+        }
+
+        if !has_toolchain {
+            debug!(
+                "[{out_pretty}, {job_id}]: Submitting toolchain {:?}",
+                dist_toolchain.archive_id,
+            );
+            match dist_client
+                .put_toolchain(dist_toolchain.clone())
+                .await
+                .map_err(|e| e.context("Could not submit toolchain"))
+            {
+                Ok(dist::SubmitToolchainResult::Success) => {
+                    has_toolchain = true;
+                    trace!(
+                        "[{out_pretty}]: Successfully submitted toolchain `{}`",
+                        dist_toolchain.archive_id,
+                    );
+                }
+                Ok(dist::SubmitToolchainResult::Error { message }) => {
+                    warn!(
+                        "[{out_pretty}]: Failed submitting toolchain `{}`: {message}",
+                        dist_toolchain.archive_id,
+                    );
+                    let err = anyhow!(message);
+                    if should_retry(&err, Some(job_id)) {
+                        tokio::time::sleep(retry_delay.next().unwrap()).await;
+                        continue;
+                    }
+                    break Err(err);
+                }
+                // Maybe retry network errors
+                Err(err) => {
+                    if should_retry(&err, Some(job_id)) {
+                        tokio::time::sleep(retry_delay.next().unwrap()).await;
+                        continue;
+                    }
+                    break Err(err);
                 }
             }
         }
@@ -1048,9 +1063,11 @@ where
         match job_result {
             // Maybe retry errors
             Err(err) => {
-                if maybe_retry(&err, Some(job_id)).is_break() {
-                    break Err(err);
+                if should_retry(&err, Some(job_id)) {
+                    tokio::time::sleep(retry_delay.next().unwrap()).await;
+                    continue;
                 }
+                break Err(err);
             }
             Ok((result, server_id)) => {
                 // Don't need this in memory anymore
@@ -3412,6 +3429,7 @@ mod test_dist {
             assert_eq!(self.tc, tc);
 
             Ok(NewJobResponse {
+                has_inputs: true,
                 has_toolchain: false,
                 job_id: "job_id".into(),
                 timeout: 10,
@@ -3487,6 +3505,7 @@ mod test_dist {
             assert_eq!(self.tc, tc);
 
             Ok(NewJobResponse {
+                has_inputs: true,
                 has_toolchain: false,
                 job_id: "job_id".into(),
                 timeout: 10,
@@ -3574,6 +3593,7 @@ mod test_dist {
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
             assert_eq!(self.tc, tc);
             Ok(NewJobResponse {
+                has_inputs: true,
                 has_toolchain: false,
                 job_id: "job_id".into(),
                 timeout: 10,

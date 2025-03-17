@@ -247,7 +247,7 @@ pub mod urls {
 #[cfg(feature = "dist-server")]
 mod server {
     use async_trait::async_trait;
-    use tokio_retry2::strategy::{FibonacciBackoff, MaxInterval};
+    use tokio_retry2::strategy::FibonacciBackoff;
     use tokio_retry2::Retry;
 
     pub async fn retry_with_jitter<F>(
@@ -260,7 +260,6 @@ mod server {
         Retry::spawn(
             FibonacciBackoff::from_millis(1000) // wait 1s before retrying
                 .max_delay_millis(10000) // set max interval to 10 seconds
-                .max_interval(1000) // set max interval to 1 second for all retries
                 .map(tokio_retry2::strategy::jitter) // add jitter to the retry interval
                 .take(limit), // limit retries
             func,

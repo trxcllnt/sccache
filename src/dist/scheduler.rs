@@ -18,13 +18,14 @@ use bytes::Buf;
 use celery::{error::CeleryError, task::AsyncResult};
 
 use futures::{lock::Mutex, AsyncReadExt};
+use tokio_retry2::RetryError;
 
 use crate::{
     cache::Storage,
     dist::{
         self,
         http::bincode_deserialize,
-        metrics::{Metrics, TimeRecorder},
+        metrics::{CountRecorder, Metrics, TimeRecorder},
         CompileCommand, JobStats, NewJobRequest, NewJobResponse, RunJobRequest, RunJobResponse,
         SchedulerService, SchedulerStatus, ServerDetails, ServerStats, ServerStatus,
         SubmitToolchainResult, Toolchain,
@@ -41,6 +42,8 @@ use std::{
 
 use crate::dist::{job_inputs_key, job_result_key, server_to_schedulers_queue, to_scheduler_queue};
 
+use super::http::retry_with_jitter;
+
 const HAS_JOB_INPUTS_TIME: &str = "sccache::scheduler::has_job_inputs_time";
 const HAS_JOB_RESULT_TIME: &str = "sccache::scheduler::has_job_result_time";
 const GET_JOB_RESULT_TIME: &str = "sccache::scheduler::get_job_result_time";
@@ -49,6 +52,7 @@ const DEL_JOB_RESULT_TIME: &str = "sccache::scheduler::del_job_result_time";
 const PUT_JOB_INPUTS_TIME: &str = "sccache::scheduler::put_job_inputs_time";
 const PUT_TOOLCHAIN_TIME: &str = "sccache::scheduler::put_toolchain_time";
 const DEL_TOOLCHAIN_TIME: &str = "sccache::scheduler::del_toolchain_time";
+const PUT_JOB_INPUTS_ERROR_COUNT: &str = "sccache::scheduler::put_job_inputs_error_count";
 
 pub struct SchedulerMetrics {
     metrics: Metrics,
@@ -96,7 +100,16 @@ impl SchedulerMetrics {
             metrics::Unit::Seconds,
             "The time to delete each job's toolchain."
         );
+        metrics::describe_counter!(
+            PUT_JOB_INPUTS_ERROR_COUNT,
+            metrics::Unit::Count,
+            "The number of errors raised storing job inputs."
+        );
         Self { metrics }
+    }
+
+    pub fn inc_put_job_inputs_error_count(&self) -> CountRecorder {
+        self.metrics.count(PUT_JOB_INPUTS_ERROR_COUNT, &[])
     }
 
     pub fn has_job_inputs_timer(&self) -> TimeRecorder {
@@ -398,16 +411,31 @@ impl SchedulerService for Scheduler {
     }
 
     async fn new_job(&self, request: NewJobRequest) -> Result<NewJobResponse> {
+        let inputs = &request.inputs;
         let job_id = uuid::Uuid::new_v4().simple().to_string();
-        let inputs = std::pin::pin!(futures::io::AllowStdIo::new(request.inputs.reader()));
-        let (has_toolchain, _) = futures::future::try_join(
-            async { Ok(self.has_toolchain(&request.toolchain).await) },
-            self.put_job(&job_id, request.inputs.len() as u64, inputs),
+        let (has_toolchain, has_inputs) = futures::future::join(
+            async { Ok::<bool, anyhow::Error>(self.has_toolchain(&request.toolchain).await) },
+            async {
+                retry_with_jitter(3, || async {
+                    let inputs = futures::io::AllowStdIo::new(inputs.reader());
+                    self.put_job(&job_id, request.inputs.len() as u64, std::pin::pin!(inputs))
+                        .await
+                        .map_err(RetryError::transient)
+                })
+                .await
+                .map_err(|err| {
+                    // Record put_job_result errors after retrying
+                    self.metrics.inc_put_job_inputs_error_count();
+                    tracing::warn!("[new_job({job_id})]: Error storing job result: {err:?}");
+                    err
+                })
+            },
         )
-        .await?;
+        .await;
 
         Ok(NewJobResponse {
-            has_toolchain,
+            has_inputs: has_inputs.is_ok(),
+            has_toolchain: has_toolchain.unwrap_or_default(),
             job_id,
             timeout: self.tasks.get_job_time_limit(),
         })
