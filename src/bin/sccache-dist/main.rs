@@ -37,7 +37,10 @@ fn main() {
         .iter()
         .for_each(|incr_str| match env::var(incr_str) {
             Ok(incr_val) if incr_val == "1" => {
-                println!("sccache: cargo incremental compilation is not supported");
+                println!(
+                    "sccache: incremental compilation is prohibited: Unset {} to continue.",
+                    incr_str
+                );
                 std::process::exit(1);
             }
             _ => (),
