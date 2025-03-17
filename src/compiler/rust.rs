@@ -1310,6 +1310,10 @@ impl<T> CompilerHasher<T> for RustHasher
 where
     T: CommandCreatorSync,
 {
+    fn get_executable(&self) -> PathBuf {
+        self.executable.clone()
+    }
+
     async fn generate_hash_key(
         self: Box<Self>,
         creator: &T,
@@ -1870,6 +1874,10 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
             optional: v.optional,
         }))
     }
+
+    fn box_clone(&self) -> Box<dyn Compilation<T>> {
+        Box::new((*self).clone())
+    }
 }
 
 // TODO: we do end up with slashes facing the wrong way, but Windows is agnostic so it's
@@ -2148,7 +2156,8 @@ impl pkg::InputsPackager for RustInputsPackager {
         let mut builder = tar::Builder::new(wtr);
 
         for (input_path, dist_input_path) in all_tar_inputs.iter() {
-            let mut file_header = pkg::make_tar_header(input_path, dist_input_path)?;
+            let (mut file_header, dist_input_path) =
+                pkg::make_tar_header(input_path, dist_input_path)?;
             let file = fs::File::open(input_path)?;
             if can_trim_rlibs && can_trim_this(input_path) {
                 let mut archive = ar::Archive::new(file);
@@ -2166,12 +2175,16 @@ impl pkg::InputsPackager for RustInputsPackager {
                     }
                     file_header.set_size(metadata_ar.len() as u64);
                     file_header.set_cksum();
-                    builder.append(&file_header, metadata_ar.as_slice())?;
+                    builder.append_data(
+                        &mut file_header,
+                        dist_input_path,
+                        metadata_ar.as_slice(),
+                    )?;
                     break;
                 }
             } else {
                 file_header.set_cksum();
-                builder.append(&file_header, file)?
+                builder.append_data(&mut file_header, dist_input_path, file)?
             }
         }
 
@@ -2188,9 +2201,17 @@ struct RustToolchainPackager {
 }
 
 #[cfg(feature = "dist-client")]
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+))]
+#[async_trait]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+))]
 impl pkg::ToolchainPackager for RustToolchainPackager {
-    fn write_pkg(self: Box<Self>, f: fs::File) -> Result<()> {
+    async fn write_pkg(self: Box<Self>, f: fs::File) -> Result<String> {
         info!(
             "Packaging Rust compiler for sysroot {}",
             self.sysroot.display()
@@ -2202,7 +2223,7 @@ impl pkg::ToolchainPackager for RustToolchainPackager {
 
         let bins_path = sysroot.join(BINS_DIR);
         let sysroot_executable = bins_path.join("rustc").with_extension(EXE_EXTENSION);
-        package_builder.add_executable_and_deps(sysroot_executable)?;
+        package_builder.add_executable_and_deps(&[], sysroot_executable)?;
 
         package_builder.add_dir_contents(&bins_path)?;
         if BINS_DIR != LIBS_DIR {
@@ -2210,7 +2231,7 @@ impl pkg::ToolchainPackager for RustToolchainPackager {
             package_builder.add_dir_contents(&libs_path)?
         }
 
-        package_builder.into_compressed_tar(f)
+        package_builder.into_compressed_tar(f).await
     }
 }
 

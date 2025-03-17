@@ -30,7 +30,7 @@
 # This script can be run from a github action. When run locally, make
 # sure to install the required packages:
 #
-#     pkg install -y ca-root-nss curl gmake gtar pot sudo
+#     pkg install -y ca_root_nss curl gmake gtar pot sudo rabbitmq
 #
 
 # shellcheck disable=SC3040
@@ -46,6 +46,8 @@ init()
 	export XDG_CONFIG_HOME="$TEST_TMPDIR/.config"
 	mkdir -p "$XDG_CONFIG_HOME"
 	export SCCACHE_DIR="$TEST_TMPDIR/.cache"
+	export SCCACHE_DIST_JOBS_DIR="$TEST_TMPDIR/.cache/jobs"
+	export SCCACHE_DIST_TOOLCHAINS_DIR="$TEST_TMPDIR/.cache/toolchains"
 	killall sccache 2>/dev/null || true
 	killall sccache-dist 2>/dev/null || true
 	export RUST_LOG_STYLE=never
@@ -70,55 +72,50 @@ output_env_info()
 	pkg info
 }
 
-build_and_test_project()
+build_and_test_sccache()
 {
 	echo "#### building sccache (cargo)"
 	cd "$base"
 	FAULT=0
 	export RUSTFLAGS="-C debuginfo=0"
-	cargo build --features "dist-client,dist-server" || FAULT=1
+	cargo build \
+		--features "dist-client,dist-server" \
+		--target-dir "$TEST_TMPDIR"/target \
+	|| FAULT=1
 	echo "#### testing sccache (cargo)"
-	cargo test --features "dist-client,dist-server" -- \
-	  --test-threads 1 || FAULT=1
+	rm -rf /tmp/sccache_local_daemon.txt
+	cargo test \
+		--features "dist-client,dist-server" \
+		--target-dir "$TEST_TMPDIR"/target \
+		-- \
+		--test-threads 1 || FAULT=1
 	unset RUSTFLAGS
 	if [ "$FAULT" -eq 0 ]; then
 		# save build time by avoiding "cargo install"
-		cp -a target/debug/sccache target/debug/sccache-dist \
+		cp -a "$TEST_TMPDIR"/target/debug/sccache "$TEST_TMPDIR"/target/debug/sccache-dist \
 		  "$HOME/.cargo/bin/."
 	fi
 	if [ $FAULT -ne 0 ]; then return 1; fi
 }
 
-prepare_and_run_sccache_dist()
+prepare_sccache_dist()
 {
 	echo "#### preparing sccache-dist"
-	SECRET_KEY="$(sccache-dist auth generate-jwt-hs256-key)"
-	CLIENT_AUTH_KEY="$(sccache-dist auth generate-jwt-hs256-key)"
+	CLIENT_TOKEN="client_token"
 	# create scheduler.conf
 	cat >"$TEST_TMPDIR"/scheduler.conf <<-EOF
 	public_addr = "127.0.0.1:10600"
 	[client_auth]
 	type = "token"
-	token = "$CLIENT_AUTH_KEY"
-	[server_auth]
-	type = "jwt_hs256"
-	secret_key = "$SECRET_KEY"
+	token = "$CLIENT_TOKEN"
 	EOF
-	SERVER_TOKEN="$(sccache-dist auth generate-jwt-hs256-server-token \
-	  --config="$TEST_TMPDIR"/scheduler.conf \
-	  --server="127.0.0.1:10501")"
 
 	# Create server.conf
 	cat >"$TEST_TMPDIR"/server.conf <<-EOF
 	cache_dir = "$TEST_TMPDIR/toolchains"
-	public_addr = "127.0.0.1:10501"
-	scheduler_url = "http://127.0.0.1:10600"
 	[builder]
 	type = "pot"
 	pot_fs_root = "$TEST_TMPDIR/pot"
-	[scheduler_auth]
-	type = "jwt_token"
-	token = "$SERVER_TOKEN"
 	EOF
 
 	# create sccache client config
@@ -132,7 +129,7 @@ prepare_and_run_sccache_dist()
 	cache_dir = "$HOME/.cache/sccache-dist-client"
 	[dist.auth]
 	type = "token"
-	token = "$CLIENT_AUTH_KEY"
+	token = "$CLIENT_TOKEN"
 	[[dist.toolchains]]
 	type = "path_override"
 	compiler_executable = "/usr/bin/cc"
@@ -151,8 +148,11 @@ prepare_and_run_sccache_dist()
 	gtar cf - --sort=name --mtime='2022-06-28 17:35Z' "$HOME/.rustup"  | \
 	  gzip -n >"$TEST_TMPDIR/rust-toolchain.tgz"
 
-	echo "Starting scheduler"
-	sccache-dist scheduler --config "$TEST_TMPDIR"/scheduler.conf
+	echo "Starting rabbitmq"
+	sudo service rabbitmq onestart
+	sleep 5
+	echo "Checking rabbitmq status"
+	sudo service rabbitmq onestatus
 }
 
 prepare_zpool()
@@ -183,26 +183,40 @@ prepare_pot()
 	sudo pot snapshot -p sccache-template
 }
 
-start_build_server()
+start_scheduler()
 {
-	echo "#### starting build-server (as root)"
-	SCCACHE_DIST_LOG=debug RUST_LOG=info sudo \
-	  "$HOME"/.cargo/bin/sccache-dist server \
-	  --config "$TEST_TMPDIR"/server.conf &
+	echo "#### starting sccache-dist scheduler (as root)"
+	# sudo so the scheduler can access the server job results
+	sudo \
+		AMQP_ADDR="amqp://127.0.0.1:5672//" \
+		NO_COLOR=1 \
+		SCCACHE_DIR="$SCCACHE_DIR" \
+		SCCACHE_DIST_JOBS_DIR="$SCCACHE_DIST_JOBS_DIR" \
+		SCCACHE_DIST_TOOLCHAINS_DIR="$SCCACHE_DIST_TOOLCHAINS_DIR" \
+		SCCACHE_LOG="sccache=debug,tower_http=debug,axum::rejection=trace" \
+		SCCACHE_NO_DAEMON=1 \
+		"$HOME"/.cargo/bin/sccache-dist scheduler \
+		--config "$TEST_TMPDIR"/scheduler.conf \
+		1>"$TEST_TMPDIR"/sccache_scheduler_log.txt 2>&1 &
+	sleep 1
 }
 
-wait_for_build_server()
+start_build_server()
 {
-	echo "#### waiting for build server to become available"
-	count=0
-	while [ "$(sockstat -q4l -p 10501 | wc -l | xargs)" -eq "0" ]; do
-		count=$(( count + 1 ))
-		if [ $count -gt 60 ]; then
-			2>&1 echo "Build server did not become available"
-			return 1
-		fi
-		sleep 5
-	done
+	echo "#### starting sccache-dist server (as root)"
+	sudo \
+		AMQP_ADDR="amqp://127.0.0.1:5672//" \
+		NO_COLOR=1 \
+		SCCACHE_DIR="$SCCACHE_DIR" \
+		SCCACHE_DIST_JOBS_DIR="$SCCACHE_DIST_JOBS_DIR" \
+		SCCACHE_DIST_SERVER_ID="build-server" \
+		SCCACHE_DIST_TOOLCHAINS_DIR="$SCCACHE_DIST_TOOLCHAINS_DIR" \
+		SCCACHE_LOG="sccache=debug" \
+		SCCACHE_NO_DAEMON=1 \
+		"$HOME"/.cargo/bin/sccache-dist server \
+			--config "$TEST_TMPDIR"/server.conf \
+			1>"$TEST_TMPDIR"/sccache_server_log.txt 2>&1 &
+	sleep 1
 }
 
 create_build_test_project()
@@ -218,25 +232,28 @@ start_sccache_server()
 {
 	echo "#### starting sccache-server"
 	killall sccache 2>/dev/null || true
-	SCCACHE_ERROR_LOG="$TEST_TMPDIR"/sccache_log.txt SCCACHE_LOG=info \
-	  RUST_LOG=info sccache --start-server
-	sleep 10
+	SCCACHE_LOG="sccache=debug" \
+	SCCACHE_ERROR_LOG="$TEST_TMPDIR"/sccache_client_log.txt \
+		sccache --start-server \
+		1>"$TEST_TMPDIR"/sccache_client_log.txt 2>&1
+	sleep 5
 }
 
 test_sccache_dist_01()
 {
 	echo "#### running scache_dist test 01"
 	cd "$TEST_TMPDIR/buildtest"
-	RUSTC_WRAPPER=sccache cargo build
+	cargo clean --target-dir /tmp/buildtest
+	RUSTC_WRAPPER=sccache cargo build --target-dir /tmp/buildtest
 	STATS="$(sccache -s)"
 	echo "Statistics of first buildtest"
 	echo "$STATS"
 	CACHE_HITS="$(echo "$STATS" | \
-	  grep "Cache hits" | grep -v Rust | \awk '{ print $3 }')"
+	  grep "Cache hits" | grep -vE '(rate|Rust)' | awk '{ print $3 }')"
 	FAILED_DIST="$(echo "$STATS" | \
 	  grep "Failed distributed compilations" | awk '{ print $4 }')"
 	SUCCEEDED_DIST="$(echo "$STATS" | \
-	  (grep -F "127.0.0.1:10501" || echo 0 0) | awk '{ print $2 }')"
+	  (grep -F "build-server" || echo 0 0) | awk '{ print $2 }')"
 
 	if [ "$CACHE_HITS" -ne 0 ]; then
 		2>&1 echo "Unexpected cache hits"
@@ -247,12 +264,17 @@ test_sccache_dist_01()
 	# to building locally). Until this has been resolved, accept
 	# one failed remote build.
 	if [ "$FAILED_DIST" -gt 1 ]; then
-		2>&1 echo "More than one distributed compilations failed"
-		cat "$TEST_TMPDIR"/sccache_log.txt
+		2>&1 echo "More than one distributed compilation failed"
+		cat "$TEST_TMPDIR"/sccache_client_log.txt
+		cat "$TEST_TMPDIR"/sccache_scheduler_log.txt
+		cat "$TEST_TMPDIR"/sccache_server_log.txt
 		return 1
 	fi
 	if [ "$SUCCEEDED_DIST" -eq 0 ]; then
 		2>&1 echo "No distributed compilations succeeded"
+		cat "$TEST_TMPDIR"/sccache_client_log.txt
+		cat "$TEST_TMPDIR"/sccache_scheduler_log.txt
+		cat "$TEST_TMPDIR"/sccache_server_log.txt
 		return 1
 	fi
 }
@@ -262,17 +284,17 @@ test_sccache_dist_02()
 	echo "#### running scache_dist test 02"
 	cd "$TEST_TMPDIR/buildtest"
 	sccache -z
-	cargo clean
-	RUSTC_WRAPPER=sccache cargo build
+	cargo clean --target-dir /tmp/buildtest
+	RUSTC_WRAPPER=sccache cargo build --target-dir /tmp/buildtest
 	STATS="$(sccache -s)"
 	echo "Statistics of second buildtest"
 	echo "$STATS"
 	CACHE_HITS="$(echo "$STATS" | \
-	  grep "Cache hits" | grep -v Rust | \awk '{ print $3 }')"
+	  grep "Cache hits" | grep -vE '(rate|Rust)' | awk '{ print $3 }')"
 	FAILED_DIST="$(echo "$STATS" | \
 	  grep "Failed distributed compilations" | awk '{ print $4 }')"
 	SUCCEEDED_DIST="$(echo "$STATS" | \
-	  (grep -F "127.0.0.1:10501" || echo 0 0) | awk '{ print $2 }')"
+	  (grep -F "build-server" || echo 0 0) | awk '{ print $2 }')"
 
 	if [ "$CACHE_HITS" -eq 0 ]; then
 		2>&1 echo "No cache hits when there should be some"
@@ -283,11 +305,17 @@ test_sccache_dist_02()
 	# to building locally). Until this has been resolved, accept
 	# one failed remote build.
 	if [ "$FAILED_DIST" -gt 1 ]; then
-		2>&1 echo "More than one distributed compilations failed"
+		2>&1 echo "More than one distributed compilation failed"
+		cat "$TEST_TMPDIR"/sccache_client_log.txt
+		cat "$TEST_TMPDIR"/sccache_scheduler_log.txt
+		cat "$TEST_TMPDIR"/sccache_server_log.txt
 		return 1
 	fi
 	if [ "$SUCCEEDED_DIST" -ne 0 ]; then
 		2>&1 echo "Unexpected distributed compilations happened"
+		cat "$TEST_TMPDIR"/sccache_client_log.txt
+		cat "$TEST_TMPDIR"/sccache_scheduler_log.txt
+		cat "$TEST_TMPDIR"/sccache_server_log.txt
 		return 1
 	fi
 }
@@ -302,10 +330,17 @@ cleanup()
 	sudo killall sccache-dist && sleep 3
 	sudo killall -9 sccache-dist
 	killall sccache
-	cp "$TEST_TMPDIR/sccache_log.txt" "$base/sccache_log_$(date +%s).txt"
-	if [ -z "$FREEBSD_CI_NOCLEAN" ]; then
-		for name in $(pot ls -q); do
-			sudo pot stop -p "$name"
+	echo "Stopping rabbitmq"
+	sudo service rabbitmq onestop
+	cp "$TEST_TMPDIR"/sccache_client_log.txt "$base/sccache_client_log_$(date +%s).txt"
+	cp "$TEST_TMPDIR"/sccache_server_log.txt "$base/sccache_server_log_$(date +%s).txt"
+	cp "$TEST_TMPDIR"/sccache_scheduler_log.txt "$base/sccache_scheduler_log_$(date +%s).txt"
+	if [ -f /tmp/sccache_local_daemon.txt ]; then
+		cp /tmp/sccache_local_daemon.txt "$base/sccache_local_daemon_$(date +%s).txt"
+	fi
+	if [ -z "${FREEBSD_CI_NOCLEAN:-}" ]; then
+		for name in $(sudo pot ls -q); do
+			sudo pot stop -p "$name" || true
 		done
 		sudo pot de-init
 		sudo zpool destroy -f potpool
@@ -332,12 +367,12 @@ main()
 	install_signal_handler
 	init
 	output_env_info
-	build_and_test_project
-	prepare_and_run_sccache_dist
+	build_and_test_sccache
+	prepare_sccache_dist
 	prepare_zpool
 	prepare_pot
+	start_scheduler
 	start_build_server
-	wait_for_build_server
 	create_build_test_project
 	start_sccache_server
 	test_sccache_dist_01

@@ -33,6 +33,7 @@ use std::future::Future;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::str::FromStr;
 
 use crate::errors::*;
 
@@ -184,6 +185,23 @@ impl CCompilerImpl for Nvhpc {
             gcc::language_to_gcc_arg,
         )
         .map(|(command, dist_command, cacheable)| {
+            // Cannot currently dist-compile NVHPC CUDA code.
+            // We'll have to do the same `nvc++ --dryrun` trick as we do with nvcc.
+            if parsed_args
+                .common_args
+                .contains(&OsString::from_str("-gpu").unwrap())
+            {
+                return (CCompileCommand::new(command), None, cacheable);
+            }
+            for arg in ["-acc", "-mp", "-stdpar", "-target"] {
+                if let Some(idx) = parsed_args.common_args.iter().position(|x| x == arg) {
+                    if let Some(val) = parsed_args.common_args.get(idx + 1) {
+                        if val == "gpu" {
+                            return (CCompileCommand::new(command), None, cacheable);
+                        }
+                    }
+                }
+            }
             (CCompileCommand::new(command), dist_command, cacheable)
         })
     }

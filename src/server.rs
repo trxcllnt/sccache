@@ -82,7 +82,7 @@ const DIST_CLIENT_RECREATE_TIMEOUT: Duration = Duration::from_secs(30);
 pub enum ServerStartup {
     /// Server started successfully on `addr`.
     Ok { addr: String },
-    /// Server Addr already in suse
+    /// Server Addr already in use.
     AddrInUse,
     /// Timed out waiting for server startup.
     TimedOut,
@@ -128,13 +128,27 @@ fn notify_server_startup(name: &Option<OsString>, status: ServerStartup) -> Resu
 }
 
 #[cfg(unix)]
-fn get_signal(status: ExitStatus) -> i32 {
+fn get_signal(status: &ExitStatus) -> Option<i32> {
     use std::os::unix::prelude::*;
-    status.signal().expect("must have signal")
+    status.signal()
 }
 #[cfg(windows)]
-fn get_signal(_status: ExitStatus) -> i32 {
-    panic!("no signals on windows")
+fn get_signal(_status: &ExitStatus) -> Option<i32> {
+    None
+}
+
+fn set_retcode_or_signal(res: &mut CompileFinished, status: &ExitStatus) {
+    if let Some(code) = status.code() {
+        res.retcode = Some(code)
+    } else if let Some(signal) = get_signal(status) {
+        res.signal = Some(signal)
+    } else if cfg!(windows) {
+        // No signals on Windows, assume exited with error
+        res.retcode = Some(1)
+    } else {
+        // If no code or signal on Unix, assume SIGKILL
+        res.signal = Some(9)
+    }
 }
 
 pub struct DistClientContainer {
@@ -145,12 +159,12 @@ pub struct DistClientContainer {
 
 #[cfg(feature = "dist-client")]
 pub struct DistClientConfig {
-    // Reusable items tied to an SccacheServer instance
-    pool: tokio::runtime::Handle,
-
     // From the static dist configuration
     scheduler_url: Option<config::HTTPUrl>,
     auth: config::DistAuth,
+    fallback_to_local_compile: bool,
+    max_retries: f64,
+    net: config::DistNetworking,
     cache_dir: PathBuf,
     toolchain_cache_size: u64,
     toolchains: Vec<config::DistToolchainConfig>,
@@ -202,9 +216,11 @@ impl DistClientContainer {
 impl DistClientContainer {
     fn new(config: &Config, pool: &tokio::runtime::Handle) -> Self {
         let config = DistClientConfig {
-            pool: pool.clone(),
             scheduler_url: config.dist.scheduler_url.clone(),
             auth: config.dist.auth.clone(),
+            fallback_to_local_compile: config.dist.fallback_to_local_compile,
+            max_retries: config.dist.max_retries,
+            net: config.dist.net.clone(),
             cache_dir: config.dist.cache_dir.clone(),
             toolchain_cache_size: config.dist.toolchain_cache_size,
             toolchains: config.dist.toolchains.clone(),
@@ -267,7 +283,7 @@ impl DistClientContainer {
             DistClientState::Some(cfg, client) => (Arc::clone(client), cfg.scheduler_url.clone()),
         };
 
-        match client.do_get_status().await {
+        match client.get_status().await {
             Ok(res) => DistInfo::SchedulerStatus(scheduler_url.clone(), res),
             Err(_) => DistInfo::NotConnected(
                 scheduler_url.clone(),
@@ -362,22 +378,26 @@ impl DistClientContainer {
                 let auth_token = try_or_fail_with_message!(auth_token
                     .context("could not load client auth token, run |sccache --dist-auth|"));
                 let dist_client = dist::http::Client::new(
-                    &config.pool,
                     url,
                     &config.cache_dir.join("client"),
                     config.toolchain_cache_size,
                     &config.toolchains,
                     auth_token,
+                    config.fallback_to_local_compile,
+                    config.max_retries,
                     config.rewrite_includes_only,
-                );
+                    &config.net,
+                )
+                .await;
                 let dist_client =
                     try_or_retry_later!(dist_client.context("failure during dist client creation"));
                 use crate::dist::Client;
-                match dist_client.do_get_status().await {
+                match dist_client.get_status().await {
                     Ok(res) => {
                         info!(
                             "Successfully created dist client with {:?} cores across {:?} servers",
-                            res.num_cpus, res.num_servers
+                            res.info.occupancy,
+                            res.servers.len()
                         );
                         DistClientState::Some(Box::new(config), Arc::new(dist_client))
                     }
@@ -429,16 +449,17 @@ pub fn start_server(config: &Config, addr: &crate::net::SocketAddr) -> Result<()
         panic_hook(info)
     }));
     let client = Client::new();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(std::cmp::max(20, 2 * util::num_cpus()))
-        .build()?;
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    if std::env::var("TOKIO_WORKER_THREADS").is_err() {
+        builder.worker_threads(2 * util::num_cpus());
+    }
+    let runtime = builder.enable_all().build()?;
     let pool = runtime.handle().clone();
     let dist_client = DistClientContainer::new(config, &pool);
 
     let notify = env::var_os("SCCACHE_STARTUP_NOTIFY");
 
-    let raw_storage = match storage_from_config(config, &pool) {
+    let raw_storage = match storage_from_config(&config.cache, &config.fallback_cache) {
         Ok(storage) => storage,
         Err(err) => {
             error!("storage init failed for: {err:?}");
@@ -850,31 +871,31 @@ where
         Box::pin(async move {
             match req.into_inner() {
                 Request::Compile(compile) => {
-                    debug!("handle_client: compile");
+                    trace!("handle_client: compile");
                     me.stats.lock().await.compile_requests += 1;
                     me.handle_compile(compile).await
                 }
                 Request::GetStats => {
-                    debug!("handle_client: get_stats");
+                    trace!("handle_client: get_stats");
                     me.get_info()
                         .await
                         .map(|i| Response::Stats(Box::new(i)))
                         .map(Message::WithoutBody)
                 }
                 Request::DistStatus => {
-                    debug!("handle_client: dist_status");
+                    trace!("handle_client: dist_status");
                     me.get_dist_status()
                         .await
                         .map(Response::DistStatus)
                         .map(Message::WithoutBody)
                 }
                 Request::ZeroStats => {
-                    debug!("handle_client: zero_stats");
+                    trace!("handle_client: zero_stats");
                     me.zero_stats().await;
                     Ok(Message::WithoutBody(Response::ZeroStats))
                 }
                 Request::Shutdown => {
-                    debug!("handle_client: shutdown");
+                    trace!("handle_client: shutdown");
                     let mut tx = me.tx.clone();
                     future::try_join(
                         async {
@@ -959,9 +980,11 @@ where
             stats: Arc::default(),
             dist_client: Arc::new(DistClientContainer::new_with_state(DistClientState::Some(
                 Box::new(DistClientConfig {
-                    pool: rt.clone(),
                     scheduler_url: None,
                     auth: config::DistAuth::Token { token: "".into() },
+                    fallback_to_local_compile: true,
+                    max_retries: 0f64,
+                    net: Default::default(),
                     cache_dir: "".into(),
                     toolchain_cache_size: 0,
                     toolchains: vec![],
@@ -1123,7 +1146,7 @@ where
 
         let dist_info = match me1.dist_client.get_client().await {
             Ok(Some(ref client)) => {
-                if let Some(archive) = client.get_custom_toolchain(&resolved_compiler_path) {
+                if let Some(archive) = client.get_custom_toolchain(&resolved_compiler_path).await {
                     match metadata(&archive)
                         .map(|attr| FileTime::from_last_modification_time(&attr))
                     {
@@ -1229,19 +1252,19 @@ where
     ) -> SccacheResponse {
         match compiler {
             Err(e) => {
-                debug!("check_compiler: Unsupported compiler: {}", e.to_string());
+                warn!("check_compiler: Unsupported compiler: {}", e.to_string());
                 self.stats.lock().await.requests_unsupported_compiler += 1;
                 return Message::WithoutBody(Response::Compile(
                     CompileResponse::UnsupportedCompiler(OsString::from(e.to_string())),
                 ));
             }
             Ok(c) => {
-                debug!("check_compiler: Supported compiler");
+                trace!("check_compiler: Supported compiler");
                 // Now check that we can handle this compiler with
                 // the provided commandline.
                 match c.parse_arguments(&cmd, &cwd, &env_vars) {
                     CompilerArguments::Ok(hasher) => {
-                        debug!("parse_arguments: Ok: {:?}", cmd);
+                        trace!("parse_arguments: Ok: {:?}", cmd);
 
                         let body = self
                             .clone()
@@ -1377,18 +1400,18 @@ where
 
                         match compiled {
                             CompileResult::Error => {
-                                debug!("compile result: cache error");
+                                trace!("[{}]: compile result: error", out_pretty);
 
                                 stats.cache_errors.increment(&kind, &lang);
                             }
                             CompileResult::CacheHit(duration) => {
-                                debug!("compile result: cache hit");
+                                trace!("[{}]: compile result: cache hit", out_pretty);
 
                                 stats.cache_hits.increment(&kind, &lang);
                                 stats.cache_read_hit_duration += duration;
                             }
                             CompileResult::CacheMiss(miss_type, dt, duration, future) => {
-                                debug!("[{}]: compile result: cache miss", out_pretty);
+                                trace!("[{}]: compile result: cache miss", out_pretty);
                                 dist_type = dt;
 
                                 match miss_type {
@@ -1407,24 +1430,24 @@ where
                                 stats.compilations += 1;
                                 stats.cache_misses.increment(&kind, &lang);
                                 stats.compiler_write_duration += duration;
-                                debug!("stats after compile result: {stats:?}");
+                                trace!("[{}]: stats after compile result: {stats:?}", out_pretty);
                                 cache_write = Some(future);
                             }
                             CompileResult::NotCached(dt, duration) => {
-                                debug!("[{}]: compile result: not cached", out_pretty);
+                                trace!("[{}]: compile result: not cached", out_pretty);
                                 dist_type = dt;
                                 stats.compilations += 1;
                                 stats.compiler_write_duration += duration;
                             }
                             CompileResult::NotCacheable(dt, duration) => {
-                                debug!("[{}]: compile result: not cacheable", out_pretty);
+                                trace!("[{}]: compile result: not cacheable", out_pretty);
                                 dist_type = dt;
                                 stats.compilations += 1;
                                 stats.compiler_write_duration += duration;
                                 stats.non_cacheable_compilations += 1;
                             }
                             CompileResult::CompileFailed(dt, duration) => {
-                                debug!("[{}]: compile result: compile failed", out_pretty);
+                                trace!("[{}]: compile result: compile failed", out_pretty);
                                 dist_type = dt;
                                 stats.compilations += 1;
                                 stats.compiler_write_duration += duration;
@@ -1434,10 +1457,8 @@ where
 
                         match dist_type {
                             DistType::NoDist => {}
-                            DistType::Ok(id) => {
-                                let server = id.addr().to_string();
-                                let server_count = stats.dist_compiles.entry(server).or_insert(0);
-                                *server_count += 1;
+                            DistType::Ok(server_id) => {
+                                stats.dist_compiles.entry(server_id).and_modify(|c| *c += 1).or_insert(1);
                             }
                             DistType::Error => stats.dist_errors += 1,
                         }
@@ -1451,28 +1472,21 @@ where
                             stderr,
                         } = out;
 
-                        trace!("CompileFinished retcode: {}", status);
+                        trace!("[{}]: CompileFinished retcode: {}", out_pretty, status);
 
-                        match status.code() {
-                            Some(code) => res.retcode = Some(code),
-                            None => res.signal = Some(get_signal(status)),
-                        };
-
+                        set_retcode_or_signal(&mut res, &status);
                         res.stdout = stdout;
                         res.stderr = stderr;
                     }
                     Err(err) => {
                         match err.downcast::<ProcessError>() {
                             Ok(ProcessError(output)) => {
-                                debug!("Compilation failed: {:?}", output);
+                                warn!("[{}]: Compilation failed: {:?}", out_pretty, output);
                                 stats.compile_fails += 1;
                                 // Make sure the write guard has been dropped ASAP.
                                 drop(stats);
 
-                                match output.status.code() {
-                                    Some(code) => res.retcode = Some(code),
-                                    None => res.signal = Some(get_signal(output.status)),
-                                };
+                                set_retcode_or_signal(&mut res, &output.status);
                                 res.stdout = output.stdout;
                                 res.stderr = output.stderr;
                             }
@@ -1481,7 +1495,7 @@ where
                                     // Make sure the write guard has been dropped ASAP.
                                     drop(stats);
                                     me.dist_client.reset_state().await;
-                                    let errmsg = format!("[{:?}] http error status: {}", out_pretty, msg);
+                                    let errmsg = format!("[{out_pretty}] http error status: {msg}");
                                     error!("{}", errmsg);
                                     res.retcode = Some(1);
                                     res.stderr = errmsg.as_bytes().to_vec();
@@ -1493,12 +1507,12 @@ where
 
                                     use std::fmt::Write;
 
-                                    error!("[{:?}] fatal error: {}", out_pretty, err);
+                                    error!("[{out_pretty}] fatal error: {err}");
 
                                     let mut error = "sccache: encountered fatal error\n".to_string();
-                                    let _ = writeln!(error, "sccache: error: {}", err);
+                                    let _ = writeln!(error, "sccache: error: {err}");
                                     for e in err.chain() {
-                                        error!("[{:?}] \t{}", out_pretty, e);
+                                        error!("[{out_pretty}] \t{e}");
                                         let _ = writeln!(error, "sccache: caused by: {}", e);
                                     }
                                     //TODO: figure out a better way to communicate this?
@@ -1513,12 +1527,12 @@ where
                 if let Some(cache_write) = cache_write {
                     match cache_write.await {
                         Err(e) => {
-                            debug!("Error executing cache write: {}", e);
+                            warn!("[{out_pretty}]: Error executing cache write: {e}");
                             me.stats.lock().await.cache_write_errors += 1;
                         }
                         //TODO: save cache stats!
                         Ok(info) => {
-                            debug!(
+                            trace!(
                                 "[{}]: Cache write finished in {}",
                                 info.object_file_pretty,
                                 util::fmt_duration_as_secs(&info.duration)
@@ -1537,14 +1551,14 @@ where
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct PerLanguageCount {
     counts: HashMap<String, u64>,
     adv_counts: HashMap<String, u64>,
 }
 
 impl PerLanguageCount {
-    fn increment(&mut self, kind: &CompilerKind, lang: &Language) {
+    pub fn increment(&mut self, kind: &CompilerKind, lang: &Language) {
         let lang_comp_key = kind.lang_comp_kind(lang);
         let adv_count = self.adv_counts.entry(lang_comp_key).or_insert(0);
         *adv_count += 1;
@@ -1572,7 +1586,7 @@ impl PerLanguageCount {
 }
 
 /// Statistics about the server.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ServerStats {
     /// The count of client compile requests.
     pub compile_requests: u64,
@@ -1639,7 +1653,7 @@ pub enum DistInfo {
     #[cfg(feature = "dist-client")]
     NotConnected(Option<config::HTTPUrl>, String),
     #[cfg(feature = "dist-client")]
-    SchedulerStatus(Option<config::HTTPUrl>, dist::SchedulerStatusResult),
+    SchedulerStatus(Option<config::HTTPUrl>, dist::SchedulerStatus),
 }
 
 impl Default for ServerStats {
@@ -1799,6 +1813,11 @@ impl ServerStats {
         );
         set_stat!(
             stats_vec,
+            self.dist_compiles.values().sum::<usize>(),
+            "Successful distributed compiles"
+        );
+        set_stat!(
+            stats_vec,
             self.dist_errors,
             "Failed distributed compilations"
         );
@@ -1918,7 +1937,7 @@ impl ServerInfo {
         let cache_size;
         let max_cache_size;
         if let Some(storage) = storage {
-            cache_location = storage.location();
+            cache_location = storage.location().await;
             use_preprocessor_cache_mode = storage
                 .preprocessor_cache_mode_config()
                 .use_preprocessor_cache_mode;
