@@ -1582,6 +1582,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     flag!("--device-debug", PassThroughFlag),
     flag!("--device-link", NotCompilationFlag),
     flag!("--device-w", DoCompilation),
+    take_arg!("--diag-suppress", OsString, CanBeSeparated('='), PassThrough),
     flag!("--expt-extended-lambda", PreprocessorArgumentFlag),
     flag!("--expt-relaxed-constexpr", PreprocessorArgumentFlag),
     flag!("--extended-lambda", PreprocessorArgumentFlag),
