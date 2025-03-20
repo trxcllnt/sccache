@@ -52,6 +52,7 @@ static IS_ENVVAR_LINE_RE: Lazy<Regex> = regex_static::lazy_regex!(r"^([_A-Z]+)=(
 static HAS_SM_IN_NAME_RE: Lazy<Regex> = regex_static::lazy_regex!(r"^(.*).sm_([0-9A-Za-z]+).(.*)$");
 static HAS_COMPUTE_IN_NAME_RE: Lazy<Regex> =
     regex_static::lazy_regex!(r"^(.*).compute_([0-9A-Za-z]+).(.*)$");
+static ARG_HAS_FILE_WITH_EXTENSION_RE: Lazy<Regex> = regex_static::lazy_regex!(r"-.*=(.*)");
 
 /// A unit struct on which to implement `CCompilerImpl`.
 #[derive(Clone, Debug)]
@@ -385,12 +386,6 @@ fn generate_compile_commands(
         .cloned()
         .collect::<Vec<_>>();
 
-    let temp_dir = tempfile::Builder::new()
-        .prefix("sccache_nvcc")
-        .tempdir()
-        .unwrap()
-        .into_path();
-
     let mut arguments = vec![];
 
     if let Some(lang) = gcc::language_to_gcc_arg(parsed_args.language) {
@@ -403,6 +398,18 @@ fn generate_compile_commands(
         .context("Missing object file output")
         .unwrap()
         .path;
+
+    // Make nvcc's internal files siblings of the output file.
+    // Building into a tempdir yields cache misses on the final
+    // host compiler call because the tempdir's path ends up in
+    // the preprocessed output.
+    let out_dir = if let Some(out_dir) = output.parent() {
+        let out_dir = cwd.join(out_dir);
+        fs::create_dir_all(&out_dir).ok();
+        out_dir
+    } else {
+        cwd.to_owned()
+    };
 
     let compile_flag = match parsed_args.compilation_flag.to_str() {
         Some("") // compile to executable
@@ -450,7 +457,7 @@ fn generate_compile_commands(
     arguments.push(cwd.join(&parsed_args.input).canonicalize().unwrap().into());
 
     let command = NvccCompileCommand {
-        temp_dir,
+        out_dir,
         keep_dir,
         num_parallel,
         executable: executable.to_owned(),
@@ -490,7 +497,7 @@ enum NvccCompileFlag {
 
 #[derive(Clone, Debug)]
 struct NvccCompileCommand {
-    pub temp_dir: PathBuf,
+    pub out_dir: PathBuf,
     pub keep_dir: Option<PathBuf>,
     pub num_parallel: usize,
     pub executable: PathBuf,
@@ -526,7 +533,7 @@ impl CompileCommandImpl for NvccCompileCommand {
         T: CommandCreatorSync,
     {
         let NvccCompileCommand {
-            temp_dir,
+            out_dir,
             keep_dir,
             num_parallel,
             executable,
@@ -538,46 +545,56 @@ impl CompileCommandImpl for NvccCompileCommand {
             output_file_name,
         } = self;
 
-        let nvcc_subcommand_groups = group_nvcc_subcommands_by_compilation_stage(
-            creator,
-            executable,
-            arguments,
-            compile_flag,
-            cwd,
-            temp_dir.as_path(),
-            keep_dir.clone(),
-            env_vars,
-            host_compiler,
-            output_file_name,
-        )
-        .await?;
+        let (mut nvcc_internal_files, nvcc_subcommand_groups) =
+            group_nvcc_subcommands_by_compilation_stage(
+                creator,
+                executable,
+                arguments,
+                compile_flag,
+                cwd,
+                out_dir.as_path(),
+                keep_dir.clone(),
+                env_vars,
+                host_compiler,
+                output_file_name,
+            )
+            .await?;
 
-        let maybe_keep_temps_then_clean = || {
-            // If the caller passed `-keep` or `-keep-dir`, copy the
-            // temp files to the requested location. We do this because we
-            // override `-keep` and `-keep-dir` in our `nvcc --dryrun` call.
-            let maybe_keep_temps = keep_dir.as_ref().and_then(|dst| {
-                fs::create_dir_all(dst)
-                    .and_then(|_| fs::read_dir(temp_dir))
-                    .and_then(|files| {
-                        files
-                            .filter_map(|path| path.ok())
-                            .filter_map(|path| {
-                                path.file_name()
-                                    .to_str()
-                                    .map(|file| (path.path(), file.to_owned()))
-                            })
-                            .try_fold((), |res, (path, file)| fs::rename(path, dst.join(file)))
-                    })
-                    .ok()
-            });
+        let mut maybe_keep_temps_then_clean = || {
+            let nvcc_internal_files = nvcc_internal_files
+                .drain()
+                .filter_map(|(orig, path)| {
+                    let path = out_dir.join(path);
+                    PathBuf::from(orig)
+                        .file_name()
+                        .map(|name| (path, name.to_owned()))
+                })
+                .filter(|(_, name)| name != output_file_name)
+                .collect::<Vec<_>>();
 
-            maybe_keep_temps
-                .map_or_else(
-                    || fs::remove_dir_all(temp_dir).ok(),
-                    |_| fs::remove_dir_all(temp_dir).ok(),
-                )
-                .unwrap_or(());
+            // Remove or rename nvcc's internal files.
+            //
+            // If the caller passed `-keep` or `-keep-dir`, copy the internal
+            // files to the requested location. We do this because we override
+            // `-keep` and `-keep-dir` in our `nvcc --dryrun` call.
+            if let Some(dir) = keep_dir {
+                if fs::create_dir_all(dir).is_ok() {
+                    nvcc_internal_files
+                        .iter()
+                        .filter(|(src, _)| src.exists())
+                        .try_fold((), |_, (src, name)| fs::rename(src, dir.join(name)).ok())
+                } else {
+                    nvcc_internal_files
+                        .iter()
+                        .filter(|(src, _)| src.exists())
+                        .try_fold((), |_, (src, _)| fs::remove_file(src).ok())
+                }
+            } else {
+                nvcc_internal_files
+                    .iter()
+                    .filter(|(src, _)| src.exists())
+                    .try_fold((), |_, (src, _)| fs::remove_file(src).ok())
+            }
         };
 
         let mut output = process::Output {
@@ -641,12 +658,12 @@ async fn group_nvcc_subcommands_by_compilation_stage<T>(
     arguments: &[OsString],
     compile_flag: &NvccCompileFlag,
     cwd: &Path,
-    tmp: &Path,
+    out: &Path,
     keep_dir: Option<PathBuf>,
     env_vars: &[(OsString, OsString)],
     host_compiler: &NvccHostCompiler,
     output_file_name: &OsStr,
-) -> Result<Vec<Vec<NvccGeneratedSubcommand>>>
+) -> Result<(HashMap<String, String>, Vec<Vec<NvccGeneratedSubcommand>>)>
 where
     T: CommandCreatorSync,
 {
@@ -660,7 +677,7 @@ where
     // All the host compiler invocations are run in the original `cwd` where
     // sccache was invoked. Arguments will be relative to the cwd, except
     // any arguments that reference nvcc-generated files should be absolute
-    // to the temp dir, e.g. `gcc -E [...] x.cu -o /tmp/dir/x.cpp4.ii`
+    // to the temp dir, e.g. `gcc -E [...] x.cu -o /out/dir/x.cpp4.ii`
 
     // Roughly equivalent to:
     // ```shell
@@ -668,7 +685,7 @@ where
     //       | nl -n ln -s ' ' -w 1                                       \
     //       | grep -P    "^[0-9]+ (cicc|ptxas|cudafe|nvlink|fatbinary)") \
     //                                                                    \
-    //       <(nvcc --dryrun --keep --keep-dir /tmp/dir                   \
+    //       <(nvcc --dryrun --keep --keep-dir /out/dir                   \
     //       | nl -n ln -s ' ' -w 1                                       \
     //       | grep -P -v "^[0-9]+ (cicc|ptxas|cudafe|nvlink|fatbinary)") \
     //                                                                    \
@@ -682,7 +699,7 @@ where
         |exe: &str| matches!(exe, "cicc" | "ptxas" | "cudafe++" | "nvlink" | "fatbinary");
 
     let (mut nvcc_commands, mut host_commands) = futures::future::try_join(
-        // Get the nvcc compile command lines with paths relative to `tmp`
+        // Get the nvcc compile command lines with paths relative to `out`
         select_nvcc_subcommands(
             creator,
             executable,
@@ -693,13 +710,13 @@ where
             host_compiler,
             output_file_name,
         ),
-        // Get the host compile command lines with paths relative to `cwd` and absolute paths to `tmp`
+        // Get the host compile command lines with paths relative to `cwd` and absolute paths to `out`
         select_nvcc_subcommands(
             creator,
             executable,
             cwd,
             &mut env_vars_2,
-            &[arguments, &["--keep-dir".into(), tmp.into()][..]].concat(),
+            &[arguments, &["--keep-dir".into(), out.into()][..]].concat(),
             |exe| !is_nvcc_exe(exe),
             host_compiler,
             output_file_name,
@@ -743,19 +760,28 @@ where
     // So to avoid this, we detect these "single-arch" compilations and rewrite the names to
     // match what nvcc generates for "many-arch" compilations.
     //
-    if compile_flag != &NvccCompileFlag::Preprocess {
-        if let Some(arch) = find_last_compute_arch(&nvcc_commands) {
-            host_commands = remap_generated_filenames(&arch, compile_flag, &host_commands);
-            nvcc_commands = remap_generated_filenames(&arch, compile_flag, &nvcc_commands);
-        }
+    let mut nvcc_internal_files = HashMap::<String, String>::new();
+    if let Some(arch) = find_last_compute_arch(&nvcc_commands) {
+        host_commands = remap_generated_filenames(
+            &arch,
+            compile_flag,
+            &host_commands,
+            &mut nvcc_internal_files,
+        );
+        nvcc_commands = remap_generated_filenames(
+            &arch,
+            compile_flag,
+            &nvcc_commands,
+            &mut nvcc_internal_files,
+        );
     }
 
     // Now zip the two lists of commands again by sorting on original line index.
     // Transform to tuples that include the dir in which each command should run.
     let all_commands = nvcc_commands
         .iter()
-        // Run cudafe++, nvlink, cicc, ptxas, and fatbinary in `tmp`
-        .map(|(idx, exe, args)| (idx, tmp, exe, args))
+        // Run cudafe++, nvlink, cicc, ptxas, and fatbinary in `out`
+        .map(|(idx, exe, args)| (idx, out, exe, args))
         .chain(
             host_commands
                 .iter()
@@ -986,7 +1012,7 @@ where
     command_groups.extend(device_compile_groups.into_values());
     command_groups.push(final_assembly_group);
 
-    Ok(command_groups)
+    Ok((nvcc_internal_files, command_groups))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1201,9 +1227,28 @@ fn remap_generated_filenames(
     last_arch: &str,
     compile_flag: &NvccCompileFlag,
     lines: &[(usize, PathBuf, Vec<String>)],
+    nvcc_internal_files: &mut HashMap<String, String>,
 ) -> Vec<(usize, PathBuf, Vec<String>)> {
-    let mut old_to_new = HashMap::<String, String>::new();
-    let mut extensions = vec![
+    let extensions = [
+        "_dlink.fatbin.c",
+        "_dlink.fatbin",
+        "_dlink.o",
+        "_dlink.reg.c",
+        ".cpp1.ii",
+        ".cpp4.ii",
+        ".cubin",
+        ".cudafe1.c",
+        ".cudafe1.cpp",
+        ".cudafe1.gpu",
+        ".cudafe1.stub.c",
+        ".fatbin.c",
+        ".fatbin",
+        ".module_id",
+        ".ptx",
+    ];
+
+    let should_rename = compile_flag != &NvccCompileFlag::Preprocess;
+    let mut extensions_to_rename = vec![
         ".cpp1.ii",
         ".cudafe1.c",
         ".cudafe1.cpp",
@@ -1214,12 +1259,12 @@ fn remap_generated_filenames(
     match compile_flag {
         // Rewrite PTX names if the compile flag is `-cubin`
         NvccCompileFlag::Cubin => {
-            extensions.push(".ptx");
+            extensions_to_rename.push(".ptx");
         }
         // Rewrite both PTX and cubin names if the compile flag is `-c` or `-fatbin`
         NvccCompileFlag::Device | NvccCompileFlag::Fatbin => {
-            extensions.push(".ptx");
-            extensions.push(".cubin");
+            extensions_to_rename.push(".ptx");
+            extensions_to_rename.push(".cubin");
         }
         _ => {}
     }
@@ -1264,9 +1309,16 @@ fn remap_generated_filenames(
                             // Since the output cubin is identical, rewrite the first three forms
                             // to match the fourth form so we get more cache hits.
                             Some(".cubin") => {
-                                old_to_new
+                                nvcc_internal_files
                                     .entry(arg)
                                     .or_insert_with_key(|arg| {
+                                        if !should_rename
+                                            || !extensions_to_rename
+                                                .iter()
+                                                .any(|ext| arg.ends_with(*ext))
+                                        {
+                                            return arg.to_owned();
+                                        }
                                         let mut path = PathBuf::from(arg);
 
                                         let cubin_arch = path
@@ -1329,9 +1381,16 @@ fn remap_generated_filenames(
                                     .to_owned()
                             }
                             Some(extension) => {
-                                old_to_new
+                                nvcc_internal_files
                                     .entry(arg)
                                     .or_insert_with_key(|arg| {
+                                        if !should_rename
+                                            || !extensions_to_rename
+                                                .iter()
+                                                .any(|ext| arg.ends_with(*ext))
+                                        {
+                                            return arg.to_owned();
+                                        }
                                         let mut path = PathBuf::from(arg);
                                         // Add the `compute_{arch}` component if necessary
                                         if let Some(name) = path
@@ -1370,7 +1429,7 @@ fn remap_generated_filenames(
                                 // `test_a.compute_70.cudafe1.c`
                                 //
                                 let mut arg = arg.clone();
-                                for (old, new) in old_to_new
+                                for (old, new) in nvcc_internal_files
                                     .iter()
                                     .sorted_by(|a, b| b.0.len().cmp(&a.0.len()))
                                 {
@@ -1385,6 +1444,23 @@ fn remap_generated_filenames(
                         } else {
                             arg
                         }
+                    })
+                    .collect::<Vec<_>>()
+                    .iter()
+                    .map(|arg| {
+                        // If the argument matches the form `-<arg>=<val>` and `val` is a
+                        // filename or path that ends in one of these extensions, extract
+                        // and track the filename as an internal nvcc file
+                        if let Some(groups) = ARG_HAS_FILE_WITH_EXTENSION_RE.captures(arg.as_str())
+                        {
+                            let (_, [name]) = groups.extract();
+                            if !nvcc_internal_files.contains_key(name)
+                                && extensions.iter().any(|ext| name.ends_with(*ext))
+                            {
+                                nvcc_internal_files.insert(name.to_owned(), name.to_owned());
+                            }
+                        }
+                        arg.to_owned()
                     })
                     .collect::<Vec<_>>(),
             )
@@ -1484,6 +1560,7 @@ where
                                 cwd.to_owned(),
                                 env_vars
                                     .iter()
+                                    .filter(|(key, _)| key != "SCCACHE_DIRECT")
                                     .chain([("SCCACHE_DIRECT".into(), "false".into())].iter())
                                     .cloned()
                                     .collect::<Vec<_>>(),

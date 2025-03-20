@@ -749,6 +749,9 @@ fn test_nvcc_cuda_compiles(
         tempdir,
     );
 
+    let build_dir = PathBuf::from("build");
+    fs::create_dir_all(tempdir.join(&build_dir)).unwrap();
+
     let mut run_cuda_test = |compile_flag: &str,
                              input: &Path,
                              output: &Path,
@@ -812,7 +815,7 @@ fn test_nvcc_cuda_compiles(
     run_cuda_test(
         "-ptx",
         Path::new(INPUT_FOR_CUDA_A), // relative path for input
-        Path::new("test.ptx"),       // relative path for output
+        &build_dir.join("test.ptx"), // relative path for output
         &extra_args,
         AdditionalStats {
             cache_writes: Some(1),
@@ -828,7 +831,7 @@ fn test_nvcc_cuda_compiles(
     run_cuda_test(
         "-cubin",
         Path::new(INPUT_FOR_CUDA_A), // relative path for input
-        &tempdir.join("test.cubin"), // absolute path for output
+        &tempdir.join(&build_dir).join("test.cubin"), // absolute path for output
         &extra_args,
         AdditionalStats {
             cache_writes: Some(1),
@@ -845,7 +848,7 @@ fn test_nvcc_cuda_compiles(
     run_cuda_test(
         "-c",
         Path::new(INPUT_FOR_CUDA_A), // relative path for input
-        Path::new(OUTPUT),           // relative path for output
+        &build_dir.join(OUTPUT),     // relative path for output
         &extra_args,
         AdditionalStats {
             cache_writes: Some(2),
@@ -868,7 +871,7 @@ fn test_nvcc_cuda_compiles(
     run_cuda_test(
         "-c",
         &tempdir.join(INPUT_FOR_CUDA_A), // absolute path for input
-        &tempdir.join(OUTPUT),           // absolute path for output
+        &tempdir.join(&build_dir).join(OUTPUT), // absolute path for output
         &extra_args,
         AdditionalStats {
             compilations: Some(1),
@@ -889,7 +892,7 @@ fn test_nvcc_cuda_compiles(
     run_cuda_test(
         "-c",
         Path::new(INPUT_FOR_CUDA_A_COPY), // relative path for input
-        Path::new(OUTPUT),                // relative path for output
+        &build_dir.join(OUTPUT),          // relative path for output
         &extra_args,
         // Since `test_a_copy.cu` is a copy of `test_a.cu`, its PTX will be identical when *not* using -G.
         // But -G causes cudafe++ and cicc to embed the source path their output, and we get cache misses.
@@ -921,7 +924,7 @@ fn test_nvcc_cuda_compiles(
     run_cuda_test(
         "-c",
         &tempdir.join(INPUT_FOR_CUDA_A_COPY), // absolute path for input
-        &tempdir.join(OUTPUT),                // absolute path for output
+        &tempdir.join(&build_dir).join(OUTPUT), // absolute path for output
         &extra_args,
         AdditionalStats {
             compilations: Some(1),
@@ -943,7 +946,7 @@ fn test_nvcc_cuda_compiles(
     run_cuda_test(
         "-c",
         Path::new(INPUT_FOR_CUDA_B), // relative path for input
-        Path::new(OUTPUT),           // relative path for output
+        &build_dir.join(OUTPUT),     // relative path for output
         &extra_args,
         AdditionalStats {
             cache_writes: Some(4),
@@ -964,7 +967,7 @@ fn test_nvcc_cuda_compiles(
     run_cuda_test(
         "-c",
         &tempdir.join(INPUT_FOR_CUDA_B), // absolute path for input
-        &tempdir.join(OUTPUT),           // absolute path for output
+        &tempdir.join(&build_dir).join(OUTPUT), // absolute path for output
         &extra_args,
         AdditionalStats {
             compilations: Some(1),
@@ -1003,8 +1006,8 @@ int main(int argc, char** argv) {
     write_source(tempdir, test_2299_src_name, test_2299_cu_src_1);
     run_cuda_test(
         "-c",
-        Path::new(test_2299_src_name), // relative path for input
-        Path::new(test_2299_out_name), // relative path for output
+        Path::new(test_2299_src_name),       // relative path for input
+        &build_dir.join(test_2299_out_name), // relative path for output
         &extra_args,
         AdditionalStats {
             cache_writes: Some(4),
@@ -1025,8 +1028,8 @@ int main(int argc, char** argv) {
     trace!("compile test_2299.cu (2)");
     run_cuda_test(
         "-c",
-        Path::new(test_2299_src_name), // relative path for input
-        Path::new(test_2299_out_name), // relative path for output
+        Path::new(test_2299_src_name),       // relative path for input
+        &build_dir.join(test_2299_out_name), // relative path for output
         &extra_args,
         AdditionalStats {
             cache_writes: Some(2),
@@ -1051,7 +1054,7 @@ int main(int argc, char** argv) {
     run_cuda_test(
         "-c",
         &tempdir.join(test_2299_src_name), // absolute path for input
-        &tempdir.join(test_2299_out_name), // absolute path for output
+        &tempdir.join(&build_dir).join(test_2299_out_name), // absolute path for output
         &extra_args,
         AdditionalStats {
             compilations: Some(1),
@@ -1072,7 +1075,7 @@ int main(int argc, char** argv) {
     run_cuda_test(
         "-cubin",
         Path::new(INPUT_FOR_CUDA_A), // relative path for input
-        Path::new(OUTPUT),           // relative path for output
+        &build_dir.join(OUTPUT),     // relative path for output
         &[
             extra_args.as_slice(),
             &["-gencode=arch=compute_86,code=[sm_86]".into()],
@@ -1096,7 +1099,7 @@ int main(int argc, char** argv) {
     run_cuda_test(
         "-cubin",
         Path::new(INPUT_FOR_CUDA_B), // relative path for input
-        Path::new(OUTPUT),           // relative path for output
+        &build_dir.join(OUTPUT),     // relative path for output
         &[
             extra_args.as_slice(),
             &["-gencode=arch=compute_86,code=[sm_86]".into()],
@@ -1129,7 +1132,7 @@ int main(int argc, char** argv) {
     run_cuda_test(
         "-c",
         Path::new(INPUT_FOR_CUDA_A), // relative path for input
-        Path::new(OUTPUT),           // relative path for output
+        &build_dir.join(OUTPUT),     // relative path for output
         &[
             extra_args.as_slice(),
             &[
@@ -1163,7 +1166,7 @@ int main(int argc, char** argv) {
     run_cuda_test(
         "-c",
         Path::new(INPUT_FOR_CUDA_A_COPY), // relative path for input
-        Path::new(OUTPUT),                // relative path for output
+        &build_dir.join(OUTPUT),          // relative path for output
         &[
             extra_args.as_slice(),
             &[
@@ -1200,7 +1203,7 @@ int main(int argc, char** argv) {
     run_cuda_test(
         "-c",
         Path::new(INPUT_FOR_CUDA_B), // relative path for input
-        Path::new(OUTPUT),           // relative path for output
+        &build_dir.join(OUTPUT),     // relative path for output
         &[
             extra_args.as_slice(),
             &[
@@ -1235,7 +1238,7 @@ int main(int argc, char** argv) {
     run_cuda_test(
         "-c",
         Path::new(INPUT_FOR_CUDA_A), // relative path for input
-        Path::new(OUTPUT),           // relative path for output
+        &build_dir.join(OUTPUT),     // relative path for output
         &[
             extra_args.as_slice(),
             &["-gencode=arch=compute_80,code=[compute_80,sm_80]".into()],
@@ -1262,7 +1265,7 @@ int main(int argc, char** argv) {
     run_cuda_test(
         "-c",
         Path::new(INPUT_FOR_CUDA_B), // relative path for input
-        Path::new(OUTPUT),           // relative path for output
+        &build_dir.join(OUTPUT),     // relative path for output
         &[
             extra_args.as_slice(),
             &["-gencode=arch=compute_80,code=[compute_80,sm_80]".into()],
@@ -1292,7 +1295,7 @@ int main(int argc, char** argv) {
     run_cuda_test(
         "-cubin",
         &tempdir.join(INPUT_FOR_CUDA_A), // absolute path for input
-        &tempdir.join("test.cubin"),     // absolute path for output
+        &tempdir.join(&build_dir).join("test.cubin"), // absolute path for output
         &[
             extra_args.as_slice(),
             &["-gencode=arch=compute_80,code=[sm_80]".into()],
@@ -1314,7 +1317,7 @@ int main(int argc, char** argv) {
     run_cuda_test(
         "-cubin",
         &tempdir.join(INPUT_FOR_CUDA_B), // absolute path for input
-        &tempdir.join("test.cubin"),     // absolute path for output
+        &tempdir.join(&build_dir).join("test.cubin"), // absolute path for output
         &[
             extra_args.as_slice(),
             &["-gencode=arch=compute_80,code=[sm_80]".into()],
@@ -1338,7 +1341,7 @@ int main(int argc, char** argv) {
         run_cuda_test(
             "",
             Path::new(INPUT_FOR_CUDA_A), // relative path for input
-            Path::new("test_a"),         // relative path for output
+            &build_dir.join("test_a"),   // relative path for output
             &[
                 extra_args.as_slice(),
                 &[
@@ -1368,7 +1371,7 @@ int main(int argc, char** argv) {
         run_cuda_test(
             "",
             Path::new(INPUT_FOR_CUDA_A_COPY), // relative path for input
-            Path::new("test_a_copy"),         // relative path for output
+            &build_dir.join("test_a_copy"),   // relative path for output
             &[
                 extra_args.as_slice(),
                 &[
@@ -1398,7 +1401,7 @@ int main(int argc, char** argv) {
         run_cuda_test(
             "",
             Path::new(INPUT_FOR_CUDA_B), // relative path for input
-            Path::new("test_b"),         // relative path for output
+            &build_dir.join("test_b"),   // relative path for output
             &[
                 extra_args.as_slice(),
                 &[
