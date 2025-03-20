@@ -1484,6 +1484,7 @@ where
                                 cwd.to_owned(),
                                 env_vars
                                     .iter()
+                                    .filter(|(key, _)| key != "SCCACHE_DIRECT")
                                     .chain([("SCCACHE_DIRECT".into(), "false".into())].iter())
                                     .cloned()
                                     .collect::<Vec<_>>(),
