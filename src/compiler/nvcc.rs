@@ -1351,13 +1351,12 @@ fn remap_generated_filenames(
                                                 (!HAS_SM_IN_NAME_RE.is_match(name)).then_some(name)
                                             })
                                         {
-                                            // test_a.cubin -> (test_a, cubin)
+                                            // test_a.cubin -> test_a
                                             // test_a.compute_60.cubin -> (test_a.compute_60, cubin)
-                                            let mut pair = name.split(".cubin");
-                                            let lhs = pair.next().unwrap();
+                                            let name = name.strip_suffix(".cubin").unwrap();
                                             // test_a.cubin -> test_a.sm_60.cubin
                                             // test_a.compute_60.cubin -> test_a.compute_60.sm_60.cubin
-                                            let name = format!("{lhs}.sm_{cubin_arch}.cubin");
+                                            let name = format!("{name}.sm_{cubin_arch}.cubin");
                                             path.set_file_name(name);
                                         }
 
@@ -1370,17 +1369,18 @@ fn remap_generated_filenames(
                                                     .then_some(name)
                                             })
                                         {
-                                            // test_a.sm_60.cubin -> (test_a, sm_60.cubin)
-                                            let (lhs, rhs) = name.split_once('.').unwrap();
+                                            // test_a.sm_60.cubin -> test_a
+                                            let ext = format!(".sm_{cubin_arch}.cubin");
+                                            let name = name.strip_suffix(&ext).unwrap();
                                             // test_a.sm_60.cubin -> test_a.compute_60.sm_60.cubin
-                                            let name = format!("{lhs}.compute_{cubin_arch}.{rhs}");
+                                            let name = format!("{name}.compute_{cubin_arch}{ext}");
                                             path.set_file_name(name);
                                         }
                                         path.into_os_string().into_string().unwrap()
                                     })
                                     .to_owned()
                             }
-                            Some(extension) => {
+                            Some(ext) => {
                                 nvcc_internal_files
                                     .entry(arg)
                                     .or_insert_with_key(|arg| {
@@ -1401,10 +1401,10 @@ fn remap_generated_filenames(
                                                     .then_some(name)
                                             })
                                         {
-                                            // test_a.cudafe1.c -> (test_a, cudafe1.c)
-                                            let (lhs, rhs) = arg.split_once('.').unwrap();
+                                            // test_a.cudafe1.c -> test_a
+                                            let name = name.strip_suffix(ext).unwrap();
                                             // test_a.cudafe1.c -> test_a.compute_60.cudafe1.c
-                                            let name = format!("{lhs}.compute_{last_arch}.{rhs}");
+                                            let name = format!("{name}.compute_{last_arch}{ext}");
                                             path.set_file_name(name);
                                         }
                                         path.into_os_string().into_string().unwrap()
