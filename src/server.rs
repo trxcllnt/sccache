@@ -795,7 +795,7 @@ where
     C: Send,
 {
     /// Server statistics.
-    stats: Arc<Mutex<ServerStats>>,
+    pub stats: Arc<Mutex<ServerStats>>,
 
     /// Distributed sccache client
     dist_client: Arc<DistClientContainer>,
@@ -1588,6 +1588,8 @@ impl PerLanguageCount {
 /// Statistics about the server.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ServerStats {
+    /// The count of currently active compile requests.
+    pub active_compilations: u64,
     /// The count of client compile requests.
     pub compile_requests: u64,
     /// The count of client requests that used an unsupported compiler.
@@ -1659,6 +1661,7 @@ pub enum DistInfo {
 impl Default for ServerStats {
     fn default() -> ServerStats {
         ServerStats {
+            active_compilations: u64::default(),
             compile_requests: u64::default(),
             requests_unsupported_compiler: u64::default(),
             requests_not_compile: u64::default(),
@@ -1744,6 +1747,7 @@ impl ServerStats {
 
         let mut stats_vec = vec![];
         //TODO: this would be nice to replace with a custom derive implementation.
+        set_stat!(stats_vec, self.active_compilations, "Active compilations");
         set_stat!(stats_vec, self.compile_requests, "Compile requests");
         set_stat!(
             stats_vec,

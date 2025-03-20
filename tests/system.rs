@@ -799,6 +799,7 @@ fn test_nvcc_cuda_compiles(
         assert_eq!(
             stats,
             ServerStats {
+                active_compilations: stats.active_compilations,
                 cache_write_duration: stats.cache_write_duration,
                 cache_read_hit_duration: stats.cache_read_hit_duration,
                 compiler_write_duration: stats.compiler_write_duration,
@@ -1486,6 +1487,7 @@ fn test_nvcc_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
+            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -1528,6 +1530,7 @@ fn test_nvcc_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
+            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -1562,6 +1565,7 @@ fn test_nvcc_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
+            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -1595,6 +1599,7 @@ fn test_nvcc_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
+            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -1664,6 +1669,7 @@ fn test_clang_cuda_compiles(
     assert_eq!(
         stats,
         ServerStats {
+            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -1697,6 +1703,7 @@ fn test_clang_cuda_compiles(
     assert_eq!(
         stats,
         ServerStats {
+            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -1733,6 +1740,7 @@ fn test_clang_cuda_compiles(
     assert_eq!(
         stats,
         ServerStats {
+            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -1792,6 +1800,7 @@ fn test_clang_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
+            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -1823,6 +1832,7 @@ fn test_clang_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
+            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -1855,6 +1865,7 @@ fn test_clang_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
+            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -1885,6 +1896,7 @@ fn test_clang_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
+            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,

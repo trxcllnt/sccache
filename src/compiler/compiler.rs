@@ -597,9 +597,11 @@ where
             }
             CacheLookupResult::Miss(miss_type) => {
                 // Cache miss, so compile it.
+                service.stats.lock().await.active_compilations += 1;
+
                 let start = Instant::now();
 
-                let (cacheable, dist_type, compiler_result) = dist_or_local_compile(
+                let res = dist_or_local_compile(
                     service,
                     if may_dist { dist_client } else { None },
                     creator,
@@ -609,8 +611,13 @@ where
                     out_pretty.clone(),
                     &pool,
                 )
-                .await?;
+                .await;
+
                 let duration_compilation = start.elapsed();
+
+                service.stats.lock().await.active_compilations -= 1;
+
+                let (cacheable, dist_type, compiler_result) = res?;
                 if !compiler_result.status.success() {
                     trace!(
                         "[{}]: Compiled in {}, but failed, not storing in cache",
