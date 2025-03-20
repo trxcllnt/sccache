@@ -1048,7 +1048,7 @@ where
             // or build server failed to write the job result due
             // to e.g. network error, server shutdown, etc.
             Ok(dist::RunJobResponse::MissingJobResult { server_id }) => {
-                warn!(
+                debug!(
                     "[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job result"
                 );
                 // Don't break because these errors can be retried
@@ -1056,7 +1056,7 @@ where
             }
             // Server shutdown before job finished
             Ok(dist::RunJobResponse::ServerTerminated { server_id }) => {
-                warn!("[{out_pretty}, {job_id}, {server_id}]: Build server shutdown");
+                debug!("[{out_pretty}, {job_id}, {server_id}]: Build server shutdown");
                 // Don't break because these errors can be retried
                 Err(anyhow!("Build server shutdown"))
             }
