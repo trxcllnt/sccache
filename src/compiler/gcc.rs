@@ -727,13 +727,7 @@ fn preprocess_cmd<F, T>(
     // reporting and to not cause spurious compilation failure (e.g. no exceptions build
     // fails due to exceptions transitively included in the stdlib).
     // With -fprofile-generate line number information is important, so don't use -P.
-    let use_dash_p = !parsed_args.profile_generate
-        && (!may_dist
-            // Use -P if this is an internal gcc compilation produced by nvcc
-            || env_vars
-                .iter()
-                .any(|(k, _)| k == "__SCCACHE_THIS_IS_A_CUDA_COMPILATION__"));
-    if use_dash_p {
+    if !may_dist && !parsed_args.profile_generate {
         cmd.args(&ignorable_whitespace_flags);
     }
     if rewrite_includes_only {

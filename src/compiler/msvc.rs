@@ -898,14 +898,7 @@ pub fn preprocess_cmd<T>(
     // With -fprofile-generate line number information is important, so use -E.
     // Otherwise, use -EP to maximize cache hits (because no absolute file paths are
     // emitted) and improve performance.
-    let use_dash_p = !parsed_args.profile_generate
-        && (!may_dist
-            // Use -P if this is an internal gcc compilation produced by nvcc
-            || env_vars
-                .iter()
-                .any(|(k, _)| k == "__SCCACHE_THIS_IS_A_CUDA_COMPILATION__"));
-
-    if !use_dash_p {
+    if may_dist || parsed_args.profile_generate {
         cmd.arg("-E");
     } else {
         cmd.arg("-EP");
