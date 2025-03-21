@@ -728,7 +728,10 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
     let envvar_prefix = envvar_prefix.into().unwrap_or("SCCACHE_").to_owned();
     let envvar = |key: &str| envvar_prefix.clone() + key;
     // ======= AWS =======
-    let s3 = if let Ok(bucket) = env::var(envvar("BUCKET")) {
+    let s3 = if let Some(bucket) = env::var(envvar("BUCKET"))
+        .ok()
+        .and_then(|bucket| (!bucket.is_empty()).then_some(bucket))
+    {
         let region = env::var(envvar("REGION")).ok();
         let no_credentials = bool_from_env_var(&envvar("S3_NO_CREDENTIALS"))?.unwrap_or(false);
         let use_ssl = bool_from_env_var(&envvar("S3_USE_SSL"))?;
