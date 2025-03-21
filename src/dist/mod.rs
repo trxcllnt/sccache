@@ -412,8 +412,16 @@ impl ProcessOutput {
         } = o;
         let code = match (status.code(), status.signal()) {
             (Some(c), _) => c,
-            (None, Some(s)) => bail!("Process status {} terminated with signal {}", status, s),
-            (None, None) => bail!("Process status {} has no exit code or signal", status),
+            (None, Some(s)) => {
+                warn!("Process status {} terminated with signal {}", status, s);
+                //TODO: figure out a better way to communicate this?
+                -1
+            }
+            (None, None) => {
+                warn!("Process status {} has no exit code or signal", status);
+                //TODO: figure out a better way to communicate this?
+                -2
+            }
         };
         Ok(ProcessOutput {
             code,
@@ -599,6 +607,9 @@ pub enum RunJobResponse {
         server_id: String,
     },
     MissingToolchain {
+        server_id: String,
+    },
+    BuildTerminated {
         server_id: String,
     },
     ServerTerminated {

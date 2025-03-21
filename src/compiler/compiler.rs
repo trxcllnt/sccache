@@ -1054,6 +1054,12 @@ where
                 // Don't break because these errors can be retried
                 Err(anyhow!("Missing distributed compilation job result"))
             }
+            // Build process killed before job finished
+            Ok(dist::RunJobResponse::BuildTerminated { server_id }) => {
+                debug!("[{out_pretty}, {job_id}, {server_id}]: Build process killed");
+                // Don't break because these errors can be retried
+                Err(anyhow!("Build process killed"))
+            }
             // Server shutdown before job finished
             Ok(dist::RunJobResponse::ServerTerminated { server_id }) => {
                 debug!("[{out_pretty}, {job_id}, {server_id}]: Build server shutdown");

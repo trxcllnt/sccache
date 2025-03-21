@@ -695,6 +695,9 @@ impl Server {
                     if !self.is_alive() {
                         return RunJobResponse::ServerTerminated { server_id };
                     }
+                    if matches!(result.output.code, -1 | -2) {
+                        return RunJobResponse::BuildTerminated { server_id };
+                    }
                     tracing::warn!("[run_build({job_id})]: Build failed: {:?}", result.output);
                 }
                 RunJobResponse::JobComplete { result, server_id }
