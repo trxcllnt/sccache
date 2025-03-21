@@ -57,6 +57,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Used to denote the environment variable that controls
 /// logging for sccache, and sccache-dist.
 pub const LOGGING_ENV: &str = "SCCACHE_LOG";
+pub const SERVER_LOG_ENV: &str = "SCCACHE_SERVER_LOG";
 
 pub fn main() {
     // We only care if it's `1`
@@ -96,21 +97,22 @@ fn init_logging(is_server: bool) {
     // This allows users to configure server logging independently from
     // client logs.
     //
-    // For example, a user doesn't necessarily want to see each sccache
-    // client's logs in their `make -j` stderr output, but does want to
-    // see the server logs redirected to $SCCACHE_ERROR_LOG.
+    // A user doesn't necessarily want to see each sccache client's logs
+    // in their `make -j` stderr output, but does want to see the server
+    // logs redirected to $SCCACHE_ERROR_LOG.
     //
-    if is_server && env::var("SCCACHE_SERVER_LOG").is_ok() {
-        match env_logger::Builder::from_env("SCCACHE_SERVER_LOG").try_init() {
-            Ok(_) => (),
-            Err(e) => panic!("Failed to initialize logging: {:?}", e),
-        }
-    }
-    // Both client and server will use SCCACHE_LOG=
-    if env::var(LOGGING_ENV).is_ok() {
-        match env_logger::Builder::from_env(LOGGING_ENV).try_init() {
-            Ok(_) => (),
-            Err(e) => panic!("Failed to initialize logging: {:?}", e),
+    if !is_server
+        || env::var(SERVER_LOG_ENV).is_err()
+        || env_logger::Builder::from_env(SERVER_LOG_ENV)
+            .try_init()
+            .is_err()
+    {
+        // Both client and server will use SCCACHE_LOG if SCCACHE_SERVER_LOG is unset
+        if env::var(LOGGING_ENV).is_ok() {
+            match env_logger::Builder::from_env(LOGGING_ENV).try_init() {
+                Ok(_) => (),
+                Err(e) => panic!("Failed to initialize logging: {:?}", e),
+            }
         }
     }
 }
