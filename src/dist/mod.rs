@@ -572,34 +572,48 @@ pub struct RunJobRequest {
 
 #[derive(Debug)]
 pub enum RunJobError {
-    Err(Error),
+    Fatal(Error),
     MissingJobInputs,
     MissingJobResult,
     MissingToolchain,
-    ServerTerminated,
+    Retryable(Error),
 }
 
 impl std::fmt::Display for RunJobError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Fatal(e) => write!(f, "Fatal error: {e:?}"),
             Self::MissingJobInputs => write!(f, "Missing job inputs"),
             Self::MissingJobResult => write!(f, "Missing job result"),
             Self::MissingToolchain => write!(f, "Missing tool chain"),
-            Self::ServerTerminated => write!(f, "Server terminated"),
-            Self::Err(e) => e.fmt(f),
+            Self::Retryable(e) => write!(f, "Retryable error: {e:?}"),
         }
     }
 }
 
 impl From<anyhow::Error> for RunJobError {
     fn from(err: anyhow::Error) -> Self {
-        RunJobError::Err(err)
+        RunJobError::Retryable(err)
+    }
+}
+
+impl RunJobError {
+    pub fn server_terminated() -> Self {
+        anyhow!("Server terminated").into()
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum RunJobResponse {
+    Complete {
+        result: BuildResult,
+        server_id: String,
+    },
+    FatalError {
+        message: String,
+        server_id: String,
+    },
     MissingJobInputs {
         server_id: String,
     },
@@ -609,20 +623,25 @@ pub enum RunJobResponse {
     MissingToolchain {
         server_id: String,
     },
-    BuildTerminated {
+    RetryableError {
+        message: String,
         server_id: String,
     },
-    ServerTerminated {
-        server_id: String,
-    },
-    JobComplete {
-        result: BuildResult,
-        server_id: String,
-    },
-    JobFailed {
-        reason: String,
-        server_id: String,
-    },
+}
+
+impl RunJobResponse {
+    pub fn build_process_killed(server_id: &str) -> Self {
+        RunJobResponse::RetryableError {
+            message: "Build process killed".into(),
+            server_id: server_id.to_owned(),
+        }
+    }
+    pub fn server_terminated(server_id: &str) -> Self {
+        RunJobResponse::RetryableError {
+            message: "Server terminated".into(),
+            server_id: server_id.to_owned(),
+        }
+    }
 }
 
 // Toolchain

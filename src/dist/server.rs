@@ -440,7 +440,7 @@ impl Server {
         crate::util::daemonize()?;
 
         // Install our own SIGINT handler so pending jobs can bail early and
-        // record ServerTerminated responses. This gives the client a chance
+        // record server_terminated responses. This gives the client a chance
         // to retry the job or build locally.
         let sigint = async {
             let _ = tokio::signal::ctrl_c().await;
@@ -506,8 +506,8 @@ impl Server {
 
         if !jobs.is_empty() {
             futures::future::join_all(jobs.iter().map(|(job_id, reply_to)| {
-                tracing::info!("Sending ServerTerminated for job {job_id} to {reply_to}");
-                self.job_failed(job_id, reply_to, RunJobError::ServerTerminated)
+                tracing::info!("Sending server terminated error for job {job_id} to {reply_to}");
+                self.job_failed(job_id, reply_to, RunJobError::server_terminated())
                     .boxed()
             }))
             .await;
@@ -688,21 +688,24 @@ impl Server {
         self.run_build(job_id, toolchain_dir, inputs, command, outputs)
             .await
             .map(|result| {
-                let server_id = self.state.id.clone();
                 // If the build failed because the server was terminated,
                 // report it as a server termination, not a failed build.
                 if !result.output.success() {
                     if !self.is_alive() {
-                        return RunJobResponse::ServerTerminated { server_id };
+                        return RunJobResponse::server_terminated(&self.state.id);
                     }
                     if matches!(result.output.code, -1 | -2) {
-                        return RunJobResponse::BuildTerminated { server_id };
+                        tracing::warn!("[run_build({job_id})]: Build killed: {:?}", result.output);
+                        return RunJobResponse::build_process_killed(&self.state.id);
                     }
                     tracing::warn!("[run_build({job_id})]: Build failed: {:?}", result.output);
                 }
-                RunJobResponse::JobComplete { result, server_id }
+                RunJobResponse::Complete {
+                    result,
+                    server_id: self.state.id.clone(),
+                }
             })
-            .map_err(RunJobError::Err)
+            .map_err(Into::into)
     }
 }
 
@@ -721,12 +724,12 @@ impl ServerService for Server {
             tokio::select! {
                 // If the build failed because the server was terminated,
                 // report it as a server termination, not a failed build.
-                _ = alive.changed() => Err(RunJobError::ServerTerminated),
+                _ = alive.changed() => Err(RunJobError::server_terminated()),
                 // Do the build
                 res = self.load_job_and_run_build(job_id, reply_to, toolchain, command, outputs) => res,
             }
         } else {
-            Err(RunJobError::ServerTerminated)
+            Err(RunJobError::server_terminated())
         }
     }
 
@@ -734,14 +737,19 @@ impl ServerService for Server {
         let server_id = self.state.id.clone();
 
         let job_res = match job_err {
+            // Unrecoverable errors
+            RunJobError::Fatal(e) => RunJobResponse::FatalError {
+                message: format!("{e:#}"),
+                server_id,
+            },
+            // Retryable errors
+            RunJobError::Retryable(e) => RunJobResponse::RetryableError {
+                message: format!("{e:#}"),
+                server_id,
+            },
             RunJobError::MissingJobInputs => RunJobResponse::MissingJobInputs { server_id },
             RunJobError::MissingJobResult => RunJobResponse::MissingJobResult { server_id },
             RunJobError::MissingToolchain => RunJobResponse::MissingToolchain { server_id },
-            RunJobError::ServerTerminated => RunJobResponse::ServerTerminated { server_id },
-            RunJobError::Err(e) => RunJobResponse::JobFailed {
-                reason: format!("{e:#}"),
-                server_id,
-            },
         };
 
         self.job_finished(job_id, reply_to, &job_res).await

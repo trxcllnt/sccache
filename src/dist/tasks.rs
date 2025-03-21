@@ -189,8 +189,8 @@ impl SchedulerTasks for Tasks {
         self.app
             .send_task(
                 RunJob::new(job_id, reply_to, toolchain, command, outputs)
-                    .with_time_limit(self.job_time_limit)
-                    .with_expires_in(self.job_time_limit),
+                    .with_time_limit(self.job_time_limit.saturating_sub(30))
+                    .with_expires_in(self.job_time_limit.saturating_sub(30)),
             )
             .await
     }
@@ -280,6 +280,14 @@ impl Task for RunJob {
 
     fn from_request(request: Request<Self>, mut options: TaskOptions) -> Self {
         options.acks_late = Some(true);
+        // Set `max_retries` to 0 because we don't want rust-celery
+        // to ever retry these tasks -- that is the client's responsibility.
+        //
+        // Since the client has an open connection to the scheduler waiting for
+        // the job result, the client must be notified of the result as soon as
+        // possible. If not, the client, load balancer, or scheduler may close
+        // the connection due to inactivity, which would be bad if rust-celery
+        // retried the job on a server that could finish it in time.
         options.max_retries = Some(0);
         Self { request, options }
     }
@@ -310,23 +318,23 @@ impl Task for RunJob {
 
         self.server()
             .map(|server| server.run_job(&job_id, &reply_to, toolchain, command, outputs))
-            .unwrap_or_else(|err| futures::future::err(RunJobError::Err(err)).boxed())
+            .unwrap_or_else(|err| futures::future::err(RunJobError::Retryable(err)).boxed())
             .await
-            .map_err(|e| match e {
+            .map_err(|err| match err {
                 RunJobError::MissingJobInputs => {
-                    TaskError::UnexpectedError("MissingJobInputs".into())
-                }
-                RunJobError::MissingJobResult => {
-                    TaskError::UnexpectedError("MissingJobResult".into())
+                    TaskError::ExpectedError("MissingJobInputs".into())
                 }
                 RunJobError::MissingToolchain => {
-                    TaskError::UnexpectedError("MissingToolchain".into())
+                    TaskError::ExpectedError("MissingToolchain".into())
                 }
-                RunJobError::ServerTerminated => {
-                    TaskError::UnexpectedError("ServerTerminated".into())
+                RunJobError::MissingJobResult => {
+                    TaskError::ExpectedError("MissingJobResult".into())
                 }
-                RunJobError::Err(e) => {
-                    TaskError::UnexpectedError(format!("Job {job_id} failed: {e:#}"))
+                RunJobError::Retryable(e) => {
+                    TaskError::ExpectedError(format!("Error in job {job_id}: {e:#}"))
+                }
+                RunJobError::Fatal(e) => {
+                    TaskError::UnexpectedError(format!("Fatal error in job {job_id}: {e:#}"))
                 }
             })
     }
@@ -336,20 +344,28 @@ impl Task for RunJob {
         let reply_to = &self.request.params.reply_to;
 
         let err = match err {
-            TaskError::ExpectedError(msg) | TaskError::UnexpectedError(msg) => {
-                match msg.as_ref() {
-                    // Notify the client so these can be retried or compiled locally.
-                    // Matching strings because that's the only data in TaskError.
-                    "MissingJobInputs" => RunJobError::MissingJobInputs,
-                    "MissingToolchain" => RunJobError::MissingToolchain,
-                    "MissingJobResult" => RunJobError::MissingJobResult,
-                    "ServerTerminated" => RunJobError::ServerTerminated,
-                    _ => RunJobError::Err(anyhow!(msg.to_owned())),
-                }
-            }
-            TaskError::TimeoutError => RunJobError::Err(anyhow!("Job {job_id} timed out")),
+            // The client can choose to retry these or compile locally.
+            // Matching strings because that's the only type in TaskError.
+            TaskError::ExpectedError(ref msg) => match msg.as_ref() {
+                "MissingJobInputs" => RunJobError::MissingJobInputs,
+                "MissingToolchain" => RunJobError::MissingToolchain,
+                "MissingJobResult" => RunJobError::MissingJobResult,
+                msg => anyhow!(msg.to_owned()).into(),
+            },
+            // We don't expect many unexpected/fatal errors to happen.
+            //
+            // Report task timeouts as a fatal error, since this means the
+            // compilation took longer than the scheduler's `job_time_limit`.
+            //
+            // In this case, retrying the compilation on a different server
+            // won't finish any sooner, so we report a fatal error so clients
+            // see their build fail and can either increase the job time limit,
+            // or apply source optimizations so their files compile in a
+            // reasonable amount of time.
+            TaskError::UnexpectedError(ref msg) => RunJobError::Fatal(anyhow!(msg.to_owned())),
+            TaskError::TimeoutError => RunJobError::Fatal(anyhow!("Job {job_id} timed out")),
             TaskError::Retry(_) => {
-                RunJobError::Err(anyhow!("Job {job_id} exceeded the retry limit"))
+                RunJobError::Fatal(anyhow!("Job {job_id} exceeded the retry limit"))
             }
         };
 

@@ -461,12 +461,13 @@ impl SchedulerService for Scheduler {
     ) -> Result<RunJobResponse> {
         if self.has_job_result(job_id).await {
             match self.get_job_result(job_id).await {
-                Ok(RunJobResponse::JobFailed { reason, server_id }) => {
-                    return Ok(RunJobResponse::JobFailed { reason, server_id })
+                Ok(RunJobResponse::FatalError { message, server_id }) => {
+                    return Ok(RunJobResponse::FatalError { message, server_id })
                 }
-                Ok(RunJobResponse::JobComplete { result, server_id }) => {
-                    return Ok(RunJobResponse::JobComplete { result, server_id })
+                Ok(RunJobResponse::Complete { result, server_id }) => {
+                    return Ok(RunJobResponse::Complete { result, server_id })
                 }
+                // All others, delete the bad result and retry run_job
                 _ => {
                     let _ = self.del_job_result(job_id).await;
                 }
@@ -529,7 +530,7 @@ impl SchedulerService for Scheduler {
                     server_id: server.id.clone(),
                 }
             });
-            let job_success = matches!(job_result, RunJobResponse::JobComplete { .. });
+            let job_success = matches!(job_result, RunJobResponse::Complete { .. });
             let job_success = sndr
                 .send(job_result)
                 .map_or_else(|_| false, |_| job_success);

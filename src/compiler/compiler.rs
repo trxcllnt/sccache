@@ -832,6 +832,7 @@ async fn dist_compile<T>(
 where
     T: CommandCreatorSync,
 {
+    use dist::RunJobResponse;
     use std::io;
     use tokio_retry2::strategy::FibonacciBackoff;
 
@@ -1011,7 +1012,7 @@ where
 
         debug!("[{out_pretty}, {job_id}]: Running job");
 
-        let job_result = dist_client
+        let job_result = match dist_client
             .run_job(
                 job_id,
                 Duration::from_secs(timeout as u64),
@@ -1019,26 +1020,36 @@ where
                 dist_compile_cmd.clone(),
                 dist_output_paths.clone(),
             )
-            .await;
-
-        let job_result = match job_result {
-            // Success
-            Ok(dist::RunJobResponse::JobComplete { result, server_id }) => Ok((result, server_id)),
-            // Failure
-            Ok(dist::RunJobResponse::JobFailed { reason, server_id }) => {
-                warn!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation job failed: {reason}");
-                // Break because JobFailed responses are not retryable
-                break Err(anyhow!(reason));
+            .await
+        {
+            // Job completed, regardless of whether compilation succeeded or failed
+            Ok(RunJobResponse::Complete { result, server_id }) => Ok((result, server_id)),
+            // Job failed with an unrecoverable fatal error. These should be rare, since
+            // There aren't many cases where we want to explicitly fail the build without
+            // allowing the client to retry.
+            //
+            // The most likely source of these errors are when the compilation took longer
+            // than the Scheduler's `job_time_limit` configuration. In this case, retrying
+            // the compilation on a different server won't finish any sooner, so we report
+            // a fatal error so clients see their build fail and can either increase the
+            // job time limit, or apply source optimizations so their files compile in a
+            // reasonable amount of time.
+            Ok(RunJobResponse::FatalError { message, server_id }) => {
+                error!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation job failed: {message}");
+                // Break because fatal errors are not retryable
+                break Err(anyhow!(message));
             }
             // Missing inputs (S3 cleared, Redis rebooted, etc.)
-            Ok(dist::RunJobResponse::MissingJobInputs { server_id }) => {
+            Ok(RunJobResponse::MissingJobInputs { server_id }) => {
+                // If we retry, send the inputs again
                 has_inputs = false;
                 debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job inputs");
                 // Don't break because these errors can be retried
                 Err(anyhow!("Missing distributed compilation job inputs"))
             }
             // Missing toolchain (S3 cleared, Redis rebooted, etc.)
-            Ok(dist::RunJobResponse::MissingToolchain { server_id }) => {
+            Ok(RunJobResponse::MissingToolchain { server_id }) => {
+                // If we retry, send the toolchain again
                 has_toolchain = false;
                 debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job toolchain");
                 // Don't break because these errors can be retried
@@ -1047,24 +1058,18 @@ where
             // Missing result (S3 cleared, Redis rebooted, etc.),
             // or build server failed to write the job result due
             // to e.g. network error, server shutdown, etc.
-            Ok(dist::RunJobResponse::MissingJobResult { server_id }) => {
+            Ok(RunJobResponse::MissingJobResult { server_id }) => {
                 debug!(
                     "[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job result"
                 );
                 // Don't break because these errors can be retried
                 Err(anyhow!("Missing distributed compilation job result"))
             }
-            // Build process killed before job finished
-            Ok(dist::RunJobResponse::BuildTerminated { server_id }) => {
-                debug!("[{out_pretty}, {job_id}, {server_id}]: Build process killed");
+            // Disk errors, build process killed, server shutdown, etc.
+            Ok(RunJobResponse::RetryableError { message, server_id }) => {
+                debug!("[{out_pretty}, {job_id}, {server_id}]: {message:?}");
                 // Don't break because these errors can be retried
-                Err(anyhow!("Build process killed"))
-            }
-            // Server shutdown before job finished
-            Ok(dist::RunJobResponse::ServerTerminated { server_id }) => {
-                debug!("[{out_pretty}, {job_id}, {server_id}]: Build server shutdown");
-                // Don't break because these errors can be retried
-                Err(anyhow!("Build server shutdown"))
+                Err(anyhow!("{message:?}"))
             }
             // Other (e.g. client network, timeout, etc.) errors
             Err(err) => {
@@ -3647,7 +3652,7 @@ mod test_dist {
                     (name, data)
                 })
                 .collect();
-            let result = RunJobResponse::JobComplete {
+            let result = RunJobResponse::Complete {
                 server_id: "".into(),
                 result: BuildResult {
                     output: self.output.clone(),
