@@ -1481,7 +1481,7 @@ where
                     Err(err) => {
                         match err.downcast::<ProcessError>() {
                             Ok(ProcessError(output)) => {
-                                warn!("[{}]: Compilation failed: {:?}", out_pretty, output);
+                                debug!("[{}]: Compilation failed: {:?}", out_pretty, output);
                                 stats.compile_fails += 1;
                                 // Make sure the write guard has been dropped ASAP.
                                 drop(stats);

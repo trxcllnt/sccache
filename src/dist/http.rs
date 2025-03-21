@@ -101,7 +101,19 @@ mod common {
         let res = match req.send().await {
             Ok(res) => res,
             Err(err) => {
-                error!("Response error: err={err}");
+                if log_enabled!(log::Level::Debug) {
+                    debug!(
+                        "Request error: {}",
+                        [
+                            err.url().map(|u| format!("url={u:?}")).unwrap_or_default(),
+                            err.status()
+                                .map(|u| format!("status={u:?}"))
+                                .unwrap_or_default(),
+                            format!("err={err:?}"),
+                        ]
+                        .join(", ")
+                    );
+                }
                 return Err(err.into());
             }
         };
@@ -111,7 +123,7 @@ mod common {
         let bytes = match res.bytes().await {
             Ok(b) => b,
             Err(err) => {
-                error!("Body error: url={url}, status={status}, err={err}");
+                debug!("Request body error: url={url}, status={status}, err={err}");
                 return Err(err.into());
             }
         };
