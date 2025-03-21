@@ -832,6 +832,7 @@ async fn dist_compile<T>(
 where
     T: CommandCreatorSync,
 {
+    use bytes::Buf;
     use dist::RunJobResponse;
     use std::io;
     use tokio_retry2::strategy::FibonacciBackoff;
@@ -887,7 +888,14 @@ where
                 compressor.total_out()
             );
             compressor.finish().context("failed to finish compressor")?;
-            Ok((job_inputs, path_transformer))
+
+            // Write the job inputs to a tempfile because they can be huge
+            // and we don't want to OOM the server during parallel builds.
+            let mut job_inputs_file = tempfile::Builder::new().prefix(".sccachetmp").tempfile()?;
+            std::io::copy(&mut job_inputs.reader(), &mut job_inputs_file.as_file_mut())?;
+            job_inputs_file.flush()?;
+
+            Ok((job_inputs_file, path_transformer))
         })
         .await??;
 
@@ -928,7 +936,10 @@ where
             debug!("[{out_pretty}]: Requesting job allocation");
 
             match dist_client
-                .new_job(dist_toolchain.clone(), &job_inputs)
+                .new_job(
+                    dist_toolchain.clone(),
+                    std::fs::File::open(job_inputs.path())?,
+                )
                 .await
             {
                 Ok(res) => {
@@ -952,7 +963,7 @@ where
         if !has_inputs {
             debug!("[{out_pretty}, {job_id}]: Resubmitting job inputs");
             match dist_client
-                .put_job(job_id, &job_inputs)
+                .put_job(job_id, std::fs::File::open(job_inputs.path())?)
                 .await
                 .map_err(|e| e.context("Could not submit job inputs"))
             {
@@ -3312,10 +3323,10 @@ mod test_dist {
     }
     #[async_trait]
     impl dist::Client for ErrorPutToolchainClient {
-        async fn new_job(&self, _: Toolchain, _: &[u8]) -> Result<NewJobResponse> {
+        async fn new_job(&self, _: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
             unreachable!()
         }
-        async fn put_job(&self, _: &str, _: &[u8]) -> Result<()> {
+        async fn put_job(&self, _: &str, _: std::fs::File) -> Result<()> {
             unreachable!()
         }
         async fn del_job(&self, _: &str) -> Result<()> {
@@ -3374,11 +3385,11 @@ mod test_dist {
     }
     #[async_trait]
     impl dist::Client for ErrorAllocJobClient {
-        async fn new_job(&self, tc: Toolchain, _: &[u8]) -> Result<NewJobResponse> {
+        async fn new_job(&self, tc: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
             assert_eq!(self.tc, tc);
             Err(anyhow!("MOCK: alloc job failure"))
         }
-        async fn put_job(&self, _: &str, _: &[u8]) -> Result<()> {
+        async fn put_job(&self, _: &str, _: std::fs::File) -> Result<()> {
             unreachable!()
         }
         async fn del_job(&self, _: &str) -> Result<()> {
@@ -3440,7 +3451,7 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for ErrorSubmitToolchainClient {
-        async fn new_job(&self, tc: Toolchain, _: &[u8]) -> Result<NewJobResponse> {
+        async fn new_job(&self, tc: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
             assert!(!self
                 .has_started
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
@@ -3453,7 +3464,7 @@ mod test_dist {
                 timeout: 10,
             })
         }
-        async fn put_job(&self, _: &str, _: &[u8]) -> Result<()> {
+        async fn put_job(&self, _: &str, _: std::fs::File) -> Result<()> {
             unreachable!()
         }
         async fn del_job(&self, _: &str) -> Result<()> {
@@ -3516,7 +3527,7 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for ErrorRunJobClient {
-        async fn new_job(&self, tc: Toolchain, _: &[u8]) -> Result<NewJobResponse> {
+        async fn new_job(&self, tc: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
             assert!(!self
                 .has_started
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
@@ -3529,7 +3540,7 @@ mod test_dist {
                 timeout: 10,
             })
         }
-        async fn put_job(&self, _: &str, _: &[u8]) -> Result<()> {
+        async fn put_job(&self, _: &str, _: std::fs::File) -> Result<()> {
             unreachable!()
         }
         async fn del_job(&self, _: &str) -> Result<()> {
@@ -3605,7 +3616,7 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for OneshotClient {
-        async fn new_job(&self, tc: Toolchain, _: &[u8]) -> Result<NewJobResponse> {
+        async fn new_job(&self, tc: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
             assert!(!self
                 .has_started
                 .swap(true, std::sync::atomic::Ordering::AcqRel));
@@ -3617,7 +3628,7 @@ mod test_dist {
                 timeout: 10,
             })
         }
-        async fn put_job(&self, _: &str, _: &[u8]) -> Result<()> {
+        async fn put_job(&self, _: &str, _: std::fs::File) -> Result<()> {
             unreachable!()
         }
         async fn del_job(&self, _: &str) -> Result<()> {

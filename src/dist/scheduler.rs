@@ -26,9 +26,9 @@ use crate::{
         self,
         http::bincode_deserialize,
         metrics::{CountRecorder, Metrics, TimeRecorder},
-        CompileCommand, JobStats, NewJobRequest, NewJobResponse, RunJobRequest, RunJobResponse,
-        SchedulerService, SchedulerStatus, ServerDetails, ServerStats, ServerStatus,
-        SubmitToolchainResult, Toolchain,
+        CompileCommand, JobStats, NewJobResponse, RunJobRequest, RunJobResponse, SchedulerService,
+        SchedulerStatus, ServerDetails, ServerStats, ServerStatus, SubmitToolchainResult,
+        Toolchain,
     },
     errors::*,
 };
@@ -410,15 +410,14 @@ impl SchedulerService for Scheduler {
             })
     }
 
-    async fn new_job(&self, request: NewJobRequest) -> Result<NewJobResponse> {
-        let inputs = &request.inputs;
+    async fn new_job(&self, toolchain: &Toolchain, inputs: &[u8]) -> Result<NewJobResponse> {
         let job_id = uuid::Uuid::new_v4().simple().to_string();
         let (has_toolchain, has_inputs) = futures::future::join(
-            async { Ok::<bool, anyhow::Error>(self.has_toolchain(&request.toolchain).await) },
+            async { Ok::<bool, anyhow::Error>(self.has_toolchain(toolchain).await) },
             async {
                 retry_with_jitter(3, || async {
-                    let inputs = futures::io::AllowStdIo::new(inputs.reader());
-                    self.put_job(&job_id, request.inputs.len() as u64, std::pin::pin!(inputs))
+                    let reader = futures::io::AllowStdIo::new(inputs.reader());
+                    self.put_job(&job_id, inputs.len() as u64, std::pin::pin!(reader))
                         .await
                         .map_err(RetryError::transient)
                 })

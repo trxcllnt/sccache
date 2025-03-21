@@ -546,13 +546,6 @@ pub struct CompileCommand {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct NewJobRequest {
-    pub toolchain: Toolchain,
-    pub inputs: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct NewJobResponse {
     pub has_inputs: bool,
     pub has_toolchain: bool,
@@ -743,7 +736,7 @@ pub trait SchedulerService: Send + Sync {
     async fn del_toolchain(&self, toolchain: &Toolchain) -> Result<()>;
 
     async fn has_job(&self, job_id: &str) -> bool;
-    async fn new_job(&self, request: NewJobRequest) -> Result<NewJobResponse>;
+    async fn new_job(&self, toolchain: &Toolchain, inputs: &[u8]) -> Result<NewJobResponse>;
     async fn run_job(&self, job_id: &str, request: RunJobRequest) -> Result<RunJobResponse>;
     async fn put_job(
         &self,
@@ -798,9 +791,9 @@ pub trait BuilderIncoming: Send + Sync {
 #[async_trait]
 pub trait Client: Send + Sync {
     // To Scheduler
-    async fn new_job(&self, toolchain: Toolchain, inputs: &[u8]) -> Result<NewJobResponse>;
+    async fn new_job(&self, toolchain: Toolchain, inputs: std::fs::File) -> Result<NewJobResponse>;
     // To Scheduler
-    async fn put_job(&self, job_id: &str, inputs: &[u8]) -> Result<()>;
+    async fn put_job(&self, job_id: &str, inputs: std::fs::File) -> Result<()>;
     // To Scheduler
     async fn del_job(&self, job_id: &str) -> Result<()>;
     // To Scheduler

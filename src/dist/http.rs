@@ -323,8 +323,11 @@ mod scheduler {
 
     use std::{io, net::SocketAddr, str::FromStr, sync::Arc, time::Instant};
 
-    use tokio::net::TcpListener;
-    use tokio_util::{compat::TokioAsyncReadCompatExt, io::StreamReader};
+    use tokio::{io::AsyncReadExt, net::TcpListener};
+    use tokio_util::{
+        compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt},
+        io::StreamReader,
+    };
     use tower::{Service, ServiceBuilder, ServiceExt};
     use tower_http::{
         request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -335,7 +338,7 @@ mod scheduler {
     use crate::dist::{
         http::{bincode_deserialize, ClientAuthCheck},
         metrics::Metrics,
-        NewJobRequest, RunJobRequest, SchedulerService, Toolchain,
+        RunJobRequest, SchedulerService, Toolchain,
     };
 
     use crate::errors::*;
@@ -741,8 +744,36 @@ mod scheduler {
                          method: Method,
                          uri: Uri,
                          Extension(state): Extension<Arc<SchedulerState>>,
-                         Bincode(req): Bincode<NewJobRequest>| async move {
-                            state.service.new_job(req).await.map_or_else(
+                         RequestBodyAsyncRead(body): RequestBodyAsyncRead| async move {
+                            let mut body = Box::pin(body.compat());
+
+                            // Deserialize new job requests. First is the Toolchain
+                            // bincode, followed by the compressed inputs.
+                            let (toolchain, inputs) = {
+                                let bincode_len = body.read_u32().await
+                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid bincode length".to_owned()))
+                                    .map_err(|e| e.into_response())? as u64;
+
+                                let mut bincode_reader = body.take(bincode_len);
+                                let mut bincode = vec![];
+                                bincode_reader.read_to_end(&mut bincode).await
+                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid toolchain".to_owned()))
+                                    .map_err(|e| e.into_response())?;
+
+                                let toolchain = bincode_deserialize(bincode).await
+                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid toolchain".to_owned()))
+                                    .map_err(|e| e.into_response())?;
+
+                                let mut inputs_reader = bincode_reader.into_inner();
+                                let mut inputs = vec![];
+                                inputs_reader.read_to_end(&mut inputs).await
+                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job inputs".to_owned()))
+                                    .map_err(|e| e.into_response())?;
+
+                                (toolchain, inputs)
+                            };
+
+                            state.service.new_job(&toolchain, &inputs).await.map_or_else(
                                 anyhow_to_response(method, uri),
                                 result_to_response(headers),
                             )
@@ -867,11 +898,12 @@ mod client {
     use crate::config;
     use crate::dist::pkg::ToolchainPackager;
     use crate::dist::{
-        self, CompileCommand, NewJobRequest, NewJobResponse, RunJobRequest, RunJobResponse,
-        SchedulerStatus, SubmitToolchainResult, Toolchain,
+        self, CompileCommand, NewJobResponse, RunJobRequest, RunJobResponse, SchedulerStatus,
+        SubmitToolchainResult, Toolchain,
     };
     use crate::util::new_reqwest_client;
 
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::compat::FuturesAsyncReadCompatExt;
 
     use std::sync::Arc;
@@ -884,7 +916,7 @@ mod client {
     use super::common::{
         bincode_req_fut, AsyncMulticast, AsyncMulticastFn, ReqwestRequestBuilderExt,
     };
-    use super::urls;
+    use super::{bincode_serialize, urls};
     use crate::errors::*;
 
     struct SubmitToolchainFn {
@@ -975,25 +1007,43 @@ mod client {
 
     #[async_trait]
     impl dist::Client for Client {
-        async fn new_job(&self, toolchain: Toolchain, inputs: &[u8]) -> Result<NewJobResponse> {
+        async fn new_job(
+            &self,
+            toolchain: Toolchain,
+            inputs: std::fs::File,
+        ) -> Result<NewJobResponse> {
             bincode_req_fut(
                 self.client
                     .post(urls::scheduler_new_job(&self.scheduler_url))
                     .bearer_auth(self.auth_token.clone())
-                    .bincode(&NewJobRequest {
-                        inputs: inputs.to_vec(),
-                        toolchain,
-                    })?,
+                    .body(Body::wrap_stream({
+                        let bincode = bincode_serialize(toolchain).await?;
+                        let (body, mut writer) = tokio::io::simplex(bincode.len() + 4);
+                        writer
+                            .write_u32(bincode.len() as u32)
+                            .await
+                            .expect("Infallible write of bincode length to stream failed");
+                        writer
+                            .write_all(&bincode)
+                            .await
+                            .expect("Infallible write of bincode body to stream failed");
+                        writer.shutdown().await?;
+                        let inputs = tokio::fs::File::from_std(inputs);
+                        let inputs = tokio::io::BufReader::new(inputs);
+                        tokio_util::io::ReaderStream::new(body.chain(inputs))
+                    })),
             )
             .await
         }
 
-        async fn put_job(&self, job_id: &str, inputs: &[u8]) -> Result<()> {
+        async fn put_job(&self, job_id: &str, inputs: std::fs::File) -> Result<()> {
+            let body = futures::io::AllowStdIo::new(inputs);
+            let body = tokio_util::io::ReaderStream::new(body.compat());
             bincode_req_fut(
                 self.client
                     .put(urls::scheduler_put_job(&self.scheduler_url, job_id))
                     .bearer_auth(self.auth_token.clone())
-                    .body(inputs.to_vec()),
+                    .body(Body::wrap_stream(body)),
             )
             .await
         }
