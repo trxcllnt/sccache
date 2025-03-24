@@ -92,7 +92,7 @@ impl SccacheClient {
                     "SCCACHE_ERROR_LOG".into(),
                     env::var_os("SCCACHE_ERROR_LOG").unwrap_or(
                         env::temp_dir()
-                            .join("sccache_local_daemon.txt")
+                            .join(format!("sccache_local_daemon.{port}.txt"))
                             .into_os_string(),
                     ),
                 ),
