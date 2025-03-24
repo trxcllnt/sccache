@@ -776,9 +776,17 @@ where
         );
     }
 
+    let gen_module_id_file_flag = "--gen_module_id_file".to_owned();
+    let gen_c_file_name_flag = "--gen_c_file_name".to_owned();
+    let gen_device_file_name_flag = "--gen_device_file_name".to_owned();
+    let module_id_file_name_flag = "--module_id_file_name".to_owned();
+    let stub_file_name_flag = "--stub_file_name".to_owned();
+
+    let mut cudafe_has_gen_module_id_file_flag = false;
+
     // Now zip the two lists of commands again by sorting on original line index.
     // Transform to tuples that include the dir in which each command should run.
-    let all_commands = nvcc_commands
+    let mut all_commands = nvcc_commands
         .iter()
         // Run cudafe++, nvlink, cicc, ptxas, and fatbinary in `out`
         .map(|(idx, exe, args)| (idx, out, exe, args))
@@ -788,7 +796,25 @@ where
                 // Run host preprocessing and compilation steps in `cwd`
                 .map(|(idx, exe, args)| (idx, cwd, exe, args)),
         )
-        .sorted_by(|a, b| Ord::cmp(&a.0, &b.0));
+        .sorted_by(|a, b| Ord::cmp(&a.0, &b.0))
+        .map(|(_, dir, exe, args)| (dir.to_owned(), exe.to_owned(), args.to_owned()))
+        .collect::<Vec<_>>();
+
+    // First pass over commands because in CTK < 12.0, `cudafe++` is at the end of the commands list,
+    // but we need to set `cudafe_has_gen_module_id_file_flag` in order to adjust the cicc commands.
+    for (dir, exe, args) in all_commands.iter_mut() {
+        if let Some("cudafe++") = exe.file_stem().and_then(|s| s.to_str()) {
+            // Fix for CTK < 12.0:
+            // Add `--gen_module_id_file` if the cudafe++ args include `--module_id_file_name`
+            if let Some(idx) = args.iter().position(|x| x == &module_id_file_name_flag) {
+                if !args.contains(&gen_module_id_file_flag) {
+                    // Insert `--gen_module_id_file` just before `--module_id_file_name` to match nvcc behavior
+                    args.splice(idx..idx, [gen_module_id_file_flag.clone()]);
+                }
+            }
+            cudafe_has_gen_module_id_file_flag = args.contains(&gen_module_id_file_flag);
+        }
+    }
 
     // Create groups of commands that should be run sequential relative to each other,
     // but can optionally be run in parallel to other groups if the user requested via
@@ -800,18 +826,11 @@ where
     }
     .to_owned();
 
-    let gen_module_id_file_flag = "--gen_module_id_file".to_owned();
-    let gen_c_file_name_flag = "--gen_c_file_name".to_owned();
-    let gen_device_file_name_flag = "--gen_device_file_name".to_owned();
-    let module_id_file_name_flag = "--module_id_file_name".to_owned();
-    let stub_file_name_flag = "--stub_file_name".to_owned();
     let mut cuda_front_end_group = Vec::<NvccGeneratedSubcommand>::new();
     let mut final_assembly_group = Vec::<NvccGeneratedSubcommand>::new();
     let mut device_compile_groups = HashMap::<String, Vec<NvccGeneratedSubcommand>>::new();
 
-    for (_, dir, exe, args) in all_commands {
-        let mut args = args.clone();
-
+    for (dir, exe, args) in all_commands.iter_mut() {
         if let (env_vars, cacheable, Some(group)) = match exe.file_stem().and_then(|s| s.to_str()) {
             // fatbinary and nvlink are not cacheable
             Some("fatbinary") | Some("nvlink") => (
@@ -821,20 +840,13 @@ where
             ),
             // cicc and ptxas are cacheable
             Some("cicc") => {
-                // Add `--gen_module_id_file` if the cicc args include `--module_id_file_name`.
-                //
-                // From emperical observation, it seems if this file has already been created
-                // by `cudafe++`, cicc will use the existing file. If the file doesn't exist,
-                // cicc should create it. In both cases, the `.module_id` file should be
-                // cached alongside the `.ptx` output.
-                if let Some(idx) = args.iter().position(|x| x == &module_id_file_name_flag) {
-                    // Add `--gen_module_id_file` if necessary
-                    if !args.contains(&gen_module_id_file_flag) {
-                        // Insert `--gen_module_id_file` just before `--module_id_file_name` to match nvcc behavior
-                        args.splice(idx..idx, [gen_module_id_file_flag.clone()]);
+                // Fix for CTK < 12.0:
+                // Remove `--gen_module_id_file` if cudafe++ already does it
+                if cudafe_has_gen_module_id_file_flag {
+                    if let Some(idx) = args.iter().position(|x| x == &gen_module_id_file_flag) {
+                        args.splice(idx..idx + 1, []);
                     }
                 }
-
                 // Add these flags if they're missing:
                 // * `--gen_c_file_name test_a.compute_XX.cudafe1.c`
                 // * `--stub_file_name test_a.compute_XX.cudafe1.stub.c`
@@ -875,21 +887,11 @@ where
                 (env_vars.clone(), Cacheable::Yes, group)
             }
             // cudafe++ _must be_ cached, because the `.module_id` file is unique to each invocation (new in CTK 12.8)
-            Some("cudafe++") => {
-                // Fix for CTK < 12.0:
-                // Add `--gen_module_id_file` if the cudafe++ args include `--module_id_file_name`
-                if let Some(idx) = args.iter().position(|x| x == &module_id_file_name_flag) {
-                    if !args.contains(&gen_module_id_file_flag) {
-                        // Insert `--gen_module_id_file` just before `--module_id_file_name` to match nvcc behavior
-                        args.splice(idx..idx, [gen_module_id_file_flag.clone()]);
-                    }
-                }
-                (
-                    env_vars.clone(),
-                    Cacheable::Yes,
-                    Some(&mut cuda_front_end_group),
-                )
-            }
+            Some("cudafe++") => (
+                env_vars.clone(),
+                Cacheable::Yes,
+                Some(&mut cuda_front_end_group),
+            ),
             _ => {
                 // All generated host compiler commands include one of these defines.
                 // If one of these isn't present, this command is either a new binary
@@ -999,7 +1001,7 @@ where
             group.push(NvccGeneratedSubcommand {
                 exe: exe.clone(),
                 args: args.clone(),
-                cwd: dir.into(),
+                cwd: dir.to_owned(),
                 env_vars,
                 cacheable,
             });

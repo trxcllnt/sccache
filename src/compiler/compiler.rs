@@ -870,7 +870,7 @@ where
         tc_archive = Some(archive_path);
     }
 
-    debug!("[{out_pretty}]: Serializing job inputs");
+    trace!("[{out_pretty}]: Serializing job inputs");
 
     // TODO: Make this use asyncio
     let (job_inputs, path_transformer) = pool
@@ -933,7 +933,7 @@ where
         let (job_id, timeout) = if let Some((ref job_id, timeout)) = job {
             (job_id, timeout)
         } else {
-            debug!("[{out_pretty}]: Requesting job allocation");
+            trace!("[{out_pretty}]: Requesting job allocation");
 
             match dist_client
                 .new_job(
@@ -943,7 +943,7 @@ where
                 .await
             {
                 Ok(res) => {
-                    debug!("[{out_pretty}, {}]: Received job allocation", res.job_id);
+                    trace!("[{out_pretty}, {}]: Received job allocation", res.job_id);
                     has_inputs = res.has_inputs;
                     has_toolchain = res.has_toolchain;
                     job = Some((res.job_id, res.timeout));

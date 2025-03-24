@@ -118,7 +118,7 @@ where
     let mut take_next = false;
     let mut outputs = HashMap::new();
     let mut extra_dist_files = vec![];
-    let mut gen_module_id_file = false;
+    // let mut gen_module_id_file = false;
     let mut module_id_file_name = Option::<PathBuf>::None;
 
     let mut common_args = vec![];
@@ -160,7 +160,7 @@ where
                     }
                     Some(GenModuleIdFileFlag) => {
                         take_next = false;
-                        gen_module_id_file = true;
+                        // gen_module_id_file = true;
                         &mut common_args
                     }
                     Some(ModuleIdFileName(o)) => {
@@ -196,17 +196,16 @@ where
     }
 
     if let Some(module_id_path) = module_id_file_name {
-        if gen_module_id_file {
-            outputs.insert(
-                "--module_id_file_name",
-                ArtifactDescriptor {
-                    path: module_id_path,
-                    optional: true,
-                },
-            );
-        } else {
-            extra_dist_files.push(module_id_path);
+        if module_id_path.exists() {
+            extra_dist_files.push(module_id_path.clone());
         }
+        outputs.insert(
+            "--module_id_file_name",
+            ArtifactDescriptor {
+                path: module_id_path,
+                optional: false,
+            },
+        );
     }
 
     CompilerArguments::Ok(ParsedArguments {
@@ -265,6 +264,7 @@ pub fn generate_compile_commands(
     };
 
     let mut arguments: Vec<OsString> = vec![];
+
     arguments.extend_from_slice(&parsed_args.common_args);
     arguments.extend_from_slice(&parsed_args.unhashed_args);
     arguments.extend(vec![
