@@ -812,8 +812,8 @@ pub trait Client: Send + Sync {
     // Write to local toolchain cache
     async fn put_toolchain_local(
         &self,
-        compiler_path: PathBuf,
-        weak_key: String,
+        compiler_path: &Path,
+        weak_toolchain_key: &str,
         toolchain_packager: Box<dyn pkg::ToolchainPackager>,
     ) -> Result<(Toolchain, Option<(String, PathBuf)>)>;
     fn fallback_to_local_compile(&self) -> bool;

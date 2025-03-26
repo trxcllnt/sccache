@@ -2243,27 +2243,27 @@ struct RustOutputsRewriter {
 #[cfg(feature = "dist-client")]
 impl OutputsRewriter for RustOutputsRewriter {
     fn handle_outputs(
-        self: Box<Self>,
+        &self,
         path_transformer: &dist::PathTransformer,
         output_paths: &[PathBuf],
-        extra_inputs: &[PathBuf],
+        extra_inputs: &[&Path],
     ) -> Result<()> {
         use std::io::Write;
 
         // Outputs in dep files (the files at the beginning of lines) are untransformed at this point -
         // remap-path-prefix is documented to only apply to 'inputs'.
         trace!("Pondering on rewriting dep file {:?}", self.dep_info);
-        if let Some(dep_info) = self.dep_info {
+        if let Some(dep_info) = self.dep_info.as_ref() {
             let extra_input_str = extra_inputs
                 .iter()
                 .fold(String::new(), |s, p| s + " " + &p.to_string_lossy());
             for dep_info_local_path in output_paths {
                 trace!("Comparing with {}", dep_info_local_path.display());
-                if dep_info == *dep_info_local_path {
+                if dep_info == dep_info_local_path {
                     info!("Replacing using the transformer {:?}", path_transformer);
                     // Found the dep info file, read it in
-                    let f = fs::File::open(&dep_info)
-                        .with_context(|| "Failed to open dep info file")?;
+                    let f =
+                        fs::File::open(dep_info).with_context(|| "Failed to open dep info file")?;
                     let mut deps = String::new();
                     { f }.read_to_string(&mut deps)?;
                     // Replace all the output paths, at the beginning of lines
@@ -2287,7 +2287,7 @@ impl OutputsRewriter for RustOutputsRewriter {
                     }
                     // Write the depinfo file
                     let f =
-                        fs::File::create(&dep_info).context("Failed to recreate dep info file")?;
+                        fs::File::create(dep_info).context("Failed to recreate dep info file")?;
                     { f }.write_all(deps.as_bytes())?;
                     return Ok(());
                 }

@@ -752,6 +752,8 @@ async fn dist_or_local_compile<T>(
 where
     T: CommandCreatorSync,
 {
+    use futures::TryFutureExt;
+
     let rewrite_includes_only = match dist_client {
         Some(ref client) => client.rewrite_includes_only(),
         _ => false,
@@ -761,30 +763,59 @@ where
         .generate_compile_commands(&mut path_transformer, rewrite_includes_only)
         .context("Failed to generate compile commands")?;
 
-    let dist_client = match dist_compile_cmd.clone().and(dist_client) {
-        Some(dc) => dc,
-        None => {
-            trace!("[{}]: Compiling locally", out_pretty);
-            return compile_cmd
-                .execute(service, &creator)
-                .await
-                .map(move |o| (cacheable, DistType::NoDist, o));
-        }
-    };
+    let (mut dist_compile_cmd, dist_client) =
+        match dist_compile_cmd.and_then(|cmd| dist_client.map(|client| (cmd, client))) {
+            Some((dcc, dc)) => (dcc, dc),
+            None => {
+                trace!("[{}]: Compiling locally", out_pretty);
+                return compile_cmd
+                    .execute(service, &creator)
+                    .await
+                    .map(move |o| (cacheable, DistType::NoDist, o));
+            }
+        };
 
-    match dist_compile(
-        path_transformer.clone(),
-        dist_client.clone(),
-        cwd.clone(),
-        compilation.clone(),
-        weak_toolchain_key.clone(),
-        compile_cmd.clone(),
-        dist_compile_cmd.clone(),
-        out_pretty.clone(),
+    let exe = compile_cmd.get_executable();
+
+    let dist_compile_res = prepare_dist_compile(
+        path_transformer,
+        dist_client.as_ref(),
+        compilation,
+        &weak_toolchain_key,
+        &exe,
+        &mut dist_compile_cmd,
+        &cwd,
+        &out_pretty,
         pool,
     )
-    .await
-    {
+    .and_then(
+        |(
+            job_inputs,
+            dist_toolchain,
+            dist_compile_cmd,
+            dist_output_paths,
+            tc_archive,
+            outputs_rewriter,
+            path_transformer,
+            dist_client,
+            out_pretty,
+        )| async move {
+            dist_compile(
+                &job_inputs,
+                &dist_toolchain,
+                dist_compile_cmd,
+                &dist_output_paths,
+                &tc_archive,
+                outputs_rewriter.as_ref(),
+                &path_transformer,
+                dist_client,
+                out_pretty,
+            )
+            .await
+        },
+    );
+
+    match dist_compile_res.await {
         Ok((dt, o)) => Ok((cacheable, dt, o)),
         Err(e) => {
             if let Some(HttpClientError(_)) = e.downcast_ref::<HttpClientError>() {
@@ -793,9 +824,8 @@ where
                 e.downcast_ref::<lru_disk_cache::Error>()
             {
                 Err(anyhow!(
-                    "Could not cache dist toolchain for {:?} locally.
+                    "Could not cache dist toolchain for {exe:?} locally.
                  Increase `toolchain_cache_size` or decrease the toolchain archive size.",
-                    compile_cmd.get_executable()
                 ))
             } else if dist_client.fallback_to_local_compile() {
                 // `{:#}` prints the error and the causes in a single line.
@@ -818,28 +848,30 @@ where
 
 #[cfg(feature = "dist-client")]
 #[allow(clippy::too_many_arguments)]
-async fn dist_compile<T>(
+async fn prepare_dist_compile<'a, T>(
     mut path_transformer: dist::PathTransformer,
-    dist_client: Arc<dyn dist::Client>,
-    cwd: PathBuf,
+    dist_client: &'a dyn dist::Client,
     compilation: Box<dyn Compilation<T>>,
-    weak_toolchain_key: String,
-    compile_cmd: Box<dyn CompileCommand<T>>,
-    dist_compile_cmd: Option<dist::CompileCommand>,
-    out_pretty: String,
+    weak_toolchain_key: &str,
+    exe: &Path,
+    dist_compile_cmd: &'a mut dist::CompileCommand,
+    cwd: &Path,
+    out_pretty: &'a str,
     pool: &tokio::runtime::Handle,
-) -> Result<(DistType, std::process::Output)>
+) -> Result<(
+    tempfile::NamedTempFile,
+    dist::Toolchain,
+    &'a dist::CompileCommand,
+    Vec<String>,
+    Option<PathBuf>,
+    Box<dyn OutputsRewriter>,
+    dist::PathTransformer,
+    &'a dyn dist::Client,
+    &'a str,
+)>
 where
     T: CommandCreatorSync,
 {
-    use bytes::Buf;
-    use dist::RunJobResponse;
-    use std::io;
-    use tokio_retry2::strategy::FibonacciBackoff;
-
-    let mut dist_compile_cmd =
-        dist_compile_cmd.context("Could not create distributed compile command")?;
-
     trace!("[{out_pretty}]: Creating distributed compile request");
 
     let dist_output_paths: Vec<String> = compilation
@@ -851,16 +883,9 @@ where
     let (inputs_packager, toolchain_packager, outputs_rewriter) =
         compilation.into_dist_packagers(path_transformer)?;
 
-    trace!(
-        "[{out_pretty}]: Identifying dist toolchain for {:?}",
-        compile_cmd.get_executable()
-    );
+    trace!("[{out_pretty}]: Identifying dist toolchain for {exe:?}");
     let (dist_toolchain, maybe_dist_compile_executable) = dist_client
-        .put_toolchain_local(
-            compile_cmd.get_executable(),
-            weak_toolchain_key,
-            toolchain_packager,
-        )
+        .put_toolchain_local(exe, weak_toolchain_key, toolchain_packager)
         .await?;
 
     let mut tc_archive = None;
@@ -875,29 +900,60 @@ where
     // TODO: Make this use asyncio
     let (job_inputs, path_transformer) = pool
         .spawn_blocking(move || -> Result<_> {
-            let mut job_inputs = vec![];
+            // Write the job inputs to a tempfile because they can be huge
+            // and we don't want to OOM the server during parallel builds.
+            let mut job_inputs = tempfile::Builder::new().prefix(".sccachetmp").tempfile()?;
+
             let mut compressor =
                 flate2::write::ZlibEncoder::new(&mut job_inputs, flate2::Compression::fast());
+
             let path_transformer = inputs_packager
                 .write_inputs(&mut compressor)
                 .context("Could not write inputs for compilation")?;
+
             compressor.flush().context("failed to flush compressor")?;
+
             trace!(
                 "Compressed inputs from {} -> {}",
                 compressor.total_in(),
                 compressor.total_out()
             );
+
             compressor.finish().context("failed to finish compressor")?;
 
-            // Write the job inputs to a tempfile because they can be huge
-            // and we don't want to OOM the server during parallel builds.
-            let mut job_inputs_file = tempfile::Builder::new().prefix(".sccachetmp").tempfile()?;
-            std::io::copy(&mut job_inputs.reader(), &mut job_inputs_file.as_file_mut())?;
-            job_inputs_file.flush()?;
-
-            Ok((job_inputs_file, path_transformer))
+            Ok((job_inputs, path_transformer))
         })
         .await??;
+
+    Ok((
+        job_inputs,
+        dist_toolchain,
+        dist_compile_cmd,
+        dist_output_paths,
+        tc_archive,
+        outputs_rewriter,
+        path_transformer,
+        dist_client,
+        out_pretty,
+    ))
+}
+
+#[cfg(feature = "dist-client")]
+#[allow(clippy::too_many_arguments)]
+async fn dist_compile(
+    job_inputs: &tempfile::NamedTempFile,
+    dist_toolchain: &dist::Toolchain,
+    dist_compile_cmd: &dist::CompileCommand,
+    dist_output_paths: &[String],
+    tc_archive: &Option<PathBuf>,
+    outputs_rewriter: &dyn OutputsRewriter,
+    path_transformer: &dist::PathTransformer,
+    dist_client: &dyn dist::Client,
+    out_pretty: &str,
+) -> Result<(DistType, std::process::Output)> {
+    use dist::RunJobResponse;
+    use std::io;
+    use tokio_retry2::strategy::FibonacciBackoff;
 
     let dist_retry_limit = dist_client.max_retries() + 1.0;
     let mut num_dist_attempts = 1.0f64;
@@ -916,9 +972,9 @@ where
             warn!(
                 "[{}]: Could not run distributed compilation job: {err}",
                 if let Some(job_id) = job_id {
-                    [&out_pretty, job_id].join(", ")
+                    [out_pretty, job_id].join(", ")
                 } else {
-                    out_pretty.clone()
+                    out_pretty.to_owned()
                 }
             );
             false
@@ -936,10 +992,7 @@ where
             trace!("[{out_pretty}]: Requesting job allocation");
 
             match dist_client
-                .new_job(
-                    dist_toolchain.clone(),
-                    std::fs::File::open(job_inputs.path())?,
-                )
+                .new_job(dist_toolchain.clone(), job_inputs.reopen()?)
                 .await
             {
                 Ok(res) => {
@@ -963,7 +1016,7 @@ where
         if !has_inputs {
             debug!("[{out_pretty}, {job_id}]: Resubmitting job inputs");
             match dist_client
-                .put_job(job_id, std::fs::File::open(job_inputs.path())?)
+                .put_job(job_id, job_inputs.reopen()?)
                 .await
                 .map_err(|e| e.context("Could not submit job inputs"))
             {
@@ -1029,7 +1082,7 @@ where
                 Duration::from_secs(timeout as u64),
                 dist_toolchain.clone(),
                 dist_compile_cmd.clone(),
-                dist_output_paths.clone(),
+                dist_output_paths.to_vec(),
             )
             .await
         {
@@ -1099,9 +1152,6 @@ where
                 break Err(err);
             }
             Ok((result, server_id)) => {
-                // Don't need this in memory anymore
-                drop(job_inputs);
-
                 debug!(
                     "[{out_pretty}, {job_id}]: Fetched {:?}",
                     result
@@ -1173,9 +1223,12 @@ where
                     break Err(err);
                 }
 
-                let extra_inputs = tc_archive.map(|p| vec![p]).unwrap_or(vec![]);
+                let extra_inputs = tc_archive
+                    .as_ref()
+                    .map(|p| vec![p.as_path()])
+                    .unwrap_or_default();
                 try_or_cleanup!(outputs_rewriter
-                    .handle_outputs(&path_transformer, &output_paths, &extra_inputs)
+                    .handle_outputs(path_transformer, &output_paths, extra_inputs.as_slice())
                     .with_context(|| "Failed to rewrite outputs from compile"));
 
                 break Ok((
@@ -1252,13 +1305,13 @@ impl<T: CommandCreatorSync> Clone for Box<dyn Compilation<T>> {
 }
 
 #[cfg(feature = "dist-client")]
-pub trait OutputsRewriter: Send {
+pub trait OutputsRewriter: Send + Sync {
     /// Perform any post-compilation handling of outputs, given a Vec of the dist_path and local_path
     fn handle_outputs(
-        self: Box<Self>,
+        &self,
         path_transformer: &dist::PathTransformer,
         output_paths: &[PathBuf],
-        extra_inputs: &[PathBuf],
+        extra_inputs: &[&Path],
     ) -> Result<()>;
 }
 
@@ -1267,10 +1320,10 @@ pub struct NoopOutputsRewriter;
 #[cfg(feature = "dist-client")]
 impl OutputsRewriter for NoopOutputsRewriter {
     fn handle_outputs(
-        self: Box<Self>,
+        &self,
         _path_transformer: &dist::PathTransformer,
         _output_paths: &[PathBuf],
-        _extra_inputs: &[PathBuf],
+        _extra_inputs: &[&Path],
     ) -> Result<()> {
         Ok(())
     }
@@ -3350,8 +3403,8 @@ mod test_dist {
         }
         async fn put_toolchain_local(
             &self,
-            _: PathBuf,
-            _: String,
+            _: &Path,
+            _: &str,
             _: Box<dyn pkg::ToolchainPackager>,
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
             Err(anyhow!("MOCK: put toolchain failure"))
@@ -3413,8 +3466,8 @@ mod test_dist {
         }
         async fn put_toolchain_local(
             &self,
-            _: PathBuf,
-            _: String,
+            _: &Path,
+            _: &str,
             _: Box<dyn pkg::ToolchainPackager>,
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
             Ok((self.tc.clone(), None))
@@ -3489,8 +3542,8 @@ mod test_dist {
         }
         async fn put_toolchain_local(
             &self,
-            _: PathBuf,
-            _: String,
+            _: &Path,
+            _: &str,
             _: Box<dyn pkg::ToolchainPackager>,
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
             Ok((self.tc.clone(), None))
@@ -3569,8 +3622,8 @@ mod test_dist {
         }
         async fn put_toolchain_local(
             &self,
-            _: PathBuf,
-            _: String,
+            _: &Path,
+            _: &str,
             _: Box<dyn pkg::ToolchainPackager>,
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
             Ok((
@@ -3674,8 +3727,8 @@ mod test_dist {
         }
         async fn put_toolchain_local(
             &self,
-            _: PathBuf,
-            _: String,
+            _: &Path,
+            _: &str,
             _: Box<dyn pkg::ToolchainPackager>,
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
             Ok((

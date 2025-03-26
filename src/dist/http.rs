@@ -1098,12 +1098,12 @@ mod client {
 
         async fn put_toolchain_local(
             &self,
-            compiler_path: PathBuf,
-            weak_key: String,
+            compiler_path: &Path,
+            weak_toolchain_key: &str,
             toolchain_packager: Box<dyn ToolchainPackager>,
         ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
             self.tc_cache
-                .put_toolchain(&compiler_path, &weak_key, toolchain_packager)
+                .put_toolchain(compiler_path, weak_toolchain_key, toolchain_packager)
                 .await
         }
 
