@@ -42,7 +42,7 @@ use std::io::{self, BufRead, Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process;
+use std::{env, process};
 use which::which_in;
 
 use crate::errors::*;
@@ -287,6 +287,7 @@ impl CCompilerImpl for Nvcc {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         rewrite_includes_only: bool,
+        compilation_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,
@@ -295,11 +296,17 @@ impl CCompilerImpl for Nvcc {
     where
         T: CommandCreatorSync,
     {
-        generate_compile_commands(parsed_args, executable, cwd, env_vars, &self.host_compiler).map(
-            |(command, dist_command, cacheable)| {
-                (CCompileCommand::new(command), dist_command, cacheable)
-            },
+        generate_compile_commands(
+            parsed_args,
+            executable,
+            cwd,
+            env_vars,
+            &self.host_compiler,
+            compilation_key,
         )
+        .map(|(command, dist_command, cacheable)| {
+            (CCompileCommand::new(command), dist_command, cacheable)
+        })
     }
 }
 
@@ -309,6 +316,7 @@ fn generate_compile_commands(
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     host_compiler: &NvccHostCompiler,
+    compilation_key: &str,
 ) -> Result<(NvccCompileCommand, Option<dist::CompileCommand>, Cacheable)> {
     let mut unhashed_args = parsed_args.unhashed_args.clone();
 
@@ -399,17 +407,13 @@ fn generate_compile_commands(
         .unwrap()
         .path;
 
-    // Make nvcc's internal files siblings of the output file.
-    // Building into a tempdir yields cache misses on the final
-    // host compiler call because the tempdir's path ends up in
-    // the preprocessed output.
-    let out_dir = if let Some(out_dir) = output.parent() {
-        let out_dir = cwd.join(out_dir);
-        fs::create_dir_all(&out_dir).ok();
-        out_dir
-    } else {
-        cwd.to_owned()
-    };
+    // Build nvcc's internal files in `$out_dir/$hash_key` so the paths are
+    // stable across compilations. This is important because this path ends
+    // up in the preprocessed output, so using random tmpdir paths leads to
+    // erroneous cache misses.
+    // Note: `cwd.join(output)` guarantees `parent()` is always Some()
+    let out_dir = cwd.join(output).parent().unwrap().join(compilation_key);
+    fs::create_dir_all(&out_dir).ok();
 
     let compile_flag = match parsed_args.compilation_flag.to_str() {
         Some("") // compile to executable
@@ -453,7 +457,7 @@ fn generate_compile_commands(
     // transforms, its cache key is sensitive to the preprocessor output. The
     // preprocessor embeds the name of the input file in comments, so without
     // canonicalizing here, cicc will get cache misses on otherwise identical
-    // input that should produce a cache hit.
+    // inputs that should produce cache hits.
     arguments.push(cwd.join(&parsed_args.input).canonicalize().unwrap().into());
 
     let command = NvccCompileCommand {
@@ -561,40 +565,31 @@ impl CompileCommandImpl for NvccCompileCommand {
             .await?;
 
         let mut maybe_keep_temps_then_clean = || {
-            let nvcc_internal_files = nvcc_internal_files
-                .drain()
-                .filter_map(|(orig, path)| {
-                    let path = out_dir.join(path);
-                    PathBuf::from(orig)
-                        .file_name()
-                        .map(|name| (path, name.to_owned()))
-                })
-                .filter(|(_, name)| name != output_file_name)
-                .collect::<Vec<_>>();
-
-            // Remove or rename nvcc's internal files.
+            // Move and/or delete nvcc's internal files.
             //
             // If the caller passed `-keep` or `-keep-dir`, copy the internal
             // files to the requested location. We do this because we override
             // `-keep` and `-keep-dir` in our `nvcc --dryrun` call.
-            if let Some(dir) = keep_dir {
-                if fs::create_dir_all(dir).is_ok() {
+            //
+            // Renames the files back to the original names nvcc gave them.
+            if let Some(dst) = keep_dir {
+                if fs::create_dir_all(dst).is_ok() {
                     nvcc_internal_files
-                        .iter()
-                        .filter(|(src, _)| src.exists())
-                        .try_fold((), |_, (src, name)| fs::rename(src, dir.join(name)).ok())
-                } else {
-                    nvcc_internal_files
-                        .iter()
-                        .filter(|(src, _)| src.exists())
-                        .try_fold((), |_, (src, _)| fs::remove_file(src).ok())
+                        .drain()
+                        .filter_map(|(orig, path)| {
+                            let path = out_dir.join(path);
+                            if path.exists() {
+                                PathBuf::from(orig)
+                                    .file_name()
+                                    .map(|name| (path, name.to_owned()))
+                            } else {
+                                None
+                            }
+                        })
+                        .try_fold((), |_, (src, name)| fs::rename(src, dst.join(name)).ok());
                 }
-            } else {
-                nvcc_internal_files
-                    .iter()
-                    .filter(|(src, _)| src.exists())
-                    .try_fold((), |_, (src, _)| fs::remove_file(src).ok())
             }
+            // fs::remove_dir_all(out_dir).ok();
         };
 
         let mut output = process::Output {

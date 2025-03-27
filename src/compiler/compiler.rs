@@ -607,6 +607,7 @@ where
                     creator,
                     cwd,
                     compilation,
+                    &key,
                     weak_toolchain_key,
                     out_pretty.clone(),
                     &pool,
@@ -718,6 +719,7 @@ async fn dist_or_local_compile<T>(
     creator: T,
     _cwd: PathBuf,
     compilation: Box<dyn Compilation<T>>,
+    compilation_key: &str,
     _weak_toolchain_key: String,
     out_pretty: String,
     _pool: &tokio::runtime::Handle,
@@ -727,7 +729,7 @@ where
 {
     let mut path_transformer = dist::PathTransformer::new();
     let (compile_cmd, _dist_compile_cmd, cacheable) = compilation
-        .generate_compile_commands(&mut path_transformer, true)
+        .generate_compile_commands(&mut path_transformer, true, compilation_key)
         .context("Failed to generate compile commands")?;
 
     trace!("[{}]: Compiling locally", out_pretty);
@@ -745,6 +747,7 @@ async fn dist_or_local_compile<T>(
     creator: T,
     cwd: PathBuf,
     compilation: Box<dyn Compilation<T>>,
+    compilation_key: &str,
     weak_toolchain_key: String,
     out_pretty: String,
     pool: &tokio::runtime::Handle,
@@ -760,7 +763,11 @@ where
     };
     let mut path_transformer = dist::PathTransformer::new();
     let (compile_cmd, dist_compile_cmd, cacheable) = compilation
-        .generate_compile_commands(&mut path_transformer, rewrite_includes_only)
+        .generate_compile_commands(
+            &mut path_transformer,
+            rewrite_includes_only,
+            compilation_key,
+        )
         .context("Failed to generate compile commands")?;
 
     let (mut dist_compile_cmd, dist_client) =
@@ -781,7 +788,7 @@ where
         path_transformer,
         dist_client.as_ref(),
         compilation,
-        &weak_toolchain_key,
+        weak_toolchain_key,
         &exe,
         &mut dist_compile_cmd,
         &cwd,
@@ -852,7 +859,7 @@ async fn prepare_dist_compile<'a, T>(
     mut path_transformer: dist::PathTransformer,
     dist_client: &'a dyn dist::Client,
     compilation: Box<dyn Compilation<T>>,
-    weak_toolchain_key: &str,
+    weak_toolchain_key: String,
     exe: &Path,
     dist_compile_cmd: &'a mut dist::CompileCommand,
     cwd: &Path,
@@ -885,7 +892,7 @@ where
 
     trace!("[{out_pretty}]: Identifying dist toolchain for {exe:?}");
     let (dist_toolchain, maybe_dist_compile_executable) = dist_client
-        .put_toolchain_local(exe, weak_toolchain_key, toolchain_packager)
+        .put_toolchain_local(exe, &weak_toolchain_key, toolchain_packager)
         .await?;
 
     let mut tc_archive = None;
@@ -1260,6 +1267,7 @@ where
         &self,
         path_transformer: &mut dist::PathTransformer,
         rewrite_includes_only: bool,
+        compilation_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,
