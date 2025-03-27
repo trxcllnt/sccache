@@ -589,7 +589,7 @@ impl CompileCommandImpl for NvccCompileCommand {
                         .try_fold((), |_, (src, name)| fs::rename(src, dst.join(name)).ok());
                 }
             }
-            // fs::remove_dir_all(out_dir).ok();
+            fs::remove_dir_all(out_dir).ok();
         };
 
         let mut output = process::Output {
