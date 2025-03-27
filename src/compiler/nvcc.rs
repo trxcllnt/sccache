@@ -407,12 +407,19 @@ fn generate_compile_commands(
         .unwrap()
         .path;
 
-    // Build nvcc's internal files in `$out_dir/$hash_key` so the paths are
+    // Build nvcc's internal files in `$TMPDIR/$hash_key` so the paths are
     // stable across compilations. This is important because this path ends
     // up in the preprocessed output, so using random tmpdir paths leads to
     // erroneous cache misses.
-    // Note: `cwd.join(output)` guarantees `parent()` is always Some()
-    let out_dir = cwd.join(output).parent().unwrap().join(compilation_key);
+    let out_dir = env::temp_dir().join("sccache_nvcc").join({
+        // Hash compilation_key with the output path in case
+        // the same file is concurrently built into separate
+        // output paths.
+        let mut m = crate::util::Digest::new();
+        m.update(compilation_key.as_bytes());
+        m.update(cwd.join(output).as_os_str().as_encoded_bytes());
+        m.finish()
+    });
     fs::create_dir_all(&out_dir).ok();
 
     let compile_flag = match parsed_args.compilation_flag.to_str() {
