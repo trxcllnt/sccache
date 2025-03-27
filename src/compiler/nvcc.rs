@@ -222,18 +222,18 @@ impl CCompilerImpl for Nvcc {
                     .collect::<Vec<_>>(),
             );
             if log_enabled!(Trace) {
-                let output_file_name = &parsed_args
-                    .outputs
-                    .get("obj")
-                    .context("Missing object file output")
-                    .unwrap()
-                    .path
-                    .file_name()
-                    .unwrap();
+                let output_path = cwd.join(
+                    &parsed_args
+                        .outputs
+                        .get("obj")
+                        .context("Missing object file output")
+                        .unwrap()
+                        .path,
+                );
 
                 trace!(
                     "[{}]: dependencies command: {:?}",
-                    output_file_name.to_string_lossy(),
+                    output_path.display(),
                     dependency_cmd
                 );
             }
@@ -253,18 +253,18 @@ impl CCompilerImpl for Nvcc {
                 NvccHostCompiler::Gcc => "-Xcompiler=-P",
             });
             if log_enabled!(Trace) {
-                let output_file_name = &parsed_args
-                    .outputs
-                    .get("obj")
-                    .context("Missing object file output")
-                    .unwrap()
-                    .path
-                    .file_name()
-                    .unwrap();
+                let output_path = cwd.join(
+                    &parsed_args
+                        .outputs
+                        .get("obj")
+                        .context("Missing object file output")
+                        .unwrap()
+                        .path,
+                );
 
                 trace!(
                     "[{}]: preprocessor command: {:?}",
-                    output_file_name.to_string_lossy(),
+                    output_path.display(),
                     preprocess_cmd
                 );
             }
@@ -467,7 +467,7 @@ fn generate_compile_commands(
         cwd: cwd.to_owned(),
         host_compiler: host_compiler.clone(),
         // Only here so we can include it in logs
-        output_file_name: output.file_name().unwrap().to_owned(),
+        output_path: cwd.join(output),
     };
 
     Ok((
@@ -506,7 +506,7 @@ struct NvccCompileCommand {
     pub env_vars: Vec<(OsString, OsString)>,
     pub cwd: PathBuf,
     pub host_compiler: NvccHostCompiler,
-    pub output_file_name: OsString,
+    pub output_path: PathBuf,
 }
 
 #[async_trait]
@@ -542,7 +542,7 @@ impl CompileCommandImpl for NvccCompileCommand {
             env_vars,
             cwd,
             host_compiler,
-            output_file_name,
+            output_path,
         } = self;
 
         let (mut nvcc_internal_files, nvcc_subcommand_groups) =
@@ -556,7 +556,7 @@ impl CompileCommandImpl for NvccCompileCommand {
                 keep_dir.clone(),
                 env_vars,
                 host_compiler,
-                output_file_name,
+                output_path,
             )
             .await?;
 
@@ -618,7 +618,7 @@ impl CompileCommandImpl for NvccCompileCommand {
         ] {
             for command_groups in command_group_chunks {
                 let results = futures::future::join_all(command_groups.iter().map(|commands| {
-                    run_nvcc_subcommands_group(service, creator, cwd, commands, output_file_name)
+                    run_nvcc_subcommands_group(service, creator, cwd, commands, output_path)
                 }))
                 .await;
 
@@ -662,7 +662,7 @@ async fn group_nvcc_subcommands_by_compilation_stage<T>(
     keep_dir: Option<PathBuf>,
     env_vars: &[(OsString, OsString)],
     host_compiler: &NvccHostCompiler,
-    output_file_name: &OsStr,
+    output_path: &Path,
 ) -> Result<(HashMap<String, String>, Vec<Vec<NvccGeneratedSubcommand>>)>
 where
     T: CommandCreatorSync,
@@ -708,7 +708,7 @@ where
             arguments,
             is_nvcc_exe,
             host_compiler,
-            output_file_name,
+            output_path,
         ),
         // Get the host compile command lines with paths relative to `cwd` and absolute paths to `out`
         select_nvcc_subcommands(
@@ -719,7 +719,7 @@ where
             &[arguments, &["--keep-dir".into(), out.into()][..]].concat(),
             |exe| !is_nvcc_exe(exe),
             host_compiler,
-            output_file_name,
+            output_path,
         ),
     )
     .await?;
@@ -987,7 +987,7 @@ where
             if log_enabled!(log::Level::Trace) {
                 trace!(
                     "[{}]: transformed nvcc command: \"{}\"",
-                    output_file_name.to_string_lossy(),
+                    output_path.display(),
                     [
                         &[format!("cd {} &&", dir.to_string_lossy()).to_string()],
                         &[exe.to_str().unwrap_or_default().to_string()][..],
@@ -1026,7 +1026,7 @@ async fn select_nvcc_subcommands<T, F>(
     arguments: &[OsString],
     select_subcommand: F,
     host_compiler: &NvccHostCompiler,
-    output_file_name: &OsStr,
+    output_path: &Path,
 ) -> Result<Vec<(usize, PathBuf, Vec<String>)>>
 where
     F: Fn(&str) -> bool,
@@ -1035,7 +1035,7 @@ where
     if log_enabled!(log::Level::Trace) {
         trace!(
             "[{}]: nvcc dryrun command: {:?}",
-            output_file_name.to_string_lossy(),
+            output_path.display(),
             [
                 &[executable.to_str().unwrap_or_default().to_string()][..],
                 &dist::osstrings_to_strings(arguments).unwrap_or_default()[..],
@@ -1475,7 +1475,7 @@ async fn run_nvcc_subcommands_group<T>(
     creator: &T,
     cwd: &Path,
     commands: &[NvccGeneratedSubcommand],
-    output_file_name: &OsStr,
+    output_path: &Path,
 ) -> Result<process::Output>
 where
     T: CommandCreatorSync,
@@ -1522,7 +1522,7 @@ where
         if log_enabled!(log::Level::Trace) {
             trace!(
                 "[{}]: run_commands_sequential cwd={:?}, cmd=\"{}\"",
-                output_file_name.to_string_lossy(),
+                output_path.display(),
                 cwd,
                 [
                     vec![exe.clone().into_os_string().into_string().unwrap()],

@@ -611,7 +611,7 @@ mod server {
                 // Return the path to the unpacked toolchain dir.
                 self.load_inflated_toolchain(tc).await.map_err(|err| {
                     tracing::warn!(
-                        "ServerToolchains({})]: Error loading toolchain: {err:?}",
+                        "[ServerToolchains({})]: Error loading toolchain: {err:?}",
                         &tc.archive_id
                     );
                     RetryError::transient(err)
@@ -620,7 +620,7 @@ mod server {
             .await
             .map_err(|err| {
                 tracing::error!(
-                    "ServerToolchains({})]: Error loading toolchain: {err:?}",
+                    "[ServerToolchains({})]: Error loading toolchain: {err:?}",
                     &tc.archive_id
                 );
                 err

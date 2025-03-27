@@ -929,7 +929,9 @@ mod client {
     #[async_trait]
     impl AsyncMulticastFn<'_, Toolchain, SubmitToolchainResult> for SubmitToolchainFn {
         async fn call(&self, tc: &Toolchain) -> Result<SubmitToolchainResult> {
-            debug!("Uploading toolchain {:?}", tc.archive_id);
+            let id = &tc.archive_id;
+
+            debug!("Submitting toolchain {id:?}");
 
             let Self {
                 client,
@@ -938,19 +940,31 @@ mod client {
                 client_toolchains,
             } = self;
 
-            match client_toolchains.get_toolchain(tc).await {
+            let res = match client_toolchains.get_toolchain(tc).await {
                 Err(e) => Err(e),
                 Ok(None) => Err(anyhow!("Couldn't find toolchain locally")),
                 Ok(Some(file)) => {
                     let body = futures::io::AllowStdIo::new(file);
                     let body = tokio_util::io::ReaderStream::new(body.compat());
-                    let url = urls::scheduler_submit_toolchain(scheduler_url, &tc.archive_id);
+                    let url = urls::scheduler_submit_toolchain(scheduler_url, id);
                     let req = client
                         .put(url)
                         .bearer_auth(auth_token)
                         .body(Body::wrap_stream(body));
                     bincode_req_fut::<SubmitToolchainResult>(req).await
                 }
+            };
+
+            match res {
+                Ok(dist::SubmitToolchainResult::Success) => {
+                    debug!("Successfully submitted toolchain {id:?}");
+                    res
+                }
+                Ok(dist::SubmitToolchainResult::Error { ref message }) => {
+                    warn!("Failed to submit toolchain {id:?}: {message}");
+                    res
+                }
+                Err(err) => Err(err.context(format!("Could not submit toolchain {id:?}:"))),
             }
         }
     }

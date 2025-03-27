@@ -1035,27 +1035,11 @@ async fn dist_compile(
         }
 
         if !has_toolchain {
-            debug!(
-                "[{out_pretty}, {job_id}]: Submitting toolchain {:?}",
-                dist_toolchain.archive_id,
-            );
-            match dist_client
-                .put_toolchain(dist_toolchain.clone())
-                .await
-                .map_err(|e| e.context("Could not submit toolchain"))
-            {
+            match dist_client.put_toolchain(dist_toolchain.clone()).await {
                 Ok(dist::SubmitToolchainResult::Success) => {
                     has_toolchain = true;
-                    trace!(
-                        "[{out_pretty}]: Successfully submitted toolchain `{}`",
-                        dist_toolchain.archive_id,
-                    );
                 }
                 Ok(dist::SubmitToolchainResult::Error { message }) => {
-                    warn!(
-                        "[{out_pretty}]: Failed submitting toolchain `{}`: {message}",
-                        dist_toolchain.archive_id,
-                    );
                     let err = anyhow!(message);
                     if should_retry(&err, Some(job_id)) {
                         tokio::time::sleep(retry_delay.next().unwrap()).await;
@@ -1628,7 +1612,7 @@ where
     let rustc_executable = if let Some(ref rustc_executable) = maybe_rustc_executable {
         rustc_executable
     } else if is_nvidia_cudafe(executable) {
-        debug!("Found cudafe++");
+        trace!("Found cudafe++");
         return CCompiler::new(
             CudaFE {
                 // TODO: Use nvcc --version
@@ -1940,7 +1924,7 @@ compiler_version=__VERSION__
             .map(str::to_owned);
         match kind {
             "clang" | "clang++" | "apple-clang" | "apple-clang++" => {
-                debug!("Found {}", kind);
+                trace!("Found {}", kind);
                 return CCompiler::new(
                     Clang {
                         clangplusplus: kind.ends_with("++"),
@@ -1954,7 +1938,7 @@ compiler_version=__VERSION__
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "diab" => {
-                debug!("Found diab");
+                trace!("Found diab");
                 return CCompiler::new(
                     Diab {
                         version: version.clone(),
@@ -1966,7 +1950,7 @@ compiler_version=__VERSION__
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "gcc" | "g++" => {
-                debug!("Found {}", kind);
+                trace!("Found {}", kind);
                 return CCompiler::new(
                     Gcc {
                         gplusplus: kind == "g++",
@@ -1980,7 +1964,7 @@ compiler_version=__VERSION__
             }
             "msvc" | "msvc-clang" => {
                 let is_clang = kind == "msvc-clang";
-                debug!("Found MSVC (is clang: {})", is_clang);
+                trace!("Found MSVC (is clang: {})", is_clang);
                 let prefix = msvc::detect_showincludes_prefix(
                     &creator,
                     executable.as_ref(),
@@ -2029,7 +2013,7 @@ compiler_version=__VERSION__
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "nvhpc" => {
-                debug!("Found NVHPC");
+                trace!("Found NVHPC");
                 return CCompiler::new(
                     Nvhpc {
                         nvcplusplus: kind == "nvc++",
@@ -2042,7 +2026,7 @@ compiler_version=__VERSION__
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "tasking_vx" => {
-                debug!("Found Tasking VX");
+                trace!("Found Tasking VX");
                 return CCompiler::new(TaskingVX, executable, &pool)
                     .await
                     .map(|c| Box::new(c) as Box<dyn Compiler<T>>);

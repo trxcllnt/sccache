@@ -474,12 +474,17 @@ impl SchedulerService for Scheduler {
         }
 
         if !self.has_toolchain(&toolchain).await {
+            tracing::warn!(
+                "[run_job({job_id})]: Missing toolchain {:?}",
+                &toolchain.archive_id
+            );
             return Ok(RunJobResponse::MissingToolchain {
                 server_id: self.scheduler_id.clone(),
             });
         }
 
         if !self.has_job_inputs(job_id).await {
+            tracing::warn!("[run_job({job_id})]: Missing job inputs");
             return Ok(RunJobResponse::MissingJobInputs {
                 server_id: self.scheduler_id.clone(),
             });
