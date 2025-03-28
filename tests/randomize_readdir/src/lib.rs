@@ -121,7 +121,7 @@ impl State {
             .write()
             .expect("lock poisoned")
             .get_mut(&(dirp as usize))
-            .map(|dirstate| {
+            .and_then(|dirstate| {
                 let iter = get_iter(dirstate);
                 if iter.is_none() {
                     let mut entries = Vec::new();
@@ -149,7 +149,6 @@ impl State {
                 );
                 iter.next()
             })
-            .flatten()
             .unwrap_or(std::ptr::null_mut())
     }
 
@@ -214,6 +213,7 @@ fn init() {
     });
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn opendir(dirname: *const c_char) -> *mut DIR {
     let state = STATE.wait();
@@ -256,6 +256,7 @@ pub extern "C" fn readdir64(dirp: *mut DIR) -> *mut dirent64 {
     STATE.wait().wrapped_readdir64(dirp)
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn closedir(dirp: *mut DIR) -> c_int {
     info!("{:p}: closing handle", dirp);
