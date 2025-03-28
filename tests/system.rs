@@ -19,10 +19,16 @@
 
 #[macro_use]
 extern crate log;
-use crate::harness::{sccache_client_cfg, write_json_cfg, write_source, SccacheClient};
+
+mod harness;
+
 use assert_cmd::prelude::*;
 use fs::File;
 use fs_err as fs;
+use harness::{
+    client::{sccache_client_cfg, SccacheClient},
+    write_json_cfg, write_source,
+};
 use log::Level::Trace;
 use predicates::prelude::*;
 use regex::Regex;
@@ -39,8 +45,6 @@ use std::str;
 use std::time::{Duration, SystemTime};
 use test_case::test_case;
 use which::{which, which_in};
-
-mod harness;
 
 #[derive(Clone)]
 struct Compiler {

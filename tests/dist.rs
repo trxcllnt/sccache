@@ -6,15 +6,17 @@ extern crate log;
 extern crate sccache;
 extern crate serde_json;
 
-use harness::DistSystem;
+mod harness;
 
-use crate::harness::{cargo_command, init_cargo, write_source, SccacheClient};
 use assert_cmd::prelude::*;
 use sccache::config::HTTPUrl;
 use std::path::Path;
 use std::process::Output;
 
-mod harness;
+use harness::{cargo_command, client::SccacheClient, dist::DistSystem, init_cargo, write_source};
+
+// In case of panics, this command will destroy any dangling containers:
+//   docker rm -f $(docker ps -aq --filter "name=sccache_dist_*")
 
 // TODO:
 // * Test each builder (docker and overlay for Linux, pot for freebsd)
@@ -89,7 +91,7 @@ pub fn dist_test_sccache_client_cfg(
     tmpdir: &Path,
     scheduler_url: HTTPUrl,
 ) -> sccache::config::FileConfig {
-    let mut sccache_cfg = harness::sccache_client_cfg(tmpdir, false);
+    let mut sccache_cfg = harness::client::sccache_client_cfg(tmpdir, false);
     sccache_cfg.cache.disk.as_mut().unwrap().size = 0;
     sccache_cfg.dist.scheduler_url = Some(scheduler_url);
     sccache_cfg.dist.net.connect_timeout = 10;
@@ -101,8 +103,9 @@ pub fn dist_test_sccache_client_cfg(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_dist_cargo_build() {
     async fn run_test_with(message_broker: &str) {
+        let test_name = format!("test_dist_cargo_build_{message_broker}");
         let system = DistSystem::builder()
-            .with_name(&format!("test_dist_cargo_build_{message_broker}"))
+            .with_name(&test_name)
             .with_scheduler()
             .with_server()
             .with_message_broker(message_broker)
@@ -143,8 +146,9 @@ async fn test_dist_cargo_build() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_dist_cpp_disk_storage() {
     async fn run_test_with(message_broker: &str) {
+        let test_name = format!("test_dist_cpp_disk_storage_{message_broker}");
         let system = DistSystem::builder()
-            .with_name(&format!("test_dist_cpp_disk_storage_{message_broker}"))
+            .with_name(&test_name)
             .with_scheduler()
             .with_server()
             .with_message_broker(message_broker)
@@ -177,8 +181,9 @@ async fn test_dist_cpp_disk_storage() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_dist_cpp_cloud_storage() {
     async fn run_test_with(message_broker: &str) {
+        let test_name = format!("test_dist_cpp_cloud_storage_{message_broker}");
         let system = DistSystem::builder()
-            .with_name(&format!("test_dist_cpp_cloud_storage_{message_broker}"))
+            .with_name(&test_name)
             .with_scheduler()
             .with_server()
             .with_message_broker(message_broker)
@@ -212,8 +217,9 @@ async fn test_dist_cpp_cloud_storage() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_dist_cpp_server_restart() {
     async fn run_test_with(message_broker: &str) {
+        let test_name = format!("test_dist_cpp_server_restart_{message_broker}");
         let system = DistSystem::builder()
-            .with_name(&format!("test_dist_cpp_server_restart_{message_broker}"))
+            .with_name(&test_name)
             .with_scheduler()
             .with_server()
             .with_message_broker(message_broker)
@@ -251,10 +257,9 @@ async fn test_dist_cpp_server_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_dist_cpp_no_server_times_out() {
     async fn run_test_with(message_broker: &str) {
+        let test_name = format!("test_dist_cpp_no_server_times_out_{message_broker}");
         let system = DistSystem::builder()
-            .with_name(&format!(
-                "test_dist_cpp_no_server_times_out_{message_broker}"
-            ))
+            .with_name(&test_name)
             .with_scheduler()
             .with_message_broker(message_broker)
             .with_job_time_limit(10)
@@ -288,8 +293,9 @@ async fn test_dist_cpp_no_server_times_out() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_dist_cpp_two_servers() {
     async fn run_test_with(message_broker: &str) {
+        let test_name = format!("test_dist_cpp_two_servers_{message_broker}");
         let system = DistSystem::builder()
-            .with_name(&format!("test_dist_cpp_two_servers_{message_broker}"))
+            .with_name(&test_name)
             .with_scheduler()
             .with_server()
             .with_server()
@@ -335,10 +341,9 @@ async fn test_dist_cpp_two_servers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_dist_cpp_errors_on_job_load_failures() {
     async fn run_test_with(message_broker: &str) {
+        let test_name = format!("test_dist_cpp_errors_on_job_load_failures_{message_broker}");
         let system = DistSystem::builder()
-            .with_name(&format!(
-                "test_dist_cpp_errors_on_job_load_failures_{message_broker}"
-            ))
+            .with_name(&test_name)
             .with_scheduler()
             .with_server()
             .with_message_broker(message_broker)
@@ -373,10 +378,9 @@ async fn test_dist_cpp_errors_on_job_load_failures() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_dist_cpp_errors_on_toolchain_load_failures() {
     async fn run_test_with(message_broker: &str) {
+        let test_name = format!("test_dist_cpp_errors_on_toolchain_load_failures_{message_broker}");
         let system = DistSystem::builder()
-            .with_name(&format!(
-                "test_dist_cpp_errors_on_toolchain_load_failures_{message_broker}"
-            ))
+            .with_name(&test_name)
             .with_scheduler()
             .with_server()
             .with_message_broker(message_broker)
