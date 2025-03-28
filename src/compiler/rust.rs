@@ -1875,10 +1875,6 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
             optional: v.optional,
         }))
     }
-
-    fn box_clone(&self) -> Box<dyn Compilation<T>> {
-        Box::new((*self).clone())
-    }
 }
 
 // TODO: we do end up with slashes facing the wrong way, but Windows is agnostic so it's

@@ -1286,14 +1286,6 @@ where
     /// Each item is a descriptive (and unique) name of the output paired with
     /// the path where it'll show up.
     fn outputs<'a>(&'a self) -> Box<dyn Iterator<Item = FileObjectSource> + 'a>;
-
-    fn box_clone(&self) -> Box<dyn Compilation<T>>;
-}
-
-impl<T: CommandCreatorSync> Clone for Box<dyn Compilation<T>> {
-    fn clone(&self) -> Box<dyn Compilation<T>> {
-        self.box_clone()
-    }
 }
 
 #[cfg(feature = "dist-client")]
