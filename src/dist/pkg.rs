@@ -77,6 +77,7 @@ mod toolchain_imp {
     use std::str;
     use walkdir::WalkDir;
 
+    use super::tar_safe_path;
     use crate::errors::*;
 
     pub struct ToolchainPackageBuilder {
@@ -196,12 +197,9 @@ mod toolchain_imp {
         ) -> Result<String> {
             use crate::util::Digest;
 
-            let mut digest = Digest::new();
-            let pool = tokio::runtime::Handle::current();
-
             use gzp::{
                 deflate::Gzip,
-                par::compress::{Compression, ParCompress, ParCompressBuilder},
+                par::compress::{Compression, ParCompressBuilder},
             };
 
             let ToolchainPackageBuilder {
@@ -209,34 +207,42 @@ mod toolchain_imp {
                 file_set,
                 symlinks,
             } = self;
-            let par: ParCompress<Gzip> = ParCompressBuilder::new()
-                .compression_level(Compression::default())
-                .from_writer(writer);
-            let mut builder = tar::Builder::new(par);
 
-            for (tar_path, dir_path) in dir_set.iter() {
-                builder.append_dir(tar_path, dir_path)?;
-                digest.update(dir_path.to_string_lossy().as_bytes());
-            }
-            for (tar_path, file_path) in file_set.iter() {
-                let file = &mut fs::File::open(file_path)?;
-                builder.append_file(tar_path, file.file_mut())?;
-                digest.update(Digest::file(file_path, &pool).await?.as_bytes());
-            }
-            for (from_path, to_path) in symlinks.iter() {
-                let mut header = tar::Header::new_gnu();
-                header.set_size(0);
-                header.set_entry_type(tar::EntryType::Symlink);
-                digest.update(to_path.to_string_lossy().as_bytes());
-                digest.update(from_path.to_string_lossy().as_bytes());
-                // Leave `to_path` as absolute, assuming the tar will be used in a chroot-like
-                // environment.
-                builder.append_link(&mut header, tar_safe_path(from_path.into()), to_path)?;
-            }
-            builder
-                .finish()
-                .map_err(Into::into)
-                .map(|_| digest.finish())
+            tokio::task::spawn_blocking(move || {
+                let mut digest = Digest::new();
+
+                let compressor = ParCompressBuilder::<Gzip>::new()
+                    .compression_level(Compression::default())
+                    .from_writer(writer);
+
+                let mut builder = tar::Builder::new(compressor);
+
+                for (tar_path, dir_path) in dir_set.iter() {
+                    builder.append_dir(tar_path, dir_path)?;
+                    digest.update(dir_path.to_string_lossy().as_bytes());
+                }
+                for (tar_path, file_path) in file_set.iter() {
+                    let file = &mut fs::File::open(file_path)?;
+                    builder.append_file(tar_path, file.file_mut())?;
+                    digest.update(Digest::reader_sync(file).unwrap_or_default().as_bytes());
+                }
+                for (from_path, to_path) in symlinks.iter() {
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(0);
+                    header.set_entry_type(tar::EntryType::Symlink);
+                    digest.update(to_path.to_string_lossy().as_bytes());
+                    digest.update(from_path.to_string_lossy().as_bytes());
+                    // Leave `to_path` as absolute, assuming the tar will
+                    // be used in a chroot-like environment.
+                    builder.append_link(&mut header, tar_safe_path(from_path), to_path)?;
+                }
+
+                builder
+                    .finish()
+                    .map(|_| digest.finish())
+                    .map_err(Into::into)
+            })
+            .await?
         }
 
         /// Simplify the path and strip the leading slash.
@@ -249,13 +255,6 @@ mod toolchain_imp {
             .simplify(path)
             .map(tar_safe_path)
         }
-    }
-
-    /// Strip a leading slash, if any.
-    fn tar_safe_path(path: PathBuf) -> PathBuf {
-        path.strip_prefix(Component::RootDir)
-            .map(ToOwned::to_owned)
-            .unwrap_or(path)
     }
 
     // The dynamic linker is the only thing that truly knows how dynamic libraries will be
@@ -443,7 +442,15 @@ mod toolchain_imp {
     }
 }
 
-pub fn make_tar_header(src: &Path, dest: &str) -> io::Result<(tar::Header, String)> {
+/// Strip a leading slash, if any.
+pub fn tar_safe_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    path.as_ref()
+        .strip_prefix(Component::RootDir)
+        .map(ToOwned::to_owned)
+        .unwrap_or(path.as_ref().to_path_buf())
+}
+
+pub fn make_tar_header(src: &Path, dest: &str) -> io::Result<(tar::Header, PathBuf)> {
     let metadata_res = fs::metadata(src);
 
     let mut file_header = tar::Header::new_ustar();
@@ -469,11 +476,7 @@ pub fn make_tar_header(src: &Path, dest: &str) -> io::Result<(tar::Header, Strin
         file_header.set_entry_type(tar::EntryType::file());
     }
 
-    // tar-rs imposes that `set_path` takes a relative path
-    assert!(dest.starts_with('/'));
-    let dest = dest.trim_start_matches('/');
-    assert!(!dest.starts_with('/'));
-    Ok((file_header, dest.to_owned()))
+    Ok((file_header, tar_safe_path(dest)))
 }
 
 /// Simplify a path to one without any relative components, erroring if it looks
