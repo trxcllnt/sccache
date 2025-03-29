@@ -136,7 +136,7 @@ impl ParsedArguments {
 struct CCompilation<I: CCompilerImpl> {
     parsed_args: ParsedArguments,
     #[cfg(feature = "dist-client")]
-    preprocessed_input: Vec<u8>,
+    preprocessor_output: Vec<u8>,
     executable: PathBuf,
     compiler: I,
     cwd: PathBuf,
@@ -510,7 +510,7 @@ where
                                     parsed_args: parsed_args.to_owned(),
                                     #[cfg(feature = "dist-client")]
                                     // TODO or is it never relevant since dist?
-                                    preprocessed_input: vec![],
+                                    preprocessor_output: vec![],
                                     executable: executable.to_owned(),
                                     compiler: compiler.to_owned(),
                                     cwd: cwd.to_owned(),
@@ -655,7 +655,7 @@ where
             compilation: Box::new(CCompilation {
                 parsed_args,
                 #[cfg(feature = "dist-client")]
-                preprocessed_input: preprocessor_result.stdout,
+                preprocessor_output: preprocessor_result.stdout,
                 executable,
                 compiler,
                 cwd,
@@ -1194,14 +1194,11 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
     }
 
     #[cfg(feature = "dist-client")]
-    fn into_dist_packagers(
-        self: Box<Self>,
-        path_transformer: dist::PathTransformer,
-    ) -> Result<DistPackagers> {
+    fn into_dist_packagers(self: Box<Self>) -> Result<DistPackagers> {
         let CCompilation {
             parsed_args,
             cwd,
-            preprocessed_input,
+            preprocessor_output,
             executable,
             compiler,
             env_vars,
@@ -1212,8 +1209,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
         let input_path = cwd.join(&parsed_args.input);
         let inputs_packager = Box::new(CInputsPackager {
             input_path,
-            preprocessed_input,
-            path_transformer,
+            preprocessor_output,
             extra_dist_files: parsed_args.extra_dist_files,
             extra_hash_files: parsed_args.extra_hash_files,
         });
@@ -1243,19 +1239,21 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
 #[cfg(feature = "dist-client")]
 struct CInputsPackager {
     input_path: PathBuf,
-    path_transformer: dist::PathTransformer,
-    preprocessed_input: Vec<u8>,
+    preprocessor_output: Vec<u8>,
     extra_dist_files: Vec<PathBuf>,
     extra_hash_files: Vec<PathBuf>,
 }
 
 #[cfg(feature = "dist-client")]
 impl pkg::InputsPackager for CInputsPackager {
-    fn write_inputs(self: Box<Self>, wtr: &mut dyn io::Write) -> Result<dist::PathTransformer> {
+    fn write_inputs(
+        self: Box<Self>,
+        path_transformer: &mut dist::PathTransformer,
+        wtr: &mut dyn io::Write,
+    ) -> Result<()> {
         let CInputsPackager {
             input_path,
-            mut path_transformer,
-            preprocessed_input,
+            preprocessor_output,
             extra_dist_files,
             extra_hash_files,
         } = *self;
@@ -1270,12 +1268,12 @@ impl pkg::InputsPackager for CInputsPackager {
 
             let (mut file_header, dist_input_path) =
                 pkg::make_tar_header(&input_path, &dist_input_path)?;
-            file_header.set_size(preprocessed_input.len() as u64); // The metadata is from non-preprocessed
+            file_header.set_size(preprocessor_output.len() as u64); // The metadata is from non-preprocessed
             file_header.set_cksum();
             builder.append_data(
                 &mut file_header,
                 dist_input_path,
-                preprocessed_input.as_slice(),
+                preprocessor_output.as_slice(),
             )?;
         }
 
@@ -1310,7 +1308,8 @@ impl pkg::InputsPackager for CInputsPackager {
 
         // Finish archive
         let _ = builder.into_inner();
-        Ok(path_transformer)
+
+        Ok(())
     }
 }
 

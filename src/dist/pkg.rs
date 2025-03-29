@@ -33,12 +33,11 @@ pub trait ToolchainPackager: Send {
 }
 
 pub trait InputsPackager: Send {
-    fn write_inputs(self: Box<Self>, wtr: &mut dyn io::Write) -> Result<dist::PathTransformer>;
-}
-
-pub trait OutputsRepackager {
-    fn repackage_outputs(self: Box<Self>, wtr: &mut dyn io::Write)
-        -> Result<dist::PathTransformer>;
+    fn write_inputs(
+        self: Box<Self>,
+        path_transformer: &mut dist::PathTransformer,
+        wtr: &mut dyn io::Write,
+    ) -> Result<()>;
 }
 
 #[cfg(not(any(

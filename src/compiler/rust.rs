@@ -1834,10 +1834,7 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
     }
 
     #[cfg(feature = "dist-client")]
-    fn into_dist_packagers(
-        self: Box<Self>,
-        path_transformer: dist::PathTransformer,
-    ) -> Result<DistPackagers> {
+    fn into_dist_packagers(self: Box<Self>) -> Result<DistPackagers> {
         let RustCompilation {
             inputs,
             crate_link_paths,
@@ -1859,7 +1856,6 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
             crate_link_paths,
             crate_types,
             inputs,
-            path_transformer,
             rlib_dep_reader,
         });
         let toolchain_packager = Box::new(RustToolchainPackager { sysroot });
@@ -1893,7 +1889,6 @@ struct RustInputsPackager {
     crate_link_paths: Vec<PathBuf>,
     crate_types: CrateTypes,
     inputs: Vec<PathBuf>,
-    path_transformer: dist::PathTransformer,
     rlib_dep_reader: Option<Arc<RlibDepReader>>,
 }
 
@@ -1993,13 +1988,16 @@ fn test_maybe_add_cargo_toml() {
 #[cfg(feature = "dist-client")]
 impl pkg::InputsPackager for RustInputsPackager {
     #[allow(clippy::cognitive_complexity)] // TODO simplify this method.
-    fn write_inputs(self: Box<Self>, wtr: &mut dyn io::Write) -> Result<dist::PathTransformer> {
+    fn write_inputs(
+        self: Box<Self>,
+        path_transformer: &mut dist::PathTransformer,
+        wtr: &mut dyn io::Write,
+    ) -> Result<()> {
         debug!("Packaging compile inputs for compile");
         let RustInputsPackager {
             crate_link_paths,
             crate_types,
             inputs,
-            mut path_transformer,
             rlib_dep_reader,
             env_vars,
         } = *{ self };
@@ -2187,7 +2185,8 @@ impl pkg::InputsPackager for RustInputsPackager {
 
         // Finish archive
         let _ = builder.into_inner()?;
-        Ok(path_transformer)
+
+        Ok(())
     }
 }
 

@@ -433,14 +433,13 @@ where
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
         cache_control: CacheControl,
-        pool: tokio::runtime::Handle,
+        runtime: tokio::runtime::Handle,
     ) -> Result<(CompileResult, process::Output)> {
         let out_pretty = self.output_pretty().into_owned();
         if log_enabled!(log::Level::Debug) {
             // [<file>] get_cached_or_compile: "/path/to/exe" <args...>
             debug!(
-                "[{}]: get_cached_or_compile: {}",
-                out_pretty,
+                "[{out_pretty}]: get_cached_or_compile: {}",
                 [
                     &[format!("{:?}", self.get_executable().as_path().display())],
                     &dist::osstrings_to_strings(&arguments).unwrap_or_default()[..]
@@ -449,148 +448,87 @@ where
                 .join(" ")
             );
         }
+
         let start = Instant::now();
-        let may_dist = dist_client.is_some()
+
+        let dist_client = dist_client.filter(|_| {
             // Clients might want to set this when configuring
             // so e.g. the CMake compiler checks execute locally
-            && !env_vars
+            !env_vars
                 .iter()
-                .any(|(k, _v)| k == "SCCACHE_NO_DIST_COMPILE");
-        let rewrite_includes_only = match dist_client {
-            Some(ref client) => client.rewrite_includes_only(),
-            _ => false,
-        };
-        let result = self
+                .any(|(k, _v)| k == "SCCACHE_NO_DIST_COMPILE")
+        });
+
+        let rewrite_includes_only = dist_client
+            .as_ref()
+            .map(|client| client.rewrite_includes_only())
+            .unwrap_or_default();
+
+        let hash_result = self
             .generate_hash_key(
                 &creator,
                 cwd.clone(),
                 env_vars,
-                may_dist,
-                &pool,
+                dist_client.is_some(),
+                &runtime,
                 rewrite_includes_only,
                 storage.clone(),
                 cache_control,
             )
             .await;
+
         trace!(
-            "[{}]: generate_hash_key took {}",
-            out_pretty,
+            "[{out_pretty}]: generate_hash_key took {}",
             fmt_duration_as_secs(&start.elapsed())
         );
-        let (key, compilation, weak_toolchain_key) = match result {
-            Err(e) => {
-                return match e.downcast::<ProcessError>() {
-                    Ok(ProcessError(output)) => Ok((CompileResult::Error, output)),
-                    Err(e) => Err(e),
-                };
-            }
-            Ok(HashResult {
-                key,
-                compilation,
-                weak_toolchain_key,
-            }) => (key, compilation, weak_toolchain_key),
-        };
-        trace!("[{}]: Hash key: {}", out_pretty, key);
-        // If `ForceRecache` is enabled, we won't check the cache.
-        let start = Instant::now();
-        let cache_status = async {
-            if cache_control == CacheControl::ForceNoCache {
-                Ok(Cache::None)
-            } else if cache_control == CacheControl::ForceRecache {
-                Ok(Cache::Recache)
-            } else {
-                storage.get(&key).await
-            }
-        };
 
-        // Set a maximum time limit for the cache to respond before we forge
-        // ahead ourselves with a compilation.
-        let timeout = Duration::new(60, 0);
-        let cache_status = async {
-            let res = tokio::time::timeout(timeout, cache_status).await;
-            let duration = start.elapsed();
-            (res, duration)
-        };
+        if let Err(e) = hash_result {
+            return match e.downcast::<ProcessError>() {
+                Ok(ProcessError(output)) => Ok((CompileResult::Error, output)),
+                Err(e) => Err(e),
+            };
+        }
 
-        // Check the result of the cache lookup.
-        let outputs = compilation
-            .outputs()
-            .map(|output| FileObjectSource {
-                path: cwd.join(output.path),
-                ..output
-            })
-            .collect::<Vec<_>>();
+        // Instance to perform the cache lookup and prepare to compile
+        let lookup_or_compile = CacheLookupOrCompile::new(
+            cache_control,
+            &creator,
+            hash_result.unwrap(),
+            &cwd,
+            dist_client,
+            out_pretty.clone(),
+            rewrite_includes_only,
+            runtime.clone(),
+            service,
+        );
 
-        let lookup = match cache_status.await {
-            (Ok(Ok(Cache::Hit(mut entry))), duration) => {
-                trace!(
-                    "[{}]: Cache hit in {}",
-                    out_pretty,
-                    fmt_duration_as_secs(&duration)
-                );
-                let stdout = entry.get_stdout();
-                let stderr = entry.get_stderr();
-                let output = process::Output {
-                    status: exit_status(0),
-                    stdout,
-                    stderr,
-                };
-                let hit = CompileResult::CacheHit(duration);
-                match entry.extract_objects(outputs.clone(), &pool).await {
-                    Ok(()) => Ok(CacheLookupResult::Success(hit, output)),
-                    Err(e) => {
-                        if e.downcast_ref::<DecompressionFailure>().is_some() {
-                            debug!("[{}]: Failed to decompress object", out_pretty);
-                            Ok(CacheLookupResult::Miss(MissType::CacheReadError))
-                        } else {
-                            Err(e)
-                        }
-                    }
-                }
-            }
-            (Ok(Ok(Cache::Miss)), duration) => {
-                debug!(
-                    "[{}]: Cache miss in {}",
-                    out_pretty,
-                    fmt_duration_as_secs(&duration)
-                );
-                Ok(CacheLookupResult::Miss(MissType::Normal))
-            }
-            (Ok(Ok(Cache::None)), duration) => {
-                trace!(
-                    "[{}]: Cache none in {}",
-                    out_pretty,
-                    fmt_duration_as_secs(&duration)
-                );
-                Ok(CacheLookupResult::Miss(MissType::ForcedNoCache))
-            }
-            (Ok(Ok(Cache::Recache)), duration) => {
-                trace!(
-                    "[{}]: Cache recache in {}",
-                    out_pretty,
-                    fmt_duration_as_secs(&duration)
-                );
-                Ok(CacheLookupResult::Miss(MissType::ForcedRecache))
-            }
-            (Ok(Err(err)), duration) => {
-                error!(
-                    "[{}]: Cache read error: {:?} in {}",
-                    out_pretty,
-                    err,
-                    fmt_duration_as_secs(&duration)
-                );
-                Ok(CacheLookupResult::Miss(MissType::CacheReadError))
-            }
-            (Err(_), duration) => {
-                trace!(
-                    "[{}]: Cache timed out {}",
-                    out_pretty,
-                    fmt_duration_as_secs(&duration)
-                );
-                Ok(CacheLookupResult::Miss(MissType::TimedOut))
-            }
-        }?;
+        // The preprocessor results are large, so flush them to disk as early
+        // as possible. During highly parallel builds, sccache's memory usage
+        // can easily grow to 2-4GB due to keeping the preprocessor output in
+        // `compilation.preprocessed_output` while we check the cache and gen
+        // compile commands.
+        //
+        // This can easily OOM smaller CI machines with 4-8GB of RAM like the
+        // free-tier GitHub runners.
+        //
+        // When configured for distributed compilation we write the job input
+        // to disk a bit early, while we're checking the cache for a hit.
+        // If we get a hit, the tempfile is deleted, but if we don't, we keep
+        // the memory usage low.
+        //
+        // Always good when the compiler cacher isn't why CI runs failed :^)
 
+        let (lookup, compile) = lookup_or_compile
+            .into_cache_lookup_and_compile_result(
+                storage.as_ref(),
+                // Set a maximum time limit for the cache to respond before we
+                // forge ahead ourselves with a compilation.
+                // TODO: this should be configurable
+                Duration::new(60, 0),
+            )
+            .await?;
+
+        // Check the result of the cache lookup
         match lookup {
             CacheLookupResult::Success(compile_result, output) => {
                 Ok::<_, Error>((compile_result, output))
@@ -599,76 +537,51 @@ where
                 // Cache miss, so compile it.
                 service.stats.lock().await.active_compilations += 1;
 
+                // Do the compilation (either local or distributed)
                 let start = Instant::now();
-
-                let res = dist_or_local_compile(
-                    service,
-                    if may_dist { dist_client } else { None },
-                    creator,
-                    cwd,
-                    compilation,
-                    &key,
-                    weak_toolchain_key,
-                    out_pretty.clone(),
-                    &pool,
-                )
-                .await;
-
-                let duration_compilation = start.elapsed();
+                let res = compile.into_result().await;
+                let duration = start.elapsed();
 
                 service.stats.lock().await.active_compilations -= 1;
 
-                let (cacheable, dist_type, compiler_result) = res?;
-                if !compiler_result.status.success() {
+                let (hash_key, outputs, cacheable, dist_type, output) = res?;
+
+                if !output.status.success() {
                     trace!(
-                        "[{}]: Compiled in {}, but failed, not storing in cache",
-                        out_pretty,
-                        fmt_duration_as_secs(&duration_compilation)
+                        "[{out_pretty}]: Compiled in {}, but failed, not storing in cache",
+                        fmt_duration_as_secs(&duration)
                     );
-                    return Ok((
-                        CompileResult::CompileFailed(dist_type, duration_compilation),
-                        compiler_result,
-                    ));
+                    return Ok((CompileResult::CompileFailed(dist_type, duration), output));
                 }
                 if miss_type == MissType::ForcedNoCache {
                     // Do not cache
                     trace!(
-                        "[{}]: Compiled in {}, but not caching",
-                        out_pretty,
-                        fmt_duration_as_secs(&duration_compilation)
+                        "[{out_pretty}]: Compiled in {}, but not caching",
+                        fmt_duration_as_secs(&duration)
                     );
-                    return Ok((
-                        CompileResult::NotCached(dist_type, duration_compilation),
-                        compiler_result,
-                    ));
+                    return Ok((CompileResult::NotCached(dist_type, duration), output));
                 }
                 if cacheable != Cacheable::Yes {
                     // Not cacheable
                     trace!(
-                        "[{}]: Compiled in {}, but not cacheable",
-                        out_pretty,
-                        fmt_duration_as_secs(&duration_compilation)
+                        "[{out_pretty}]: Compiled in {}, but not cacheable",
+                        fmt_duration_as_secs(&duration)
                     );
-                    return Ok((
-                        CompileResult::NotCacheable(dist_type, duration_compilation),
-                        compiler_result,
-                    ));
+                    return Ok((CompileResult::NotCacheable(dist_type, duration), output));
                 }
                 trace!(
-                    "[{}]: Compiled in {}, storing in cache",
-                    out_pretty,
-                    fmt_duration_as_secs(&duration_compilation)
+                    "[{out_pretty}]: Compiled in {}, storing in cache",
+                    fmt_duration_as_secs(&duration)
                 );
                 let start_create_artifact = Instant::now();
-                let mut entry = CacheWrite::from_objects(outputs, &pool)
+                let mut entry = CacheWrite::from_objects(outputs, &runtime)
                     .await
                     .context("failed to zip up compiler outputs")?;
 
-                entry.put_stdout(&compiler_result.stdout)?;
-                entry.put_stderr(&compiler_result.stderr)?;
+                entry.put_stdout(&output.stdout)?;
+                entry.put_stderr(&output.stderr)?;
                 trace!(
-                    "[{}]: Created cache artifact in {}",
-                    out_pretty,
+                    "[{out_pretty}]: Created cache artifact in {}",
                     fmt_duration_as_secs(&start_create_artifact.elapsed())
                 );
 
@@ -677,9 +590,9 @@ where
                 // entry. We'll get the result back elsewhere.
                 let future = async move {
                     let start = Instant::now();
-                    match storage.put(&key, entry).await {
+                    match storage.put(&hash_key, entry).await {
                         Ok(_) => {
-                            trace!("[{}]: Stored in cache successfully!", out_pretty2);
+                            trace!("[{out_pretty2}]: Stored in cache successfully!");
                             Ok(CacheWriteInfo {
                                 object_file_pretty: out_pretty2,
                                 duration: start.elapsed(),
@@ -690,12 +603,12 @@ where
                 };
                 let future = Box::pin(future);
                 Ok((
-                    CompileResult::CacheMiss(miss_type, dist_type, duration_compilation, future),
-                    compiler_result,
+                    CompileResult::CacheMiss(miss_type, dist_type, duration, future),
+                    output,
                 ))
             }
         }
-        .with_context(|| format!("failed to store `{}` to cache", out_pretty))
+        .with_context(|| format!("Failed to cache `{out_pretty}`"))
     }
 
     /// A descriptive string about the file that we're going to be producing.
@@ -711,326 +624,697 @@ where
     fn get_executable(&self) -> PathBuf;
 }
 
-#[cfg(not(feature = "dist-client"))]
-#[allow(clippy::too_many_arguments)]
-async fn dist_or_local_compile<T>(
-    service: &server::SccacheService<T>,
-    _dist_client: Option<Arc<dyn dist::Client>>,
-    creator: T,
-    _cwd: PathBuf,
+struct CacheLookupOrCompile<'a, T: CommandCreatorSync> {
+    cache_control: CacheControl,
+    command_creator: &'a T,
     compilation: Box<dyn Compilation<T>>,
-    compilation_key: &str,
-    _weak_toolchain_key: String,
+    dist_client: Option<Arc<dyn dist::Client>>,
+    hash_key: String,
     out_pretty: String,
-    _pool: &tokio::runtime::Handle,
-) -> Result<(Cacheable, DistType, process::Output)>
-where
-    T: CommandCreatorSync,
-{
-    let mut path_transformer = dist::PathTransformer::new();
-    let (compile_cmd, _dist_compile_cmd, cacheable) = compilation
-        .generate_compile_commands(&mut path_transformer, true, compilation_key)
-        .context("Failed to generate compile commands")?;
-
-    trace!("[{}]: Compiling locally", out_pretty);
-    compile_cmd
-        .execute(&service, &creator)
-        .await
-        .map(move |o| (cacheable, DistType::NoDist, o))
+    outputs: Vec<FileObjectSource>,
+    rewrite_includes_only: bool,
+    runtime: tokio::runtime::Handle,
+    sccache_service: &'a server::SccacheService<T>,
+    weak_toolchain_key: String,
 }
 
-#[cfg(feature = "dist-client")]
-#[allow(clippy::too_many_arguments)]
-async fn dist_or_local_compile<T>(
-    service: &server::SccacheService<T>,
-    dist_client: Option<Arc<dyn dist::Client>>,
-    creator: T,
-    cwd: PathBuf,
-    compilation: Box<dyn Compilation<T>>,
-    compilation_key: &str,
-    weak_toolchain_key: String,
-    out_pretty: String,
-    pool: &tokio::runtime::Handle,
-) -> Result<(Cacheable, DistType, process::Output)>
+impl<'a, T> CacheLookupOrCompile<'a, T>
 where
     T: CommandCreatorSync,
 {
-    use futures::TryFutureExt;
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        cache_control: CacheControl,
+        command_creator: &'a T,
+        compilation: HashResult<T>,
+        cwd: &Path,
+        dist_client: Option<Arc<dyn dist::Client>>,
+        out_pretty: String,
+        rewrite_includes_only: bool,
+        runtime: tokio::runtime::Handle,
+        sccache_service: &'a server::SccacheService<T>,
+    ) -> Self {
+        let HashResult {
+            compilation,
+            key: hash_key,
+            weak_toolchain_key,
+        } = compilation;
 
-    let rewrite_includes_only = match dist_client {
-        Some(ref client) => client.rewrite_includes_only(),
-        _ => false,
-    };
-    let mut path_transformer = dist::PathTransformer::new();
-    let (compile_cmd, dist_compile_cmd, cacheable) = compilation
-        .generate_compile_commands(
-            &mut path_transformer,
+        trace!("[{out_pretty}]: Hash key: {hash_key}");
+
+        let outputs = compilation
+            .outputs()
+            .map(|output| FileObjectSource {
+                path: cwd.join(output.path),
+                ..output
+            })
+            .collect::<Vec<_>>();
+
+        Self {
+            cache_control,
+            command_creator,
+            compilation,
+            dist_client,
+            hash_key,
+            out_pretty,
+            outputs,
             rewrite_includes_only,
-            compilation_key,
-        )
-        .context("Failed to generate compile commands")?;
+            runtime,
+            sccache_service,
+            weak_toolchain_key,
+        }
+    }
 
-    let (mut dist_compile_cmd, dist_client) =
-        match dist_compile_cmd.and_then(|cmd| dist_client.map(|client| (cmd, client))) {
-            Some((dcc, dc)) => (dcc, dc),
+    async fn into_cache_lookup_and_compile_result(
+        self,
+        storage: &dyn Storage,
+        timeout: Duration,
+    ) -> Result<(CacheLookupResult, Compile<'a, T>)> {
+        let Self {
+            cache_control,
+            out_pretty,
+            ..
+        } = &self;
+
+        let start = Instant::now();
+
+        // If `ForceNoCache` or `ForceRecache` is enabled, don't check the cache.
+        match cache_control {
+            CacheControl::ForceNoCache => {
+                trace!(
+                    "[{out_pretty}]: Cache none in {}",
+                    fmt_duration_as_secs(&start.elapsed())
+                );
+                Ok((
+                    CacheLookupResult::Miss(MissType::ForcedNoCache),
+                    self.into_compile_result().await?,
+                ))
+            }
+            CacheControl::ForceRecache => {
+                trace!(
+                    "[{out_pretty}]: Cache recache in {}",
+                    fmt_duration_as_secs(&start.elapsed())
+                );
+                Ok((
+                    CacheLookupResult::Miss(MissType::ForcedRecache),
+                    self.into_compile_result().await?,
+                ))
+            }
+            _ => {
+                let cache_lookup = CacheLookup::new(&self, start, timeout, storage);
+                futures::try_join!(cache_lookup.into_result(), self.into_compile_result())
+            }
+        }
+    }
+
+    #[cfg(not(feature = "dist-client"))]
+    async fn into_compile_result(self) -> Result<Compile<'a, T>> {
+        let Self {
+            command_creator,
+            compilation,
+            hash_key,
+            out_pretty,
+            outputs,
+            sccache_service,
+            ..
+        } = self;
+
+        let mut path_transformer = dist::PathTransformer::new();
+
+        let (compile_cmd, _dist_compile_cmd, cacheable) = compilation
+            .generate_compile_commands(&mut path_transformer, true, &hash_key)
+            .context("Failed to generate compile commands")?;
+
+        Ok(Compile {
+            command_creator,
+            hash_key,
+            local: LocalCompile {
+                compile_cmd,
+                cacheable,
+                path_transformer,
+                outputs,
+            },
+            dist: None,
+            out_pretty,
+            sccache_service,
+        })
+    }
+
+    #[cfg(feature = "dist-client")]
+    async fn into_compile_result(self) -> Result<Compile<'a, T>> {
+        let Self {
+            command_creator,
+            compilation,
+            dist_client,
+            hash_key,
+            out_pretty,
+            outputs,
+            rewrite_includes_only,
+            runtime,
+            sccache_service,
+            weak_toolchain_key,
+            ..
+        } = self;
+
+        let mut path_transformer = dist::PathTransformer::new();
+
+        let (compile_cmd, dist_compile_cmd, cacheable) = compilation
+            .generate_compile_commands(&mut path_transformer, rewrite_includes_only, &hash_key)
+            .context("Failed to generate compile commands")?;
+
+        if let Some((dist_client, dist_compile_cmd)) =
+            dist_client.and_then(|x| dist_compile_cmd.map(|y| (x, y)))
+        {
+            let (inputs_packager, toolchain_packager, outputs_rewriter) =
+                compilation.into_dist_packagers()?;
+
+            trace!("[{out_pretty}]: Serializing dist inputs");
+
+            // TODO: Make this use asyncio
+            let (job_inputs, path_transformer) = runtime
+                .spawn_blocking(move || -> Result<_> {
+                    // Write the job inputs to a tempfile because they can be huge
+                    // and we don't want to OOM the server during parallel builds.
+                    let mut job_inputs =
+                        tempfile::Builder::new().prefix("sccache_tmp_").tempfile()?;
+
+                    let mut compressor = flate2::write::ZlibEncoder::new(
+                        &mut job_inputs,
+                        // Optimize for size since bandwidth costs more than client CPU cycles
+                        flate2::Compression::best(),
+                    );
+
+                    inputs_packager
+                        .write_inputs(&mut path_transformer, &mut compressor)
+                        .context("Could not write inputs for compilation")?;
+
+                    compressor.flush().context("failed to flush compressor")?;
+
+                    trace!(
+                        "Compressed inputs from {} -> {}",
+                        compressor.total_in(),
+                        compressor.total_out()
+                    );
+
+                    compressor.finish().context("failed to finish compressor")?;
+
+                    Ok((job_inputs, path_transformer))
+                })
+                .await??;
+
+            return Ok(Compile {
+                command_creator,
+                hash_key,
+                local: LocalCompile {
+                    compile_cmd,
+                    cacheable,
+                    path_transformer,
+                    outputs,
+                },
+                dist: Some(DistCompile {
+                    dist_client,
+                    dist_compile_cmd,
+                    toolchain_packager,
+                    outputs_rewriter,
+                    out_pretty: out_pretty.clone(),
+                    job_inputs,
+                    weak_toolchain_key,
+                }),
+                out_pretty,
+                sccache_service,
+            });
+        }
+
+        Ok(Compile {
+            command_creator,
+            hash_key,
+            local: LocalCompile {
+                compile_cmd,
+                cacheable,
+                path_transformer,
+                outputs,
+            },
+            dist: None,
+            out_pretty,
+            sccache_service,
+        })
+    }
+}
+
+struct CacheLookup<'a> {
+    hash_key: String,
+    out_pretty: String,
+    outputs: Vec<FileObjectSource>,
+    runtime: tokio::runtime::Handle,
+    start: Instant,
+    storage: &'a dyn Storage,
+    timeout: Duration,
+}
+
+impl<'a> CacheLookup<'a> {
+    fn new<T: CommandCreatorSync>(
+        details: &CacheLookupOrCompile<'a, T>,
+        start: Instant,
+        timeout: Duration,
+        storage: &'a dyn Storage,
+    ) -> Self {
+        Self {
+            hash_key: details.hash_key.clone(),
+            out_pretty: details.out_pretty.clone(),
+            outputs: details.outputs.clone(),
+            runtime: details.runtime.clone(),
+            start,
+            storage,
+            timeout,
+        }
+    }
+
+    async fn into_result(self) -> Result<CacheLookupResult> {
+        let Self {
+            out_pretty, start, ..
+        } = &self;
+
+        let fut = self.lookup_in_cache();
+        let fut = tokio::time::timeout(self.timeout, fut);
+
+        match fut.await {
+            Ok(res) => res,
+            Err(_) => {
+                trace!(
+                    "[{out_pretty}]: Cache timed out {}",
+                    fmt_duration_as_secs(&start.elapsed())
+                );
+                Ok(CacheLookupResult::Miss(MissType::TimedOut))
+            }
+        }
+    }
+
+    async fn lookup_in_cache(&self) -> Result<CacheLookupResult> {
+        let Self {
+            hash_key,
+            out_pretty,
+            outputs,
+            runtime,
+            start,
+            storage,
+            ..
+        } = self;
+
+        match storage.get(hash_key).await {
+            Ok(Cache::Hit(mut entry)) => {
+                let duration = start.elapsed();
+                trace!(
+                    "[{out_pretty}]: Cache hit in {}",
+                    fmt_duration_as_secs(&duration)
+                );
+                let stdout = entry.get_stdout();
+                let stderr = entry.get_stderr();
+                let output = process::Output {
+                    status: exit_status(0),
+                    stdout,
+                    stderr,
+                };
+                let hit = CompileResult::CacheHit(duration);
+                match entry.extract_objects(outputs.to_vec(), runtime).await {
+                    Ok(()) => Ok(CacheLookupResult::Success(hit, output)),
+                    Err(e) => {
+                        if e.downcast_ref::<DecompressionFailure>().is_some() {
+                            debug!("[{}]: Failed to decompress object", out_pretty);
+                            Ok(CacheLookupResult::Miss(MissType::CacheReadError))
+                        } else {
+                            Err(e)
+                        }
+                    }
+                }
+            }
+            Ok(Cache::Miss) => {
+                debug!(
+                    "[{out_pretty}]: Cache miss in {}",
+                    fmt_duration_as_secs(&start.elapsed())
+                );
+                Ok(CacheLookupResult::Miss(MissType::Normal))
+            }
+            Err(err) => {
+                error!(
+                    "[{out_pretty}]: Cache read error in {}: {err:?}",
+                    fmt_duration_as_secs(&start.elapsed())
+                );
+                Ok(CacheLookupResult::Miss(MissType::CacheReadError))
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+struct Compile<'a, T: CommandCreatorSync> {
+    command_creator: &'a T,
+    dist: Option<DistCompile>,
+    hash_key: String,
+    local: LocalCompile<T>,
+    out_pretty: String,
+    sccache_service: &'a server::SccacheService<T>,
+}
+
+impl<T> Compile<'_, T>
+where
+    T: CommandCreatorSync,
+{
+    #[cfg(not(feature = "dist-client"))]
+    async fn into_result(
+        self,
+    ) -> Result<(
+        String,
+        Vec<FileObjectSource>,
+        Cacheable,
+        DistType,
+        process::Output,
+    )> {
+        let Self {
+            command_creator,
+            hash_key,
+            out_pretty,
+            sccache_service,
+            ..
+        } = self;
+
+        let LocalCompile {
+            ref compile_cmd,
+            cacheable,
+            outputs,
+            ..
+        } = self.local;
+
+        trace!("[{}]: Compiling locally", out_pretty);
+        compile_cmd
+            .execute(sccache_service, command_creator)
+            .await
+            .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o))
+    }
+
+    #[cfg(feature = "dist-client")]
+    async fn into_result(
+        self,
+    ) -> Result<(
+        String,
+        Vec<FileObjectSource>,
+        Cacheable,
+        DistType,
+        process::Output,
+    )> {
+        let Self {
+            command_creator,
+            hash_key,
+            out_pretty,
+            sccache_service,
+            ..
+        } = self;
+
+        let LocalCompile {
+            compile_cmd,
+            cacheable,
+            mut path_transformer,
+            outputs,
+            ..
+        } = self.local;
+
+        match self.dist {
             None => {
                 trace!("[{}]: Compiling locally", out_pretty);
-                return compile_cmd
-                    .execute(service, &creator)
-                    .await
-                    .map(move |o| (cacheable, DistType::NoDist, o));
-            }
-        };
-
-    let exe = compile_cmd.get_executable();
-
-    let dist_compile_res = prepare_dist_compile(
-        path_transformer,
-        dist_client.as_ref(),
-        compilation,
-        weak_toolchain_key,
-        &exe,
-        &mut dist_compile_cmd,
-        &cwd,
-        &out_pretty,
-        pool,
-    )
-    .and_then(
-        |(
-            job_inputs,
-            dist_toolchain,
-            dist_compile_cmd,
-            dist_output_paths,
-            tc_archive,
-            outputs_rewriter,
-            path_transformer,
-            dist_client,
-            out_pretty,
-        )| async move {
-            dist_compile(
-                &job_inputs,
-                &dist_toolchain,
-                dist_compile_cmd,
-                &dist_output_paths,
-                &tc_archive,
-                outputs_rewriter.as_ref(),
-                &path_transformer,
-                dist_client,
-                out_pretty,
-            )
-            .await
-        },
-    );
-
-    match dist_compile_res.await {
-        Ok((dt, o)) => Ok((cacheable, dt, o)),
-        Err(e) => {
-            if let Some(HttpClientError(_)) = e.downcast_ref::<HttpClientError>() {
-                Err(e)
-            } else if let Some(lru_disk_cache::Error::FileTooLarge) =
-                e.downcast_ref::<lru_disk_cache::Error>()
-            {
-                Err(anyhow!(
-                    "Could not cache dist toolchain for {exe:?} locally.
-                 Increase `toolchain_cache_size` or decrease the toolchain archive size.",
-                ))
-            } else if dist_client.fallback_to_local_compile() {
-                // `{:#}` prints the error and the causes in a single line.
-                let errmsg = format!("{:#}", e);
-                warn!(
-                    "[{}]: Could not perform distributed compile, falling back to local: {}",
-                    out_pretty, errmsg
-                );
-
                 compile_cmd
-                    .execute(service, &creator)
+                    .execute(sccache_service, command_creator)
                     .await
-                    .map(|o| (cacheable, DistType::Error, o))
-            } else {
-                Err(e)
+                    .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o))
+            }
+            Some(dist) => {
+                let executable = compile_cmd.get_executable();
+                let fallback_to_local = dist.dist_client.fallback_to_local_compile();
+                // Do the distributed compilation
+                let dist_compile_res = dist
+                    .into_result(&executable, &outputs, &mut path_transformer)
+                    .await;
+
+                match dist_compile_res {
+                    Ok((dt, o)) => Ok((hash_key, outputs, cacheable, dt, o)),
+                    Err(e) => {
+                        if let Some(HttpClientError(_)) = e.downcast_ref::<HttpClientError>() {
+                            Err(e)
+                        } else if let Some(lru_disk_cache::Error::FileTooLarge) =
+                            e.downcast_ref::<lru_disk_cache::Error>()
+                        {
+                            Err(anyhow!(
+                                "Could not cache dist toolchain for {executable:?} locally.
+                             Increase `toolchain_cache_size` or decrease the toolchain archive size.",
+                            ))
+                        } else if !fallback_to_local {
+                            Err(e)
+                        } else {
+                            // `{:#}` prints the error and the causes in a single line.
+                            warn!("[{out_pretty}]: Could not perform distributed compile, falling back to local: {e:#}");
+                            compile_cmd
+                                .execute(sccache_service, command_creator)
+                                .await
+                                .map(move |o| (hash_key, outputs, cacheable, DistType::Error, o))
+                        }
+                    }
+                }
             }
         }
     }
 }
 
-#[cfg(feature = "dist-client")]
-#[allow(clippy::too_many_arguments)]
-async fn prepare_dist_compile<'a, T>(
-    mut path_transformer: dist::PathTransformer,
-    dist_client: &'a dyn dist::Client,
-    compilation: Box<dyn Compilation<T>>,
+struct LocalCompile<T: CommandCreatorSync> {
+    compile_cmd: Box<dyn CompileCommand<T>>,
+    cacheable: Cacheable,
+    path_transformer: dist::PathTransformer,
+    outputs: Vec<FileObjectSource>,
+}
+
+struct DistCompile {
+    dist_client: Arc<dyn dist::Client>,
+    dist_compile_cmd: dist::CompileCommand,
+    #[cfg(feature = "dist-client")]
+    toolchain_packager: Box<dyn pkg::ToolchainPackager>,
+    #[cfg(feature = "dist-client")]
+    outputs_rewriter: Box<dyn OutputsRewriter>,
+    job_inputs: tempfile::NamedTempFile,
+    out_pretty: String,
     weak_toolchain_key: String,
-    exe: &Path,
-    dist_compile_cmd: &'a mut dist::CompileCommand,
-    cwd: &Path,
-    out_pretty: &'a str,
-    pool: &tokio::runtime::Handle,
-) -> Result<(
-    tempfile::NamedTempFile,
-    dist::Toolchain,
-    &'a dist::CompileCommand,
-    Vec<String>,
-    Option<PathBuf>,
-    Box<dyn OutputsRewriter>,
-    dist::PathTransformer,
-    &'a dyn dist::Client,
-    &'a str,
-)>
-where
-    T: CommandCreatorSync,
-{
-    trace!("[{out_pretty}]: Creating distributed compile request");
-
-    let dist_output_paths: Vec<String> = compilation
-        .outputs()
-        .map(|output| path_transformer.as_dist_abs(&cwd.join(output.path)))
-        .collect::<Option<_>>()
-        .context("Failed to adapt an output path for distributed compile")?;
-
-    let (inputs_packager, toolchain_packager, outputs_rewriter) =
-        compilation.into_dist_packagers(path_transformer)?;
-
-    trace!("[{out_pretty}]: Identifying dist toolchain for {exe:?}");
-    let (dist_toolchain, maybe_dist_compile_executable) = dist_client
-        .put_toolchain_local(exe, &weak_toolchain_key, toolchain_packager)
-        .await?;
-
-    let mut tc_archive = None;
-
-    if let Some((dist_compile_executable, archive_path)) = maybe_dist_compile_executable {
-        dist_compile_cmd.executable = dist_compile_executable;
-        tc_archive = Some(archive_path);
-    }
-
-    trace!("[{out_pretty}]: Serializing job inputs");
-
-    // TODO: Make this use asyncio
-    let (job_inputs, path_transformer) = pool
-        .spawn_blocking(move || -> Result<_> {
-            // Write the job inputs to a tempfile because they can be huge
-            // and we don't want to OOM the server during parallel builds.
-            let mut job_inputs = tempfile::Builder::new().prefix(".sccachetmp").tempfile()?;
-
-            let mut compressor =
-                flate2::write::ZlibEncoder::new(&mut job_inputs, flate2::Compression::fast());
-
-            let path_transformer = inputs_packager
-                .write_inputs(&mut compressor)
-                .context("Could not write inputs for compilation")?;
-
-            compressor.flush().context("failed to flush compressor")?;
-
-            trace!(
-                "Compressed inputs from {} -> {}",
-                compressor.total_in(),
-                compressor.total_out()
-            );
-
-            compressor.finish().context("failed to finish compressor")?;
-
-            Ok((job_inputs, path_transformer))
-        })
-        .await??;
-
-    Ok((
-        job_inputs,
-        dist_toolchain,
-        dist_compile_cmd,
-        dist_output_paths,
-        tc_archive,
-        outputs_rewriter,
-        path_transformer,
-        dist_client,
-        out_pretty,
-    ))
 }
 
 #[cfg(feature = "dist-client")]
-#[allow(clippy::too_many_arguments)]
-async fn dist_compile(
-    job_inputs: &tempfile::NamedTempFile,
-    dist_toolchain: &dist::Toolchain,
-    dist_compile_cmd: &dist::CompileCommand,
-    dist_output_paths: &[String],
-    tc_archive: &Option<PathBuf>,
-    outputs_rewriter: &dyn OutputsRewriter,
-    path_transformer: &dist::PathTransformer,
-    dist_client: &dyn dist::Client,
-    out_pretty: &str,
-) -> Result<(DistType, std::process::Output)> {
-    use dist::RunJobResponse;
-    use std::io;
-    use tokio_retry2::strategy::FibonacciBackoff;
+impl DistCompile {
+    async fn into_result(
+        self,
+        executable: &Path,
+        outputs: &[FileObjectSource],
+        path_transformer: &mut dist::PathTransformer,
+    ) -> Result<(DistType, std::process::Output)> {
+        use dist::RunJobResponse;
+        use std::io;
+        use tokio_retry2::strategy::FibonacciBackoff;
 
-    let dist_retry_limit = dist_client.max_retries() + 1.0;
-    let mut num_dist_attempts = 1.0f64;
-    let mut has_toolchain = false;
-    let mut has_inputs = false;
-    let mut job = None;
+        let Self {
+            dist_client,
+            mut dist_compile_cmd,
+            job_inputs,
+            outputs_rewriter,
+            ref out_pretty,
+            toolchain_packager,
+            weak_toolchain_key,
+            ..
+        } = self;
 
-    let mut should_retry = |err: &Error, job_id: Option<&str>| {
-        if num_dist_attempts < dist_retry_limit {
-            debug!(
-                "[{out_pretty}]: Distributed compilation error ({num_dist_attempts} of {dist_retry_limit}), retrying: {err:#}"
-            );
-            num_dist_attempts += 1.0;
-            true
-        } else {
-            warn!(
-                "[{}]: Could not run distributed compilation job: {err}",
-                if let Some(job_id) = job_id {
-                    [out_pretty, job_id].join(", ")
-                } else {
-                    out_pretty.to_owned()
-                }
-            );
-            false
-        }
-    };
+        trace!("[{out_pretty}]: Identifying dist toolchain for {executable:?}");
 
-    let mut retry_delay = FibonacciBackoff::from_millis(1000)
-        .max_delay(Duration::from_secs(10))
-        .map(tokio_retry2::strategy::jitter);
+        let (dist_toolchain, maybe_dist_compile_executable) = dist_client
+            .put_toolchain_local(executable, &weak_toolchain_key, toolchain_packager)
+            .await?;
 
-    let dist_compile_res = loop {
-        let (job_id, timeout) = if let Some((ref job_id, timeout)) = job {
-            (job_id, timeout)
-        } else {
-            trace!("[{out_pretty}]: Requesting job allocation");
+        let tc_archive =
+            maybe_dist_compile_executable.map(|(dist_compile_executable, archive_path)| {
+                dist_compile_cmd.executable = dist_compile_executable;
+                archive_path
+            });
 
-            match dist_client
-                .new_job(dist_toolchain.clone(), job_inputs.reopen()?)
-                .await
-            {
-                Ok(res) => {
-                    trace!("[{out_pretty}, {}]: Received job allocation", res.job_id);
-                    has_inputs = res.has_inputs;
-                    has_toolchain = res.has_toolchain;
-                    job = Some((res.job_id, res.timeout));
-                    continue;
-                }
-                // Maybe retry network errors
-                Err(err) => {
-                    if should_retry(&err, None) {
-                        tokio::time::sleep(retry_delay.next().unwrap()).await;
-                        continue;
+        let dist_output_paths: Vec<String> = outputs
+            .iter()
+            .map(|output| path_transformer.as_dist_abs(&output.path))
+            .collect::<Option<_>>()
+            .context("Failed to adapt an output path for distributed compile")?;
+
+        let dist_retry_limit = dist_client.max_retries() + 1.0;
+        let mut num_dist_attempts = 1.0f64;
+        let mut has_toolchain = false;
+        let mut has_inputs = false;
+        let mut job = None;
+
+        let mut should_retry = |err: &Error, job_id: Option<&str>| {
+            if num_dist_attempts < dist_retry_limit {
+                debug!(
+                    "[{out_pretty}]: Distributed compilation error ({num_dist_attempts} of {dist_retry_limit}), retrying: {err:#}"
+                );
+                num_dist_attempts += 1.0;
+                true
+            } else {
+                warn!(
+                    "[{}]: Could not run distributed compilation job: {err}",
+                    if let Some(job_id) = job_id {
+                        [out_pretty, job_id].join(", ")
+                    } else {
+                        out_pretty.to_owned()
                     }
-                    break Err(err);
-                }
+                );
+                false
             }
         };
 
-        if !has_inputs {
-            debug!("[{out_pretty}, {job_id}]: Resubmitting job inputs");
-            match dist_client
-                .put_job(job_id, job_inputs.reopen()?)
+        let mut retry_delay = FibonacciBackoff::from_millis(1000)
+            .max_delay(Duration::from_secs(10))
+            .map(tokio_retry2::strategy::jitter);
+
+        let dist_compile_res = loop {
+            let (job_id, timeout) = if let Some((ref job_id, timeout)) = job {
+                (job_id, timeout)
+            } else {
+                trace!("[{out_pretty}]: Requesting job allocation");
+
+                match dist_client
+                    .new_job(dist_toolchain.clone(), job_inputs.reopen()?)
+                    .await
+                {
+                    Ok(res) => {
+                        trace!("[{out_pretty}, {}]: Received job allocation", res.job_id);
+                        has_inputs = res.has_inputs;
+                        has_toolchain = res.has_toolchain;
+                        job = Some((res.job_id, res.timeout));
+                        continue;
+                    }
+                    // Maybe retry network errors
+                    Err(err) => {
+                        if should_retry(&err, None) {
+                            tokio::time::sleep(retry_delay.next().unwrap()).await;
+                            continue;
+                        }
+                        break Err(err);
+                    }
+                }
+            };
+
+            if !has_inputs {
+                debug!("[{out_pretty}, {job_id}]: Resubmitting job inputs");
+                match dist_client
+                    .put_job(job_id, job_inputs.reopen()?)
+                    .await
+                    .map_err(|e| e.context("Could not submit job inputs"))
+                {
+                    Ok(_) => {
+                        has_inputs = true;
+                    }
+                    // Maybe retry network errors
+                    Err(err) => {
+                        if should_retry(&err, Some(job_id)) {
+                            tokio::time::sleep(retry_delay.next().unwrap()).await;
+                            continue;
+                        }
+                        break Err(err);
+                    }
+                }
+            }
+
+            if !has_toolchain {
+                match dist_client.put_toolchain(dist_toolchain.clone()).await {
+                    Ok(dist::SubmitToolchainResult::Success) => {
+                        has_toolchain = true;
+                    }
+                    Ok(dist::SubmitToolchainResult::Error { message }) => {
+                        let err = anyhow!(message);
+                        if should_retry(&err, Some(job_id)) {
+                            tokio::time::sleep(retry_delay.next().unwrap()).await;
+                            continue;
+                        }
+                        break Err(err);
+                    }
+                    // Maybe retry network errors
+                    Err(err) => {
+                        if should_retry(&err, Some(job_id)) {
+                            tokio::time::sleep(retry_delay.next().unwrap()).await;
+                            continue;
+                        }
+                        break Err(err);
+                    }
+                }
+            }
+
+            debug!("[{out_pretty}, {job_id}]: Running job");
+
+            let job_result = match dist_client
+                .run_job(
+                    job_id,
+                    Duration::from_secs(timeout as u64),
+                    dist_toolchain.clone(),
+                    dist_compile_cmd.clone(),
+                    dist_output_paths.clone(),
+                )
                 .await
-                .map_err(|e| e.context("Could not submit job inputs"))
             {
-                Ok(_) => {
-                    has_inputs = true;
+                // Job completed, regardless of whether compilation succeeded or failed
+                Ok(RunJobResponse::Complete { result, server_id }) => Ok((result, server_id)),
+                // Job failed with an unrecoverable fatal error. These should be rare, since
+                // There aren't many cases where we want to explicitly fail the build without
+                // allowing the client to retry.
+                //
+                // The most likely source of these errors are when the compilation took longer
+                // than the Scheduler's `job_time_limit` configuration. In this case, retrying
+                // the compilation on a different server won't finish any sooner, so we report
+                // a fatal error so clients see their build fail and can either increase the
+                // job time limit, or apply source optimizations so their files compile in a
+                // reasonable amount of time.
+                Ok(RunJobResponse::FatalError { message, server_id }) => {
+                    error!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation job failed: {message}");
+                    // Break because fatal errors are not retryable
+                    break Err(anyhow!(message));
                 }
-                // Maybe retry network errors
+                // Missing inputs (S3 cleared, Redis rebooted, etc.)
+                Ok(RunJobResponse::MissingJobInputs { server_id }) => {
+                    // If we retry, send the inputs again
+                    has_inputs = false;
+                    debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job inputs");
+                    // Don't break because these errors can be retried
+                    Err(anyhow!("Missing distributed compilation job inputs"))
+                }
+                // Missing toolchain (S3 cleared, Redis rebooted, etc.)
+                Ok(RunJobResponse::MissingToolchain { server_id }) => {
+                    // If we retry, send the toolchain again
+                    has_toolchain = false;
+                    debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job toolchain");
+                    // Don't break because these errors can be retried
+                    Err(anyhow!("Missing distributed compilation job toolchain"))
+                }
+                // Missing result (S3 cleared, Redis rebooted, etc.),
+                // or build server failed to write the job result due
+                // to e.g. network error, server shutdown, etc.
+                Ok(RunJobResponse::MissingJobResult { server_id }) => {
+                    debug!(
+                        "[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job result"
+                    );
+                    // Don't break because these errors can be retried
+                    Err(anyhow!("Missing distributed compilation job result"))
+                }
+                // Disk errors, build process killed, server shutdown, etc.
+                Ok(RunJobResponse::RetryableError { message, server_id }) => {
+                    debug!("[{out_pretty}, {job_id}, {server_id}]: {message:?}");
+                    // Don't break because these errors can be retried
+                    Err(anyhow!("{message:?}"))
+                }
+                // Other (e.g. client network, timeout, etc.) errors
+                Err(err) => {
+                    // Don't break because these errors can be retried
+                    Err(anyhow!(err))
+                }
+            };
+
+            match job_result {
+                // Maybe retry errors
                 Err(err) => {
                     if should_retry(&err, Some(job_id)) {
                         tokio::time::sleep(retry_delay.next().unwrap()).await;
@@ -1038,216 +1322,115 @@ async fn dist_compile(
                     }
                     break Err(err);
                 }
-            }
-        }
+                Ok((result, server_id)) => {
+                    debug!(
+                        "[{out_pretty}, {job_id}]: Fetched {:?}",
+                        result
+                            .outputs
+                            .iter()
+                            .map(|(p, bs)| (p, bs.lens().to_string()))
+                            .collect::<Vec<_>>()
+                    );
 
-        if !has_toolchain {
-            match dist_client.put_toolchain(dist_toolchain.clone()).await {
-                Ok(dist::SubmitToolchainResult::Success) => {
-                    has_toolchain = true;
-                }
-                Ok(dist::SubmitToolchainResult::Error { message }) => {
-                    let err = anyhow!(message);
-                    if should_retry(&err, Some(job_id)) {
-                        tokio::time::sleep(retry_delay.next().unwrap()).await;
-                        continue;
-                    }
-                    break Err(err);
-                }
-                // Maybe retry network errors
-                Err(err) => {
-                    if should_retry(&err, Some(job_id)) {
-                        tokio::time::sleep(retry_delay.next().unwrap()).await;
-                        continue;
-                    }
-                    break Err(err);
-                }
-            }
-        }
+                    let mut output_paths: Vec<PathBuf> = vec![];
 
-        debug!("[{out_pretty}, {job_id}]: Running job");
-
-        let job_result = match dist_client
-            .run_job(
-                job_id,
-                Duration::from_secs(timeout as u64),
-                dist_toolchain.clone(),
-                dist_compile_cmd.clone(),
-                dist_output_paths.to_vec(),
-            )
-            .await
-        {
-            // Job completed, regardless of whether compilation succeeded or failed
-            Ok(RunJobResponse::Complete { result, server_id }) => Ok((result, server_id)),
-            // Job failed with an unrecoverable fatal error. These should be rare, since
-            // There aren't many cases where we want to explicitly fail the build without
-            // allowing the client to retry.
-            //
-            // The most likely source of these errors are when the compilation took longer
-            // than the Scheduler's `job_time_limit` configuration. In this case, retrying
-            // the compilation on a different server won't finish any sooner, so we report
-            // a fatal error so clients see their build fail and can either increase the
-            // job time limit, or apply source optimizations so their files compile in a
-            // reasonable amount of time.
-            Ok(RunJobResponse::FatalError { message, server_id }) => {
-                error!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation job failed: {message}");
-                // Break because fatal errors are not retryable
-                break Err(anyhow!(message));
-            }
-            // Missing inputs (S3 cleared, Redis rebooted, etc.)
-            Ok(RunJobResponse::MissingJobInputs { server_id }) => {
-                // If we retry, send the inputs again
-                has_inputs = false;
-                debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job inputs");
-                // Don't break because these errors can be retried
-                Err(anyhow!("Missing distributed compilation job inputs"))
-            }
-            // Missing toolchain (S3 cleared, Redis rebooted, etc.)
-            Ok(RunJobResponse::MissingToolchain { server_id }) => {
-                // If we retry, send the toolchain again
-                has_toolchain = false;
-                debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job toolchain");
-                // Don't break because these errors can be retried
-                Err(anyhow!("Missing distributed compilation job toolchain"))
-            }
-            // Missing result (S3 cleared, Redis rebooted, etc.),
-            // or build server failed to write the job result due
-            // to e.g. network error, server shutdown, etc.
-            Ok(RunJobResponse::MissingJobResult { server_id }) => {
-                debug!(
-                    "[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job result"
-                );
-                // Don't break because these errors can be retried
-                Err(anyhow!("Missing distributed compilation job result"))
-            }
-            // Disk errors, build process killed, server shutdown, etc.
-            Ok(RunJobResponse::RetryableError { message, server_id }) => {
-                debug!("[{out_pretty}, {job_id}, {server_id}]: {message:?}");
-                // Don't break because these errors can be retried
-                Err(anyhow!("{message:?}"))
-            }
-            // Other (e.g. client network, timeout, etc.) errors
-            Err(err) => {
-                // Don't break because these errors can be retried
-                Err(anyhow!(err))
-            }
-        };
-
-        match job_result {
-            // Maybe retry errors
-            Err(err) => {
-                if should_retry(&err, Some(job_id)) {
-                    tokio::time::sleep(retry_delay.next().unwrap()).await;
-                    continue;
-                }
-                break Err(err);
-            }
-            Ok((result, server_id)) => {
-                debug!(
-                    "[{out_pretty}, {job_id}]: Fetched {:?}",
-                    result
-                        .outputs
-                        .iter()
-                        .map(|(p, bs)| (p, bs.lens().to_string()))
-                        .collect::<Vec<_>>()
-                );
-
-                let mut output_paths: Vec<PathBuf> = vec![];
-
-                macro_rules! try_or_cleanup {
-                    ($v:expr) => {{
-                        match $v {
-                            Ok(v) => v,
-                            Err(e) => {
-                                // Do our best to clear up. We may end up deleting a file that we just wrote over
-                                // the top of, but it's better to clear up too much than too little
-                                for local_path in output_paths.iter() {
-                                    if let Err(e) = fs::remove_file(local_path) {
-                                        if e.kind() != io::ErrorKind::NotFound {
-                                            warn!("[{out_pretty}, {job_id}]: {e} while attempting to remove `{}`", local_path.display())
+                    macro_rules! try_or_cleanup {
+                        ($v:expr) => {{
+                            match $v {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    // Do our best to clear up. We may end up deleting a file that we just wrote over
+                                    // the top of, but it's better to clear up too much than too little
+                                    for local_path in output_paths.iter() {
+                                        if let Err(e) = fs::remove_file(local_path) {
+                                            if e.kind() != io::ErrorKind::NotFound {
+                                                warn!("[{out_pretty}, {job_id}]: {e} while attempting to remove `{}`", local_path.display())
+                                            }
                                         }
                                     }
-                                }
-                                break Err(e)
-                            },
-                        }
-                    }};
-                }
+                                    break Err(e)
+                                },
+                            }
+                        }};
+                    }
 
-                let mut result_outputs_iter = result.outputs.into_iter();
+                    let mut result_outputs_iter = result.outputs.into_iter();
 
-                // loop instead of for so we can break with the Err instead of
-                // returning to ensure we still delete the job (below) in case
-                // of client errors.
-                let unpack_outputs_res = loop {
-                    if let Some((path, output_data)) = result_outputs_iter.next() {
-                        let len = output_data.lens().actual;
-                        let local_path = try_or_cleanup!(path_transformer
-                            .to_local(&path)
-                            .with_context(|| format!(
-                                "[{out_pretty}, {job_id}]: unable to transform output path {path}"
-                            )));
-
-                        // Do this first so cleanup works correctly
-                        output_paths.push(local_path.clone());
-
-                        // TODO: Make this use asyncio
-                        let mut file = try_or_cleanup!(File::create(&local_path).with_context(
-                            || format!("Failed to create output file {}", local_path.display())
-                        ));
-                        let count =
-                            try_or_cleanup!(io::copy(&mut output_data.into_reader(), &mut file)
+                    // loop instead of for so we can break with the Err instead of
+                    // returning to ensure we still delete the job (below) in case
+                    // of client errors.
+                    let unpack_outputs_res = loop {
+                        if let Some((path, output_data)) = result_outputs_iter.next() {
+                            let len = output_data.lens().actual;
+                            let local_path = try_or_cleanup!(path_transformer
+                                .to_local(&path)
                                 .with_context(|| format!(
-                                    "Failed to write output to {}",
-                                    local_path.display()
+                                    "[{out_pretty}, {job_id}]: unable to transform output path {path}"
                                 )));
 
-                        if count != len {
-                            break Err(anyhow!("Expected {len} outputs, but received {count}"));
+                            // Do this first so cleanup works correctly
+                            output_paths.push(local_path.clone());
+
+                            // TODO: Make this use asyncio
+                            let mut file = try_or_cleanup!(File::create(&local_path).with_context(
+                                || format!("Failed to create output file {}", local_path.display())
+                            ));
+                            let count = try_or_cleanup!(io::copy(
+                                &mut output_data.into_reader(),
+                                &mut file
+                            )
+                            .with_context(|| format!(
+                                "Failed to write output to {}",
+                                local_path.display()
+                            )));
+
+                            if count != len {
+                                break Err(anyhow!("Expected {len} outputs, but received {count}"));
+                            }
+                        } else {
+                            break Ok(());
                         }
-                    } else {
-                        break Ok(());
+                    };
+
+                    if let Err(err) = unpack_outputs_res {
+                        break Err(err);
                     }
-                };
 
-                if let Err(err) = unpack_outputs_res {
-                    break Err(err);
+                    let extra_inputs = tc_archive
+                        .as_ref()
+                        .map(|p| vec![p.as_path()])
+                        .unwrap_or_default();
+                    try_or_cleanup!(outputs_rewriter
+                        .handle_outputs(path_transformer, &output_paths, extra_inputs.as_slice())
+                        .with_context(|| "Failed to rewrite outputs from compile"));
+
+                    break Ok((
+                        DistType::Ok(server_id),
+                        std::process::Output::from(result.output),
+                    ));
                 }
-
-                let extra_inputs = tc_archive
-                    .as_ref()
-                    .map(|p| vec![p.as_path()])
-                    .unwrap_or_default();
-                try_or_cleanup!(outputs_rewriter
-                    .handle_outputs(path_transformer, &output_paths, extra_inputs.as_slice())
-                    .with_context(|| "Failed to rewrite outputs from compile"));
-
-                break Ok((
-                    DistType::Ok(server_id),
-                    std::process::Output::from(result.output),
-                ));
             }
+        };
+
+        // Inform the scheduler we've received and unpacked the result.
+        // This is its chance to clean up after the job.
+        //
+        // It's possible a network error occurs and the scheduler isn't notified
+        // it should delete job artifacts. To mitigate this, sccache-dist servers
+        // should use storage backends that are configured to delete job artifacts
+        // after some reasonable time, like 3-24hrs.
+        //
+        // Intentionally ignore errors so otherwise successful builds don't fail.
+        //
+        // Don't unwrap `dist_compile_res` until after this, so even if the job
+        // failed or the client encounters errors downloading/unpacking the result,
+        // we still call `del_job` to tell the scheduler to delete the job artifacts.
+        if let Some((ref job_id, _)) = job {
+            let _ = dist_client.del_job(job_id).await;
         }
-    };
 
-    // Inform the scheduler we've received and unpacked the result.
-    // This is its chance to clean up after the job.
-    //
-    // It's possible a network error occurs and the scheduler isn't notified
-    // it should delete job artifacts. To mitigate this, sccache-dist servers
-    // should use storage backends that are configured to delete job artifacts
-    // after some reasonable time, like 3-24hrs.
-    //
-    // Intentionally ignore errors so otherwise successful builds don't fail.
-    //
-    // Don't unwrap `dist_compile_res` until after this, so even if the job
-    // failed or the client encounters errors downloading/unpacking the result,
-    // we still call `del_job` to tell the scheduler to delete the job artifacts.
-    if let Some((ref job_id, _)) = job {
-        let _ = dist_client.del_job(job_id).await;
+        dist_compile_res
     }
-
-    dist_compile_res
 }
 
 impl<T: CommandCreatorSync> Clone for Box<dyn CompilerHasher<T>> {
@@ -1257,7 +1440,7 @@ impl<T: CommandCreatorSync> Clone for Box<dyn CompilerHasher<T>> {
 }
 
 /// An interface to a compiler for actually invoking compilation.
-pub trait Compilation<T>: Send
+pub trait Compilation<T>: Send + Sync
 where
     T: CommandCreatorSync,
 {
@@ -1267,7 +1450,7 @@ where
         &self,
         path_transformer: &mut dist::PathTransformer,
         rewrite_includes_only: bool,
-        compilation_key: &str,
+        hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,
@@ -1276,10 +1459,7 @@ where
 
     /// Create a function that will create the inputs used to perform a distributed compilation
     #[cfg(feature = "dist-client")]
-    fn into_dist_packagers(
-        self: Box<Self>,
-        _path_transformer: dist::PathTransformer,
-    ) -> Result<DistPackagers>;
+    fn into_dist_packagers(self: Box<Self>) -> Result<DistPackagers>;
 
     /// Returns an iterator over the results of this compilation.
     ///
