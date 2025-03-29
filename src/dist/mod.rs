@@ -492,10 +492,12 @@ impl From<ProcessOutput> for process::Output {
 pub struct OutputData(Vec<u8>, u64);
 impl OutputData {
     #[cfg(any(feature = "dist-server", all(feature = "dist-client", test)))]
-    pub fn try_from_reader<R: std::io::Read>(r: R) -> std::io::Result<Self> {
-        use flate2::read::ZlibEncoder as ZlibReadEncoder;
-        use flate2::Compression;
-        let mut compressor = ZlibReadEncoder::new(r, Compression::fast());
+    pub fn try_from_reader<R: std::io::Read>(reader: R) -> std::io::Result<Self> {
+        let mut compressor = flate2::read::ZlibEncoder::new(
+            reader,
+            // Optimize for size since bandwidth costs more than CPU cycles
+            flate2::Compression::best(),
+        );
         let mut res = vec![];
         std::io::copy(&mut compressor, &mut res)?;
         Ok(OutputData(res, compressor.total_in()))
@@ -508,8 +510,7 @@ impl OutputData {
     }
     #[cfg(feature = "dist-client")]
     pub fn into_reader(self) -> impl std::io::Read {
-        use flate2::read::ZlibDecoder as ZlibReadDecoder;
-        ZlibReadDecoder::new(std::io::Cursor::new(self.0))
+        flate2::read::ZlibDecoder::new(std::io::Cursor::new(self.0))
     }
 }
 
