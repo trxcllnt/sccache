@@ -336,52 +336,56 @@ impl OverlayBuilder {
                 cmd.arg("--setenv").arg(k).arg(v);
             }
             cmd.arg("--");
-            cmd.arg(executable);
+            cmd.arg(&executable);
             cmd.args(arguments);
 
             tracing::trace!("[perform_build({job_id})]: performing compile");
             tracing::trace!("[perform_build({job_id})]: bubblewrap command: {:?}", cmd);
 
-            let compile_output = cmd
+            let output: ProcessOutput = cmd
                 .output()
-                .context("Failed to retrieve output from compile")?;
-
-            if compile_output.status.success() {
-                tracing::trace!("[perform_build({job_id})]: compile output: {compile_output:?}");
-            }
-
-            tracing::trace!("[perform_build({job_id})]: retrieving {output_paths:?}");
+                .context("Failed to retrieve output from compile")?
+                .into();
 
             let mut outputs = vec![];
 
-            for (path, abspath) in output_paths.iter().zip(output_paths_absolute.iter()) {
-                let abspath = join_suffix(&target_dir, abspath);
-                match fs::File::open(&abspath) {
-                    Ok(file) => match OutputData::try_from_reader(file) {
-                        Ok(output) => outputs.push((path.clone(), output)),
-                        Err(err) => {
-                            tracing::error!(
-                                "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, overlay={path:?}: {err}"
-                            )
-                        }
-                    },
-                    Err(e) => {
-                        if e.kind() == io::ErrorKind::NotFound {
-                            tracing::debug!("[perform_build({job_id})]: Missing output path host={abspath:?}, overlay={path:?}")
-                        } else {
-                            return Err(Error::from(e).context("Failed to open output file"));
+            if !output.success() {
+                if matches!(output.code, -1 | -2) {
+                    // Warn on abnormal terminations (i.e. SIGTERM, SIGKILL)
+                    tracing::warn!(
+                        "[perform_build({job_id})]: {executable:?} terminated with {}",
+                        output.status
+                    );
+                } else {
+                    tracing::trace!("[perform_build({job_id})]: compile failure: {output:?}");
+                }
+            } else {
+                tracing::trace!("[perform_build({job_id})]: compile success: {output:?}");
+                tracing::trace!("[perform_build({job_id})]: retrieving {output_paths:?}");
+
+                for (path, abspath) in output_paths.iter().zip(output_paths_absolute.iter()) {
+                    let abspath = join_suffix(&target_dir, abspath);
+                    match fs::File::open(&abspath) {
+                        Ok(file) => match OutputData::try_from_reader(file) {
+                            Ok(output) => outputs.push((path.clone(), output)),
+                            Err(err) => {
+                                tracing::error!(
+                                    "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, overlay={path:?}: {err}"
+                                )
+                            }
+                        },
+                        Err(e) => {
+                            if e.kind() == io::ErrorKind::NotFound {
+                                tracing::debug!("[perform_build({job_id})]: Missing output path host={abspath:?}, overlay={path:?}")
+                            } else {
+                                return Err(Error::from(e).context("Failed to open output file"));
+                            }
                         }
                     }
                 }
             }
 
-            let compile_output = ProcessOutput::try_from(compile_output)
-                .context("Failed to convert compilation exit status")?;
-
-            Ok(BuildResult {
-                output: compile_output,
-                outputs,
-            })
+            Ok(BuildResult { output, outputs })
         };
 
         // Guard compiling until we get a token from the job queue
@@ -640,7 +644,7 @@ impl DockerBuilder {
             // container name
             .arg(c_name)
             // Finally, the executable and arguments
-            .arg(executable)
+            .arg(&executable)
             .args(arguments);
 
         // Guard compiling until we get a token from the job queue
@@ -649,49 +653,52 @@ impl DockerBuilder {
         tracing::trace!("[perform_build({job_id})]: performing compile");
         tracing::trace!("[perform_build({job_id})]: {:?}", cmd.as_std());
 
-        let compile_output = cmd.output().await.context("Failed to compile")?;
+        let output: ProcessOutput = cmd.output().await.context("Failed to compile")?.into();
 
         // Drop the job slot once compile is finished
         drop(job_slot);
 
-        if compile_output.status.success() {
-            tracing::trace!("[perform_build({job_id})]: compile output: {compile_output:?}");
-        }
-
         let mut outputs = vec![];
 
-        tracing::trace!("[perform_build({job_id})]: retrieving {output_paths:?}");
+        if !output.success() {
+            if matches!(output.code, -1 | -2) {
+                // Warn on abnormal terminations (i.e. SIGTERM, SIGKILL)
+                tracing::warn!(
+                    "[perform_build({job_id})]: {executable:?} terminated with {}",
+                    output.status
+                );
+            } else {
+                tracing::trace!("[perform_build({job_id})]: compile failure: {output:?}");
+            }
+        } else {
+            tracing::trace!("[perform_build({job_id})]: compile success: {output:?}");
+            tracing::trace!("[perform_build({job_id})]: retrieving {output_paths:?}");
 
-        for (path, abspath) in output_paths.iter().zip(output_paths_absolute.iter()) {
-            let abspath = join_suffix(host_root, abspath); // Resolve in case it's relative since we copy it from the root level
-            match fs::File::open(&abspath) {
-                Ok(file) => match OutputData::try_from_reader(file) {
-                    Ok(output) => outputs.push((path.clone(), output)),
-                    Err(err) => {
-                        tracing::error!(
-                            "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, container={path:?}: {err}"
-                        )
-                    }
-                },
-                Err(e) => {
-                    if e.kind() == io::ErrorKind::NotFound {
-                        tracing::debug!(
-                            "[perform_build({job_id})]: Missing output path host={abspath:?}, container={path:?}"
-                        )
-                    } else {
-                        return Err(Error::from(e).context("Failed to open output file"));
+            for (path, abspath) in output_paths.iter().zip(output_paths_absolute.iter()) {
+                let abspath = join_suffix(host_root, abspath); // Resolve in case it's relative since we copy it from the root level
+                match fs::File::open(&abspath) {
+                    Ok(file) => match OutputData::try_from_reader(file) {
+                        Ok(output) => outputs.push((path.clone(), output)),
+                        Err(err) => {
+                            tracing::error!(
+                                "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, container={path:?}: {err}"
+                            )
+                        }
+                    },
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::NotFound {
+                            tracing::debug!(
+                                "[perform_build({job_id})]: Missing output path host={abspath:?}, container={path:?}"
+                            )
+                        } else {
+                            return Err(Error::from(e).context("Failed to open output file"));
+                        }
                     }
                 }
             }
         }
 
-        let compile_output = ProcessOutput::try_from(compile_output)
-            .context("Failed to convert compilation exit status")?;
-
-        Ok(BuildResult {
-            output: compile_output,
-            outputs,
-        })
+        Ok(BuildResult { output, outputs })
     }
 }
 

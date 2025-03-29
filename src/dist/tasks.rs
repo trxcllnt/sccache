@@ -330,12 +330,8 @@ impl Task for RunJob {
                 RunJobError::MissingJobResult => {
                     TaskError::ExpectedError("MissingJobResult".into())
                 }
-                RunJobError::Retryable(e) => {
-                    TaskError::ExpectedError(format!("Error in job {job_id}: {e:#}"))
-                }
-                RunJobError::Fatal(e) => {
-                    TaskError::UnexpectedError(format!("Fatal error in job {job_id}: {e:#}"))
-                }
+                RunJobError::Retryable(e) => TaskError::ExpectedError(format!("{e:#}")),
+                RunJobError::Fatal(e) => TaskError::UnexpectedError(format!("{e:#}")),
             })
     }
 
@@ -369,7 +365,7 @@ impl Task for RunJob {
             }
         };
 
-        tracing::warn!("[run_job({job_id})]: {err:#}");
+        tracing::warn!("[run_job({job_id})]: {err}");
 
         if let Err(err) = self
             .server()

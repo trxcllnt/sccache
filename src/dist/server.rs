@@ -695,7 +695,6 @@ impl Server {
                         return RunJobResponse::server_terminated(&self.state.id);
                     }
                     if matches!(result.output.code, -1 | -2) {
-                        tracing::warn!("[run_build({job_id})]: Build killed: {:?}", result.output);
                         return RunJobResponse::build_process_killed(&self.state.id);
                     }
                     tracing::warn!("[run_build({job_id})]: Build failed: {:?}", result.output);
