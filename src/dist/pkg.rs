@@ -221,9 +221,10 @@ mod toolchain_imp {
                     digest.update(dir_path.to_string_lossy().as_bytes());
                 }
                 for (tar_path, file_path) in file_set.iter() {
-                    let file = &mut fs::File::open(file_path)?;
+                    let mut file = fs::File::open(file_path)?;
                     builder.append_file(tar_path, file.file_mut())?;
-                    digest.update(Digest::reader_sync(file).unwrap_or_default().as_bytes());
+                    digest.update(Digest::reader_sync(file)?.as_bytes());
+                    digest.update(file_path.to_string_lossy().as_bytes());
                 }
                 for (from_path, to_path) in symlinks.iter() {
                     let mut header = tar::Header::new_gnu();
