@@ -221,9 +221,8 @@ mod toolchain_imp {
                     digest.update(dir_path.to_string_lossy().as_bytes());
                 }
                 for (tar_path, file_path) in file_set.iter() {
-                    let mut file = fs::File::open(file_path)?;
-                    builder.append_file(tar_path, file.file_mut())?;
-                    digest.update(Digest::reader_sync(file)?.as_bytes());
+                    builder.append_file(tar_path, fs::File::open(file_path)?.file_mut())?;
+                    digest.update(Digest::reader_sync(fs::File::open(file_path)?)?.as_bytes());
                     digest.update(file_path.to_string_lossy().as_bytes());
                 }
                 for (from_path, to_path) in symlinks.iter() {
