@@ -195,12 +195,13 @@ impl CompileCommandImpl for SingleCompileCommand {
 
     async fn execute<T>(
         &self,
-        _: &server::SccacheService<T>,
+        service: &server::SccacheService<T>,
         creator: &T,
     ) -> Result<process::Output>
     where
         T: CommandCreatorSync,
     {
+        service.stats.lock().await.decrement_pending_compilations();
         let SingleCompileCommand {
             executable,
             arguments,
@@ -490,7 +491,7 @@ where
         }
 
         // Instance to perform the cache lookup and prepare to compile
-        let lookup_or_compile = CacheLookupOrCompile::new(
+        let lookup_and_compile = CacheLookupAndCompile::new(
             cache_control,
             &creator,
             hash_result.unwrap(),
@@ -502,23 +503,19 @@ where
             service,
         );
 
-        // The preprocessor results are large, so flush them to disk as early
-        // as possible. During highly parallel builds, sccache's memory usage
-        // can easily grow to 2-4GB due to keeping the preprocessor output in
-        // `compilation.preprocessed_output` while we check the cache and gen
-        // compile commands.
+        // When configured for distributed compilation, eagerly write the job
+        // inputs to a tempfile. If we get a hit, the tempfile is deleted, but
+        // if we don't, memory usage stays low.
         //
-        // This can easily OOM smaller CI machines with 4-8GB of RAM like the
-        // free-tier GitHub runners.
+        // The preprocessor outputs are large, and during massively parallel
+        // builds (`make -j10000`), sccache's memory usage can easily grow
+        // to dozens of GB because `compilation.preprocessed_output` stays
+        // resident during the cache lookups.
         //
-        // When configured for distributed compilation we write the job input
-        // to disk a bit early, while we're checking the cache for a hit.
-        // If we get a hit, the tempfile is deleted, but if we don't, we keep
-        // the memory usage low.
-        //
-        // Always good when the compiler cacher isn't why CI runs failed :^)
-
-        let (lookup, compile) = lookup_or_compile
+        // This can easily OOM CI instances with 4-8GB of memory, like free-
+        // tier GitHub runners. The compiler cacher shouldn't be the reason
+        // why CI runs fail :^)
+        let lookup_and_compile = lookup_and_compile
             .into_cache_lookup_and_compile_result(
                 storage.as_ref(),
                 // Set a maximum time limit for the cache to respond before we
@@ -526,23 +523,32 @@ where
                 // TODO: this should be configurable
                 Duration::new(60, 0),
             )
-            .await?;
+            .await;
+
+        let (lookup, compile) = match lookup_and_compile {
+            Ok((lookup, compile)) => (lookup, compile),
+            Err(err) => {
+                service.stats.lock().await.decrement_pending_compilations();
+                return Err(err);
+            }
+        };
 
         // Check the result of the cache lookup
         match lookup {
             CacheLookupResult::Success(compile_result, output) => {
+                service.stats.lock().await.decrement_pending_compilations();
                 Ok::<_, Error>((compile_result, output))
             }
             CacheLookupResult::Miss(miss_type) => {
                 // Cache miss, so compile it.
-                service.stats.lock().await.active_compilations += 1;
+                service.stats.lock().await.increment_active_compilations();
 
                 // Do the compilation (either local or distributed)
                 let start = Instant::now();
                 let res = compile.into_result().await;
                 let duration = start.elapsed();
 
-                service.stats.lock().await.active_compilations -= 1;
+                service.stats.lock().await.decrement_active_compilations();
 
                 let (hash_key, outputs, cacheable, dist_type, output) = res?;
 
@@ -624,7 +630,7 @@ where
     fn get_executable(&self) -> PathBuf;
 }
 
-struct CacheLookupOrCompile<'a, T: CommandCreatorSync> {
+struct CacheLookupAndCompile<'a, T: CommandCreatorSync> {
     cache_control: CacheControl,
     command_creator: &'a T,
     compilation: Box<dyn Compilation<T>>,
@@ -638,7 +644,7 @@ struct CacheLookupOrCompile<'a, T: CommandCreatorSync> {
     weak_toolchain_key: String,
 }
 
-impl<'a, T> CacheLookupOrCompile<'a, T>
+impl<'a, T> CacheLookupAndCompile<'a, T>
 where
     T: CommandCreatorSync,
 {
@@ -873,7 +879,7 @@ struct CacheLookup<'a> {
 
 impl<'a> CacheLookup<'a> {
     fn new<T: CommandCreatorSync>(
-        details: &CacheLookupOrCompile<'a, T>,
+        details: &CacheLookupAndCompile<'a, T>,
         start: Instant,
         timeout: Duration,
         storage: &'a dyn Storage,
@@ -1050,7 +1056,12 @@ where
                 let fallback_to_local = dist.dist_client.fallback_to_local_compile();
                 // Do the distributed compilation
                 let dist_compile_res = dist
-                    .into_result(&executable, &outputs, &mut path_transformer)
+                    .into_result(
+                        &executable,
+                        &outputs,
+                        &mut path_transformer,
+                        sccache_service,
+                    )
                     .await;
 
                 match dist_compile_res {
@@ -1103,11 +1114,12 @@ struct DistCompile {
 
 #[cfg(feature = "dist-client")]
 impl DistCompile {
-    async fn into_result(
+    async fn into_result<T: CommandCreatorSync>(
         self,
         executable: &Path,
         outputs: &[FileObjectSource],
         path_transformer: &mut dist::PathTransformer,
+        sccache_service: &server::SccacheService<T>,
     ) -> Result<(DistType, std::process::Output)> {
         use dist::RunJobResponse;
         use std::io;
@@ -1171,6 +1183,12 @@ impl DistCompile {
         let mut retry_delay = FibonacciBackoff::from_millis(1000)
             .max_delay(Duration::from_secs(10))
             .map(tokio_retry2::strategy::jitter);
+
+        sccache_service
+            .stats
+            .lock()
+            .await
+            .decrement_pending_compilations();
 
         let dist_compile_res = loop {
             let (job_id, timeout) = if let Some((ref job_id, timeout)) = job {

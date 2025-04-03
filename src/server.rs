@@ -834,6 +834,9 @@ where
     /// This field causes [WaitUntilZero] to wait until this struct drops.
     #[allow(dead_code)]
     info: ActiveInfo,
+
+    #[cfg(feature = "dist-client")]
+    num_cpus: u64,
 }
 
 type SccacheRequest = Message<Request, Body<()>>;
@@ -943,6 +946,8 @@ where
             creator: C::new(client),
             tx,
             info,
+            #[cfg(feature = "dist-client")]
+            num_cpus: util::num_cpus() as u64,
         }
     }
 
@@ -964,6 +969,8 @@ where
             creator: C::new(&client),
             tx,
             info,
+            #[cfg(feature = "dist-client")]
+            num_cpus: util::num_cpus() as u64,
         }
     }
 
@@ -999,6 +1006,8 @@ where
             creator: C::new(&client),
             tx,
             info,
+            #[cfg(feature = "dist-client")]
+            num_cpus: util::num_cpus() as u64,
         }
     }
 
@@ -1266,6 +1275,68 @@ where
                     CompilerArguments::Ok(hasher) => {
                         trace!("parse_arguments: Ok: {:?}", cmd);
 
+                        // This loop limits the number of concurrent compile requests that are in
+                        // the pre-compilation stage (including the number of concurrent cache
+                        // lookups) to `self.num_cpus`.
+                        //
+                        // `stats.pending_compilations` is the number of compile requests that have
+                        // been accepted by the server but have not started compiling yet. In other
+                        // words, compile requests that are in the preprocess, `generate_hash_key`,
+                        // or cache lookup stages (collectively, the pre-compilation stages).
+                        //
+                        // When the client is configured for local compilation, this loop has no
+                        // impact on job throughput, since subprocess invocation is already
+                        // guarded by the jobserver's semaphore.
+                        //
+                        // If the client is configured for distributed compilation, this loop gives
+                        // the client time to send the `new_job`/`run_job` requests to the build
+                        // cluster as soon as they're done with the pre-compilation stages.
+                        //
+                        // Without this, all the incoming pre-compilation tasks are interleaved,
+                        // because tokio's scheduler is fair/breadth-first. The implication is all
+                        // the compile requests are preprocessed at roughly the same time, then all
+                        // their hash keys are computed, then all cache lookups occur, and finally
+                        // all the cache misses are compiled.
+                        //
+                        // This is a problem in massively parallel (`make -j100000`) distributed
+                        // compilations -- especially with CUDA in the mix, because that fans out
+                        // into potentially many parallel subcompilations.
+                        //
+                        // We don't want to peg the client's CPU at ~100% preprocessing every file,
+                        // generating all hash keys, whipping up a cache lookup request storm, etc.
+                        // before any jobs are sent to the build cluster.
+                        //
+                        // Jobs should be sent to the build cluster as soon as we know they're not
+                        // in the cache. Then we can handle more compile requests while the build
+                        // cluster is busy.
+                        //
+                        // So this loop is effectively a semaphore, but not implemented with an
+                        // actual Semaphore because we need to introduce a short a delay before
+                        // "unlocking".
+                        //
+                        // Why is that? Good question.
+                        //
+                        // The "lock" for a compile request is "released" just before the first
+                        // async call of a compilation phase starts. But with a CUDA compilation,
+                        // a re-entrant subcompilation is scheduled, which should take precedence
+                        // over (and continue to block) processing another outer compile request.
+                        //
+                        // Delaying a short amount of time here is an approximation of this logic.
+                        // It's unlikely the CUDA subcompilation will land exactly on a timeout
+                        // boundary and be scheduled after the next outer compile request. But
+                        // even if a few sometimes do, most won't, which is good enough.
+                        #[cfg(feature = "dist-client")]
+                        loop {
+                            if self.stats.lock().await.pending_compilations >= self.num_cpus {
+                                tokio::time::sleep(tokio_retry2::strategy::jitter(
+                                    Duration::from_millis(1000),
+                                ))
+                                .await;
+                            } else {
+                                break;
+                            }
+                        }
+
                         let body = self
                             .clone()
                             .start_compile_task(c, hasher, cmd, cwd, env_vars)
@@ -1313,7 +1384,14 @@ where
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
     ) -> Result<CompileFinished> {
-        self.stats.lock().await.requests_executed += 1;
+        {
+            let mut stats = self.stats.lock().await;
+            // Increment pending_compilations so we guard handling new
+            // compile requests until after the current compile request
+            // has been (potentially) sent to the build cluster.
+            stats.increment_pending_compilations();
+            stats.requests_executed += 1;
+        }
 
         let force_recache = env_vars.iter().any(|(k, _v)| k == "SCCACHE_RECACHE");
         let force_no_cache = env_vars.iter().any(|(k, _v)| k == "SCCACHE_NO_CACHE");
@@ -1590,6 +1668,8 @@ impl PerLanguageCount {
 pub struct ServerStats {
     /// The count of currently active compile requests.
     pub active_compilations: u64,
+    /// The count of currently pending compile requests.
+    pub pending_compilations: u64,
     /// The count of client compile requests.
     pub compile_requests: u64,
     /// The count of client requests that used an unsupported compiler.
@@ -1662,6 +1742,7 @@ impl Default for ServerStats {
     fn default() -> ServerStats {
         ServerStats {
             active_compilations: u64::default(),
+            pending_compilations: u64::default(),
             compile_requests: u64::default(),
             requests_unsupported_compiler: u64::default(),
             requests_not_compile: u64::default(),
@@ -1747,6 +1828,7 @@ impl ServerStats {
 
         let mut stats_vec = vec![];
         //TODO: this would be nice to replace with a custom derive implementation.
+        set_stat!(stats_vec, self.pending_compilations, "Pending compilations");
         set_stat!(stats_vec, self.active_compilations, "Active compilations");
         set_stat!(stats_vec, self.compile_requests, "Compile requests");
         set_stat!(
@@ -1917,6 +1999,22 @@ impl ServerStats {
                 &format!("Cache hits rate ({})", lang),
             );
         }
+    }
+
+    pub fn increment_active_compilations(&mut self) {
+        self.active_compilations = self.active_compilations.saturating_add(1);
+    }
+
+    pub fn decrement_active_compilations(&mut self) {
+        self.active_compilations = self.active_compilations.saturating_sub(1);
+    }
+
+    pub fn increment_pending_compilations(&mut self) {
+        self.pending_compilations = self.pending_compilations.saturating_add(1);
+    }
+
+    pub fn decrement_pending_compilations(&mut self) {
+        self.pending_compilations = self.pending_compilations.saturating_sub(1);
     }
 }
 

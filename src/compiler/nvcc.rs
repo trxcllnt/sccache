@@ -612,6 +612,8 @@ impl CompileCommandImpl for NvccCompileCommand {
 
         let num_parallel = device_compile_range.len().min(*num_parallel).max(1);
 
+        service.stats.lock().await.decrement_pending_compilations();
+
         for command_group_chunks in [
             nvcc_subcommand_groups[cuda_front_end_range].chunks(1),
             // compile multiple device architectures in parallel when `nvcc -t=N` is specified
