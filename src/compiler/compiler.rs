@@ -484,6 +484,7 @@ where
         );
 
         if let Err(e) = hash_result {
+            service.stats.lock().await.decrement_pending_compilations();
             return match e.downcast::<ProcessError>() {
                 Ok(ProcessError(output)) => Ok((CompileResult::Error, output)),
                 Err(e) => Err(e),
