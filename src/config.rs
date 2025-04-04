@@ -1686,6 +1686,29 @@ pub mod server {
                 return Err(anyhow!("Invalid config `metrics.prometheus.type=\"path\"`. Choose `type = \"addr\"` or `type = \"push\"`"));
             }
 
+            let builder = if let Ok(builder_type) = env::var("SCCACHE_DIST_BUILDER_TYPE") {
+                match builder_type.as_ref() {
+                    "docker" => BuilderType::Docker,
+                    "overlay" => BuilderType::Overlay {
+                        build_dir: env::var("SCCACHE_DIST_BUILD_DIR").map(|p| p.into())?,
+                        bwrap_path: env::var("SCCACHE_DIST_BWRAP_PATH").map(|p| p.into())?,
+                    },
+                    "pot" => BuilderType::Pot {
+                        clone_from: default_pot_clone_from(),
+                        pot_clone_args: default_pot_clone_args(),
+                        pot_cmd: env::var("SCCACHE_DIST_POT_CMD")
+                            .map(|p| p.into())
+                            .unwrap_or_else(|_| default_pot_cmd()),
+                        pot_fs_root: env::var("SCCACHE_DIST_BUILD_DIR")
+                            .map(|p| p.into())
+                            .unwrap_or_else(|_| default_pot_fs_root()),
+                    },
+                    _ => builder,
+                }
+            } else {
+                builder
+            };
+
             let builder = match builder {
                 BuilderType::Overlay {
                     build_dir,
@@ -1699,19 +1722,19 @@ pub mod server {
                         .unwrap_or(bwrap_path),
                 },
                 BuilderType::Pot {
+                    clone_from,
                     pot_cmd,
                     pot_fs_root,
-                    clone_from,
                     pot_clone_args,
                 } => BuilderType::Pot {
                     clone_from,
                     pot_clone_args,
-                    pot_cmd: env::var("SCCACHE_DIST_BUILD_DIR")
-                        .map(|p| p.into())
-                        .unwrap_or(pot_fs_root),
-                    pot_fs_root: env::var("SCCACHE_DIST_POT_CMD")
+                    pot_cmd: env::var("SCCACHE_DIST_POT_CMD")
                         .map(|p| p.into())
                         .unwrap_or(pot_cmd),
+                    pot_fs_root: env::var("SCCACHE_DIST_BUILD_DIR")
+                        .map(|p| p.into())
+                        .unwrap_or(pot_fs_root),
                 },
                 builder => builder,
             };
