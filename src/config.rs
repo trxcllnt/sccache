@@ -1686,6 +1686,36 @@ pub mod server {
                 return Err(anyhow!("Invalid config `metrics.prometheus.type=\"path\"`. Choose `type = \"addr\"` or `type = \"push\"`"));
             }
 
+            let builder = match builder {
+                BuilderType::Overlay {
+                    build_dir,
+                    bwrap_path,
+                } => BuilderType::Overlay {
+                    build_dir: env::var("SCCACHE_DIST_BUILD_DIR")
+                        .map(|p| p.into())
+                        .unwrap_or(build_dir),
+                    bwrap_path: env::var("SCCACHE_DIST_BWRAP_PATH")
+                        .map(|p| p.into())
+                        .unwrap_or(bwrap_path),
+                },
+                BuilderType::Pot {
+                    pot_cmd,
+                    pot_fs_root,
+                    clone_from,
+                    pot_clone_args,
+                } => BuilderType::Pot {
+                    clone_from,
+                    pot_clone_args,
+                    pot_cmd: env::var("SCCACHE_DIST_BUILD_DIR")
+                        .map(|p| p.into())
+                        .unwrap_or(pot_fs_root),
+                    pot_fs_root: env::var("SCCACHE_DIST_POT_CMD")
+                        .map(|p| p.into())
+                        .unwrap_or(pot_cmd),
+                },
+                builder => builder,
+            };
+
             let mut jobs_storage = CacheConfigs::default();
             jobs_storage.merge(jobs);
             jobs_storage.merge(config_from_env("SCCACHE_DIST_JOBS_")?.cache);
