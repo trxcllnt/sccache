@@ -117,7 +117,7 @@ impl OverlayBuilder {
         dir: PathBuf,
         job_queue: Arc<tokio::sync::Semaphore>,
     ) -> Result<Self> {
-        tracing::info!("Creating overlay builder");
+        tracing::info!("Creating overlay builder with dir {dir:?}");
 
         if !nix::unistd::getuid().is_root() && !nix::unistd::geteuid().is_root() {
             // Not root, or a setuid binary - haven't put enough thought into supporting this, bail

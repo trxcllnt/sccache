@@ -884,7 +884,8 @@ mod scheduler {
                             .serve_connection(tok_stream, hyper_service)
                             .await
                     {
-                        tracing::debug!("sccache: failed to serve connection: {err:#}");
+                        // These seem... irrelevant?
+                        tracing::trace!("sccache: failed to serve connection: {err:#}");
                     }
                 });
             }
