@@ -1577,18 +1577,6 @@ pub mod server {
     }
 
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
-    #[serde(tag = "type")]
-    #[serde(deny_unknown_fields)]
-    pub enum SchedulerAuth {
-        #[serde(rename = "DANGEROUSLY_INSECURE")]
-        Insecure,
-        #[serde(rename = "jwt_token")]
-        JwtToken { token: String },
-        #[serde(rename = "token")]
-        Token { token: String },
-    }
-
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
     #[serde(default)]
     #[serde(deny_unknown_fields)]
     pub struct FileConfig {
