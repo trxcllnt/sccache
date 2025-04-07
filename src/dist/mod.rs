@@ -84,6 +84,8 @@ pub fn env_info() -> String {
         std::env::var("SCCACHE_DIST_ARCH").unwrap_or(std::env::consts::ARCH.to_owned()),
         std::env::var("SCCACHE_DIST_DEPLOYMENT_NAME").unwrap_or_default(),
     ]
+    .iter()
+    .filter(|s| !s.is_empty())
     .join("-")
 }
 
