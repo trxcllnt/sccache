@@ -1,0 +1,278 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug sccache client",
+            "program": "${workspaceFolder}/target/x86_64-unknown-linux-musl/debug/sccache",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "SCCACHE_LOG": "sccache=debug",
+                "SCCACHE_ERROR_LOG": "/tmp/sccache_debug.log",
+                "SCCACHE_SERVER_PORT": "4226",
+                "SCCACHE_NO_DAEMON": "1",
+                "SCCACHE_START_SERVER": "1",
+                "SCCACHE_IDLE_TIMEOUT": "0",
+                "SCCACHE_CONF": "${workspaceFolder}/.devcontainer/.config/sccache/client.conf"
+            },
+            "stdio": null,
+            "terminal": "console",
+            "internalConsoleOptions": "neverOpen"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'sccache'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "-F",
+                    "all,dist-server,vendored-openssl",
+                    "--no-run",
+                    "--lib",
+                    "--package", "sccache"
+                ],
+                "filter": {
+                    "name": "sccache",
+                    "kind": "lib"
+                }
+            },
+            "args": ["test_parse_threads_argument_simple_cu"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'sccache'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "-F",
+                    "all,dist-server,vendored-openssl",
+                    "--bin=sccache",
+                    "--package=sccache"
+                ],
+                "filter": {
+                    "name": "sccache",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'sccache'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "-F",
+                    "all,dist-server,vendored-openssl",
+                    "--no-run",
+                    "--bin=sccache",
+                    "--package=sccache"
+                ],
+                "filter": {
+                    "name": "sccache",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'sccache-dist'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "-F",
+                    "all,dist-server,vendored-openssl",
+                    "--bin=sccache-dist",
+                    "--package=sccache"
+                ],
+                "filter": {
+                    "name": "sccache-dist",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'sccache-dist'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "-F",
+                    "all,dist-server,vendored-openssl",
+                    "--no-run",
+                    "--bin=sccache-dist",
+                    "--package=sccache"
+                ],
+                "filter": {
+                    "name": "sccache-dist",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'cache_hit_rate'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "-F",
+                    "all,dist-server,vendored-openssl",
+                    "--no-run",
+                    "--test=cache_hit_rate",
+                    "--package=sccache"
+                ],
+                "filter": {
+                    "name": "cache_hit_rate",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'dist'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "-F",
+                    "all,dist-server,vendored-openssl",
+                    "--no-run",
+                    "--test=dist",
+                    "--package=sccache"
+                ],
+                "filter": {
+                    "name": "dist",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'oauth'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "-F",
+                    "all,dist-server,vendored-openssl",
+                    "--no-run",
+                    "--test=oauth",
+                    "--package=sccache"
+                ],
+                "filter": {
+                    "name": "oauth",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'sccache_args'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "-F",
+                    "all,dist-server,vendored-openssl",
+                    "--no-run",
+                    "--test=sccache_args",
+                    "--package=sccache"
+                ],
+                "filter": {
+                    "name": "sccache_args",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'sccache_cargo'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "-F",
+                    "all,dist-server,vendored-openssl",
+                    "--no-run",
+                    "--test=sccache_cargo",
+                    "--package=sccache"
+                ],
+                "filter": {
+                    "name": "sccache_cargo",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'sccache_rustc'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "-F",
+                    "all,dist-server,vendored-openssl",
+                    "--no-run",
+                    "--test=sccache_rustc",
+                    "--package=sccache"
+                ],
+                "filter": {
+                    "name": "sccache_rustc",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'system'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "-F",
+                    "all,dist-server,vendored-openssl",
+                    "--no-run",
+                    "--test=system",
+                    "--package=sccache"
+                ],
+                "filter": {
+                    "name": "system",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

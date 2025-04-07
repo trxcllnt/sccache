@@ -1,0 +1,18 @@
+api:
+  enabled: true
+
+sources:
+  pushgateway:
+    type: prometheus_pushgateway
+    address: 0.0.0.0:9091
+    aggregate_metrics: false
+    auth:
+      username: sccache
+      password: sccache
+
+sinks:
+  prometheus:
+    type: prometheus_remote_write
+    inputs:
+      - pushgateway
+    endpoint: http://prometheus:9090/api/v1/write

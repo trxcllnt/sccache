@@ -1,0 +1,16 @@
+apiVersion: 1
+
+datasources:
+  - name: prometheus
+    type: prometheus
+    isDefault: true
+    access: server
+    url: http://prometheus:9090
+    jsonData:
+      httpMethod: POST
+      manageAlerts: true
+      prometheusType: Prometheus
+      prometheusVersion: 3.1.0
+      cacheLevel: 'High'
+      disableRecordingRules: false
+      timeInterval: 1s

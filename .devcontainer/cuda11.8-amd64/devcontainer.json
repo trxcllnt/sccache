@@ -1,0 +1,145 @@
+{
+  "dockerFile": "${localWorkspaceFolder}/.devcontainer/Dockerfile",
+  "build": {
+    "args": {
+      "BASE": "messense/rust-musl-cross:x86_64-musl",
+      "LOCAL_WORKSPACE_FOLDER": "${localWorkspaceFolder}",
+      "LOCAL_WORKSPACE_FOLDER_BASE_NAME": "${localWorkspaceFolderBasename}"
+    },
+    "options": [
+      "--platform",
+      "linux/amd64",
+      "--pull"
+    ]
+  },
+  "capAdd": ["SYS_ADMIN", "SYS_PTRACE"],
+  "hostRequirements": { "gpu": "optional" },
+  "securityOpt": ["apparmor=unconfined", "seccomp=unconfined"],
+  "runArgs": [
+    "--rm",
+    "--name",
+    "${localEnv:USER:anon}-${localWorkspaceFolderBasename}-cuda11.8-amd64",
+    "--network",
+    "host",
+    "--platform",
+    "linux/amd64",
+    "--privileged",
+    "--ulimit",
+    "nofile=1048576:1048576"
+  ],
+
+  "remoteUser": "${localEnv:USER:anon}",
+  "containerUser": "root",
+  "initializeCommand": [
+    "/bin/bash",
+    "-c",
+    "if test amd64 != $(dpkg --print-architecture | awk -F'-' '{print $NF}'); then docker run --privileged --rm tonistiigi/binfmt --install amd64; fi; mkdir -m 0755 -p ${localWorkspaceFolder}/.devcontainer/{bin,.cache,.config}"
+  ],
+  "postCreateCommand": [
+    "/bin/bash",
+    "-c",
+    "sudo apt update && sudo apt install -y pkg-config bubblewrap libcap-dev && sudo chown -R $(id -u):$(id -g) \"$RUSTUP_HOME\" \"$CARGO_HOME\" && rustup override set stable && sed -i 's/HISTSIZE=1000/HISTSIZE=/g' ~/.bashrc && sed -i 's/HISTFILESIZE=2000/HISTFILESIZE=/g' ~/.bashrc && echo -e 'export PROMPT_COMMAND=\"${PROMPT_COMMAND:-history -a}\";\\nif test -n \"${PROMPT_COMMAND##*\"history -a\"*}\"; then export PROMPT_COMMAND=\"history -a; $PROMPT_COMMAND\"; fi\\nexport PATH=\"/opt/sccache/.devcontainer/bin:$PATH\"' >> ~/.bashrc;"
+  ],
+  "workspaceFolder": "/opt/sccache",
+  "workspaceMount": "type=bind,src=${localWorkspaceFolder},dst=${localWorkspaceFolder}",
+  "mounts": [
+    "type=bind,src=/tmp,dst=/tmp",
+    "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock"
+  ],
+
+  "containerEnv": {
+    "CC": "gcc",
+    "CXX": "g++",
+    "CUDAHOSTCXX": "g++",
+    "CARGO_BUILD_TARGET": "x86_64-unknown-linux-musl",
+    "HISTFILE": "${localWorkspaceFolder}/.devcontainer/._bash_history",
+    "HISTSIZE": "",
+    "HISTFILESIZE": "",
+    "SCCACHE_DIR": "/opt/sccache/.devcontainer/.cache/sccache",
+    "SCCACHE_REPO": "${localWorkspaceFolder}",
+    "SCCACHE_SERVER_PORT": "4225",
+    // "SCCACHE_CONF": "${localEnv:HOME}/.config/sccache/client.conf",
+    "XDG_CACHE_HOME": "/opt/sccache/.devcontainer/.cache",
+    "XDG_CONFIG_HOME": "/opt/sccache/.devcontainer/.config"
+  },
+
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2.4.7": {
+      "userUid": "1001",
+      "userGid": "1001",
+      "username": "${localEnv:USER:anon}",
+      "installZsh": "false",
+      "upgradePackages": "true"
+    },
+    "ghcr.io/devcontainers/features/git:1": {
+      "ppa": "true",
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/rapidsai/devcontainers/features/gcc:25.6": {
+      "version": "11"
+    },
+    "ghcr.io/rapidsai/devcontainers/features/llvm:25.6": {
+      "version": "20"
+    },
+    "ghcr.io/rapidsai/devcontainers/features/cuda:25.6": {
+      "version": "11.8",
+      "installCompilers": "true",
+      "installProfilers": "false",
+      "installCTKLibraries": "false",
+      "installcuRAND": "true",
+      "installDevPackages": "true",
+      "installNCCL": "false",
+      "installCUDARuntime": "true",
+      "pruneStaticLibs": "true"
+    },
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+    }
+  },
+
+  "overrideFeatureInstallOrder": [
+    "ghcr.io/devcontainers/features/common-utils",
+    "ghcr.io/devcontainers/features/git",
+    "ghcr.io/devcontainers/features/github-cli",
+    "ghcr.io/rapidsai/devcontainers/features/gcc",
+    "ghcr.io/rapidsai/devcontainers/features/cuda",
+    "ghcr.io/rapidsai/devcontainers/features/llvm",
+    "ghcr.io/devcontainers/features/docker-outside-of-docker"
+  ],
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "augustocdias.tasks-shell-input",
+        "bierner.markdown-mermaid",
+        "mutantdino.resourcemonitor",
+        "rust-lang.rust-analyzer",
+        "fill-labs.dependi",
+        "tamasfe.even-better-toml",
+        "vadimcn.vscode-lldb"
+      ],
+      "settings": {
+        "debug.toolBarLocation": "docked",
+        "extensions.ignoreRecommendations": true,
+        "files.watcherExclude": {
+          "**/build/**": true,
+          "**/target/**": true,
+          "${localEnv:HOME}/.cache/**/*": true,
+          "${localEnv:HOME}/.local/share/**/*": true,
+          "${localEnv:HOME}/.vscode-server/**/*": true
+        },
+        "search.exclude": {
+          "**/build/**": true,
+          "**/target/**": true,
+          "**/*.code-search": true,
+          "${localEnv:HOME}/.cache/**/*": true,
+          "${localEnv:HOME}/.local/share/**/*": true,
+          "${localEnv:HOME}/.vscode-server/**/*": true
+        },
+        "rust-analyzer.checkOnSave": true,
+        "rust-analyzer.check.command": "clippy",
+        "rust-analyzer.cargo.features": "all"
+      }
+    }
+  }
+}

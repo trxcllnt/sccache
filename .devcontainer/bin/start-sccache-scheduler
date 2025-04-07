@@ -1,0 +1,21 @@
+#! /usr/bin/env bash
+
+# Ensure we're in the repo root
+cd "$( cd "$( dirname "$(realpath -m "${BASH_SOURCE[0]}")" )" && pwd )/../..";
+cd "${SCCACHE_REPO:-$(pwd)}";
+
+if ! command -v sccache-dist >/dev/null 2>&1; then
+    export PATH="$(realpath -m "$(pwd)/target/$(uname -m)-unknown-linux-musl/${BUILD_TYPE:-debug}"):$PATH"
+fi
+
+ulimit -n "$(ulimit -Hn)"
+sudo rm -rf /tmp/sccache/* /tmp/sccache_*
+mkdir -p /tmp/sccache/{jobs,toolchains}
+
+sudo --preserve-env=AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY \
+    RUST_BACKTRACE="${RUST_BACKTRACE:-1}" \
+    SCCACHE_NO_DAEMON=1 \
+    SCCACHE_DIST_OS=linux \
+    SCCACHE_DIST_ARCH="$(dpkg --print-architecture)" \
+    SCCACHE_LOG="celery=warn,sccache=${SCCACHE_LOG:-info},tower_http=info,axum::rejection=trace" \
+    "$(which sccache-dist)" scheduler --config .devcontainer/.config/sccache/scheduler.conf

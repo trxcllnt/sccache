@@ -1,0 +1,12 @@
+#! /usr/bin/env bash
+
+# Ensure we're in the repo root
+cd "$( cd "$( dirname "$(realpath -m "${BASH_SOURCE[0]}")" )" && pwd )/../..";
+cd "${SCCACHE_REPO:-$(pwd)}";
+
+# Default to debug builds, but can pass `--profile release` to override
+if test $# -eq 0; then
+    set -- --profile dev
+fi
+
+cargo build --bins -F all,vendored-openssl,dist-client,dist-server "$@"

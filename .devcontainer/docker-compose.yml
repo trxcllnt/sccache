@@ -1,0 +1,58 @@
+services:
+
+  # AMQP broker for scheduler and server communication
+  rabbitmq:
+    image: rabbitmq:management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  # Alternatively use Redis as a message broker, or for jobs/toolchain storage
+  # redis:
+  #   image: redis
+  #   ports:
+  #     - "6379:6379"
+
+  # Aggregate metrics
+  prometheus:
+    image: prom/prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./.config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command: |
+      --config.file=/etc/prometheus/prometheus.yml
+      --storage.tsdb.path=/prometheus
+      --web.enable-remote-write-receiver
+
+  # Metrics as pretty graphs
+  grafana:
+    image: grafana/grafana-oss
+    user: "1000:1000" # Change this to match your UID/GID so Grafana can RW host mounts
+    ports:
+      - "3000:3000"
+    volumes:
+      - "$HOME/.aws:/usr/share/grafana/.aws:ro"
+      - "./.config/grafana/dashboards:/dashboards"
+      - "./.config/grafana/var/lib/grafana:/var/lib/grafana"
+      - "./.config/grafana/etc/grafana/provisioning:/etc/grafana/provisioning"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: sccache
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: 1s
+    depends_on:
+      - prometheus
+
+  # Use Vector (https://vector.dev) as a sink for sccache-dist Prometheus metrics.
+  # metrics-rs only supports Prometheus's "pushgateway" format, not the "remote-write" format.
+  # Vector translates between the "pushgateway" format and Prometheus's "remote-write" format.
+  vector:
+    image: timberio/vector:0.44.0-debian
+    ports:
+      - "8686:8686"
+      - "9091:9091"
+    volumes:
+      - ./.config/vector/vector.yaml:/etc/vector/vector.yaml:ro
+    command: |
+      --config /etc/vector/vector.yaml
+    depends_on:
+      - prometheus
