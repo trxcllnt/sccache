@@ -33,7 +33,7 @@ sequenceDiagram
     participant Storage
     participant Build Server
     end
-    Client-->>+Scheduler: POST /job/<job_id>/run
+    Client-->>+Scheduler: POST /job/<job_id>
     Scheduler<<-->>Storage: HEAD job inputs (job_id)
     Scheduler->>+Message Broker: run_job (job_id)
     Message Broker->>+Build Server: run_job (job_id)
