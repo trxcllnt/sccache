@@ -18,7 +18,8 @@ use async_trait::async_trait;
 use bytes::Buf;
 use futures::lock::Mutex;
 use itertools::Itertools;
-use sccache::dist::{BuildResult, BuilderIncoming, CompileCommand, OutputData, ProcessOutput};
+use sccache::dist::{BuildResult, BuilderIncoming, CompileCommand, OutputData};
+use sccache::mock_command::ProcessOutput;
 use std::collections::{hash_map, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -443,7 +444,7 @@ impl PotBuilder {
         cmd.args(["sh", "-c", shell_cmd]);
         cmd.arg(&executable);
         cmd.arg(cwd);
-        cmd.arg(executable);
+        cmd.arg(&executable);
         cmd.args(&arguments);
 
         // Guard compiling until we get a token from the job queue
@@ -452,54 +453,57 @@ impl PotBuilder {
         tracing::trace!("[perform_build({job_id})]: performing compile");
         tracing::trace!("[perform_build({job_id})]: {:?}", cmd.as_std());
 
-        let compile_output = cmd
+        let output: ProcessOutput = cmd
             .output()
             .await
-            .context("Failed to start executing compile")?;
+            .context("Failed to start executing compile")?
+            .into();
 
         // Drop the job slot once compile is finished
         drop(job_slot);
 
-        if compile_output.status.success() {
-            tracing::trace!("[perform_build({job_id})]: compile output: {compile_output:?}");
-        }
-
         let mut outputs = vec![];
 
-        tracing::trace!("[perform_build({job_id})]: retrieving {output_paths:?}");
-
-        for (path, abspath) in output_paths.iter().zip(output_paths_absolute.iter()) {
-            // TODO: this isn't great, but cp gives it out as a tar
-            let output = tokio::process::Command::new("jexec")
-                .args([cid, "cat"])
-                .arg(abspath)
-                .output()
-                .await
-                .context("Failed to start command to retrieve output file")?;
-
-            if output.status.success() {
-                match OutputData::try_from_reader(&*output.stdout) {
-                    Ok(output) => outputs.push((path.clone(), output)),
-                    Err(err) => {
-                        tracing::error!(
-                            "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, container={path:?}: {err}"
-                        )
-                    }
-                }
+        if !output.success() {
+            if output.exit() {
+                tracing::trace!("[perform_build({job_id})]: compile failure: {output:?}");
             } else {
-                tracing::debug!(
-                    "[perform_build({job_id})]: Missing output path {path:?} ({abspath:?})"
-                )
+                // Warn on abnormal terminations (i.e. SIGTERM, SIGKILL)
+                tracing::warn!(
+                    "[perform_build({job_id})]: {executable:?} terminated with {}",
+                    output.desc()
+                );
+            }
+        } else {
+            tracing::trace!("[perform_build({job_id})]: retrieving {output_paths:?}");
+
+            for (path, abspath) in output_paths.iter().zip(output_paths_absolute.iter()) {
+                // TODO: this isn't great, but cp gives it out as a tar
+                let output = tokio::process::Command::new("jexec")
+                    .args([cid, "cat"])
+                    .arg(abspath)
+                    .output()
+                    .await
+                    .context("Failed to start command to retrieve output file")?;
+
+                if output.status.success() {
+                    match OutputData::try_from_reader(&*output.stdout) {
+                        Ok(output) => outputs.push((path.clone(), output)),
+                        Err(err) => {
+                            tracing::error!(
+                                "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, container={path:?}: {err}"
+                            )
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        "[perform_build({job_id})]: Missing output path {path:?} ({abspath:?})"
+                    )
+                }
             }
         }
 
-        let compile_output = ProcessOutput::try_from(compile_output)
-            .context("Failed to convert compilation exit status")?;
-
-        Ok(BuildResult {
-            output: compile_output,
-            outputs,
-        })
+        Ok(BuildResult { output, outputs })
     }
 }
 

@@ -23,7 +23,7 @@ use crate::compiler::{DistPackagers, NoopOutputsRewriter};
 use crate::dist;
 #[cfg(feature = "dist-client")]
 use crate::dist::pkg;
-use crate::mock_command::CommandCreatorSync;
+use crate::mock_command::{CommandCreatorSync, ProcessOutput};
 use crate::util::{
     decode_path, encode_path, hash_all, Digest, HashToDigest, MetadataCtimeExt, TimeMacroFinder,
     Timestamp,
@@ -39,7 +39,6 @@ use std::hash::Hash;
 use std::io;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::process;
 use std::sync::Arc;
 
 use crate::errors::*;
@@ -196,7 +195,7 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         may_dist: bool,
         rewrite_includes_only: bool,
         preprocessor_cache_mode: bool,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync;
     /// Generate a command that can be used to invoke the C compiler to perform
@@ -565,18 +564,16 @@ where
             }
 
             match err.downcast::<ProcessError>() {
-                Ok(ProcessError(output)) => {
+                Ok(ProcessError(mut output)) => {
                     debug!(
-                        "[{}]: preprocessor returned error status {:?}",
-                        out_pretty,
-                        output.status.code().unwrap_or(0)
+                        "[{out_pretty}]: preprocessor returned error (code={:?}, desc={:?})",
+                        output.code(),
+                        output.desc()
                     );
                     // Drop the stdout since it's the preprocessor output,
                     // just hand back stderr and the exit status.
-                    bail!(ProcessError(process::Output {
-                        stdout: vec!(),
-                        ..output
-                    }))
+                    output.stdout = vec![];
+                    bail!(ProcessError(output))
                 }
                 Err(err) => {
                     warn!("[{out_pretty}]: preprocessor failed: {err:?}");
@@ -1343,7 +1340,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
         // Helper to use -print-file-name and -print-prog-name to look up
         // files by path.
         let named_file = |kind: &str, name: &str| -> Option<PathBuf> {
-            let mut output = process::Command::new(&self.executable)
+            let mut output = std::process::Command::new(&self.executable)
                 .arg(format!("-print-{}-name={}", kind, name))
                 .output()
                 .ok()?;
@@ -1472,7 +1469,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                     }
                 }
 
-                let _ = process::Command::new(&self.executable)
+                let _ = std::process::Command::new(&self.executable)
                     .arg("-show")
                     .output()
                     .and_then(|output| {

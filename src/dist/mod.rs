@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+#[cfg(feature = "dist-server")]
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -20,10 +21,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "dist-server")]
 use std::pin::Pin;
-use std::process;
 use std::time::Duration;
 
 use crate::errors::*;
+use crate::mock_command::ProcessOutput;
 
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 mod cache;
@@ -393,100 +394,6 @@ pub fn strings_to_osstrings(strings: &[String]) -> Vec<OsString> {
         .iter()
         .map(|arg| std::ffi::OsStr::new(arg).to_os_string())
         .collect::<Vec<_>>()
-}
-
-// process::Output is not serialize so we have a custom Output type. However,
-// we cannot encode all information in here, such as Unix signals, as the other
-// end may not understand them (e.g. if it's Windows)
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProcessOutput {
-    pub code: i32,
-    pub status: String,
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-}
-
-impl ProcessOutput {
-    #[cfg(unix)]
-    pub fn success(&self) -> bool {
-        self.code == 0
-    }
-    #[cfg(test)]
-    pub fn fake_output(code: i32, stdout: Vec<u8>, stderr: Vec<u8>) -> Self {
-        Self {
-            code,
-            status: String::new(),
-            stdout,
-            stderr,
-        }
-    }
-}
-
-#[cfg(unix)]
-impl From<process::Output> for ProcessOutput {
-    fn from(output: process::Output) -> Self {
-        let process::Output {
-            status,
-            stdout,
-            stderr,
-        } = output;
-        let (code, status) = match (status.code(), status.signal()) {
-            (Some(c), _) => (c, format!("status: exit({c})")),
-            (None, Some(_)) => (-1, format!("{status}")),
-            (None, None) => (-2, format!("{status}")),
-        };
-        Self {
-            code,
-            status,
-            stdout,
-            stderr,
-        }
-    }
-}
-
-impl fmt::Debug for ProcessOutput {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{{ {} }}",
-            [
-                Some(self.status.clone()),
-                (!self.stdout.is_empty())
-                    .then(|| format!("stdout: \"{:#}\"", String::from_utf8_lossy(&self.stdout))),
-                (!self.stderr.is_empty())
-                    .then(|| format!("stderr: \"{:#}\"", String::from_utf8_lossy(&self.stderr))),
-            ]
-            .into_iter()
-            .flatten()
-            .join(", ")
-        )
-    }
-}
-
-#[cfg(unix)]
-use std::os::unix::process::ExitStatusExt;
-#[cfg(windows)]
-use std::os::windows::process::ExitStatusExt;
-#[cfg(unix)]
-fn exit_status(code: i32) -> process::ExitStatus {
-    process::ExitStatus::from_raw(code)
-}
-#[cfg(windows)]
-fn exit_status(code: i32) -> process::ExitStatus {
-    // TODO: this is probably a subideal conversion - it's not clear how Unix exit codes map to
-    // Windows exit codes (other than 0 being a success)
-    process::ExitStatus::from_raw(code as u32)
-}
-impl From<ProcessOutput> for process::Output {
-    fn from(o: ProcessOutput) -> Self {
-        // TODO: handle signals, i.e. None code
-        process::Output {
-            status: exit_status(o.code),
-            stdout: o.stdout,
-            stderr: o.stderr,
-        }
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

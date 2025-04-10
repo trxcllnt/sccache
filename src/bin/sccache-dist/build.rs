@@ -20,7 +20,8 @@ use flate2::read::ZlibDecoder as ZlibDecoderSync;
 use fs_err as fs;
 use itertools::Itertools;
 use libmount::Overlay;
-use sccache::dist::{BuildResult, BuilderIncoming, CompileCommand, OutputData, ProcessOutput};
+use sccache::dist::{BuildResult, BuilderIncoming, CompileCommand, OutputData};
+use sccache::mock_command::ProcessOutput;
 use std::io;
 use std::path::{self, Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -350,14 +351,14 @@ impl OverlayBuilder {
             let mut outputs = vec![];
 
             if !output.success() {
-                if matches!(output.code, -1 | -2) {
+                if output.exit() {
+                    tracing::trace!("[perform_build({job_id})]: compile failure: {output:?}");
+                } else {
                     // Warn on abnormal terminations (i.e. SIGTERM, SIGKILL)
                     tracing::warn!(
                         "[perform_build({job_id})]: {executable:?} terminated with {}",
-                        output.status
+                        output.desc()
                     );
-                } else {
-                    tracing::trace!("[perform_build({job_id})]: compile failure: {output:?}");
                 }
             } else {
                 tracing::trace!("[perform_build({job_id})]: compile success: {output:?}");
@@ -661,14 +662,14 @@ impl DockerBuilder {
         let mut outputs = vec![];
 
         if !output.success() {
-            if matches!(output.code, -1 | -2) {
+            if output.exit() {
+                tracing::trace!("[perform_build({job_id})]: compile failure: {output:?}");
+            } else {
                 // Warn on abnormal terminations (i.e. SIGTERM, SIGKILL)
                 tracing::warn!(
                     "[perform_build({job_id})]: {executable:?} terminated with {}",
-                    output.status
+                    output.desc()
                 );
-            } else {
-                tracing::trace!("[perform_build({job_id})]: compile failure: {output:?}");
             }
         } else {
             tracing::trace!("[perform_build({job_id})]: compile success: {output:?}");

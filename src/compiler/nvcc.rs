@@ -23,7 +23,8 @@ use crate::compiler::{
     CompileCommandImpl, CompilerArguments, Language,
 };
 use crate::mock_command::{
-    exit_status, CommandChild, CommandCreator, CommandCreatorSync, ExitStatusValue, RunCommand,
+    exit_status, CommandChild, CommandCreator, CommandCreatorSync, ProcessOutput, ProcessStatus,
+    RunCommand,
 };
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist, protocol, server};
@@ -170,7 +171,7 @@ impl CCompilerImpl for Nvcc {
         may_dist: bool,
         rewrite_includes_only: bool,
         _preprocessor_cache_mode: bool,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
@@ -539,7 +540,7 @@ impl CompileCommandImpl for NvccCompileCommand {
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
@@ -599,11 +600,7 @@ impl CompileCommandImpl for NvccCompileCommand {
             fs::remove_dir_all(out_dir).ok();
         };
 
-        let mut output = process::Output {
-            status: process::ExitStatus::default(),
-            stdout: vec![],
-            stderr: vec![],
-        };
+        let mut output = ProcessOutput::default();
 
         let n = nvcc_subcommand_groups.len();
         let cuda_front_end_range = if n > 0 { 0..1 } else { 0..0 };
@@ -630,7 +627,7 @@ impl CompileCommandImpl for NvccCompileCommand {
                     output = aggregate_output(output, result.unwrap_or_else(error_to_output));
                 }
 
-                if !output.status.success() {
+                if !output.success() {
                     output.stdout.shrink_to_fit();
                     output.stderr.shrink_to_fit();
                     maybe_keep_temps_then_clean();
@@ -1480,17 +1477,13 @@ async fn run_nvcc_subcommands_group<T>(
     cwd: &Path,
     commands: &[NvccGeneratedSubcommand],
     output_path: &Path,
-) -> Result<process::Output>
+) -> Result<ProcessOutput>
 where
     T: CommandCreatorSync,
 {
-    let mut output = process::Output {
-        status: process::ExitStatus::default(),
-        stdout: vec![],
-        stderr: vec![],
-    };
+    let mut output = ProcessOutput::default();
 
-    async fn run_subcommand<T>(cmd: &NvccGeneratedSubcommand, creator: &T) -> process::Output
+    async fn run_subcommand<T>(cmd: &NvccGeneratedSubcommand, creator: &T) -> ProcessOutput
     where
         T: CommandCreatorSync,
     {
@@ -1572,7 +1565,7 @@ where
                                     .collect::<Vec<_>>(),
                             )
                             .await
-                            .map_or_else(error_to_output, |res| compile_result_to_output(exe, res)),
+                            .map_or_else(error_to_output, result_to_output),
                     },
                 }
             }
@@ -1580,7 +1573,7 @@ where
 
         output = aggregate_output(output, out);
 
-        if !output.status.success() {
+        if !output.success() {
             break;
         }
     }
@@ -1588,68 +1581,27 @@ where
     Ok(output)
 }
 
-fn aggregate_output(lhs: process::Output, rhs: process::Output) -> process::Output {
-    process::Output {
-        status: exit_status(
-            std::cmp::max(status_to_code(lhs.status), status_to_code(rhs.status))
-                as ExitStatusValue,
-        ),
-        stdout: [lhs.stdout, rhs.stdout].concat(),
-        stderr: [lhs.stderr, rhs.stderr].concat(),
-    }
+fn aggregate_output(lhs: ProcessOutput, rhs: ProcessOutput) -> ProcessOutput {
+    ProcessOutput::new(
+        std::cmp::max(!lhs.success() as i64, !rhs.success() as i64),
+        [lhs.stdout, rhs.stdout].concat(),
+        [lhs.stderr, rhs.stderr].concat(),
+    )
 }
 
-fn error_to_output(err: Error) -> process::Output {
+fn error_to_output(err: Error) -> ProcessOutput {
     match err.downcast::<ProcessError>() {
         Ok(ProcessError(out)) => out,
-        Err(err) => process::Output {
-            status: exit_status(1 as ExitStatusValue),
-            stdout: vec![],
-            stderr: err.to_string().into_bytes(),
-        },
+        Err(err) => ProcessOutput::new(1, vec![], err.to_string().into_bytes()),
     }
 }
 
-fn compile_result_to_output(exe: &Path, res: protocol::CompileFinished) -> process::Output {
-    if let Some(signal) = res.signal {
-        return process::Output {
-            status: exit_status(signal as ExitStatusValue),
-            stdout: res.stdout,
-            stderr: [
-                format!(
-                    "{} terminated (signal: {})",
-                    exe.file_stem().unwrap().to_string_lossy(),
-                    signal
-                )
-                .as_bytes(),
-                &res.stderr,
-            ]
-            .concat(),
-        };
-    }
-    process::Output {
-        status: exit_status(res.retcode.unwrap_or(0) as ExitStatusValue),
-        stdout: res.stdout,
-        stderr: res.stderr,
-    }
-}
-
-#[cfg(unix)]
-fn status_to_code(res: process::ExitStatus) -> ExitStatusValue {
-    if res.success() {
-        0 as ExitStatusValue
-    } else {
-        res.signal().or(res.code()).unwrap_or(1) as ExitStatusValue
-    }
-}
-
-#[cfg(windows)]
-fn status_to_code(res: process::ExitStatus) -> ExitStatusValue {
-    if res.success() {
-        0 as ExitStatusValue
-    } else {
-        res.code().unwrap_or(1) as ExitStatusValue
-    }
+fn result_to_output(res: protocol::CompileFinished) -> ProcessOutput {
+    ProcessOutput::new(
+        !res.output.success() as i64,
+        res.output.stdout,
+        res.output.stderr,
+    )
 }
 
 counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [

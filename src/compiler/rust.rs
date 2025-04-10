@@ -656,7 +656,7 @@ impl RustupProxy {
         let mut child = creator.new_command_sync(compiler_executable);
         child.env_clear().envs(env.to_vec()).args(&["+stable"]);
         let state = run_input_output(child, None).await.map(move |output| {
-            if output.status.success() {
+            if output.success() {
                 trace!("proxy: Found a compiler proxy managed by rustup");
                 ProxyPath::ToBeDiscovered
             } else {

@@ -18,7 +18,7 @@ use crate::compiler::{
     clang, gcc, write_temp_file, CCompileCommand, Cacheable, ColorMode, CompileCommand,
     CompilerArguments, Language, SingleCompileCommand,
 };
-use crate::mock_command::{CommandCreatorSync, RunCommand};
+use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::util::{encode_path, run_input_output, OsStrExt};
 use crate::{counted_array, dist};
 use async_trait::async_trait;
@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{self, Stdio};
+use std::process::Stdio;
 
 use crate::errors::*;
 
@@ -75,7 +75,7 @@ impl CCompilerImpl for Msvc {
         may_dist: bool,
         rewrite_includes_only: bool,
         _preprocessor_cache_mode: bool,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
@@ -216,11 +216,11 @@ where
 
     let output = run_input_output(cmd, None).await?;
 
-    if !output.status.success() {
+    if !output.success() {
         bail!("Failed to detect showIncludes prefix")
     }
 
-    let process::Output {
+    let ProcessOutput {
         stdout: stdout_bytes,
         ..
     } = output;
@@ -950,7 +950,7 @@ pub async fn preprocess<T>(
     includes_prefix: &str,
     rewrite_includes_only: bool,
     is_clang: bool,
-) -> Result<process::Output>
+) -> Result<ProcessOutput>
 where
     T: CommandCreatorSync,
 {
@@ -973,7 +973,7 @@ where
     let includes_prefix = includes_prefix.to_string();
     let cwd = cwd.to_owned();
 
-    let output = run_input_output(cmd, None).await?;
+    let mut output = run_input_output(cmd, None).await?;
 
     if !is_clang {
         return Ok(output);
@@ -991,13 +991,8 @@ where
         encode_path(&mut f, &parsed_args.input)
             .with_context(|| format!("Couldn't encode input filename: '{:?}'", objfile))?;
         write!(f, " ")?;
-        let process::Output {
-            status,
-            stdout,
-            stderr: stderr_bytes,
-        } = output;
         let stderr =
-            from_local_codepage(&stderr_bytes).context("Failed to convert preprocessor stderr")?;
+            from_local_codepage(&output.stderr).context("Failed to convert preprocessor stderr")?;
         let mut deps = HashSet::new();
         let mut stderr_bytes = vec![];
         for line in stderr.lines() {
@@ -1027,11 +1022,8 @@ where
                 writeln!(f, "{}:", dep)?;
             }
         }
-        Ok(process::Output {
-            status,
-            stdout,
-            stderr: stderr_bytes,
-        })
+        output.stderr = stderr_bytes;
+        Ok(output)
     } else {
         Ok(output)
     }

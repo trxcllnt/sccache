@@ -478,20 +478,20 @@ fn handle_compile_finished(
     write_output(
         std::io::stdout(),
         stdout,
-        &response.stdout,
+        &response.output.stdout,
         response.color_mode,
     )?;
     write_output(
         std::io::stderr(),
         stderr,
-        &response.stderr,
+        &response.output.stderr,
         response.color_mode,
     )?;
 
-    if let Some(ret) = response.retcode {
-        trace!("compiler exited with status {}", ret);
-        Ok(ret)
-    } else if let Some(signal) = response.signal {
+    if let Some(code) = response.output.code() {
+        trace!("compiler exited with status {}", code);
+        Ok(code as i32)
+    } else if let Some(signal) = response.output.signal() {
         println!("sccache: Compiler killed by signal {}", signal);
         Ok(-2)
     } else {

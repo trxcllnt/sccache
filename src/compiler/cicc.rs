@@ -23,7 +23,7 @@ use crate::compiler::{
 };
 use crate::{counted_array, dist};
 
-use crate::mock_command::{CommandCreator, CommandCreatorSync, RunCommand};
+use crate::mock_command::{CommandCreator, CommandCreatorSync, ProcessOutput, RunCommand};
 
 use async_trait::async_trait;
 
@@ -71,7 +71,7 @@ impl CCompilerImpl for Cicc {
         _may_dist: bool,
         _rewrite_includes_only: bool,
         _preprocessor_cache_mode: bool,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
@@ -231,13 +231,16 @@ where
     })
 }
 
-pub async fn preprocess(cwd: &Path, parsed_args: &ParsedArguments) -> Result<process::Output> {
+pub async fn preprocess(cwd: &Path, parsed_args: &ParsedArguments) -> Result<ProcessOutput> {
     std::fs::read(cwd.join(&parsed_args.input))
         .map_err(anyhow::Error::new)
-        .map(|s| process::Output {
-            status: process::ExitStatus::default(),
-            stdout: s,
-            stderr: vec![],
+        .map(|s| {
+            process::Output {
+                status: process::ExitStatus::default(),
+                stdout: s,
+                stderr: vec![],
+            }
+            .into()
         })
 }
 

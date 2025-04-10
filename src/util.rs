@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::mock_command::{CommandChild, RunCommand};
+use crate::mock_command::{CommandChild, ProcessOutput, RunCommand};
 use blake3::Hasher as blake3_Hasher;
 use byteorder::{BigEndian, ByteOrder};
 use fs::File;
@@ -406,7 +406,7 @@ pub fn fmt_duration_as_secs(duration: &Duration) -> String {
 ///
 /// This was lifted from `std::process::Child::wait_with_output` and modified
 /// to also write to stdin.
-async fn wait_with_input_output<T>(mut child: T, input: Option<Vec<u8>>) -> Result<process::Output>
+async fn wait_with_input_output<T>(mut child: T, input: Option<Vec<u8>>) -> Result<ProcessOutput>
 where
     T: CommandChild + 'static,
 {
@@ -461,14 +461,15 @@ where
         status,
         stdout: stdout.unwrap_or_default(),
         stderr: stderr.unwrap_or_default(),
-    })
+    }
+    .into())
 }
 
 /// Run `command`, writing `input` to its stdin if it is `Some` and return the exit status and output.
 ///
 /// If the command returns a non-successful exit status, an error of `SccacheError::ProcessError`
 /// will be returned containing the process output.
-pub async fn run_input_output<C>(mut command: C, input: Option<Vec<u8>>) -> Result<process::Output>
+pub async fn run_input_output<C>(mut command: C, input: Option<Vec<u8>>) -> Result<ProcessOutput>
 where
     C: RunCommand,
 {
@@ -486,7 +487,7 @@ where
     wait_with_input_output(child, input)
         .await
         .and_then(|output| {
-            if output.status.success() {
+            if output.success() {
                 Ok(output)
             } else {
                 Err(ProcessError(output).into())

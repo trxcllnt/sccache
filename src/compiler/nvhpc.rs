@@ -21,7 +21,7 @@ use crate::compiler::gcc::ArgData::*;
 use crate::compiler::{
     gcc, write_temp_file, CCompileCommand, Cacheable, CompileCommand, CompilerArguments, Language,
 };
-use crate::mock_command::{CommandCreator, CommandCreatorSync, RunCommand};
+use crate::mock_command::{CommandCreator, CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist};
 use async_trait::async_trait;
@@ -82,7 +82,7 @@ impl CCompilerImpl for Nvhpc {
         may_dist: bool,
         rewrite_includes_only: bool,
         _preprocessor_cache_mode: bool,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {

@@ -23,7 +23,7 @@ use crate::compiler::{
     SingleCompileCommand,
 };
 use crate::errors::*;
-use crate::mock_command::{CommandCreatorSync, RunCommand};
+use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist};
 use async_trait::async_trait;
@@ -34,7 +34,6 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process;
 
 #[derive(Clone, Debug)]
 pub struct Diab {
@@ -72,7 +71,7 @@ impl CCompilerImpl for Diab {
         may_dist: bool,
         _rewrite_includes_only: bool,
         _preprocessor_cache_mode: bool,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
@@ -327,7 +326,7 @@ pub async fn preprocess<T>(
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     _may_dist: bool,
-) -> Result<process::Output>
+) -> Result<ProcessOutput>
 where
     T: CommandCreatorSync,
 {

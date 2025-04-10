@@ -23,7 +23,7 @@ use crate::config;
 use crate::config::Config;
 use crate::dist;
 use crate::jobserver::Client;
-use crate::mock_command::{CommandCreatorSync, ProcessCommandCreator};
+use crate::mock_command::{CommandCreatorSync, ProcessCommandCreator, ProcessOutput};
 use crate::protocol::{Compile, CompileFinished, CompileResponse, Request, Response};
 use crate::util;
 #[cfg(feature = "dist-client")]
@@ -50,7 +50,6 @@ use std::mem;
 use std::os::linux::net::SocketAddrExt;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::process::{ExitStatus, Output};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -127,29 +126,29 @@ fn notify_server_startup(name: &Option<OsString>, status: ServerStartup) -> Resu
     notify_server_startup_internal(pipe, status)
 }
 
-#[cfg(unix)]
-fn get_signal(status: &ExitStatus) -> Option<i32> {
-    use std::os::unix::prelude::*;
-    status.signal()
-}
-#[cfg(windows)]
-fn get_signal(_status: &ExitStatus) -> Option<i32> {
-    None
-}
+// #[cfg(unix)]
+// fn get_signal(status: &ExitStatus) -> Option<i32> {
+//     use std::os::unix::prelude::*;
+//     status.signal()
+// }
+// #[cfg(windows)]
+// fn get_signal(_status: &ExitStatus) -> Option<i32> {
+//     None
+// }
 
-fn set_retcode_or_signal(res: &mut CompileFinished, status: &ExitStatus) {
-    if let Some(code) = status.code() {
-        res.retcode = Some(code)
-    } else if let Some(signal) = get_signal(status) {
-        res.signal = Some(signal)
-    } else if cfg!(windows) {
-        // No signals on Windows, assume exited with error
-        res.retcode = Some(1)
-    } else {
-        // If no code or signal on Unix, assume SIGKILL
-        res.signal = Some(9)
-    }
-}
+// fn set_retcode_or_signal(res: &mut CompileFinished, status: &ExitStatus) {
+//     if let Some(code) = status.code() {
+//         res.retcode = Some(code)
+//     } else if let Some(signal) = get_signal(status) {
+//         res.signal = Some(signal)
+//     } else if cfg!(windows) {
+//         // No signals on Windows, assume exited with error
+//         res.retcode = Some(1)
+//     } else {
+//         // If no code or signal on Unix, assume SIGKILL
+//         res.signal = Some(9)
+//     }
+// }
 
 pub struct DistClientContainer {
     // The actual dist client state
@@ -1544,17 +1543,16 @@ where
                         // Make sure the write guard has been dropped ASAP.
                         drop(stats);
 
-                        let Output {
-                            status,
-                            stdout,
-                            stderr,
-                        } = out;
+                        // let Output {
+                        //     status,
+                        //     stdout,
+                        //     stderr,
+                        // } = out;
 
-                        trace!("[{}]: CompileFinished retcode: {}", out_pretty, status);
+                        trace!("[{}]: CompileFinished: {}", out_pretty, out.desc());
 
-                        set_retcode_or_signal(&mut res, &status);
-                        res.stdout = stdout;
-                        res.stderr = stderr;
+                        // set_retcode_or_signal(&mut res, &status);
+                        res.output = out;
                     }
                     Err(err) => {
                         match err.downcast::<ProcessError>() {
@@ -1564,19 +1562,19 @@ where
                                 // Make sure the write guard has been dropped ASAP.
                                 drop(stats);
 
-                                set_retcode_or_signal(&mut res, &output.status);
-                                res.stdout = output.stdout;
-                                res.stderr = output.stderr;
+                                res.output = output;
+                                // set_retcode_or_signal(&mut res, &output.status);
+                                // res.stdout = output.stdout;
+                                // res.stderr = output.stderr;
                             }
                             Err(err) => match err.downcast::<HttpClientError>() {
                                 Ok(HttpClientError(msg)) => {
                                     // Make sure the write guard has been dropped ASAP.
                                     drop(stats);
                                     me.dist_client.reset_state().await;
-                                    let errmsg = format!("[{out_pretty}] http error status: {msg}");
-                                    error!("{}", errmsg);
-                                    res.retcode = Some(1);
-                                    res.stderr = errmsg.as_bytes().to_vec();
+                                    let msg = format!("[{out_pretty}] http error status: {msg}");
+                                    error!("{}", msg);
+                                    res.output = ProcessOutput::new(1, res.output.stdout, msg.as_bytes().to_vec());
                                 }
                                 Err(err) => {
                                     stats.cache_errors.increment(&kind, &lang);
@@ -1594,8 +1592,7 @@ where
                                         let _ = writeln!(error, "sccache: caused by: {}", e);
                                     }
                                     //TODO: figure out a better way to communicate this?
-                                    res.retcode = Some(-2);
-                                    res.stderr = error.into_bytes();
+                                    res.output = ProcessOutput::new(-2, res.output.stdout, error.into_bytes());
                                 }
                             },
                         }

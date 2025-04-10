@@ -33,7 +33,7 @@ use crate::compiler::tasking_vx::TaskingVX;
 use crate::dist::pkg;
 #[cfg(feature = "dist-client")]
 use crate::lru_disk_cache;
-use crate::mock_command::{exit_status, CommandChild, CommandCreatorSync, RunCommand};
+use crate::mock_command::{CommandChild, CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::server;
 use crate::util::{fmt_duration_as_secs, run_input_output};
 use crate::{counted_array, dist};
@@ -49,7 +49,7 @@ use std::future::Future;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::process::{self, Stdio};
+use std::process::Stdio;
 use std::str;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -86,7 +86,7 @@ where
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
-    ) -> Result<process::Output>;
+    ) -> Result<ProcessOutput>;
 
     fn get_executable(&self) -> PathBuf;
     fn get_arguments(&self) -> Vec<OsString>;
@@ -145,7 +145,7 @@ where
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
-    ) -> Result<process::Output> {
+    ) -> Result<ProcessOutput> {
         self.cmd.execute(service, creator).await
     }
 
@@ -165,7 +165,7 @@ pub trait CompileCommandImpl: Send + Sync + Clone + 'static {
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync;
 }
@@ -197,7 +197,7 @@ impl CompileCommandImpl for SingleCompileCommand {
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
@@ -339,7 +339,7 @@ pub type DistPackagers = (
 );
 
 enum CacheLookupResult {
-    Success(CompileResult, process::Output),
+    Success(CompileResult, ProcessOutput),
     Miss(MissType),
 }
 
@@ -435,7 +435,7 @@ where
         env_vars: Vec<(OsString, OsString)>,
         cache_control: CacheControl,
         runtime: tokio::runtime::Handle,
-    ) -> Result<(CompileResult, process::Output)> {
+    ) -> Result<(CompileResult, ProcessOutput)> {
         let out_pretty = self.output_pretty().into_owned();
         if log_enabled!(log::Level::Debug) {
             // [<file>] get_cached_or_compile: "/path/to/exe" <args...>
@@ -553,7 +553,7 @@ where
 
                 let (hash_key, outputs, cacheable, dist_type, output) = res?;
 
-                if !output.status.success() {
+                if !output.success() {
                     trace!(
                         "[{out_pretty}]: Compiled in {}, but failed, not storing in cache",
                         fmt_duration_as_secs(&duration)
@@ -936,14 +936,11 @@ impl<'a> CacheLookup<'a> {
                 );
                 let stdout = entry.get_stdout();
                 let stderr = entry.get_stderr();
-                let output = process::Output {
-                    status: exit_status(0),
-                    stdout,
-                    stderr,
-                };
-                let hit = CompileResult::CacheHit(duration);
                 match entry.extract_objects(outputs.to_vec(), runtime).await {
-                    Ok(()) => Ok(CacheLookupResult::Success(hit, output)),
+                    Ok(()) => Ok(CacheLookupResult::Success(
+                        CompileResult::CacheHit(duration),
+                        ProcessOutput::new(0, stdout, stderr),
+                    )),
                     Err(e) => {
                         if e.downcast_ref::<DecompressionFailure>().is_some() {
                             debug!("[{}]: Failed to decompress object", out_pretty);
@@ -994,7 +991,7 @@ where
         Vec<FileObjectSource>,
         Cacheable,
         DistType,
-        process::Output,
+        ProcessOutput,
     )> {
         let Self {
             command_creator,
@@ -1026,7 +1023,7 @@ where
         Vec<FileObjectSource>,
         Cacheable,
         DistType,
-        process::Output,
+        ProcessOutput,
     )> {
         let Self {
             command_creator,
@@ -1121,7 +1118,7 @@ impl DistCompile {
         outputs: &[FileObjectSource],
         path_transformer: &mut dist::PathTransformer,
         sccache_service: &server::SccacheService<T>,
-    ) -> Result<(DistType, std::process::Output)> {
+    ) -> Result<(DistType, ProcessOutput)> {
         use dist::RunJobResponse;
         use std::io;
         use tokio_retry2::strategy::FibonacciBackoff;
@@ -1423,10 +1420,7 @@ impl DistCompile {
                         .handle_outputs(path_transformer, &output_paths, extra_inputs.as_slice())
                         .with_context(|| "Failed to rewrite outputs from compile"));
 
-                    break Ok((
-                        DistType::Ok(server_id),
-                        std::process::Output::from(result.output),
-                    ));
+                    break Ok((DistType::Ok(server_id), result.output));
                 }
             }
         };
@@ -2236,7 +2230,7 @@ compiler_version=__VERSION__
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     debug!("nothing useful in detection output {:?}", stdout);
-    debug!("compiler status: {}", output.status);
+    debug!("compiler status: {}", output.desc());
     debug!("compiler stderr:\n{}", stderr);
 
     bail!(stderr.into_owned())
@@ -2861,7 +2855,7 @@ LLVM version: 6.0",
             }
             _ => panic!("Unexpected compile result: {:?}", cached),
         }
-        assert_eq!(exit_status(0), res.status);
+        assert_eq!(0, res.code().unwrap());
         assert_eq!(COMPILER_STDOUT, res.stdout.as_slice());
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
         // Now compile again, which should be a cache hit.
@@ -2892,7 +2886,7 @@ LLVM version: 6.0",
         // Ensure that the object file was created.
         assert!(fs::metadata(&obj).map(|m| m.len() > 0).unwrap());
         assert_eq!(CompileResult::CacheHit(Duration::new(0, 0)), cached);
-        assert_eq!(exit_status(0), res.status);
+        assert_eq!(0, res.code().unwrap());
         assert_eq!(COMPILER_STDOUT, res.stdout.as_slice());
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
     }
@@ -2990,7 +2984,7 @@ LLVM version: 6.0",
             }
             _ => panic!("Unexpected compile result: {:?}", cached),
         }
-        assert_eq!(exit_status(0), res.status);
+        assert_eq!(0, res.code().unwrap());
         assert_eq!(COMPILER_STDOUT, res.stdout.as_slice());
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
         // Now compile again, which should be a cache hit.
@@ -3021,7 +3015,7 @@ LLVM version: 6.0",
         // Ensure that the object file was created.
         assert!(fs::metadata(&obj).map(|m| m.len() > 0).unwrap());
         assert_eq!(CompileResult::CacheHit(Duration::new(0, 0)), cached);
-        assert_eq!(exit_status(0), res.status);
+        assert_eq!(0, res.code().unwrap());
         assert_eq!(COMPILER_STDOUT, res.stdout.as_slice());
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
     }
@@ -3111,7 +3105,7 @@ LLVM version: 6.0",
             _ => panic!("Unexpected compile result: {:?}", cached),
         }
 
-        assert_eq!(exit_status(0), res.status);
+        assert_eq!(0, res.code().unwrap());
         assert_eq!(COMPILER_STDOUT, res.stdout.as_slice());
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
     }
@@ -3297,7 +3291,7 @@ LLVM version: 6.0",
             }
             _ => panic!("Unexpected compile result: {:?}", cached),
         }
-        assert_eq!(exit_status(0), res.status);
+        assert_eq!(0, res.code().unwrap());
         assert_eq!(COMPILER_STDOUT, res.stdout.as_slice());
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
         // Now compile again, but force recaching.
@@ -3325,7 +3319,7 @@ LLVM version: 6.0",
             }
             _ => panic!("Unexpected compile result: {:?}", cached),
         }
-        assert_eq!(exit_status(0), res.status);
+        assert_eq!(0, res.code().unwrap());
         assert_eq!(COMPILER_STDOUT, res.stdout.as_slice());
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
     }
@@ -3410,7 +3404,7 @@ LLVM version: 6.0",
             })
             .unwrap();
         assert_eq!(cached, CompileResult::Error);
-        assert_eq!(exit_status(1), res.status);
+        assert_eq!(1, res.code().or(res.signal()).unwrap());
         // Shouldn't get anything on stdout, since that would just be preprocessor spew!
         assert_eq!(b"", res.stdout.as_slice());
         assert_eq!(PREPROCESSOR_STDERR, res.stderr.as_slice());
@@ -3528,7 +3522,7 @@ LLVM version: 6.0",
                 }
                 _ => panic!("Unexpected compile result: {:?}", cached),
             }
-            assert_eq!(exit_status(0), res.status);
+            assert_eq!(0, res.code().unwrap());
             assert_eq!(COMPILER_STDOUT, res.stdout.as_slice());
             assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
         }
@@ -3539,10 +3533,11 @@ LLVM version: 6.0",
 #[cfg(feature = "dist-client")]
 mod test_dist {
     use crate::dist::{
-        self, CompileCommand, NewJobResponse, OutputData, ProcessOutput, RunJobResponse,
-        SchedulerStatus, SubmitToolchainResult, Toolchain,
+        self, CompileCommand, NewJobResponse, OutputData, RunJobResponse, SchedulerStatus,
+        SubmitToolchainResult, Toolchain,
     };
     use crate::dist::{pkg, BuildResult};
+    use crate::mock_command::ProcessOutput;
     use async_trait::async_trait;
     use std::path::{Path, PathBuf};
     use std::sync::{atomic::AtomicBool, Arc};
@@ -3845,7 +3840,7 @@ mod test_dist {
                 tc: Toolchain {
                     archive_id: "somearchiveid".to_owned(),
                 },
-                output: ProcessOutput::fake_output(code, stdout, stderr),
+                output: ProcessOutput::new(code as i64, stdout, stderr),
             })
         }
     }

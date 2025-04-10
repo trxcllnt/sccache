@@ -18,7 +18,7 @@ use crate::compiler::{
     clang, CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language,
     SingleCompileCommand,
 };
-use crate::mock_command::{CommandCreatorSync, RunCommand};
+use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist};
 use async_trait::async_trait;
@@ -30,7 +30,6 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process;
 
 use crate::errors::*;
 
@@ -72,7 +71,7 @@ impl CCompilerImpl for Gcc {
         may_dist: bool,
         rewrite_includes_only: bool,
         preprocessor_cache_mode: bool,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
@@ -799,7 +798,7 @@ pub async fn preprocess<F, T>(
     rewrite_includes_only: bool,
     ignorable_whitespace_flags: Vec<String>,
     language_to_arg: F,
-) -> Result<process::Output>
+) -> Result<ProcessOutput>
 where
     F: Fn(Language) -> Option<&'static str>,
     T: CommandCreatorSync,

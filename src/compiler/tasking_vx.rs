@@ -25,7 +25,7 @@ use crate::{
     },
     counted_array, dist,
     errors::*,
-    mock_command::{CommandCreatorSync, RunCommand},
+    mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     util::run_input_output,
 };
 use async_trait::async_trait;
@@ -35,7 +35,6 @@ use std::{
     collections::HashMap,
     ffi::OsString,
     path::{Path, PathBuf},
-    process,
 };
 
 #[derive(Clone, Debug)]
@@ -74,7 +73,7 @@ impl CCompilerImpl for TaskingVX {
         may_dist: bool,
         rewrite_includes_only: bool,
         _preprocessor_cache_mode: bool,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
@@ -306,7 +305,7 @@ async fn preprocess<T>(
     env_vars: &[(OsString, OsString)],
     _may_dist: bool,
     _rewrite_includes_only: bool,
-) -> Result<process::Output>
+) -> Result<ProcessOutput>
 where
     T: CommandCreatorSync,
 {
