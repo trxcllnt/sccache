@@ -12,8 +12,7 @@ ulimit -n "$(ulimit -Hn)"
 sudo rm -rf /tmp/sccache/* /tmp/sccache_*
 mkdir -p /tmp/sccache/{jobs,toolchains}
 
-sudo --preserve-env=AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY \
-    RUST_BACKTRACE="${RUST_BACKTRACE:-1}" \
+env RUST_BACKTRACE="${RUST_BACKTRACE:-1}" \
     SCCACHE_NO_DAEMON=1 \
     SCCACHE_DIST_OS=linux \
     SCCACHE_DIST_ARCH="$(dpkg --print-architecture)" \

@@ -7,11 +7,11 @@ services:
       - "5672:5672"
       - "15672:15672"
 
-  # Alternatively use Redis as a message broker, or for jobs/toolchain storage
-  # redis:
-  #   image: redis
-  #   ports:
-  #     - "6379:6379"
+  # Use Redis for job storage
+  redis:
+    image: redis
+    ports:
+      - "6379:6379"
 
   # Aggregate metrics
   prometheus:
