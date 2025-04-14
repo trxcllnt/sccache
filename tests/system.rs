@@ -1376,6 +1376,35 @@ int main(int argc, char** argv) {
         },
     );
 
+    // Test that compiling sm80 PTX and assembling as an sm86 cubin
+    // yields a cache hit for the PTX and cache miss for the cubin
+    trace!("compile A compute_80,sm_86");
+    run_cuda_test(
+        "-c",
+        Path::new(INPUT_FOR_CUDA_A), // relative path for input
+        &build_dir.join(OUTPUT),     // relative path for output
+        &[
+            extra_args.as_slice(),
+            &["-gencode=arch=compute_80,code=sm_86".into()],
+        ]
+        .concat(),
+        AdditionalStats {
+            cache_writes: Some(2),
+            compilations: Some(3),
+            compile_requests: Some(1),
+            requests_executed: Some(5),
+            cache_hits: Some(vec![
+                (CCompilerKind::Cicc, Language::Ptx, 1),
+                (CCompilerKind::CudaFE, Language::CudaFE, 1),
+            ]),
+            cache_misses: Some(vec![
+                (CCompilerKind::Nvcc, Language::Cuda, 1),
+                (CCompilerKind::Ptxas, Language::Cubin, 1),
+            ]),
+            ..Default::default()
+        },
+    );
+
     if !cfg!(target_os = "windows") {
         // Test compiling an executable (`nvcc -x cu test_a.cu -o test_a`)
         trace!("compile A to executable");
