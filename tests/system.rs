@@ -151,7 +151,10 @@ fn compile_cuda_cmdline<T: AsRef<OsStr>>(
     if !extra_args.is_empty() {
         arg.append(&mut extra_args.to_vec())
     }
-    arg.iter().filter(|x| *x != "").cloned().collect::<Vec<_>>()
+    arg.iter()
+        .filter(|x| !x.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
 }
 
 // TODO: This will fail if gcc/clang is actually a ccache wrapper, as it is the
@@ -732,14 +735,19 @@ fn test_nvcc_cuda_compiles(
     compiler: &Compiler,
     tempdir: &Path,
     with_debug_flags: bool,
+    with_rdc: bool,
 ) {
     let mut stats = client.stats().unwrap();
 
-    let extra_args = if with_debug_flags {
+    let mut extra_args = if with_debug_flags {
         vec!["-G".into()]
     } else {
         vec![]
     };
+
+    if with_rdc {
+        extra_args.push("-rdc=true".into());
+    }
 
     let Compiler {
         name,
@@ -1503,14 +1511,19 @@ fn test_nvcc_proper_lang_stat_tracking(
     compiler: &Compiler,
     tempdir: &Path,
     with_debug_flags: bool,
+    with_rdc: bool,
 ) {
     let mut stats = client.stats().unwrap();
 
-    let extra_args = if with_debug_flags {
+    let mut extra_args = if with_debug_flags {
         vec!["--device-debug".into()]
     } else {
         vec![]
     };
+
+    if with_rdc {
+        extra_args.push("-rdc=true".into());
+    }
 
     let Compiler {
         name,
@@ -1686,9 +1699,10 @@ fn run_sccache_nvcc_cuda_command_tests(
     compiler: Compiler,
     tempdir: &Path,
     with_debug_flags: bool,
+    with_rdc: bool,
 ) {
-    test_nvcc_cuda_compiles(client, &compiler, tempdir, with_debug_flags);
-    test_nvcc_proper_lang_stat_tracking(client, &compiler, tempdir, with_debug_flags);
+    test_nvcc_cuda_compiles(client, &compiler, tempdir, with_debug_flags, with_rdc);
+    test_nvcc_proper_lang_stat_tracking(client, &compiler, tempdir, with_debug_flags, with_rdc);
 }
 
 fn test_clang_cuda_compiles(
@@ -1696,14 +1710,19 @@ fn test_clang_cuda_compiles(
     compiler: &Compiler,
     tempdir: &Path,
     with_debug_flags: bool,
+    with_rdc: bool,
 ) {
     let mut stats = client.stats().unwrap();
 
-    let extra_args = if with_debug_flags {
+    let mut extra_args = if with_debug_flags {
         vec!["-g".into(), "--cuda-noopt-device-debug".into()]
     } else {
         vec![]
     };
+
+    if with_rdc {
+        extra_args.push("-fgpu-rdc".into());
+    }
 
     let Compiler {
         name,
@@ -1827,14 +1846,19 @@ fn test_clang_proper_lang_stat_tracking(
     compiler: &Compiler,
     tempdir: &Path,
     with_debug_flags: bool,
+    with_rdc: bool,
 ) {
     let mut stats = client.stats().unwrap();
 
-    let extra_args = if with_debug_flags {
+    let mut extra_args = if with_debug_flags {
         vec!["-g".into(), "--cuda-noopt-device-debug".into()]
     } else {
         vec![]
     };
+
+    if with_rdc {
+        extra_args.push("-fgpu-rdc".into());
+    }
 
     let Compiler {
         name,
@@ -1983,9 +2007,10 @@ fn run_sccache_clang_cuda_command_tests(
     compiler: Compiler,
     tempdir: &Path,
     with_debug_flags: bool,
+    with_rdc: bool,
 ) {
-    test_clang_cuda_compiles(client, &compiler, tempdir, with_debug_flags);
-    test_clang_proper_lang_stat_tracking(client, &compiler, tempdir, with_debug_flags);
+    test_clang_cuda_compiles(client, &compiler, tempdir, with_debug_flags, with_rdc);
+    test_clang_proper_lang_stat_tracking(client, &compiler, tempdir, with_debug_flags, with_rdc);
 }
 
 fn test_hip_compiles(client: &SccacheClient, compiler: &Compiler, tempdir: &Path) {
@@ -2432,18 +2457,50 @@ fn test_stats_no_server() {
     );
 }
 
-#[test_case(true, false ; "with preprocessor cache")]
-#[test_case(false, false ; "without preprocessor cache")]
-#[test_case(true, true ; "with preprocessor cache and device debug")]
-#[test_case(false, true ; "without preprocessor cache and device debug")]
-#[cfg(any(unix, target_env = "msvc"))]
-fn test_cuda_sccache_command(preprocessor_cache_mode: bool, with_debug_flags: bool) {
-    let _ = env_logger::try_init();
+fn make_sccache_client(
+    preprocessor_cache_mode: bool,
+) -> (Option<tempfile::TempDir>, PathBuf, SccacheClient) {
     let tempdir = tempfile::Builder::new()
         .prefix("sccache_system_test")
         .tempdir()
         .unwrap();
+
+    // Persist the tempdir if SCCACHE_DEBUG is defined
+    let (tempdir_path, maybe_tempdir) = if env::var("SCCACHE_DEBUG").is_ok() {
+        (tempdir.into_path(), None)
+    } else {
+        (tempdir.path().to_path_buf(), Some(tempdir))
+    };
+
+    // Create the configurations
+    let sccache_cfg = sccache_client_cfg(&tempdir_path, preprocessor_cache_mode);
+    write_json_cfg(&tempdir_path, "sccache-cfg.json", &sccache_cfg);
+    let sccache_cached_cfg_path = tempdir_path.join("sccache-cached-cfg");
+    // Start the server daemon on a unique port
+    let client = SccacheClient::new(
+        &tempdir_path.join("sccache-cfg.json"),
+        &sccache_cached_cfg_path,
+    )
+    .start();
+
+    (maybe_tempdir, tempdir_path, client)
+}
+
+#[test_case(true, false, false ; "preprocessor_cache=true, device_debug=false, rdc=false")]
+#[test_case(false, false, false ; "preprocessor_cache=false, device_debug=false, rdc=false")]
+#[test_case(true, true, false ; "preprocessor_cache=true, device_debug=true, rdc=false")]
+#[test_case(false, true, false ; "preprocessor_cache=false, device_debug=true, rdc=false")]
+#[test_case(true, true, true ; "preprocessor_cache=true, device_debug=true, rdc=true")]
+#[test_case(false, true, true ; "preprocessor_cache=false, device_debug=true, rdc=true")]
+#[cfg(any(unix, target_env = "msvc"))]
+fn test_cuda_sccache_command(
+    preprocessor_cache_mode: bool,
+    with_debug_flags: bool,
+    with_rdc: bool,
+) {
+    let _ = env_logger::try_init();
     let compilers = find_cuda_compilers();
+
     println!(
         "CUDA compilers: {:?}",
         compilers
@@ -2451,43 +2508,31 @@ fn test_cuda_sccache_command(preprocessor_cache_mode: bool, with_debug_flags: bo
             .map(|c| c.exe.to_string_lossy())
             .collect::<Vec<_>>()
     );
-    if compilers.is_empty() {
-        warn!("No compilers found, skipping test");
-    } else {
-        // Persist the tempdir if SCCACHE_DEBUG is defined
-        let tempdir_pathbuf = if env::var("SCCACHE_DEBUG").is_ok() {
-            tempdir.into_path()
-        } else {
-            tempdir.path().to_path_buf()
-        };
-        let tempdir_path = tempdir_pathbuf.as_path();
 
-        // Create the configurations
-        let sccache_cfg = sccache_client_cfg(tempdir_path, preprocessor_cache_mode);
-        write_json_cfg(tempdir_path, "sccache-cfg.json", &sccache_cfg);
-        let sccache_cached_cfg_path = tempdir_path.join("sccache-cached-cfg");
-        // Start the server daemon on a unique port
-        let client = SccacheClient::new(
-            &tempdir_path.join("sccache-cfg.json"),
-            &sccache_cached_cfg_path,
-        )
-        .start();
-        for compiler in compilers {
-            match compiler.name {
-                "nvcc" => run_sccache_nvcc_cuda_command_tests(
-                    &client,
-                    compiler,
-                    tempdir_path,
-                    with_debug_flags,
-                ),
-                "clang++" => run_sccache_clang_cuda_command_tests(
-                    &client,
-                    compiler,
-                    tempdir_path,
-                    with_debug_flags,
-                ),
-                _ => {}
-            }
+    if compilers.is_empty() {
+        return warn!("No compilers found, skipping test");
+    }
+
+    // Create and start the sccache client
+    let (_tempdir, tempdir_path, client) = make_sccache_client(preprocessor_cache_mode);
+
+    for compiler in compilers {
+        match compiler.name {
+            "nvcc" => run_sccache_nvcc_cuda_command_tests(
+                &client,
+                compiler,
+                &tempdir_path,
+                with_debug_flags,
+                with_rdc,
+            ),
+            "clang++" => run_sccache_clang_cuda_command_tests(
+                &client,
+                compiler,
+                &tempdir_path,
+                with_debug_flags,
+                with_rdc,
+            ),
+            _ => {}
         }
     }
 }
@@ -2497,22 +2542,9 @@ fn test_cuda_sccache_command(preprocessor_cache_mode: bool, with_debug_flags: bo
 #[cfg(any(unix, target_env = "msvc"))]
 fn test_hip_sccache_command(preprocessor_cache_mode: bool) {
     let _ = env_logger::try_init();
-    let tempdir = tempfile::Builder::new()
-        .prefix("sccache_system_test")
-        .tempdir()
-        .unwrap();
-
     if let Some(compiler) = find_hip_compiler() {
-        // Create the configurations
-        let sccache_cfg = sccache_client_cfg(tempdir.path(), preprocessor_cache_mode);
-        write_json_cfg(tempdir.path(), "sccache-cfg.json", &sccache_cfg);
-        let sccache_cached_cfg_path = tempdir.path().join("sccache-cached-cfg");
-        // Start the server daemon on a unique port
-        let client = SccacheClient::new(
-            &tempdir.path().join("sccache-cfg.json"),
-            &sccache_cached_cfg_path,
-        )
-        .start();
-        run_sccache_hip_command_tests(&client, compiler, tempdir.path());
+        // Create and start the sccache client
+        let (_tempdir, tempdir_path, client) = make_sccache_client(preprocessor_cache_mode);
+        run_sccache_hip_command_tests(&client, compiler, &tempdir_path);
     }
 }

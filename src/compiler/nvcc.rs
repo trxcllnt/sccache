@@ -1292,9 +1292,11 @@ fn remap_generated_filenames(
                         // If the argument doesn't start with `-` and is a file that
                         // ends in one of these extensions, rename the file to a
                         // stable name that includes the compute architecture.
-                        let maybe_extension = (!arg.starts_with('-'))
-                            .then(|| extensions.iter().find(|ext| arg.ends_with(*ext)).copied())
-                            .unwrap_or(None);
+                        let maybe_extension = if !arg.starts_with('-') {
+                            extensions.iter().find(|ext| arg.ends_with(*ext)).copied()
+                        } else {
+                            None
+                        };
 
                         // If the argument is a file that ends in one of the above extensions:
                         // * If it's our first time seeing this file, compute a stable name for it

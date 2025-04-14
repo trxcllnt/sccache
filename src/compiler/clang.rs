@@ -221,6 +221,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     flag!("-fcxx-modules", TooHardFlag),
     take_arg!("-fdebug-compilation-dir", OsString, Separated, PassThrough),
     take_arg!("-fembed-offload-object", PathBuf, Concatenated('='), ExtraHashFile),
+    flag!("-fgpu-rdc", PassThroughFlag),
     flag!("-fmodules", TooHardFlag),
     flag!("-fno-color-diagnostics", NoDiagnosticsColorFlag),
     flag!("-fno-pch-timestamp", PassThroughFlag),
