@@ -297,7 +297,7 @@ jobs:
           - os: ubuntu-22.04
             rustc: "1.75.0"
             extra_desc: dist-server
-            extra_args: --no-default-features --features=dist-tests test_dist_
+            extra_args: --no-default-features --features="dist-tests" test_dist_
           - os: macos-13
             rustc: nightly
     # Disable on Windows for now as it fails with:

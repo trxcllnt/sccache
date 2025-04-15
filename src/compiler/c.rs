@@ -209,7 +209,7 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         rewrite_includes_only: bool,
-        compilation_key: &str,
+        hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,
@@ -1164,7 +1164,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
         &self,
         path_transformer: &mut dist::PathTransformer,
         rewrite_includes_only: bool,
-        compilation_key: &str,
+        hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,
@@ -1186,7 +1186,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
             cwd,
             env_vars,
             rewrite_includes_only,
-            compilation_key,
+            hash_key,
         )
     }
 

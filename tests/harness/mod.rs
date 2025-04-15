@@ -15,10 +15,6 @@ pub mod dist;
 
 pub const TC_CACHE_SIZE: u64 = 1024 * 1024 * 1024; // 1 gig
 
-pub fn cargo_command() -> Command {
-    prune_command(Command::new("cargo"))
-}
-
 pub fn init_cargo(path: &Path, cargo_name: &str) -> PathBuf {
     let cargo_path = path.join(cargo_name);
     let source_path = "src";

@@ -35,7 +35,7 @@ use sccache::{
 
 use uuid::Uuid;
 
-use super::{client::SccacheClient, write_json_cfg, TC_CACHE_SIZE};
+use super::{client::SccacheClient, prune_command, write_json_cfg, TC_CACHE_SIZE};
 
 const CONTAINER_NAME_PREFIX: &str = "sccache_dist";
 const CONTAINER_EXTERNAL_PATH: &str = "/sccache/external";
@@ -48,6 +48,10 @@ const MAX_STARTUP_WAIT: Duration = Duration::from_secs(30);
 static SCHEDULER_PORT: AtomicU16 = AtomicU16::new(10500);
 static RABBITMQ_PORT: AtomicU16 = AtomicU16::new(5672);
 static REDIS_PORT: AtomicU16 = AtomicU16::new(6379);
+
+pub fn cargo_command() -> Command {
+    prune_command(Command::new("cargo"))
+}
 
 pub fn sccache_dist_path() -> PathBuf {
     assert_cmd::cargo::cargo_bin("sccache-dist")

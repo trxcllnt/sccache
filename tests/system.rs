@@ -32,8 +32,10 @@ use harness::{
 use log::Level::Trace;
 use predicates::prelude::*;
 use regex::Regex;
-use sccache::compiler::{CCompilerKind, CompilerKind, Language};
-use sccache::server::{ServerInfo, ServerStats};
+use sccache::{
+    compiler::{CCompilerKind, CompilerKind, Language},
+    server::{ServerInfo, ServerStats},
+};
 use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -123,7 +125,7 @@ fn compile_cuda_cmdline<T: AsRef<OsStr>>(
     output: &str,
     extra_args: &[OsString],
 ) -> Vec<OsString> {
-    let mut arg = match compiler {
+    let mut args = match compiler {
         "nvcc" => vec_from!(OsString, exe.as_ref(), compile_flag, input, "-o", output),
         "clang++" => {
             vec_from!(
@@ -149,9 +151,9 @@ fn compile_cuda_cmdline<T: AsRef<OsStr>>(
         _ => panic!("Unsupported compiler: {}", compiler),
     };
     if !extra_args.is_empty() {
-        arg.append(&mut extra_args.to_vec())
+        args.append(&mut extra_args.to_vec())
     }
-    arg.iter()
+    args.iter()
         .filter(|x| !x.is_empty())
         .cloned()
         .collect::<Vec<_>>()
@@ -1750,7 +1752,7 @@ fn test_clang_cuda_compiles(
         .assert()
         .success();
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
-    trace!("request stats");
+    fs::remove_file(&out_file).unwrap();
     stats.cache_writes += 1;
     stats.compilations += 1;
     stats.compile_requests += 1;
@@ -1761,7 +1763,6 @@ fn test_clang_cuda_compiles(
     assert_eq!(
         stats,
         ServerStats {
-            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -1770,7 +1771,6 @@ fn test_clang_cuda_compiles(
     );
 
     trace!("compile A");
-    fs::remove_file(&out_file).unwrap();
     client
         .cmd()
         .args(compile_cuda_cmdline(
@@ -1786,7 +1786,7 @@ fn test_clang_cuda_compiles(
         .assert()
         .success();
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
-    trace!("request stats");
+    fs::remove_file(&out_file).unwrap();
     stats.compile_requests += 1;
     stats.requests_executed += 1;
     stats
@@ -1821,7 +1821,7 @@ fn test_clang_cuda_compiles(
         .assert()
         .success();
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
-    trace!("request stats");
+    fs::remove_file(&out_file).unwrap();
     stats.cache_writes += 1;
     stats.compilations += 1;
     stats.compile_requests += 1;
@@ -2413,50 +2413,6 @@ fn find_hip_compiler() -> Option<Compiler> {
     None
 }
 
-// TODO: This runs multiple test cases, for multiple compilers. It should be
-// split up to run them individually. In the current form, it is hard to see
-// which sub test cases are executed, and if one fails, the remaining tests
-// are not run.
-#[test_case(true ; "with preprocessor cache")]
-#[test_case(false ; "without preprocessor cache")]
-#[cfg(any(unix, target_env = "msvc"))]
-fn test_sccache_command(preprocessor_cache_mode: bool) {
-    let _ = env_logger::try_init();
-    let tempdir = tempfile::Builder::new()
-        .prefix("sccache_system_test")
-        .tempdir()
-        .unwrap();
-    let compilers = find_compilers();
-    if compilers.is_empty() {
-        warn!("No compilers found, skipping test");
-    } else {
-        // Create the configurations
-        let sccache_cfg = sccache_client_cfg(tempdir.path(), preprocessor_cache_mode);
-        write_json_cfg(tempdir.path(), "sccache-cfg.json", &sccache_cfg);
-        let sccache_cached_cfg_path = tempdir.path().join("sccache-cached-cfg");
-        // Start a server.
-        let client = SccacheClient::new(
-            &tempdir.path().join("sccache-cfg.json"),
-            &sccache_cached_cfg_path,
-        )
-        .start();
-        for compiler in compilers {
-            run_sccache_command_tests(&client, compiler, tempdir.path(), preprocessor_cache_mode);
-            client.zero_stats();
-        }
-    }
-}
-
-#[test]
-fn test_stats_no_server() {
-    let client = SccacheClient::new_no_cfg();
-    let _ = client.stats();
-    assert!(
-        !client.stop(),
-        "Server shouldn't be running after --show-stats"
-    );
-}
-
 fn make_sccache_client(
     preprocessor_cache_mode: bool,
 ) -> (Option<tempfile::TempDir>, PathBuf, SccacheClient) {
@@ -2484,6 +2440,39 @@ fn make_sccache_client(
     .start();
 
     (maybe_tempdir, tempdir_path, client)
+}
+
+// TODO: This runs multiple test cases, for multiple compilers. It should be
+// split up to run them individually. In the current form, it is hard to see
+// which sub test cases are executed, and if one fails, the remaining tests
+// are not run.
+#[test_case(true ; "with preprocessor cache")]
+#[test_case(false ; "without preprocessor cache")]
+#[cfg(any(unix, target_env = "msvc"))]
+fn test_sccache_command(preprocessor_cache_mode: bool) {
+    let _ = env_logger::try_init();
+    let compilers = find_compilers();
+    if compilers.is_empty() {
+        return warn!("No compilers found, skipping test");
+    }
+
+    // Create and start the sccache client
+    let (_tempdir, tempdir_path, client) = make_sccache_client(preprocessor_cache_mode);
+
+    for compiler in compilers {
+        run_sccache_command_tests(&client, compiler, &tempdir_path, preprocessor_cache_mode);
+        client.zero_stats();
+    }
+}
+
+#[test]
+fn test_stats_no_server() {
+    let client = SccacheClient::new_no_cfg();
+    let _ = client.stats();
+    assert!(
+        !client.stop(),
+        "Server shouldn't be running after --show-stats"
+    );
 }
 
 #[test_case(true, false, false ; "preprocessor_cache=true, device_debug=false, rdc=false")]
@@ -2542,6 +2531,7 @@ fn test_cuda_sccache_command(
 #[cfg(any(unix, target_env = "msvc"))]
 fn test_hip_sccache_command(preprocessor_cache_mode: bool) {
     let _ = env_logger::try_init();
+
     if let Some(compiler) = find_hip_compiler() {
         // Create and start the sccache client
         let (_tempdir, tempdir_path, client) = make_sccache_client(preprocessor_cache_mode);

@@ -13,7 +13,11 @@ use sccache::config::HTTPUrl;
 use std::path::Path;
 use std::process::Output;
 
-use harness::{cargo_command, client::SccacheClient, dist::DistSystem, init_cargo, write_source};
+use harness::{
+    client::SccacheClient,
+    dist::{cargo_command, DistSystem},
+    init_cargo, write_source,
+};
 
 // In case of panics, this command will destroy any dangling containers:
 //   docker rm -f $(docker ps -aq --filter "name=sccache_dist_*")

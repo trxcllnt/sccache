@@ -288,7 +288,7 @@ impl CCompilerImpl for Nvcc {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         rewrite_includes_only: bool,
-        compilation_key: &str,
+        hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,
@@ -303,7 +303,7 @@ impl CCompilerImpl for Nvcc {
             cwd,
             env_vars,
             &self.host_compiler,
-            compilation_key,
+            hash_key,
         )
         .map(|(command, dist_command, cacheable)| {
             (CCompileCommand::new(command), dist_command, cacheable)
@@ -317,7 +317,7 @@ fn generate_compile_commands(
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     host_compiler: &NvccHostCompiler,
-    compilation_key: &str,
+    hash_key: &str,
 ) -> Result<(NvccCompileCommand, Option<dist::CompileCommand>, Cacheable)> {
     let mut unhashed_args = parsed_args.unhashed_args.clone();
 
@@ -413,11 +413,11 @@ fn generate_compile_commands(
     // up in the preprocessed output, so using random tmpdir paths leads to
     // erroneous cache misses.
     let out_dir = env::temp_dir().join("sccache_nvcc").join({
-        // Hash compilation_key with the output path in case
-        // the same file is concurrently built into separate
+        // Combine `hash_key` with the output path in case
+        // the same file is concurrently built to separate
         // output paths.
         let mut m = crate::util::Digest::new();
-        m.update(compilation_key.as_bytes());
+        m.update(hash_key.as_bytes());
         m.update(cwd.join(output).as_os_str().as_encoded_bytes());
         m.finish()
     });
