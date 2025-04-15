@@ -24,7 +24,7 @@ use crate::compiler::{
 };
 use crate::{counted_array, dist};
 
-use crate::mock_command::{CommandCreator, CommandCreatorSync, RunCommand};
+use crate::mock_command::{CommandCreator, CommandCreatorSync, ProcessOutput, RunCommand};
 
 use async_trait::async_trait;
 
@@ -72,7 +72,7 @@ impl CCompilerImpl for CudaFE {
         _may_dist: bool,
         _rewrite_includes_only: bool,
         _preprocessor_cache_mode: bool,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
@@ -86,6 +86,7 @@ impl CCompilerImpl for CudaFE {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         _rewrite_includes_only: bool,
+        _hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,
@@ -182,7 +183,7 @@ pub fn generate_compile_commands(
 use cicc::ArgData::*;
 
 counted_array!(pub static ARGS: [ArgInfo<cicc::ArgData>; _] = [
-    take_arg!("--gen_c_file_name", PathBuf, Separated, UnhashedOutput),
+    take_arg!("--gen_c_file_name", PathBuf, Separated, ExtraOutput),
     flag!("--gen_module_id_file", GenModuleIdFileFlag),
     take_arg!("--module_id_file_name", PathBuf, Separated, Output),
     take_arg!("--stub_file_name", OsString, Separated, UnhashedPassThrough),

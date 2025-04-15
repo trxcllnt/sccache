@@ -18,7 +18,7 @@ use crate::compiler::{
     clang, CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language,
     SingleCompileCommand,
 };
-use crate::mock_command::{CommandCreatorSync, RunCommand};
+use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist};
 use async_trait::async_trait;
@@ -30,7 +30,6 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process;
 
 use crate::errors::*;
 
@@ -72,7 +71,7 @@ impl CCompilerImpl for Gcc {
         may_dist: bool,
         rewrite_includes_only: bool,
         preprocessor_cache_mode: bool,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
@@ -104,6 +103,7 @@ impl CCompilerImpl for Gcc {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         rewrite_includes_only: bool,
+        _hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,
@@ -131,6 +131,7 @@ impl CCompilerImpl for Gcc {
 ArgData! { pub
     TooHardFlag,
     TooHard(OsString),
+    NotCompilationFlag,
     DiagnosticsColor(OsString),
     DiagnosticsColorFlag,
     NoDiagnosticsColorFlag,
@@ -283,7 +284,7 @@ where
     let mut preprocessor_args = vec![];
     let mut dependency_args = vec![];
     let mut extra_hash_files = vec![];
-    let mut compilation = false;
+    let mut compilation = kind == CCompilerKind::Nvcc;
     let mut multiple_input = false;
     let mut multiple_input_files = Vec::new();
     let mut pedantic_flag = false;
@@ -339,6 +340,7 @@ where
         }
 
         match arg.get_data() {
+            Some(NotCompilationFlag) => return CompilerArguments::NotCompilation,
             Some(TooHardFlag) | Some(TooHard(_)) => {
                 cannot_cache!(arg.flag_str().expect("Can't be Argument::Raw/UnknownFlag",))
             }
@@ -478,7 +480,7 @@ where
             | Some(XClang(_))
             | Some(DepTarget(_))
             | Some(SerializeDiagnostics(_)) => continue,
-            Some(TooHardFlag) | Some(TooHard(_)) => unreachable!(),
+            Some(NotCompilationFlag) | Some(TooHardFlag) | Some(TooHard(_)) => unreachable!(),
             None => match arg {
                 Argument::Raw(_) => continue,
                 Argument::UnknownFlag(_) => &mut common_args,
@@ -516,7 +518,7 @@ where
             | Some(TooHard(_)) => cannot_cache!(arg
                 .flag_str()
                 .unwrap_or("Can't handle complex arguments through clang",)),
-            None => match arg {
+            Some(NotCompilationFlag) | None => match arg {
                 Argument::Raw(_) if follows_plugin_arg => &mut common_args,
                 Argument::Raw(flag) => cannot_cache!(
                     "Can't handle Raw arguments with -Xclang",
@@ -796,7 +798,7 @@ pub async fn preprocess<F, T>(
     rewrite_includes_only: bool,
     ignorable_whitespace_flags: Vec<String>,
     language_to_arg: F,
-) -> Result<process::Output>
+) -> Result<ProcessOutput>
 where
     F: Fn(Language) -> Option<&'static str>,
     T: CommandCreatorSync,
@@ -905,10 +907,21 @@ where
             let mut language: Option<String> =
                 language_to_arg(parsed_args.language).map(|lang| lang.into());
             if !rewrite_includes_only {
-                match parsed_args.language {
-                    Language::C => language = Some("cpp-output".into()),
-                    Language::GenericHeader | Language::CHeader | Language::CxxHeader => {}
-                    _ => language.as_mut()?.push_str("-cpp-output"),
+                if let CCompilerKind::Nvhpc = kind {
+                    // -x=c|cpp|c++|i|cpp-output|asm|assembler|ASM|assembler-with-cpp|none
+                    // Specify the language for any following input files, instead of letting
+                    // the compiler choose based on suffix. Turn off with -x none
+                    match parsed_args.language {
+                        Language::C | Language::Cxx => language = Some("cpp-output".into()),
+                        Language::GenericHeader | Language::CHeader | Language::CxxHeader => {}
+                        _ => *(language.as_mut()?) = "none".into(),
+                    }
+                } else {
+                    match parsed_args.language {
+                        Language::C => language = Some("cpp-output".into()),
+                        Language::GenericHeader | Language::CHeader | Language::CxxHeader => {}
+                        _ => language.as_mut()?.push_str("-cpp-output"),
+                    }
                 }
             }
 

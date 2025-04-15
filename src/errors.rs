@@ -13,7 +13,8 @@
 // limitations under the License.
 
 pub use anyhow::{anyhow, bail, Context, Error};
-use std::process;
+
+use crate::mock_command::ProcessOutput;
 
 // We use `anyhow` for error handling.
 // - Use `context()`/`with_context()` to annotate errors.
@@ -30,7 +31,7 @@ pub struct BadHttpStatusError(pub hyper::StatusCode);
 pub struct HttpClientError(pub String);
 
 #[derive(Debug)]
-pub struct ProcessError(pub process::Output);
+pub struct ProcessError(pub ProcessOutput);
 
 #[cfg(feature = "hyper")]
 impl std::error::Error for BadHttpStatusError {}

@@ -23,7 +23,7 @@ use crate::compiler::{DistPackagers, NoopOutputsRewriter};
 use crate::dist;
 #[cfg(feature = "dist-client")]
 use crate::dist::pkg;
-use crate::mock_command::CommandCreatorSync;
+use crate::mock_command::{CommandCreatorSync, ProcessOutput};
 use crate::util::{
     decode_path, encode_path, hash_all, Digest, HashToDigest, MetadataCtimeExt, TimeMacroFinder,
     Timestamp,
@@ -39,7 +39,6 @@ use std::hash::Hash;
 use std::io;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::process;
 use std::sync::Arc;
 
 use crate::errors::*;
@@ -125,17 +124,18 @@ impl ParsedArguments {
     pub fn output_pretty(&self) -> Cow<'_, str> {
         self.outputs
             .get("obj")
-            .and_then(|o| o.path.file_name())
+            .map(|o| o.path.as_os_str())
             .map(|s| s.to_string_lossy())
             .unwrap_or(Cow::Borrowed("Unknown filename"))
     }
 }
 
 /// A generic implementation of the `Compilation` trait for C/C++ compilers.
+#[derive(Debug)]
 struct CCompilation<I: CCompilerImpl> {
     parsed_args: ParsedArguments,
     #[cfg(feature = "dist-client")]
-    preprocessed_input: Vec<u8>,
+    preprocessor_output: Vec<u8>,
     executable: PathBuf,
     compiler: I,
     cwd: PathBuf,
@@ -195,11 +195,12 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         may_dist: bool,
         rewrite_includes_only: bool,
         preprocessor_cache_mode: bool,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync;
     /// Generate a command that can be used to invoke the C compiler to perform
     /// the compilation.
+    #[allow(clippy::too_many_arguments)]
     fn generate_compile_commands<T>(
         &self,
         path_transformer: &mut dist::PathTransformer,
@@ -208,6 +209,7 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         rewrite_includes_only: bool,
+        hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,
@@ -304,6 +306,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
     #[cfg(feature = "dist-client")]
     fn get_toolchain_packager(&self) -> Box<dyn pkg::ToolchainPackager> {
         Box::new(CToolchainPackager {
+            env_vars: vec![],
             executable: self.executable.clone(),
             kind: self.compiler.kind(),
         })
@@ -364,6 +367,10 @@ where
     T: CommandCreatorSync,
     I: CCompilerImpl,
 {
+    fn get_executable(&self) -> PathBuf {
+        self.executable.clone()
+    }
+
     async fn generate_hash_key(
         self: Box<Self>,
         creator: &T,
@@ -403,7 +410,7 @@ where
         let too_hard_for_preprocessor_cache_mode =
             parsed_args.too_hard_for_preprocessor_cache_mode.is_some();
         if let Some(arg) = &parsed_args.too_hard_for_preprocessor_cache_mode {
-            debug!(
+            trace!(
                 "parse_arguments: Cannot use preprocessor cache because of {:?}",
                 arg
             );
@@ -502,7 +509,7 @@ where
                                     parsed_args: parsed_args.to_owned(),
                                     #[cfg(feature = "dist-client")]
                                     // TODO or is it never relevant since dist?
-                                    preprocessed_input: vec![],
+                                    preprocessor_output: vec![],
                                     executable: executable.to_owned(),
                                     compiler: compiler.to_owned(),
                                     cwd: cwd.to_owned(),
@@ -530,18 +537,14 @@ where
                 use_preprocessor_cache_mode,
             )
             .await;
-        let out_pretty = parsed_args.output_pretty().into_owned();
-        let result = result.map_err(|e| {
-            debug!("[{}]: preprocessor failed: {:?}", out_pretty, e);
-            e
-        });
 
+        let out_pretty = parsed_args.output_pretty().into_owned();
         let outputs = parsed_args.outputs.clone();
         let args_cwd = cwd.clone();
 
         let mut preprocessor_result = result.or_else(move |err| {
             // Errors remove all traces of potential output.
-            debug!("removing files {:?}", &outputs);
+            trace!("removing files {:?}", &outputs);
 
             let v: std::result::Result<(), std::io::Error> =
                 outputs.values().try_for_each(|output| {
@@ -554,24 +557,28 @@ where
                     }
                 });
             if v.is_err() {
-                warn!("Could not remove files after preprocessing failed!");
+                warn!(
+                    "Could not remove files after preprocessing failed: {:?}",
+                    &outputs
+                );
             }
 
             match err.downcast::<ProcessError>() {
-                Ok(ProcessError(output)) => {
+                Ok(ProcessError(mut output)) => {
                     debug!(
-                        "[{}]: preprocessor returned error status {:?}",
-                        out_pretty,
-                        output.status.code()
+                        "[{out_pretty}]: preprocessor returned error (code={:?}, desc={:?})",
+                        output.code(),
+                        output.desc()
                     );
                     // Drop the stdout since it's the preprocessor output,
                     // just hand back stderr and the exit status.
-                    bail!(ProcessError(process::Output {
-                        stdout: vec!(),
-                        ..output
-                    }))
+                    output.stdout = vec![];
+                    bail!(ProcessError(output))
                 }
-                Err(err) => Err(err),
+                Err(err) => {
+                    warn!("[{out_pretty}]: preprocessor failed: {err:?}");
+                    Err(err)
+                }
             }
         })?;
 
@@ -645,7 +652,7 @@ where
             compilation: Box::new(CCompilation {
                 parsed_args,
                 #[cfg(feature = "dist-client")]
-                preprocessed_input: preprocessor_result.stdout,
+                preprocessor_output: preprocessor_result.stdout,
                 executable,
                 compiler,
                 cwd,
@@ -1157,6 +1164,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
         &self,
         path_transformer: &mut dist::PathTransformer,
         rewrite_includes_only: bool,
+        hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,
@@ -1178,20 +1186,19 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
             cwd,
             env_vars,
             rewrite_includes_only,
+            hash_key,
         )
     }
 
     #[cfg(feature = "dist-client")]
-    fn into_dist_packagers(
-        self: Box<Self>,
-        path_transformer: dist::PathTransformer,
-    ) -> Result<DistPackagers> {
+    fn into_dist_packagers(self: Box<Self>) -> Result<DistPackagers> {
         let CCompilation {
             parsed_args,
             cwd,
-            preprocessed_input,
+            preprocessor_output,
             executable,
             compiler,
+            env_vars,
             ..
         } = *self;
         trace!("Dist inputs: {:?}", parsed_args.input);
@@ -1199,12 +1206,12 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
         let input_path = cwd.join(&parsed_args.input);
         let inputs_packager = Box::new(CInputsPackager {
             input_path,
-            preprocessed_input,
-            path_transformer,
+            preprocessor_output,
             extra_dist_files: parsed_args.extra_dist_files,
             extra_hash_files: parsed_args.extra_hash_files,
         });
         let toolchain_packager = Box::new(CToolchainPackager {
+            env_vars,
             executable,
             kind: compiler.kind(),
         });
@@ -1229,19 +1236,21 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
 #[cfg(feature = "dist-client")]
 struct CInputsPackager {
     input_path: PathBuf,
-    path_transformer: dist::PathTransformer,
-    preprocessed_input: Vec<u8>,
+    preprocessor_output: Vec<u8>,
     extra_dist_files: Vec<PathBuf>,
     extra_hash_files: Vec<PathBuf>,
 }
 
 #[cfg(feature = "dist-client")]
 impl pkg::InputsPackager for CInputsPackager {
-    fn write_inputs(self: Box<Self>, wtr: &mut dyn io::Write) -> Result<dist::PathTransformer> {
+    fn write_inputs(
+        self: Box<Self>,
+        path_transformer: &mut dist::PathTransformer,
+        wtr: &mut dyn io::Write,
+    ) -> Result<()> {
         let CInputsPackager {
             input_path,
-            mut path_transformer,
-            preprocessed_input,
+            preprocessor_output,
             extra_dist_files,
             extra_hash_files,
         } = *self;
@@ -1254,10 +1263,15 @@ impl pkg::InputsPackager for CInputsPackager {
                 format!("unable to transform input path {}", input_path.display())
             })?;
 
-            let mut file_header = pkg::make_tar_header(&input_path, &dist_input_path)?;
-            file_header.set_size(preprocessed_input.len() as u64); // The metadata is from non-preprocessed
+            let (mut file_header, dist_input_path) =
+                pkg::make_tar_header(&input_path, &dist_input_path)?;
+            file_header.set_size(preprocessor_output.len() as u64); // The metadata is from non-preprocessed
             file_header.set_cksum();
-            builder.append(&file_header, preprocessed_input.as_slice())?;
+            builder.append_data(
+                &mut file_header,
+                dist_input_path,
+                preprocessor_output.as_slice(),
+            )?;
         }
 
         for input_path in extra_hash_files.iter().chain(extra_dist_files.iter()) {
@@ -1282,40 +1296,51 @@ impl pkg::InputsPackager for CInputsPackager {
             let mut output = vec![];
             io::copy(&mut file, &mut output)?;
 
-            let mut file_header = pkg::make_tar_header(&input_path, &dist_input_path)?;
+            let (mut file_header, dist_input_path) =
+                pkg::make_tar_header(&input_path, &dist_input_path)?;
             file_header.set_size(output.len() as u64);
             file_header.set_cksum();
-            builder.append(&file_header, &*output)?;
+            builder.append_data(&mut file_header, dist_input_path, &*output)?;
         }
 
         // Finish archive
         let _ = builder.into_inner();
-        Ok(path_transformer)
+
+        Ok(())
     }
 }
 
 #[cfg(feature = "dist-client")]
 #[allow(unused)]
 struct CToolchainPackager {
+    env_vars: Vec<(OsString, OsString)>,
     executable: PathBuf,
     kind: CCompilerKind,
 }
 
 #[cfg(feature = "dist-client")]
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+))]
+#[async_trait]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+))]
 impl pkg::ToolchainPackager for CToolchainPackager {
-    fn write_pkg(self: Box<Self>, f: fs::File) -> Result<()> {
+    async fn write_pkg(self: Box<Self>, f: fs::File) -> Result<String> {
         use std::os::unix::ffi::OsStringExt;
 
-        info!("Generating toolchain {}", self.executable.display());
+        debug!("Generating toolchain {}", self.executable.display());
         let mut package_builder = pkg::ToolchainPackageBuilder::new();
         package_builder.add_common()?;
-        package_builder.add_executable_and_deps(self.executable.clone())?;
+        package_builder.add_executable_and_deps(&self.env_vars, self.executable.clone())?;
 
         // Helper to use -print-file-name and -print-prog-name to look up
         // files by path.
         let named_file = |kind: &str, name: &str| -> Option<PathBuf> {
-            let mut output = process::Command::new(&self.executable)
+            let mut output = std::process::Command::new(&self.executable)
                 .arg(format!("-print-{}-name={}", kind, name))
                 .output()
                 .ok()?;
@@ -1351,7 +1376,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
         let add_named_prog =
             |builder: &mut pkg::ToolchainPackageBuilder, name: &str| -> Result<()> {
                 if let Some(path) = named_file("prog", name) {
-                    builder.add_executable_and_deps(path)?;
+                    builder.add_executable_and_deps(&self.env_vars, path)?;
                 }
                 Ok(())
             };
@@ -1363,18 +1388,22 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                 Ok(())
             };
 
-        // Add basic |as| and |objcopy| programs.
-        add_named_prog(&mut package_builder, "as")?;
-        add_named_prog(&mut package_builder, "objcopy")?;
+        let mut add_default_files = || -> Result<()> {
+            // Add basic |as| and |objcopy| programs.
+            add_named_prog(&mut package_builder, "as")?;
+            add_named_prog(&mut package_builder, "objcopy")?;
 
-        // Linker configuration.
-        if Path::new("/etc/ld.so.conf").is_file() {
-            package_builder.add_file("/etc/ld.so.conf".into())?;
-        }
+            // Linker configuration.
+            if Path::new("/etc/ld.so.conf").is_file() {
+                package_builder.add_file("/etc/ld.so.conf".into())?;
+            }
+            Ok(())
+        };
 
         // Compiler-specific handling
         match self.kind {
             CCompilerKind::Clang => {
+                add_default_files()?;
                 // Clang uses internal header files, so add them.
                 if let Some(limits_h) = named_file("file", "include/limits.h") {
                     info!("limits_h = {}", limits_h.display());
@@ -1384,6 +1413,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 
             CCompilerKind::Gcc => {
                 // Various external programs / files which may be needed by gcc
+                add_default_files()?;
                 add_named_prog(&mut package_builder, "cc1")?;
                 add_named_prog(&mut package_builder, "cc1plus")?;
                 add_named_file(&mut package_builder, "specs")?;
@@ -1396,19 +1426,145 @@ impl pkg::ToolchainPackager for CToolchainPackager {
             | CCompilerKind::Nvcc => {}
 
             CCompilerKind::Nvhpc => {
-                // Various programs called by the nvc nvc++ front end.
-                add_named_file(&mut package_builder, "cpp1")?;
-                add_named_file(&mut package_builder, "cpp2")?;
-                add_named_file(&mut package_builder, "opt")?;
-                add_named_prog(&mut package_builder, "llc")?;
-                add_named_prog(&mut package_builder, "acclnk")?;
+                // Various programs called by the nvc/nvc++ front end.
+                let _ = add_default_files();
+
+                let mut cfg_paths = vec![];
+                let mut dir_paths = vec![];
+                let mut dir_contents = vec![];
+                let mut exe_paths = vec![];
+
+                if let Ok(as_path) = which::which("as") {
+                    exe_paths.push(as_path);
+                }
+
+                if let Some(bin_dir) = self.executable.parent() {
+                    cfg_paths.push(bin_dir.join("nvcrc"));
+                    cfg_paths.push(bin_dir.join(".nvcrc"));
+                    cfg_paths.push(bin_dir.join("nvc++rc"));
+                    cfg_paths.push(bin_dir.join(".nvc++rc"));
+                    cfg_paths.push(bin_dir.join("localrc"));
+                    cfg_paths.push(bin_dir.join("makelocalrc"));
+                    dir_contents.push(bin_dir.join("rcfiles"));
+
+                    let path = bin_dir.join("tools");
+                    if path.exists() && path.is_dir() {
+                        exe_paths.push(path.join("acclnk"));
+                        exe_paths.push(path.join("append"));
+                        exe_paths.push(path.join("cpp1"));
+                        exe_paths.push(path.join("cpp2"));
+                        exe_paths.push(path.join("nvcpfe"));
+                        exe_paths.push(path.join("nvdd"));
+                    }
+
+                    if let Some(comp_dir) = bin_dir.parent() {
+                        let path = comp_dir.join("share").join("llvm").join("bin");
+                        if path.exists() && path.is_dir() {
+                            exe_paths.push(path.join("llc"));
+                            exe_paths.push(path.join("opt"));
+                            exe_paths.push(path.join("llvm-as"));
+                            exe_paths.push(path.join("llvm-link"));
+                            exe_paths.push(path.join("llvm-mc"));
+                        }
+                    }
+                }
+
+                let _ = std::process::Command::new(&self.executable)
+                    .arg("-show")
+                    .output()
+                    .and_then(|output| {
+                        use bytes::Buf;
+                        use std::io::BufRead;
+                        output.stdout.reader().lines().try_for_each(|line| {
+                            let mut line = line?;
+                            if line.starts_with("CUDAROOT")
+                                || line.starts_with("DEFCPPINC")
+                                || line.starts_with("DEFSTDINC")
+                                || line.starts_with("GCCINC")
+                                || line.starts_with("GPPDIR")
+                                || line.starts_with("STDINC")
+                                || line.starts_with("SYSTEMINC")
+                            {
+                                dir_paths.extend_from_slice(
+                                    line.find('=')
+                                        .map(|idx| {
+                                            line.split_off(idx + 1)
+                                                .trim_start()
+                                                .trim_end()
+                                                .split(' ')
+                                                .map(PathBuf::from)
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .unwrap_or(vec![])
+                                        .as_slice(),
+                                );
+                                return Ok(());
+                            }
+                            if line.starts_with("HOMELOCALRC") || line.starts_with("MYLOCALRC") {
+                                line.find('=').and_then(|idx| {
+                                    let str = line.split_off(idx + 1);
+                                    let str = str.trim_start().trim_end();
+                                    if !str.is_empty() {
+                                        cfg_paths.push(PathBuf::from(str));
+                                    }
+                                    Option::<()>::None
+                                });
+                                return Ok(());
+                            }
+                            if line.starts_with("COMPINCDIRFULL") {
+                                dir_contents.extend_from_slice(
+                                    line.find('=')
+                                        .map(|idx| {
+                                            line.split_off(idx + 1)
+                                                .trim_start()
+                                                .trim_end()
+                                                .split(' ')
+                                                .map(PathBuf::from)
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .unwrap_or(vec![])
+                                        .as_slice(),
+                                );
+                                return Ok(());
+                            }
+                            Ok(())
+                        })
+                    });
+
+                for path in cfg_paths {
+                    if path.exists() && path.is_file() {
+                        if let Ok(path) = path.canonicalize() {
+                            let _ = package_builder.add_file(path);
+                        }
+                    }
+                }
+
+                for path in dir_paths {
+                    if path.exists() && path.is_dir() {
+                        if let Ok(path) = path.canonicalize() {
+                            let _ = package_builder.add_dir(path);
+                        }
+                    }
+                }
+
+                for path in dir_contents {
+                    if path.exists() && path.is_dir() {
+                        let _ = package_builder.add_dir_contents(&path);
+                    }
+                }
+
+                for path in exe_paths {
+                    if path.exists() && path.is_file() {
+                        let _ = package_builder.add_executable_and_deps(&self.env_vars, path);
+                    }
+                }
             }
 
             _ => unreachable!(),
         }
 
         // Bundle into a compressed tarfile.
-        package_builder.into_compressed_tar(f)
+        package_builder.into_compressed_tar(f).await
     }
 }
 

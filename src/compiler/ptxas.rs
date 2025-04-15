@@ -24,7 +24,7 @@ use crate::compiler::{
 };
 use crate::{counted_array, dist};
 
-use crate::mock_command::{CommandCreator, CommandCreatorSync, RunCommand};
+use crate::mock_command::{CommandCreator, CommandCreatorSync, ProcessOutput, RunCommand};
 
 use async_trait::async_trait;
 
@@ -72,7 +72,7 @@ impl CCompilerImpl for Ptxas {
         _may_dist: bool,
         _rewrite_includes_only: bool,
         _preprocessor_cache_mode: bool,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
@@ -86,6 +86,7 @@ impl CCompilerImpl for Ptxas {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         _rewrite_includes_only: bool,
+        _hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,

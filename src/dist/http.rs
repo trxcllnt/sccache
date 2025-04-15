@@ -11,25 +11,52 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 #[cfg(feature = "dist-client")]
 pub use self::client::Client;
 #[cfg(feature = "dist-server")]
-pub use self::server::Server;
-#[cfg(feature = "dist-server")]
-pub use self::server::{
-    ClientAuthCheck, ClientVisibleMsg, Scheduler, ServerAuthCheck, HEARTBEAT_TIMEOUT,
+pub use self::{
+    common::{AsyncMulticast, AsyncMulticastFn},
+    scheduler::Scheduler,
+    server::{retry_with_jitter, ClientAuthCheck, ClientVisibleMsg},
 };
 
-mod common {
-    use reqwest::header;
-    use serde::{Deserialize, Serialize};
-    #[cfg(feature = "dist-server")]
-    use std::collections::HashMap;
-    use std::fmt;
+pub use self::common::{bincode_deserialize, bincode_serialize};
 
-    use crate::dist;
+mod common {
+    use async_trait::async_trait;
+
+    use reqwest::header;
+
+    use futures::lock::Mutex;
+    use std::cmp::Eq;
+    use std::collections::HashMap;
+    use std::hash::Hash;
+    use std::sync::Arc;
 
     use crate::errors::*;
+
+    pub async fn bincode_deserialize<T>(bytes: Vec<u8>) -> Result<T>
+    where
+        T: for<'de> serde::Deserialize<'de> + Send + 'static,
+    {
+        tokio::runtime::Handle::current()
+            .spawn_blocking(move || bincode::deserialize(&bytes))
+            .await
+            .map_err(anyhow::Error::new)?
+            .map_err(anyhow::Error::new)
+    }
+
+    pub async fn bincode_serialize<T>(value: T) -> Result<Vec<u8>>
+    where
+        T: serde::Serialize + Send + 'static,
+    {
+        tokio::runtime::Handle::current()
+            .spawn_blocking(move || bincode::serialize(&value))
+            .await
+            .map_err(anyhow::Error::new)?
+            .map_err(anyhow::Error::new)
+    }
 
     // Note that content-length is necessary due to https://github.com/tiny-http/tiny-http/issues/147
     pub trait ReqwestRequestBuilderExt: Sized {
@@ -67,16 +94,40 @@ mod common {
         }
     }
 
-    #[cfg(feature = "dist-client")]
+    #[cfg(any(feature = "dist-client", feature = "dist-server"))]
     pub async fn bincode_req_fut<T: serde::de::DeserializeOwned + 'static>(
         req: reqwest::RequestBuilder,
     ) -> Result<T> {
-        // Work around tiny_http issue #151 by disabling HTTP pipeline with
-        // `Connection: close`.
-        let res = req.header(header::CONNECTION, "close").send().await?;
+        let res = match req.send().await {
+            Ok(res) => res,
+            Err(err) => {
+                if log_enabled!(log::Level::Debug) {
+                    debug!(
+                        "Request error: {}",
+                        [
+                            err.url().map(|u| format!("url={u:?}")).unwrap_or_default(),
+                            err.status()
+                                .map(|u| format!("status={u:?}"))
+                                .unwrap_or_default(),
+                            format!("err={err:?}"),
+                        ]
+                        .join(", ")
+                    );
+                }
+                return Err(err.into());
+            }
+        };
 
+        let url = res.url().clone();
         let status = res.status();
-        let bytes = res.bytes().await?;
+        let bytes = match res.bytes().await {
+            Ok(b) => b,
+            Err(err) => {
+                debug!("Request body error: url={url}, status={status}, err={err}");
+                return Err(err.into());
+            }
+        };
+        trace!("Response: url={url}, status={status}, body={}", bytes.len());
         if !status.is_success() {
             let errmsg = format!(
                 "Error {}: {}",
@@ -93,962 +144,751 @@ mod common {
         }
     }
 
-    #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-    #[serde(deny_unknown_fields)]
-    pub struct JobJwt {
-        pub exp: u64,
-        pub job_id: dist::JobId,
+    #[async_trait]
+    pub trait AsyncMulticastFn<'a, K: Eq + Hash, V> {
+        async fn call(&self, args: &K) -> Result<V>;
     }
 
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub enum AllocJobHttpResponse {
-        Success {
-            job_alloc: dist::JobAlloc,
-            need_toolchain: bool,
-            cert_digest: Vec<u8>,
-        },
-        Fail {
-            msg: String,
-        },
+    #[derive(Clone)]
+    pub struct AsyncMulticast<K: Eq + Hash, V> {
+        run_f: Arc<dyn for<'a> AsyncMulticastFn<'a, K, V> + Send + Sync>,
+        state: Arc<Mutex<HashMap<K, tokio::sync::broadcast::Sender<V>>>>,
     }
-    impl AllocJobHttpResponse {
-        #[cfg(feature = "dist-server")]
-        pub fn from_alloc_job_result(
-            res: dist::AllocJobResult,
-            certs: &HashMap<dist::ServerId, (Vec<u8>, Vec<u8>)>,
-        ) -> Self {
-            match res {
-                dist::AllocJobResult::Success {
-                    job_alloc,
-                    need_toolchain,
-                } => {
-                    if let Some((digest, _)) = certs.get(&job_alloc.server_id) {
-                        AllocJobHttpResponse::Success {
-                            job_alloc,
-                            need_toolchain,
-                            cert_digest: digest.to_owned(),
-                        }
-                    } else {
-                        AllocJobHttpResponse::Fail {
-                            msg: format!(
-                                "missing certificates for server {}",
-                                job_alloc.server_id.addr()
-                            ),
-                        }
-                    }
-                }
-                dist::AllocJobResult::Fail { msg } => AllocJobHttpResponse::Fail { msg },
+
+    impl<K, V> AsyncMulticast<K, V>
+    where
+        K: Clone + std::fmt::Debug + Eq + Hash + Send + Sync + 'static,
+        V: Clone + Send + Sync + 'static,
+    {
+        pub fn new<F>(run_f: F) -> Self
+        where
+            F: for<'a> AsyncMulticastFn<'a, K, V> + Send + Sync + 'static,
+        {
+            Self {
+                run_f: Arc::new(run_f),
+                state: Arc::new(Mutex::new(HashMap::new())),
             }
         }
-    }
 
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub struct ServerCertificateHttpResponse {
-        pub cert_digest: Vec<u8>,
-        pub cert_pem: Vec<u8>,
-    }
+        pub async fn call(&self, args: K) -> Result<V> {
+            // Lock state
+            let mut state = self.state.lock().await;
 
-    #[derive(Clone, Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub struct HeartbeatServerHttpRequest {
-        pub jwt_key: Vec<u8>,
-        pub num_cpus: usize,
-        pub server_nonce: dist::ServerNonce,
-        pub cert_digest: Vec<u8>,
-        pub cert_pem: Vec<u8>,
-    }
-    // cert_pem is quite long so elide it (you can retrieve it by hitting the server url anyway)
-    impl fmt::Debug for HeartbeatServerHttpRequest {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let HeartbeatServerHttpRequest {
-                jwt_key,
-                num_cpus,
-                server_nonce,
-                cert_digest,
-                cert_pem,
-            } = self;
-            write!(f, "HeartbeatServerHttpRequest {{ jwt_key: {:?}, num_cpus: {:?}, server_nonce: {:?}, cert_digest: {:?}, cert_pem: [...{} bytes...] }}", jwt_key, num_cpus, server_nonce, cert_digest, cert_pem.len())
+            let mut recv = if let Some(sndr) = state.get(&args) {
+                // Return shared broadcast receiver if pending
+                sndr.subscribe()
+            } else {
+                // Create broadcast sender/receiver on first call
+                let (sndr, recv) = tokio::sync::broadcast::channel(1);
+
+                state.insert(args.clone(), sndr);
+
+                // Run the function on a worker thread
+                tokio::runtime::Handle::current().spawn({
+                    let run_f = self.run_f.clone();
+                    let state = self.state.clone();
+                    async move {
+                        // Call the function
+                        let res = run_f.call(&args).await;
+
+                        // Unwrap the result
+                        let val = match res {
+                            Ok(val) => val,
+                            Err(err) => {
+                                // TODO: Broadcast this error instead of just closing the channel
+                                error!("AsyncMulticast error: {err:?}");
+                                state.lock().await.remove(&args);
+                                return;
+                            }
+                        };
+
+                        // Notify receivers
+                        if let Some(sndr) = state.lock().await.remove(&args) {
+                            let _ = sndr.send(val);
+                        }
+                    }
+                });
+
+                recv
+            };
+
+            // Unlock state while we await the receiver
+            drop(state);
+
+            recv.recv().await.map_err(anyhow::Error::new)
         }
-    }
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub struct RunJobHttpRequest {
-        pub command: dist::CompileCommand,
-        pub outputs: Vec<String>,
     }
 }
 
 pub mod urls {
-    use crate::dist::{JobId, ServerId};
-
-    pub fn scheduler_alloc_job(scheduler_url: &reqwest::Url) -> reqwest::Url {
-        scheduler_url
-            .join("/api/v1/scheduler/alloc_job")
-            .expect("failed to create alloc job url")
-    }
-    pub fn scheduler_server_certificate(
-        scheduler_url: &reqwest::Url,
-        server_id: ServerId,
-    ) -> reqwest::Url {
-        scheduler_url
-            .join(&format!(
-                "/api/v1/scheduler/server_certificate/{}",
-                server_id.addr()
-            ))
-            .expect("failed to create server certificate url")
-    }
-    pub fn scheduler_heartbeat_server(scheduler_url: &reqwest::Url) -> reqwest::Url {
-        scheduler_url
-            .join("/api/v1/scheduler/heartbeat_server")
-            .expect("failed to create heartbeat url")
-    }
-    pub fn scheduler_job_state(scheduler_url: &reqwest::Url, job_id: JobId) -> reqwest::Url {
-        scheduler_url
-            .join(&format!("/api/v1/scheduler/job_state/{}", job_id))
-            .expect("failed to create job state url")
-    }
     pub fn scheduler_status(scheduler_url: &reqwest::Url) -> reqwest::Url {
         scheduler_url
-            .join("/api/v1/scheduler/status")
+            .join("/api/v2/status")
             .expect("failed to create alloc job url")
     }
-
-    pub fn server_assign_job(server_id: ServerId, job_id: JobId) -> reqwest::Url {
-        let url = format!(
-            "https://{}/api/v1/distserver/assign_job/{}",
-            server_id.addr(),
-            job_id
-        );
-        reqwest::Url::parse(&url).expect("failed to create assign job url")
+    pub fn scheduler_new_job(scheduler_url: &reqwest::Url) -> reqwest::Url {
+        scheduler_url
+            .join("/api/v2/jobs/new")
+            .expect("failed to create new job url")
     }
-    pub fn server_submit_toolchain(server_id: ServerId, job_id: JobId) -> reqwest::Url {
-        let url = format!(
-            "https://{}/api/v1/distserver/submit_toolchain/{}",
-            server_id.addr(),
-            job_id
-        );
-        reqwest::Url::parse(&url).expect("failed to create submit toolchain url")
+    pub fn scheduler_put_job(scheduler_url: &reqwest::Url, job_id: &str) -> reqwest::Url {
+        scheduler_url
+            .join(&format!("/api/v2/job/{job_id}"))
+            .expect("failed to create put job url")
     }
-    pub fn server_run_job(server_id: ServerId, job_id: JobId) -> reqwest::Url {
-        let url = format!(
-            "https://{}/api/v1/distserver/run_job/{}",
-            server_id.addr(),
-            job_id
-        );
-        reqwest::Url::parse(&url).expect("failed to create run job url")
+    pub fn scheduler_run_job(scheduler_url: &reqwest::Url, job_id: &str) -> reqwest::Url {
+        scheduler_url
+            .join(&format!("/api/v2/job/{job_id}"))
+            .expect("failed to create run job url")
+    }
+    pub fn scheduler_del_job(scheduler_url: &reqwest::Url, job_id: &str) -> reqwest::Url {
+        scheduler_url
+            .join(&format!("/api/v2/job/{job_id}"))
+            .expect("failed to create put job url")
+    }
+    pub fn scheduler_submit_toolchain(
+        scheduler_url: &reqwest::Url,
+        archive_id: &str,
+    ) -> reqwest::Url {
+        scheduler_url
+            .join(&format!("/api/v2/toolchain/{archive_id}"))
+            .expect("failed to create submit toolchain url")
     }
 }
 
 #[cfg(feature = "dist-server")]
 mod server {
-    use crate::util::{new_reqwest_blocking_client, num_cpus};
-    use byteorder::{BigEndian, ReadBytesExt};
-    use flate2::read::ZlibDecoder as ZlibReadDecoder;
-    use once_cell::sync::Lazy;
-    use rand::{rngs::OsRng, RngCore};
-    use rouille::accept;
-    use serde::Serialize;
-    use std::collections::HashMap;
-    use std::convert::Infallible;
-    use std::io::Read;
-    use std::net::SocketAddr;
-    use std::result::Result as StdResult;
-    use std::sync::atomic;
-    use std::sync::Mutex;
-    use std::thread;
-    use std::time::Duration;
+    use async_trait::async_trait;
+    use tokio_retry2::strategy::FibonacciBackoff;
+    use tokio_retry2::Retry;
 
-    use super::common::{
-        AllocJobHttpResponse, HeartbeatServerHttpRequest, JobJwt, ReqwestRequestBuilderExt,
-        RunJobHttpRequest, ServerCertificateHttpResponse,
-    };
-    use super::urls;
-    use crate::dist::{
-        self, AllocJobResult, AssignJobResult, HeartbeatServerResult, InputsReader, JobAuthorizer,
-        JobId, JobState, RunJobResult, SchedulerStatusResult, ServerId, ServerNonce,
-        SubmitToolchainResult, Toolchain, ToolchainReader, UpdateJobStateResult,
-    };
-    use crate::errors::*;
-
-    const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
-    const HEARTBEAT_ERROR_INTERVAL: Duration = Duration::from_secs(10);
-    pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(90);
-
-    pub fn bincode_req<T: serde::de::DeserializeOwned + 'static>(
-        req: reqwest::blocking::RequestBuilder,
-    ) -> Result<T> {
-        // Work around tiny_http issue #151 by disabling HTTP pipeline with
-        // `Connection: close`.
-        let mut res = req.header(reqwest::header::CONNECTION, "close").send()?;
-        let status = res.status();
-        let mut body = vec![];
-        res.copy_to(&mut body)
-            .context("error reading response body")?;
-        if !status.is_success() {
-            Err(anyhow!(
-                "Error {} (Headers={:?}): {}",
-                status.as_u16(),
-                res.headers(),
-                String::from_utf8_lossy(&body)
-            ))
-        } else {
-            bincode::deserialize(&body).map_err(Into::into)
-        }
-    }
-
-    fn create_https_cert_and_privkey(addr: SocketAddr) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-        let rsa_key = openssl::rsa::Rsa::<openssl::pkey::Private>::generate(2048)
-            .context("failed to generate rsa privkey")?;
-        let privkey_pem = rsa_key
-            .private_key_to_pem()
-            .context("failed to create pem from rsa privkey")?;
-        let privkey: openssl::pkey::PKey<openssl::pkey::Private> =
-            openssl::pkey::PKey::from_rsa(rsa_key)
-                .context("failed to create openssl pkey from rsa privkey")?;
-        let mut builder =
-            openssl::x509::X509::builder().context("failed to create x509 builder")?;
-
-        // Populate the certificate with the necessary parts, mostly from mkcert in openssl
-        builder
-            .set_version(2)
-            .context("failed to set x509 version")?;
-        let serial_number = openssl::bn::BigNum::from_u32(0)
-            .and_then(|bn| bn.to_asn1_integer())
-            .context("failed to create openssl asn1 0")?;
-        builder
-            .set_serial_number(serial_number.as_ref())
-            .context("failed to set x509 serial number")?;
-        let not_before = openssl::asn1::Asn1Time::days_from_now(0)
-            .context("failed to create openssl not before asn1")?;
-        builder
-            .set_not_before(not_before.as_ref())
-            .context("failed to set not before on x509")?;
-        let not_after = openssl::asn1::Asn1Time::days_from_now(365)
-            .context("failed to create openssl not after asn1")?;
-        builder
-            .set_not_after(not_after.as_ref())
-            .context("failed to set not after on x509")?;
-        builder
-            .set_pubkey(privkey.as_ref())
-            .context("failed to set pubkey for x509")?;
-
-        let mut name = openssl::x509::X509Name::builder()?;
-        name.append_entry_by_nid(openssl::nid::Nid::COMMONNAME, &addr.to_string())?;
-        let name = name.build();
-
-        builder
-            .set_subject_name(&name)
-            .context("failed to set subject name")?;
-        builder
-            .set_issuer_name(&name)
-            .context("failed to set issuer name")?;
-
-        // Add the SubjectAlternativeName
-        let extension = openssl::x509::extension::SubjectAlternativeName::new()
-            .ip(&addr.ip().to_string())
-            .build(&builder.x509v3_context(None, None))
-            .context("failed to build SAN extension for x509")?;
-        builder
-            .append_extension(extension)
-            .context("failed to append SAN extension for x509")?;
-
-        // Add ExtendedKeyUsage
-        let ext_key_usage = openssl::x509::extension::ExtendedKeyUsage::new()
-            .server_auth()
-            .build()
-            .context("failed to build EKU extension for x509")?;
-        builder
-            .append_extension(ext_key_usage)
-            .context("fails to append EKU extension for x509")?;
-
-        // Finish the certificate
-        builder
-            .sign(&privkey, openssl::hash::MessageDigest::sha1())
-            .context("failed to sign x509 with sha1")?;
-        let cert: openssl::x509::X509 = builder.build();
-        let cert_pem = cert.to_pem().context("failed to create pem from x509")?;
-        let cert_digest = cert
-            .digest(openssl::hash::MessageDigest::sha256())
-            .context("failed to create digest of x509 certificate")?
-            .as_ref()
-            .to_owned();
-
-        Ok((cert_digest, cert_pem, privkey_pem))
+    pub async fn retry_with_jitter<F>(
+        limit: usize,
+        func: F,
+    ) -> std::result::Result<F::Item, F::Error>
+    where
+        F: tokio_retry2::Action,
+    {
+        Retry::spawn(
+            FibonacciBackoff::from_millis(1000) // wait 1s before retrying
+                .max_delay_millis(10000) // set max interval to 10 seconds
+                .map(tokio_retry2::strategy::jitter) // add jitter to the retry interval
+                .take(limit), // limit retries
+            func,
+        )
+        .await
     }
 
     // Messages that are non-sensitive and can be sent to the client
     #[derive(Debug)]
-    pub struct ClientVisibleMsg(String);
+    pub struct ClientVisibleMsg(pub String);
     impl ClientVisibleMsg {
         pub fn from_nonsensitive(s: String) -> Self {
             ClientVisibleMsg(s)
         }
     }
 
+    #[async_trait]
     pub trait ClientAuthCheck: Send + Sync {
-        fn check(&self, token: &str) -> StdResult<(), ClientVisibleMsg>;
+        async fn check(&self, token: &str) -> std::result::Result<(), ClientVisibleMsg>;
     }
-    pub type ServerAuthCheck = Box<dyn Fn(&str) -> Option<ServerId> + Send + Sync>;
+}
 
-    const JWT_KEY_LENGTH: usize = 256 / 8;
-    static JWT_HEADER: Lazy<jwt::Header> = Lazy::new(|| jwt::Header::new(jwt::Algorithm::HS256));
-    static JWT_VALIDATION: Lazy<jwt::Validation> = Lazy::new(|| {
-        let mut validation = jwt::Validation::new(jwt::Algorithm::HS256);
-        validation.leeway = 0;
-        validation.validate_exp = false;
-        validation.validate_nbf = false;
-        validation
-    });
+#[cfg(feature = "dist-server")]
+mod scheduler {
 
-    // Based on rouille::input::json::json_input
-    #[derive(Debug)]
-    pub enum RouilleBincodeError {
-        BodyAlreadyExtracted,
-        WrongContentType,
-        ParseError(bincode::Error),
-    }
-    impl From<bincode::Error> for RouilleBincodeError {
-        fn from(err: bincode::Error) -> RouilleBincodeError {
-            RouilleBincodeError::ParseError(err)
-        }
-    }
-    impl std::error::Error for RouilleBincodeError {
-        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-            match *self {
-                RouilleBincodeError::ParseError(ref e) => Some(e),
-                _ => None,
+    use async_trait::async_trait;
+
+    use axum::{
+        body::Bytes,
+        extract::{
+            ConnectInfo, DefaultBodyLimit, Extension, FromRequest, FromRequestParts, MatchedPath,
+            Path, Request,
+        },
+        http::{request::Parts, HeaderMap, Method, StatusCode, Uri},
+        response::{IntoResponse, Response},
+        routing, RequestPartsExt, Router,
+    };
+
+    use axum_extra::{
+        headers::{authorization::Bearer, Authorization},
+        TypedHeader,
+    };
+
+    use futures::TryStreamExt;
+
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+
+    use serde_json::json;
+
+    use std::{io, net::SocketAddr, str::FromStr, sync::Arc, time::Instant};
+
+    use tokio::{io::AsyncReadExt, net::TcpListener};
+    use tokio_util::{
+        compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt},
+        io::StreamReader,
+    };
+    use tower::{Service, ServiceBuilder, ServiceExt};
+    use tower_http::{
+        request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+        sensitive_headers::{SetSensitiveRequestHeadersLayer, SetSensitiveResponseHeadersLayer},
+        trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+    };
+
+    use crate::dist::{
+        http::{bincode_deserialize, ClientAuthCheck},
+        metrics::Metrics,
+        RunJobRequest, SchedulerService, Toolchain,
+    };
+
+    use crate::errors::*;
+
+    fn get_header_value<'a>(headers: &'a HeaderMap, name: &'a str) -> Option<&'a str> {
+        if let Some(header) = headers.get(name) {
+            if let Ok(header) = header.to_str() {
+                return Some(header);
             }
         }
-    }
-    impl std::fmt::Display for RouilleBincodeError {
-        fn fmt(
-            &self,
-            fmt: &mut std::fmt::Formatter<'_>,
-        ) -> std::result::Result<(), std::fmt::Error> {
-            write!(
-                fmt,
-                "{}",
-                match *self {
-                    RouilleBincodeError::BodyAlreadyExtracted => {
-                        "the body of the request was already extracted"
-                    }
-                    RouilleBincodeError::WrongContentType => {
-                        "the request didn't have a binary content type"
-                    }
-                    RouilleBincodeError::ParseError(_) => "error while parsing the bincode body",
-                }
-            )
-        }
-    }
-    fn bincode_input<O>(request: &rouille::Request) -> std::result::Result<O, RouilleBincodeError>
-    where
-        O: serde::de::DeserializeOwned,
-    {
-        if let Some(header) = request.header("Content-Type") {
-            if !header.starts_with("application/octet-stream") {
-                return Err(RouilleBincodeError::WrongContentType);
-            }
-        } else {
-            return Err(RouilleBincodeError::WrongContentType);
-        }
-
-        if let Some(mut b) = request.data() {
-            bincode::deserialize_from::<_, O>(&mut b).map_err(From::from)
-        } else {
-            Err(RouilleBincodeError::BodyAlreadyExtracted)
-        }
+        None
     }
 
-    // Based on try_or_400 in rouille, but with logging
-    #[derive(Serialize)]
-    pub struct ErrJson {
-        description: String,
-        cause: Option<Box<ErrJson>>,
+    fn get_content_length(headers: &HeaderMap) -> u64 {
+        Option::<&str>::None
+            .or(get_header_value(headers, "Content-Length"))
+            .or(get_header_value(headers, "content-length"))
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0)
     }
 
-    impl ErrJson {
-        fn from_err<E: ?Sized + std::error::Error>(err: &E) -> ErrJson {
-            let cause = err.source().map(ErrJson::from_err).map(Box::new);
-            ErrJson {
-                description: err.to_string(),
-                cause,
-            }
-        }
-
-        fn into_data(self) -> String {
-            serde_json::to_string(&self).expect("infallible serialization for ErrJson failed")
-        }
-    }
-    macro_rules! try_or_err_and_log {
-        ($reqid:expr, $code:expr, $result:expr) => {
-            match $result {
-                Ok(r) => r,
-                Err(err) => {
-                    // TODO: would ideally just use error_chain
-                    #[allow(unused_imports)]
-                    use std::error::Error;
-                    let mut err_msg = err.to_string();
-                    let mut maybe_cause = err.source();
-                    while let Some(cause) = maybe_cause {
-                        err_msg.push_str(", caused by: ");
-                        err_msg.push_str(&cause.to_string());
-                        maybe_cause = cause.source();
-                    }
-
-                    warn!("Res {} error: {}", $reqid, err_msg);
-                    let err: Box<dyn std::error::Error + 'static> = err.into();
-                    let json = ErrJson::from_err(&*err);
-                    return rouille::Response::json(&json).with_status_code($code);
-                }
-            }
-        };
-    }
-    macro_rules! try_or_400_log {
-        ($reqid:expr, $result:expr) => {
-            try_or_err_and_log!($reqid, 400, $result)
-        };
-    }
-    macro_rules! try_or_500_log {
-        ($reqid:expr, $result:expr) => {
-            try_or_err_and_log!($reqid, 500, $result)
-        };
-    }
-    fn make_401_with_body(short_err: &str, body: ClientVisibleMsg) -> rouille::Response {
-        rouille::Response {
-            status_code: 401,
-            headers: vec![(
-                "WWW-Authenticate".into(),
-                format!("Bearer error=\"{}\"", short_err).into(),
-            )],
-            data: rouille::ResponseBody::from_data(body.0),
-            upgrade: None,
-        }
-    }
-    fn make_401(short_err: &str) -> rouille::Response {
-        make_401_with_body(short_err, ClientVisibleMsg(String::new()))
-    }
-    fn bearer_http_auth(request: &rouille::Request) -> Option<&str> {
-        let header = request.header("Authorization")?;
-
-        let mut split = header.splitn(2, ' ');
-
-        let authtype = split.next()?;
-        if authtype != "Bearer" {
-            return None;
-        }
-
-        split.next()
-    }
-
-    /// Return `content` as a bincode-encoded `Response`.
-    pub fn bincode_response<T>(content: &T) -> rouille::Response
+    /// Return `content` as either a bincode or json encoded `Response` depending on the Accept header.
+    fn result_to_response<T>(
+        headers: HeaderMap,
+    ) -> impl FnOnce(T) -> std::result::Result<Response, Response>
     where
         T: serde::Serialize,
     {
-        let data = bincode::serialize(content).context("Failed to serialize response body");
-        let data = try_or_500_log!("bincode body serialization", data);
-
-        rouille::Response {
-            status_code: 200,
-            headers: vec![
-                ("Content-Type".into(), "application/octet-stream".into()),
-                ("Content-Length".into(), data.len().to_string().into()),
-            ],
-            data: rouille::ResponseBody::from_data(data),
-            upgrade: None,
+        move |content: T| {
+            if let Some(header) = headers.get("Accept") {
+                // This is the only function we use from rouille.
+                // Maybe we can find a replacement?
+                match rouille::input::priority_header_preferred(
+                    header.to_str().unwrap_or("*/*"),
+                    ["application/octet-stream", "application/json"]
+                        .iter()
+                        .cloned(),
+                ) {
+                    // application/octet-stream
+                    Some(0) => match bincode::serialize(&content) {
+                        Ok(body) => Ok((StatusCode::OK, body).into_response()),
+                        Err(err) => {
+                            tracing::error!("Failed to serialize response body: {err:?}");
+                            Err((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("Failed to serialize response body: {err}").into_bytes(),
+                            )
+                                .into_response())
+                        }
+                    },
+                    // application/json
+                    Some(1) => Ok((
+                        StatusCode::OK,
+                        json!(content).as_str().unwrap().to_string().into_bytes(),
+                    )
+                        .into_response()),
+                    _ => {
+                        tracing::error!(
+                            "Request must accept application/json or application/octet-stream"
+                        );
+                        Err((
+                            StatusCode::BAD_REQUEST,
+                            "Request must accept application/json or application/octet-stream"
+                                .to_string()
+                                .into_bytes(),
+                        )
+                            .into_response())
+                    }
+                }
+            } else {
+                tracing::error!("Request must accept application/json or application/octet-stream");
+                Err((
+                    StatusCode::BAD_REQUEST,
+                    "Request must accept application/json or application/octet-stream"
+                        .to_string()
+                        .into_bytes(),
+                )
+                    .into_response())
+            }
         }
     }
 
-    /// Return `content` as either a bincode or json encoded `Response`
-    /// depending on the Accept header in `request`.
-    pub fn prepare_response<T>(request: &rouille::Request, content: &T) -> rouille::Response
-    where
-        T: serde::Serialize,
-    {
-        accept!(request,
-        "application/octet-stream" => bincode_response(content),
-        "application/json" => rouille::Response::json(content),
+    fn anyhow_to_response(
+        method: Method,
+        uri: Uri,
+    ) -> impl FnOnce(anyhow::Error) -> std::result::Result<Response, Response> {
+        move |err: anyhow::Error| {
+            tracing::error!("sccache: `{method} {uri}` failed with: {err:?}");
+            let msg = format!("sccache: `{method} {uri}` failed with: `{err}`");
+            Err((StatusCode::INTERNAL_SERVER_ERROR, msg.into_bytes()).into_response())
+        }
+    }
+
+    fn unwrap_infallible<T>(result: std::result::Result<T, std::convert::Infallible>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(err) => match err {},
+        }
+    }
+
+    fn with_request_tracing(app: Router) -> Router {
+        // Mark these headers as sensitive so they don't show in logs
+        let headers_to_redact: Arc<[_]> = Arc::new([
+            http::header::AUTHORIZATION,
+            http::header::PROXY_AUTHORIZATION,
+            http::header::COOKIE,
+            http::header::SET_COOKIE,
+        ]);
+
+        let request_id_header_name = http::HeaderName::from_str(
+            &std::env::var("SCCACHE_DIST_REQUEST_ID_HEADER_NAME")
+                // tower_http::request_id::X_REQUEST_ID inlined here because it is not public
+                .unwrap_or("x-request-id".to_owned()),
+        )
+        .unwrap();
+
+        app.layer(
+            ServiceBuilder::new()
+                .layer(SetSensitiveRequestHeadersLayer::from_shared(Arc::clone(
+                    &headers_to_redact,
+                )))
+                .layer(SetRequestIdLayer::new(
+                    request_id_header_name,
+                    MakeRequestUuid,
+                ))
+                .layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(DefaultMakeSpan::new().include_headers(true))
+                        .on_response(DefaultOnResponse::new().include_headers(true)),
+                )
+                .layer(PropagateRequestIdLayer::x_request_id())
+                .layer(SetSensitiveResponseHeadersLayer::from_shared(
+                    headers_to_redact,
+                )),
         )
     }
 
-    // Verification of job auth in a request
-    macro_rules! job_auth_or_401 {
-        ($request:ident, $job_authorizer:expr, $job_id:expr) => {{
-            let verify_result = match bearer_http_auth($request) {
-                Some(token) => $job_authorizer.verify_token($job_id, token),
-                None => Err(anyhow!("no Authorization header")),
+    fn with_metrics(app: Router, metrics: Metrics) -> Router {
+        let app = if let Some(path) = metrics.listen_path() {
+            app.route(
+                &path,
+                routing::get(move || std::future::ready(metrics.render())),
+            )
+        } else {
+            app
+        };
+
+        async fn record_metrics(req: Request, next: axum::middleware::Next) -> impl IntoResponse {
+            let start = Instant::now();
+            let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
+                matched_path.as_str().to_owned()
+            } else {
+                req.uri().path().to_owned()
             };
-            match verify_result {
-                Ok(()) => (),
-                Err(err) => {
-                    let err: Box<dyn std::error::Error> = err.into();
-                    let json = ErrJson::from_err(&*err);
-                    return make_401_with_body("invalid_jwt", ClientVisibleMsg(json.into_data()));
-                }
-            }
-        }};
-    }
-    // Generation and verification of job auth
-    struct JWTJobAuthorizer {
-        server_key: Vec<u8>,
-    }
-    impl JWTJobAuthorizer {
-        fn new(server_key: Vec<u8>) -> Box<Self> {
-            Box::new(Self { server_key })
+            let method = req.method().clone();
+
+            let response = next.run(req).await;
+
+            let latency = start.elapsed().as_secs_f64();
+            let status = response.status().as_u16().to_string();
+
+            let labels = [
+                ("method", method.to_string()),
+                ("path", path),
+                ("status", status),
+            ];
+
+            metrics::counter!("sccache::scheduler::http::request_count", &labels).increment(1);
+            metrics::histogram!("sccache::scheduler::http::request_time", &labels).record(latency);
+
+            response
         }
+
+        // Define this at the end so we also track metrics for the `/metrics` route
+        app.route_layer(axum::middleware::from_fn(record_metrics))
     }
-    impl dist::JobAuthorizer for JWTJobAuthorizer {
-        fn generate_token(&self, job_id: JobId) -> Result<String> {
-            let claims = JobJwt { exp: 0, job_id };
-            let key = jwt::EncodingKey::from_secret(&self.server_key);
-            jwt::encode(&JWT_HEADER, &claims, &key)
-                .map_err(|e| anyhow!("Failed to create JWT for job: {}", e))
-        }
-        fn verify_token(&self, job_id: JobId, token: &str) -> Result<()> {
-            let valid_claims = JobJwt { exp: 0, job_id };
-            let key = jwt::DecodingKey::from_secret(&self.server_key);
-            jwt::decode(token, &key, &JWT_VALIDATION)
-                .map_err(|e| anyhow!("JWT decode failed: {}", e))
-                .and_then(|res| {
-                    fn identical_t<T>(_: &T, _: &T) {}
-                    identical_t(&res.claims, &valid_claims);
-                    if res.claims == valid_claims {
-                        Ok(())
-                    } else {
-                        Err(anyhow!("mismatched claims"))
-                    }
+
+    // Verify authenticated sccache clients
+    #[allow(dead_code)]
+    struct AuthenticatedClient(SocketAddr);
+
+    #[async_trait]
+    impl<S> FromRequestParts<S> for AuthenticatedClient
+    where
+        S: Send + Sync,
+    {
+        type Rejection = StatusCode;
+
+        async fn from_request_parts(
+            parts: &mut Parts,
+            _state: &S,
+        ) -> std::result::Result<Self, Self::Rejection> {
+            let TypedHeader(Authorization(bearer)) = parts
+                .extract::<TypedHeader<Authorization<Bearer>>>()
+                .await
+                .map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+            let ConnectInfo(remote_addr) = parts
+                .extract::<ConnectInfo<SocketAddr>>()
+                .await
+                .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+            let Extension(this) = parts
+                .extract::<Extension<Arc<SchedulerState>>>()
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            this.client_auth
+                .check(bearer.token())
+                .await
+                .map(|_| AuthenticatedClient(remote_addr))
+                .map_err(|err| {
+                    tracing::warn!(
+                        "[AuthenticatedClient({remote_addr})]: invalid client auth: {}",
+                        err.0
+                    );
+                    StatusCode::UNAUTHORIZED
                 })
         }
     }
 
-    #[test]
-    fn test_job_token_verification() {
-        let ja = JWTJobAuthorizer::new(vec![1, 2, 2]);
+    struct Bincode<T>(T);
 
-        let job_id = JobId(55);
-        let token = ja.generate_token(job_id).unwrap();
+    #[async_trait]
+    impl<S, T> FromRequest<S> for Bincode<T>
+    where
+        Bytes: FromRequest<S>,
+        S: Send + Sync,
+        T: serde::de::DeserializeOwned + Send + 'static,
+    {
+        type Rejection = Response;
 
-        let job_id2 = JobId(56);
-        let token2 = ja.generate_token(job_id2).unwrap();
+        async fn from_request(
+            req: Request,
+            state: &S,
+        ) -> std::result::Result<Self, Self::Rejection> {
+            let data = match get_header_value(req.headers(), "Content-Type") {
+                Some("application/octet-stream") => Bytes::from_request(req, state)
+                    .await
+                    .map_err(IntoResponse::into_response)?
+                    .to_vec(),
+                _ => return Err((StatusCode::BAD_REQUEST, "Wrong content type").into_response()),
+            };
 
-        let ja2 = JWTJobAuthorizer::new(vec![1, 2, 3]);
+            let data = bincode_deserialize::<T>(data)
+                .await
+                .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()).into_response())?;
 
-        // Check tokens are deterministic
-        assert_eq!(token, ja.generate_token(job_id).unwrap());
-        // Check token verification works
-        assert!(ja.verify_token(job_id, &token).is_ok());
-        assert!(ja.verify_token(job_id, &token2).is_err());
-        assert!(ja.verify_token(job_id2, &token).is_err());
-        assert!(ja.verify_token(job_id2, &token2).is_ok());
-        // Check token verification with a different key fails
-        assert!(ja2.verify_token(job_id, &token).is_err());
-        assert!(ja2.verify_token(job_id2, &token2).is_err());
+            Ok(Self(data))
+        }
     }
 
-    pub struct Scheduler<S> {
-        public_addr: SocketAddr,
-        handler: S,
-        // Is this client permitted to use the scheduler?
-        check_client_auth: Box<dyn ClientAuthCheck>,
-        // Do we believe the server is who they appear to be?
-        check_server_auth: ServerAuthCheck,
+    struct RequestBodyAsyncRead(Box<dyn futures::AsyncRead + Send + Unpin>);
+
+    #[async_trait]
+    impl<S> FromRequest<S> for RequestBodyAsyncRead
+    where
+        S: Send + Sync,
+    {
+        type Rejection = Response;
+
+        async fn from_request(
+            req: Request,
+            _state: &S,
+        ) -> std::result::Result<Self, Self::Rejection> {
+            // Convert the request body stream into an `AsyncRead`
+            let reader = StreamReader::new(
+                req.into_body()
+                    .into_data_stream()
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err)),
+            )
+            .compat();
+
+            Ok(Self(
+                Box::new(reader) as Box<dyn futures::AsyncRead + Send + Unpin>
+            ))
+        }
     }
 
-    impl<S: dist::SchedulerIncoming + 'static> Scheduler<S> {
+    struct SchedulerState {
+        service: Arc<dyn SchedulerService>,
+        // Test whether clients are permitted to use the scheduler
+        client_auth: Box<dyn ClientAuthCheck>,
+    }
+
+    pub struct Scheduler {
+        state: Arc<SchedulerState>,
+    }
+
+    impl Scheduler {
         pub fn new(
-            public_addr: SocketAddr,
-            handler: S,
-            check_client_auth: Box<dyn ClientAuthCheck>,
-            check_server_auth: ServerAuthCheck,
+            service: Arc<dyn SchedulerService>,
+            client_auth: Box<dyn ClientAuthCheck>,
         ) -> Self {
             Self {
-                public_addr,
-                handler,
-                check_client_auth,
-                check_server_auth,
+                state: Arc::new(SchedulerState {
+                    service,
+                    client_auth,
+                }),
             }
         }
 
-        pub fn start(self) -> Result<Infallible> {
-            let Self {
-                public_addr,
-                handler,
-                check_client_auth,
-                check_server_auth,
-            } = self;
-            let requester = SchedulerRequester {
-                client: Mutex::new(new_reqwest_blocking_client()),
-            };
+        fn make_router() -> axum::Router {
+            Router::new()
+                .route(
+                    "/api/v2/status",
+                    routing::get(
+                        |// Authenticate the client bearer token first
+                         _: AuthenticatedClient,
+                         headers: HeaderMap,
+                         method: Method,
+                         uri: Uri,
+                         Extension(state): Extension<Arc<SchedulerState>>| async move {
+                            state.service.get_status().await.map_or_else(
+                                anyhow_to_response(method, uri),
+                                result_to_response(headers),
+                            )
+                        },
+                    ),
+                )
 
-            macro_rules! check_server_auth_or_err {
-                ($request:ident) => {{
-                    match bearer_http_auth($request).and_then(&*check_server_auth) {
-                        Some(server_id) => {
-                            let origin_ip = if let Some(header_val) = $request.header("X-Real-IP") {
-                                trace!("X-Real-IP: {:?}", header_val);
-                                match header_val.parse() {
-                                    Ok(ip) => ip,
-                                    Err(err) => {
-                                        warn!(
-                                            "X-Real-IP value {:?} could not be parsed: {:?}",
-                                            header_val, err
-                                        );
-                                        return rouille::Response::empty_400();
-                                    }
-                                }
+                //
+                // TOOLCHAIN OPERATIONS
+                //
+
+                // HEAD
+                .route(
+                    "/api/v2/toolchain/:archive_id",
+                    routing::head(
+                        |// Authenticate the client bearer token first
+                         _: AuthenticatedClient,
+                         Extension(state): Extension<Arc<SchedulerState>>,
+                         Path(archive_id): Path<String>| async move {
+                            if state.service.has_toolchain(&Toolchain { archive_id }).await {
+                                (StatusCode::OK).into_response()
                             } else {
-                                $request.remote_addr().ip()
+                                (StatusCode::NOT_FOUND).into_response()
+                            }
+                        },
+                    ),
+                )
+                // PUT
+                .route(
+                    "/api/v2/toolchain/:archive_id",
+                    routing::put(
+                        |// Authenticate the client bearer token first
+                         _: AuthenticatedClient,
+                         headers: HeaderMap,
+                         method: Method,
+                         uri: Uri,
+                         Extension(state): Extension<Arc<SchedulerState>>,
+                         Path(archive_id): Path<String>,
+                         RequestBodyAsyncRead(toolchain): RequestBodyAsyncRead| async move {
+                            let tc = Toolchain { archive_id };
+                            let src = std::pin::pin!(toolchain);
+                            let len = get_content_length(&headers);
+                            state
+                                .service
+                                .put_toolchain(&tc, len, src)
+                                .await
+                                .map_or_else(
+                                    anyhow_to_response(method, uri),
+                                    result_to_response(headers),
+                                )
+                        },
+                    ),
+                )
+                // DELETE
+                .route(
+                    "/api/v2/toolchain/:archive_id",
+                    routing::delete(
+                        |// Authenticate the client bearer token first
+                         _: AuthenticatedClient,
+                         headers: HeaderMap,
+                         method: Method,
+                         uri: Uri,
+                         Extension(state): Extension<Arc<SchedulerState>>,
+                         Path(archive_id): Path<String>| async move {
+                            state
+                                .service
+                                .del_toolchain(&Toolchain { archive_id })
+                                .await
+                                .map_or_else(
+                                    anyhow_to_response(method, uri),
+                                    result_to_response(headers),
+                                )
+                        },
+                    ),
+                )
+
+                //
+                // JOB OPERATIONS
+                //
+
+                // CREATE
+                .route(
+                    "/api/v2/jobs/new",
+                    routing::post(
+                        |// Authenticate the client bearer token first
+                         _: AuthenticatedClient,
+                         headers: HeaderMap,
+                         method: Method,
+                         uri: Uri,
+                         Extension(state): Extension<Arc<SchedulerState>>,
+                         RequestBodyAsyncRead(body): RequestBodyAsyncRead| async move {
+                            let mut body = Box::pin(body.compat());
+
+                            // Deserialize new job requests. First is the Toolchain
+                            // bincode, followed by the compressed inputs.
+                            let (toolchain, inputs) = {
+                                let bincode_len = body.read_u32().await
+                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid bincode length".to_owned()))
+                                    .map_err(|e| e.into_response())? as u64;
+
+                                let mut bincode_reader = body.take(bincode_len);
+                                let mut bincode = vec![];
+                                bincode_reader.read_to_end(&mut bincode).await
+                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid toolchain".to_owned()))
+                                    .map_err(|e| e.into_response())?;
+
+                                let toolchain = bincode_deserialize(bincode).await
+                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid toolchain".to_owned()))
+                                    .map_err(|e| e.into_response())?;
+
+                                let mut inputs_reader = bincode_reader.into_inner();
+                                let mut inputs = vec![];
+                                inputs_reader.read_to_end(&mut inputs).await
+                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job inputs".to_owned()))
+                                    .map_err(|e| e.into_response())?;
+
+                                (toolchain, inputs)
                             };
-                            if server_id.addr().ip() != origin_ip {
-                                trace!("server ip: {:?}", server_id.addr().ip());
-                                trace!("request ip: {:?}", $request.remote_addr().ip());
-                                return make_401("invalid_bearer_token_mismatched_address");
-                            } else {
-                                server_id
-                            }
-                        }
-                        None => return make_401("invalid_bearer_token"),
-                    }
-                }};
-            }
 
-            fn maybe_update_certs(
-                client: &mut reqwest::blocking::Client,
-                certs: &mut HashMap<ServerId, (Vec<u8>, Vec<u8>)>,
-                server_id: ServerId,
-                cert_digest: Vec<u8>,
-                cert_pem: Vec<u8>,
-            ) -> Result<()> {
-                if let Some((saved_cert_digest, _)) = certs.get(&server_id) {
-                    if saved_cert_digest == &cert_digest {
-                        return Ok(());
-                    }
-                }
-                info!(
-                    "Adding new certificate for {} to scheduler",
-                    server_id.addr()
-                );
-                let mut client_builder = reqwest::blocking::ClientBuilder::new();
-                // Add all the certificates we know about
-                client_builder = client_builder.add_root_certificate(
-                    reqwest::Certificate::from_pem(&cert_pem)
-                        .context("failed to interpret pem as certificate")?,
-                );
-                for (_, cert_pem) in certs.values() {
-                    client_builder = client_builder.add_root_certificate(
-                        reqwest::Certificate::from_pem(cert_pem).expect("previously valid cert"),
+                            state.service.new_job(&toolchain, &inputs).await.map_or_else(
+                                anyhow_to_response(method, uri),
+                                result_to_response(headers),
+                            )
+                        },
+                    ),
+                )
+                // PUT
+                .route(
+                    "/api/v2/job/:job_id",
+                    routing::put(
+                        |// Authenticate the client bearer token first
+                         _: AuthenticatedClient,
+                         headers: HeaderMap,
+                         method: Method,
+                         uri: Uri,
+                         Extension(state): Extension<Arc<SchedulerState>>,
+                         Path(job_id): Path<String>,
+                         RequestBodyAsyncRead(inputs): RequestBodyAsyncRead| async move {
+                            let src = std::pin::pin!(inputs);
+                            let len = get_content_length(&headers);
+                            state.service.put_job(&job_id, len, src).await.map_or_else(
+                                anyhow_to_response(method, uri),
+                                result_to_response(headers),
+                            )
+                        },
+                    ),
+                )
+                // POST
+                .route(
+                    "/api/v2/job/:job_id",
+                    routing::post(
+                        |// Authenticate the client bearer token first
+                         _: AuthenticatedClient,
+                         headers: HeaderMap,
+                         method: Method,
+                         uri: Uri,
+                         Extension(state): Extension<Arc<SchedulerState>>,
+                         Path(job_id): Path<String>,
+                         Bincode(req): Bincode<RunJobRequest>| async move {
+                            state.service.run_job(&job_id, req).await.map_or_else(
+                                anyhow_to_response(method, uri),
+                                result_to_response(headers),
+                            )
+                        },
+                    ),
+                )
+                // DELETE
+                .route(
+                    "/api/v2/job/:job_id",
+                    routing::delete(
+                        |// Authenticate the client bearer token first
+                         _: AuthenticatedClient,
+                         headers: HeaderMap,
+                         method: Method,
+                         uri: Uri,
+                         Extension(state): Extension<Arc<SchedulerState>>,
+                         Path(job_id): Path<String>| async move {
+                            state.service.del_job(&job_id).await.map_or_else(
+                                anyhow_to_response(method, uri),
+                                result_to_response(headers),
+                            )
+                        },
+                    ),
+                )
+        }
+
+        pub async fn serve(
+            self,
+            addr: SocketAddr,
+            max_body_size: usize,
+            metrics: Metrics,
+        ) -> Result<()> {
+            let app = Self::make_router()
+                .fallback(|| async move { (StatusCode::NOT_FOUND, "404") })
+                .layer(DefaultBodyLimit::max(max_body_size))
+                .layer(Extension(self.state.clone()));
+
+            let app = with_metrics(app, metrics);
+
+            let app = with_request_tracing(app);
+
+            let mut make_service = app.into_make_service_with_connect_info::<SocketAddr>();
+
+            let listener = TcpListener::bind(addr).await.unwrap();
+
+            tracing::info!("sccache: Scheduler listening for clients on {}", addr);
+
+            loop {
+                let (tcp_stream, remote_addr) = listener.accept().await.unwrap();
+                let tower_service = unwrap_infallible(make_service.call(remote_addr).await);
+
+                tokio::spawn(async move {
+                    // Hyper has its own `AsyncRead` and `AsyncWrite` traits and doesn't use tokio.
+                    // `TokioIo` converts between them.
+                    let tok_stream = TokioIo::new(tcp_stream);
+
+                    let hyper_service = hyper::service::service_fn(
+                        move |request: Request<hyper::body::Incoming>| {
+                            // Clone `tower_service` because hyper's `Service` uses `&self` whereas
+                            // tower's `Service` requires `&mut self`.
+                            tower_service.clone().oneshot(request)
+                        },
                     );
-                }
-                // Finish the client
-                let new_client = client_builder
-                    // Disable connection pool to avoid broken connection
-                    // between runtime
-                    .pool_max_idle_per_host(0)
-                    .build()
-                    .context("failed to create a HTTP client")?;
-                // Use the updated certificates
-                *client = new_client;
-                certs.insert(server_id, (cert_digest, cert_pem));
-                Ok(())
-            }
 
-            info!("Scheduler listening for clients on {}", public_addr);
-            let request_count = atomic::AtomicUsize::new(0);
-            // From server_id -> cert_digest, cert_pem
-            let server_certificates: Mutex<HashMap<ServerId, (Vec<u8>, Vec<u8>)>> =
-                Default::default();
-
-            let server = rouille::Server::new(public_addr, move |request| {
-                let req_id = request_count.fetch_add(1, atomic::Ordering::SeqCst);
-                trace!(target: "sccache_http", "Req {} ({}): {:?}", req_id, request.remote_addr(), request);
-                let response = (|| router!(request,
-                    (POST) (/api/v1/scheduler/alloc_job) => {
-                        let bearer_auth = match bearer_http_auth(request) {
-                            Some(s) => s,
-                            None => return make_401("no_bearer_auth"),
-                        };
-                        match check_client_auth.check(bearer_auth) {
-                            Ok(()) => (),
-                            Err(client_msg) => {
-                                warn!("Bearer auth failed: {:?}", client_msg);
-                                return make_401_with_body("bearer_auth_failed", client_msg)
-                            },
-                        }
-                        let toolchain = try_or_400_log!(req_id, bincode_input(request));
-                        trace!("Req {}: alloc_job: {:?}", req_id, toolchain);
-
-                        let alloc_job_res: AllocJobResult = try_or_500_log!(req_id, handler.handle_alloc_job(&requester, toolchain));
-                        let certs = server_certificates.lock().unwrap();
-                        let res = AllocJobHttpResponse::from_alloc_job_result(alloc_job_res, &certs);
-                        prepare_response(request, &res)
-                    },
-                    (GET) (/api/v1/scheduler/server_certificate/{server_id: ServerId}) => {
-                        let certs = {
-                            let guard = server_certificates.lock().unwrap();
-                            guard.get(&server_id).map(|v|v.to_owned())
-                        };
-
-                        let (cert_digest, cert_pem) = try_or_500_log!(req_id, certs
-                            .context("server cert not available"));
-                        let res = ServerCertificateHttpResponse {
-                            cert_digest,
-                            cert_pem,
-                        };
-                        prepare_response(request, &res)
-                    },
-                    (POST) (/api/v1/scheduler/heartbeat_server) => {
-                        let server_id = check_server_auth_or_err!(request);
-                        let heartbeat_server = try_or_400_log!(req_id, bincode_input(request));
-                        trace!(target: "sccache_heartbeat", "Req {}: heartbeat_server: {:?}", req_id, heartbeat_server);
-
-                        let HeartbeatServerHttpRequest { num_cpus, jwt_key, server_nonce, cert_digest, cert_pem } = heartbeat_server;
-                        try_or_500_log!(req_id, maybe_update_certs(
-                            &mut requester.client.lock().unwrap(),
-                            &mut server_certificates.lock().unwrap(),
-                            server_id, cert_digest, cert_pem
-                        ));
-                        let job_authorizer = JWTJobAuthorizer::new(jwt_key);
-                        let res: HeartbeatServerResult = try_or_500_log!(req_id, handler.handle_heartbeat_server(
-                            server_id, server_nonce,
-                            num_cpus,
-                            job_authorizer
-                        ));
-                        prepare_response(request, &res)
-                    },
-                    (POST) (/api/v1/scheduler/job_state/{job_id: JobId}) => {
-                        let server_id = check_server_auth_or_err!(request);
-                        let job_state = try_or_400_log!(req_id, bincode_input(request));
-                        trace!("Req {}: job state: {:?}", req_id, job_state);
-
-                        let res: UpdateJobStateResult = try_or_500_log!(req_id, handler.handle_update_job_state(
-                            job_id, server_id, job_state
-                        ));
-                        prepare_response(request, &res)
-                    },
-                    (GET) (/api/v1/scheduler/status) => {
-                        let res: SchedulerStatusResult = try_or_500_log!(req_id, handler.handle_status());
-                        prepare_response(request, &res)
-                    },
-                    _ => {
-                        warn!("Unknown request {:?}", request);
-                        rouille::Response::empty_404()
-                    },
-                ))();
-                 trace!(target: "sccache_http", "Res {}: {:?}", req_id, response);
-                response
-            }).map_err(|e| anyhow!(format!("Failed to start http server for sccache scheduler: {}", e)))?;
-
-            // This limit is rouille's default for `start_server_with_pool`, which
-            // we would use, except that interface doesn't permit any sort of
-            // error handling to be done.
-            let server = server.pool_size(num_cpus() * 8);
-            server.run();
-
-            panic!("Rouille server terminated")
-        }
-    }
-
-    struct SchedulerRequester {
-        client: Mutex<reqwest::blocking::Client>,
-    }
-
-    impl dist::SchedulerOutgoing for SchedulerRequester {
-        fn do_assign_job(
-            &self,
-            server_id: ServerId,
-            job_id: JobId,
-            tc: Toolchain,
-            auth: String,
-        ) -> Result<AssignJobResult> {
-            let url = urls::server_assign_job(server_id, job_id);
-            let req = self.client.lock().unwrap().post(url);
-            bincode_req(req.bearer_auth(auth).bincode(&tc)?)
-                .context("POST to scheduler assign_job failed")
-        }
-    }
-
-    pub struct Server<S> {
-        bind_address: SocketAddr,
-        scheduler_url: reqwest::Url,
-        scheduler_auth: String,
-        // HTTPS pieces all the builders will use for connection encryption
-        cert_digest: Vec<u8>,
-        cert_pem: Vec<u8>,
-        privkey_pem: Vec<u8>,
-        // Key used to sign any requests relating to jobs
-        jwt_key: Vec<u8>,
-        // Randomly generated nonce to allow the scheduler to detect server restarts
-        server_nonce: ServerNonce,
-        handler: S,
-    }
-
-    impl<S: dist::ServerIncoming + 'static> Server<S> {
-        pub fn new(
-            public_addr: SocketAddr,
-            bind_address: Option<SocketAddr>,
-            scheduler_url: reqwest::Url,
-            scheduler_auth: String,
-            handler: S,
-        ) -> Result<Self> {
-            let (cert_digest, cert_pem, privkey_pem) =
-                create_https_cert_and_privkey(public_addr)
-                    .context("failed to create HTTPS certificate for server")?;
-            let mut jwt_key = vec![0; JWT_KEY_LENGTH];
-            OsRng.fill_bytes(&mut jwt_key);
-            let server_nonce = ServerNonce::new();
-
-            Ok(Self {
-                bind_address: bind_address.unwrap_or(public_addr),
-                scheduler_url,
-                scheduler_auth,
-                cert_digest,
-                cert_pem,
-                privkey_pem,
-                jwt_key,
-                server_nonce,
-                handler,
-            })
-        }
-
-        pub fn start(self) -> Result<Infallible> {
-            let Self {
-                bind_address,
-                scheduler_url,
-                scheduler_auth,
-                cert_digest,
-                cert_pem,
-                privkey_pem,
-                jwt_key,
-                server_nonce,
-                handler,
-            } = self;
-            let heartbeat_req = HeartbeatServerHttpRequest {
-                num_cpus: num_cpus(),
-                jwt_key: jwt_key.clone(),
-                server_nonce,
-                cert_digest,
-                cert_pem: cert_pem.clone(),
-            };
-            let job_authorizer = JWTJobAuthorizer::new(jwt_key);
-            let heartbeat_url = urls::scheduler_heartbeat_server(&scheduler_url);
-            let requester = ServerRequester {
-                client: new_reqwest_blocking_client(),
-                scheduler_url,
-                scheduler_auth: scheduler_auth.clone(),
-            };
-
-            // TODO: detect if this panics
-            thread::spawn(move || {
-                let client = new_reqwest_blocking_client();
-                loop {
-                    trace!(target: "sccache_heartbeat", "Performing heartbeat");
-                    match bincode_req(
-                        client
-                            .post(heartbeat_url.clone())
-                            .bearer_auth(scheduler_auth.clone())
-                            .bincode(&heartbeat_req)
-                            .expect("failed to serialize heartbeat"),
-                    ) {
-                        Ok(HeartbeatServerResult { is_new }) => {
-                            trace!(target: "sccache_heartbeat", "Heartbeat success is_new={}", is_new);
-                            // TODO: if is_new, terminate all running jobs
-                            if is_new {
-                                info!("Server connected to scheduler");
-                            }
-                            thread::sleep(HEARTBEAT_INTERVAL)
-                        }
-                        Err(e) => {
-                            error!(target: "sccache_heartbeat", "Failed to send heartbeat to server: {}", e);
-                            thread::sleep(HEARTBEAT_ERROR_INTERVAL)
-                        }
+                    if let Err(err) =
+                        hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                            .http2()
+                            .serve_connection(tok_stream, hyper_service)
+                            .await
+                    {
+                        // These seem... irrelevant?
+                        tracing::trace!("sccache: failed to serve connection: {err:#}");
                     }
-                }
-            });
-
-            info!("Server listening for clients on {}", bind_address);
-            let request_count = atomic::AtomicUsize::new(0);
-
-            let server = rouille::Server::new_ssl(bind_address, move |request| {
-                let req_id = request_count.fetch_add(1, atomic::Ordering::SeqCst);
-                trace!("Req {} ({}): {:?}", req_id, request.remote_addr(), request);
-                let response = (|| router!(request,
-                    (POST) (/api/v1/distserver/assign_job/{job_id: JobId}) => {
-                        job_auth_or_401!(request, &job_authorizer, job_id);
-                        let toolchain = try_or_400_log!(req_id, bincode_input(request));
-                        trace!("Req {}: assign_job({}): {:?}", req_id, job_id, toolchain);
-
-                        let res: AssignJobResult = try_or_500_log!(req_id, handler.handle_assign_job(job_id, toolchain));
-                        prepare_response(request, &res)
-                    },
-                    (POST) (/api/v1/distserver/submit_toolchain/{job_id: JobId}) => {
-                        job_auth_or_401!(request, &job_authorizer, job_id);
-                        trace!("Req {}: submit_toolchain({})", req_id, job_id);
-
-                        let body = request.data().expect("body was already read in submit_toolchain");
-                        let toolchain_rdr = ToolchainReader(Box::new(body));
-                        let res: SubmitToolchainResult = try_or_500_log!(req_id, handler.handle_submit_toolchain(&requester, job_id, toolchain_rdr));
-                        prepare_response(request, &res)
-                    },
-                    (POST) (/api/v1/distserver/run_job/{job_id: JobId}) => {
-                        job_auth_or_401!(request, &job_authorizer, job_id);
-
-                        let mut body = request.data().expect("body was already read in run_job");
-                        let bincode_length = try_or_500_log!(req_id, body.read_u32::<BigEndian>()
-                            .context("failed to read run job input length")) as u64;
-
-                        let mut bincode_reader = body.take(bincode_length);
-                        let runjob = try_or_500_log!(req_id, bincode::deserialize_from(&mut bincode_reader)
-                            .context("failed to deserialize run job request"));
-                        trace!("Req {}: run_job({}): {:?}", req_id, job_id, runjob);
-                        let RunJobHttpRequest { command, outputs } = runjob;
-                        let body = bincode_reader.into_inner();
-                        let inputs_rdr = InputsReader(Box::new(ZlibReadDecoder::new(body)));
-                        let outputs = outputs.into_iter().collect();
-
-                        let res: RunJobResult = try_or_500_log!(req_id, handler.handle_run_job(&requester, job_id, command, outputs, inputs_rdr));
-                        prepare_response(request, &res)
-                    },
-                    _ => {
-                        warn!("Unknown request {:?}", request);
-                        rouille::Response::empty_404()
-                    },
-                ))();
-                trace!("Res {}: {:?}", req_id, response);
-                response
-            }, cert_pem, privkey_pem).map_err(|e| anyhow!(format!("Failed to start http server for sccache server: {}", e)))?;
-
-            // This limit is rouille's default for `start_server_with_pool`, which
-            // we would use, except that interface doesn't permit any sort of
-            // error handling to be done.
-            let server = server.pool_size(num_cpus() * 8);
-            server.run();
-
-            panic!("Rouille server terminated")
-        }
-    }
-
-    struct ServerRequester {
-        client: reqwest::blocking::Client,
-        scheduler_url: reqwest::Url,
-        scheduler_auth: String,
-    }
-
-    impl dist::ServerOutgoing for ServerRequester {
-        fn do_update_job_state(
-            &self,
-            job_id: JobId,
-            state: JobState,
-        ) -> Result<UpdateJobStateResult> {
-            let url = urls::scheduler_job_state(&self.scheduler_url, job_id);
-            bincode_req(
-                self.client
-                    .post(url)
-                    .bearer_auth(self.scheduler_auth.clone())
-                    .bincode(&state)?,
-            )
-            .context("POST to scheduler job_state failed")
+                });
+            }
         }
     }
 }
@@ -1057,268 +897,245 @@ mod server {
 mod client {
     use super::super::cache;
     use crate::config;
-    use crate::dist::pkg::{InputsPackager, ToolchainPackager};
+    use crate::dist::pkg::ToolchainPackager;
     use crate::dist::{
-        self, AllocJobResult, CompileCommand, JobAlloc, PathTransformer, RunJobResult,
-        SchedulerStatusResult, SubmitToolchainResult, Toolchain,
+        self, CompileCommand, NewJobResponse, RunJobRequest, RunJobResponse, SchedulerStatus,
+        SubmitToolchainResult, Toolchain,
     };
+    use crate::util::new_reqwest_client;
 
-    use async_trait::async_trait;
-    use byteorder::{BigEndian, WriteBytesExt};
-    use flate2::write::ZlibEncoder as ZlibWriteEncoder;
-    use flate2::Compression;
-    use futures::TryFutureExt;
-    use reqwest::Body;
-    use std::collections::HashMap;
-    use std::io::Write;
-    use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_util::compat::FuturesAsyncReadCompatExt;
+
+    use std::sync::Arc;
     use std::time::Duration;
 
+    use async_trait::async_trait;
+    use reqwest::Body;
+    use std::path::{Path, PathBuf};
+
     use super::common::{
-        bincode_req_fut, AllocJobHttpResponse, ReqwestRequestBuilderExt, RunJobHttpRequest,
-        ServerCertificateHttpResponse,
+        bincode_req_fut, AsyncMulticast, AsyncMulticastFn, ReqwestRequestBuilderExt,
     };
-    use super::urls;
+    use super::{bincode_serialize, urls};
     use crate::errors::*;
 
-    const REQUEST_TIMEOUT_SECS: u64 = 1200;
-    const CONNECT_TIMEOUT_SECS: u64 = 5;
+    struct SubmitToolchainFn {
+        client: Arc<reqwest::Client>,
+        auth_token: String,
+        scheduler_url: reqwest::Url,
+        client_toolchains: Arc<cache::ClientToolchains>,
+    }
+
+    #[async_trait]
+    impl AsyncMulticastFn<'_, Toolchain, SubmitToolchainResult> for SubmitToolchainFn {
+        async fn call(&self, tc: &Toolchain) -> Result<SubmitToolchainResult> {
+            let id = &tc.archive_id;
+
+            debug!("Submitting toolchain {id:?}");
+
+            let Self {
+                client,
+                auth_token,
+                scheduler_url,
+                client_toolchains,
+            } = self;
+
+            let res = match client_toolchains.get_toolchain(tc).await {
+                Err(e) => Err(e),
+                Ok(None) => Err(anyhow!("Couldn't find toolchain locally")),
+                Ok(Some(file)) => {
+                    let body = futures::io::AllowStdIo::new(file);
+                    let body = tokio_util::io::ReaderStream::new(body.compat());
+                    let url = urls::scheduler_submit_toolchain(scheduler_url, id);
+                    let req = client
+                        .put(url)
+                        .bearer_auth(auth_token)
+                        .body(Body::wrap_stream(body));
+                    bincode_req_fut::<SubmitToolchainResult>(req).await
+                }
+            };
+
+            match res {
+                Ok(dist::SubmitToolchainResult::Success) => {
+                    debug!("Successfully submitted toolchain {id:?}");
+                    res
+                }
+                Ok(dist::SubmitToolchainResult::Error { ref message }) => {
+                    warn!("Failed to submit toolchain {id:?}: {message}");
+                    res
+                }
+                Err(err) => Err(err.context(format!("Could not submit toolchain {id:?}:"))),
+            }
+        }
+    }
 
     pub struct Client {
         auth_token: String,
-        scheduler_url: reqwest::Url,
-        // cert_digest -> cert_pem
-        server_certs: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
-        client: Arc<Mutex<reqwest::Client>>,
-        pool: tokio::runtime::Handle,
-        tc_cache: Arc<cache::ClientToolchains>,
+        client: Arc<reqwest::Client>,
+        fallback_to_local_compile: bool,
+        max_retries: f64,
         rewrite_includes_only: bool,
+        scheduler_url: reqwest::Url,
+        submit_toolchain_reqs: AsyncMulticast<Toolchain, SubmitToolchainResult>,
+        tc_cache: Arc<cache::ClientToolchains>,
     }
 
     impl Client {
-        pub fn new(
-            pool: &tokio::runtime::Handle,
+        #[allow(clippy::too_many_arguments)]
+        pub async fn new(
             scheduler_url: reqwest::Url,
             cache_dir: &Path,
             cache_size: u64,
             toolchain_configs: &[config::DistToolchainConfig],
             auth_token: String,
+            fallback_to_local_compile: bool,
+            max_retries: f64,
             rewrite_includes_only: bool,
+            net: &config::DistNetworking,
         ) -> Result<Self> {
-            let timeout = Duration::new(REQUEST_TIMEOUT_SECS, 0);
-            let connect_timeout = Duration::new(CONNECT_TIMEOUT_SECS, 0);
-            let client = reqwest::ClientBuilder::new()
-                .timeout(timeout)
-                .connect_timeout(connect_timeout)
-                // Disable connection pool to avoid broken connection
-                // between runtime
-                .pool_max_idle_per_host(0)
-                .build()
-                .context("failed to create an async HTTP client")?;
-            let client_toolchains =
+            let client = Arc::new(new_reqwest_client(Some(net.clone())));
+            let client_toolchains = Arc::new(
                 cache::ClientToolchains::new(cache_dir, cache_size, toolchain_configs)
-                    .context("failed to initialise client toolchains")?;
-            Ok(Self {
-                auth_token,
-                scheduler_url,
-                server_certs: Default::default(),
-                client: Arc::new(Mutex::new(client)),
-                pool: pool.clone(),
-                tc_cache: Arc::new(client_toolchains),
-                rewrite_includes_only,
-            })
-        }
-
-        fn update_certs(
-            client: &mut reqwest::Client,
-            certs: &mut HashMap<Vec<u8>, Vec<u8>>,
-            cert_digest: Vec<u8>,
-            cert_pem: Vec<u8>,
-        ) -> Result<()> {
-            let mut client_async_builder = reqwest::ClientBuilder::new();
-            // Add all the certificates we know about
-            client_async_builder = client_async_builder.add_root_certificate(
-                reqwest::Certificate::from_pem(&cert_pem)
-                    .context("failed to interpret pem as certificate")?,
+                    .context("failed to initialise client toolchains")?,
             );
-            for cert_pem in certs.values() {
-                client_async_builder = client_async_builder.add_root_certificate(
-                    reqwest::Certificate::from_pem(cert_pem).expect("previously valid cert"),
-                );
-            }
-            // Finish the client
-            let timeout = Duration::new(REQUEST_TIMEOUT_SECS, 0);
-            let new_client_async = client_async_builder
-                .timeout(timeout)
-                // Disable keep-alive
-                .pool_max_idle_per_host(0)
-                .build()
-                .context("failed to create an async HTTP client")?;
-            // Use the updated certificates
-            *client = new_client_async;
-            certs.insert(cert_digest, cert_pem);
-            Ok(())
+
+            let submit_toolchain_reqs = AsyncMulticast::new(SubmitToolchainFn {
+                client: client.clone(),
+                auth_token: auth_token.clone(),
+                scheduler_url: scheduler_url.clone(),
+                client_toolchains: client_toolchains.clone(),
+            });
+
+            Ok(Self {
+                auth_token: auth_token.clone(),
+                client,
+                fallback_to_local_compile,
+                max_retries,
+                rewrite_includes_only,
+                scheduler_url: scheduler_url.clone(),
+                submit_toolchain_reqs,
+                tc_cache: client_toolchains,
+            })
         }
     }
 
     #[async_trait]
     impl dist::Client for Client {
-        async fn do_alloc_job(&self, tc: Toolchain) -> Result<AllocJobResult> {
-            let scheduler_url = self.scheduler_url.clone();
-            let url = urls::scheduler_alloc_job(&scheduler_url);
-            let mut req = self.client.lock().unwrap().post(url);
-            req = req.bearer_auth(self.auth_token.clone()).bincode(&tc)?;
-
-            let client = self.client.clone();
-            let server_certs = self.server_certs.clone();
-
-            match bincode_req_fut(req).await? {
-                AllocJobHttpResponse::Success {
-                    job_alloc,
-                    need_toolchain,
-                    cert_digest,
-                } => {
-                    let server_id = job_alloc.server_id;
-                    let alloc_job_res = Ok(AllocJobResult::Success {
-                        job_alloc,
-                        need_toolchain,
-                    });
-                    if server_certs.lock().unwrap().contains_key(&cert_digest) {
-                        return alloc_job_res;
-                    }
-                    info!(
-                        "Need to request new certificate for server {}",
-                        server_id.addr()
-                    );
-                    let url = urls::scheduler_server_certificate(&scheduler_url, server_id);
-                    let req = client.lock().unwrap().get(url);
-                    let res: ServerCertificateHttpResponse = bincode_req_fut(req)
-                        .await
-                        .context("GET to scheduler server_certificate failed")?;
-
-                    // TODO: Move to asynchronous reqwest client only.
-                    // This function internally builds a blocking reqwest client;
-                    // However, it does so by utilizing a runtime which it drops,
-                    // triggering (rightfully) a sanity check that prevents from
-                    // dropping a runtime in asynchronous context.
-                    // For the time being, we work around this by off-loading it
-                    // to a dedicated blocking-friendly thread pool.
-                    let _ = self
-                        .pool
-                        .spawn_blocking(move || {
-                            Self::update_certs(
-                                &mut client.lock().unwrap(),
-                                &mut server_certs.lock().unwrap(),
-                                res.cert_digest,
-                                res.cert_pem,
-                            )
-                            .context("Failed to update certificate")
-                            .unwrap_or_else(|e| warn!("Failed to update certificate: {:?}", e));
-                        })
-                        .await;
-
-                    alloc_job_res
-                }
-                AllocJobHttpResponse::Fail { msg } => Ok(AllocJobResult::Fail { msg }),
-            }
-        }
-
-        async fn do_get_status(&self) -> Result<SchedulerStatusResult> {
-            let scheduler_url = self.scheduler_url.clone();
-            let url = urls::scheduler_status(&scheduler_url);
-            let req = self.client.lock().unwrap().get(url);
-            bincode_req_fut(req).await
-        }
-
-        async fn do_submit_toolchain(
+        async fn new_job(
             &self,
-            job_alloc: JobAlloc,
-            tc: Toolchain,
-        ) -> Result<SubmitToolchainResult> {
-            match self.tc_cache.get_toolchain(&tc) {
-                Ok(Some(toolchain_file)) => {
-                    let url = urls::server_submit_toolchain(job_alloc.server_id, job_alloc.job_id);
-                    let req = self.client.lock().unwrap().post(url);
-                    let toolchain_file = tokio::fs::File::from_std(toolchain_file.into());
-                    let toolchain_file_stream = tokio_util::io::ReaderStream::new(toolchain_file);
-                    let body = Body::wrap_stream(toolchain_file_stream);
-                    let req = req.bearer_auth(job_alloc.auth).body(body);
-                    bincode_req_fut(req).await
-                }
-                Ok(None) => Err(anyhow!("couldn't find toolchain locally")),
-                Err(e) => Err(e),
-            }
+            toolchain: Toolchain,
+            inputs: std::fs::File,
+        ) -> Result<NewJobResponse> {
+            bincode_req_fut(
+                self.client
+                    .post(urls::scheduler_new_job(&self.scheduler_url))
+                    .bearer_auth(self.auth_token.clone())
+                    .body(Body::wrap_stream({
+                        let bincode = bincode_serialize(toolchain).await?;
+                        let (body, mut writer) = tokio::io::simplex(bincode.len() + 4);
+                        writer
+                            .write_u32(bincode.len() as u32)
+                            .await
+                            .expect("Infallible write of bincode length to stream failed");
+                        writer
+                            .write_all(&bincode)
+                            .await
+                            .expect("Infallible write of bincode body to stream failed");
+                        writer.shutdown().await?;
+                        let inputs = tokio::fs::File::from_std(inputs);
+                        let inputs = tokio::io::BufReader::new(inputs);
+                        tokio_util::io::ReaderStream::new(body.chain(inputs))
+                    })),
+            )
+            .await
         }
 
-        async fn do_run_job(
+        async fn put_job(&self, job_id: &str, inputs: std::fs::File) -> Result<()> {
+            let body = futures::io::AllowStdIo::new(inputs);
+            let body = tokio_util::io::ReaderStream::new(body.compat());
+            bincode_req_fut(
+                self.client
+                    .put(urls::scheduler_put_job(&self.scheduler_url, job_id))
+                    .bearer_auth(self.auth_token.clone())
+                    .body(Body::wrap_stream(body)),
+            )
+            .await
+        }
+
+        async fn run_job(
             &self,
-            job_alloc: JobAlloc,
+            job_id: &str,
+            timeout: Duration,
+            toolchain: Toolchain,
             command: CompileCommand,
             outputs: Vec<String>,
-            inputs_packager: Box<dyn InputsPackager>,
-        ) -> Result<(RunJobResult, PathTransformer)> {
-            let url = urls::server_run_job(job_alloc.server_id, job_alloc.job_id);
+        ) -> Result<RunJobResponse> {
+            bincode_req_fut(
+                self.client
+                    .post(urls::scheduler_run_job(&self.scheduler_url, job_id))
+                    .bearer_auth(self.auth_token.clone())
+                    .timeout(timeout)
+                    .bincode(&RunJobRequest {
+                        command,
+                        outputs,
+                        toolchain,
+                    })?,
+            )
+            .await
+        }
 
-            let (body, path_transformer) = self
-                .pool
-                .spawn_blocking(move || -> Result<_> {
-                    let bincode = bincode::serialize(&RunJobHttpRequest { command, outputs })
-                        .context("failed to serialize run job request")?;
-                    let bincode_length = bincode.len();
+        async fn del_job(&self, job_id: &str) -> Result<()> {
+            bincode_req_fut(
+                self.client
+                    .delete(urls::scheduler_del_job(&self.scheduler_url, job_id))
+                    .bearer_auth(self.auth_token.clone()),
+            )
+            .await
+        }
 
-                    let mut body = vec![];
-                    body.write_u32::<BigEndian>(bincode_length as u32)
-                        .expect("Infallible write of bincode length to vec failed");
-                    body.write_all(&bincode)
-                        .expect("Infallible write of bincode body to vec failed");
-                    let path_transformer;
-                    {
-                        let mut compressor = ZlibWriteEncoder::new(&mut body, Compression::fast());
-                        path_transformer = inputs_packager
-                            .write_inputs(&mut compressor)
-                            .context("Could not write inputs for compilation")?;
-                        compressor.flush().context("failed to flush compressor")?;
-                        trace!(
-                            "Compressed inputs from {} -> {}",
-                            compressor.total_in(),
-                            compressor.total_out()
-                        );
-                        compressor.finish().context("failed to finish compressor")?;
-                    }
+        async fn get_status(&self) -> Result<SchedulerStatus> {
+            bincode_req_fut(
+                self.client
+                    .get(urls::scheduler_status(&self.scheduler_url))
+                    .bearer_auth(self.auth_token.clone()),
+            )
+            .await
+        }
 
-                    Ok((body, path_transformer))
-                })
-                .await??;
-            let mut req = self.client.lock().unwrap().post(url);
-            req = req.bearer_auth(job_alloc.auth.clone()).bytes(body);
-            bincode_req_fut(req)
-                .map_ok(|res| (res, path_transformer))
+        async fn put_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
+            let id = tc.archive_id.clone();
+            self.submit_toolchain_reqs
+                .call(tc)
+                .await
+                .map_err(|_| anyhow!("Failed to submit toolchain {id:?}"))
+        }
+
+        async fn put_toolchain_local(
+            &self,
+            compiler_path: &Path,
+            weak_toolchain_key: &str,
+            toolchain_packager: Box<dyn ToolchainPackager>,
+        ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
+            self.tc_cache
+                .put_toolchain(compiler_path, weak_toolchain_key, toolchain_packager)
                 .await
         }
 
-        async fn put_toolchain(
-            &self,
-            compiler_path: PathBuf,
-            weak_key: String,
-            toolchain_packager: Box<dyn ToolchainPackager>,
-        ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
-            let compiler_path = compiler_path.to_owned();
-            let weak_key = weak_key.to_owned();
-            let tc_cache = self.tc_cache.clone();
+        fn fallback_to_local_compile(&self) -> bool {
+            self.fallback_to_local_compile
+        }
 
-            self.pool
-                .spawn_blocking(move || {
-                    tc_cache.put_toolchain(&compiler_path, &weak_key, toolchain_packager)
-                })
-                .await?
+        fn max_retries(&self) -> f64 {
+            self.max_retries
         }
 
         fn rewrite_includes_only(&self) -> bool {
             self.rewrite_includes_only
         }
-        fn get_custom_toolchain(&self, exe: &Path) -> Option<PathBuf> {
-            match self.tc_cache.get_custom_toolchain(exe) {
+
+        async fn get_custom_toolchain(&self, exe: &Path) -> Option<PathBuf> {
+            match self.tc_cache.get_custom_toolchain(exe).await {
                 Some(Ok((_, _, path))) => Some(path),
                 _ => None,
             }

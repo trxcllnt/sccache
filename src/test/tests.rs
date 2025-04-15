@@ -34,7 +34,6 @@ use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use std::u64;
 use tokio::runtime::Runtime;
 
 /// Options for running the server in tests.
@@ -83,7 +82,6 @@ where
         let storage = Arc::new(DiskCache::new(
             &cache_dir,
             cache_size,
-            runtime.handle(),
             PreprocessorCacheModeConfig::default(),
             CacheMode::ReadWrite,
         ));

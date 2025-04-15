@@ -656,7 +656,7 @@ impl RustupProxy {
         let mut child = creator.new_command_sync(compiler_executable);
         child.env_clear().envs(env.to_vec()).args(&["+stable"]);
         let state = run_input_output(child, None).await.map(move |output| {
-            if output.status.success() {
+            if output.success() {
                 trace!("proxy: Found a compiler proxy managed by rustup");
                 ProxyPath::ToBeDiscovered
             } else {
@@ -1310,6 +1310,10 @@ impl<T> CompilerHasher<T> for RustHasher
 where
     T: CommandCreatorSync,
 {
+    fn get_executable(&self) -> PathBuf {
+        self.executable.clone()
+    }
+
     async fn generate_hash_key(
         self: Box<Self>,
         creator: &T,
@@ -1684,6 +1688,7 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
         &self,
         path_transformer: &mut dist::PathTransformer,
         _rewrite_includes_only: bool,
+        _hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,
@@ -1829,10 +1834,7 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
     }
 
     #[cfg(feature = "dist-client")]
-    fn into_dist_packagers(
-        self: Box<Self>,
-        path_transformer: dist::PathTransformer,
-    ) -> Result<DistPackagers> {
+    fn into_dist_packagers(self: Box<Self>) -> Result<DistPackagers> {
         let RustCompilation {
             inputs,
             crate_link_paths,
@@ -1854,7 +1856,6 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
             crate_link_paths,
             crate_types,
             inputs,
-            path_transformer,
             rlib_dep_reader,
         });
         let toolchain_packager = Box::new(RustToolchainPackager { sysroot });
@@ -1888,7 +1889,6 @@ struct RustInputsPackager {
     crate_link_paths: Vec<PathBuf>,
     crate_types: CrateTypes,
     inputs: Vec<PathBuf>,
-    path_transformer: dist::PathTransformer,
     rlib_dep_reader: Option<Arc<RlibDepReader>>,
 }
 
@@ -1988,13 +1988,16 @@ fn test_maybe_add_cargo_toml() {
 #[cfg(feature = "dist-client")]
 impl pkg::InputsPackager for RustInputsPackager {
     #[allow(clippy::cognitive_complexity)] // TODO simplify this method.
-    fn write_inputs(self: Box<Self>, wtr: &mut dyn io::Write) -> Result<dist::PathTransformer> {
+    fn write_inputs(
+        self: Box<Self>,
+        path_transformer: &mut dist::PathTransformer,
+        wtr: &mut dyn io::Write,
+    ) -> Result<()> {
         debug!("Packaging compile inputs for compile");
         let RustInputsPackager {
             crate_link_paths,
             crate_types,
             inputs,
-            mut path_transformer,
             rlib_dep_reader,
             env_vars,
         } = *{ self };
@@ -2148,7 +2151,8 @@ impl pkg::InputsPackager for RustInputsPackager {
         let mut builder = tar::Builder::new(wtr);
 
         for (input_path, dist_input_path) in all_tar_inputs.iter() {
-            let mut file_header = pkg::make_tar_header(input_path, dist_input_path)?;
+            let (mut file_header, dist_input_path) =
+                pkg::make_tar_header(input_path, dist_input_path)?;
             let file = fs::File::open(input_path)?;
             if can_trim_rlibs && can_trim_this(input_path) {
                 let mut archive = ar::Archive::new(file);
@@ -2166,18 +2170,23 @@ impl pkg::InputsPackager for RustInputsPackager {
                     }
                     file_header.set_size(metadata_ar.len() as u64);
                     file_header.set_cksum();
-                    builder.append(&file_header, metadata_ar.as_slice())?;
+                    builder.append_data(
+                        &mut file_header,
+                        dist_input_path,
+                        metadata_ar.as_slice(),
+                    )?;
                     break;
                 }
             } else {
                 file_header.set_cksum();
-                builder.append(&file_header, file)?
+                builder.append_data(&mut file_header, dist_input_path, file)?
             }
         }
 
         // Finish archive
         let _ = builder.into_inner()?;
-        Ok(path_transformer)
+
+        Ok(())
     }
 }
 
@@ -2188,9 +2197,17 @@ struct RustToolchainPackager {
 }
 
 #[cfg(feature = "dist-client")]
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+))]
+#[async_trait]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+))]
 impl pkg::ToolchainPackager for RustToolchainPackager {
-    fn write_pkg(self: Box<Self>, f: fs::File) -> Result<()> {
+    async fn write_pkg(self: Box<Self>, f: fs::File) -> Result<String> {
         info!(
             "Packaging Rust compiler for sysroot {}",
             self.sysroot.display()
@@ -2202,7 +2219,7 @@ impl pkg::ToolchainPackager for RustToolchainPackager {
 
         let bins_path = sysroot.join(BINS_DIR);
         let sysroot_executable = bins_path.join("rustc").with_extension(EXE_EXTENSION);
-        package_builder.add_executable_and_deps(sysroot_executable)?;
+        package_builder.add_executable_and_deps(&[], sysroot_executable)?;
 
         package_builder.add_dir_contents(&bins_path)?;
         if BINS_DIR != LIBS_DIR {
@@ -2210,7 +2227,7 @@ impl pkg::ToolchainPackager for RustToolchainPackager {
             package_builder.add_dir_contents(&libs_path)?
         }
 
-        package_builder.into_compressed_tar(f)
+        package_builder.into_compressed_tar(f).await
     }
 }
 
@@ -2222,27 +2239,27 @@ struct RustOutputsRewriter {
 #[cfg(feature = "dist-client")]
 impl OutputsRewriter for RustOutputsRewriter {
     fn handle_outputs(
-        self: Box<Self>,
+        &self,
         path_transformer: &dist::PathTransformer,
         output_paths: &[PathBuf],
-        extra_inputs: &[PathBuf],
+        extra_inputs: &[&Path],
     ) -> Result<()> {
         use std::io::Write;
 
         // Outputs in dep files (the files at the beginning of lines) are untransformed at this point -
         // remap-path-prefix is documented to only apply to 'inputs'.
         trace!("Pondering on rewriting dep file {:?}", self.dep_info);
-        if let Some(dep_info) = self.dep_info {
+        if let Some(dep_info) = self.dep_info.as_ref() {
             let extra_input_str = extra_inputs
                 .iter()
                 .fold(String::new(), |s, p| s + " " + &p.to_string_lossy());
             for dep_info_local_path in output_paths {
                 trace!("Comparing with {}", dep_info_local_path.display());
-                if dep_info == *dep_info_local_path {
+                if dep_info == dep_info_local_path {
                     info!("Replacing using the transformer {:?}", path_transformer);
                     // Found the dep info file, read it in
-                    let f = fs::File::open(&dep_info)
-                        .with_context(|| "Failed to open dep info file")?;
+                    let f =
+                        fs::File::open(dep_info).with_context(|| "Failed to open dep info file")?;
                     let mut deps = String::new();
                     { f }.read_to_string(&mut deps)?;
                     // Replace all the output paths, at the beginning of lines
@@ -2266,7 +2283,7 @@ impl OutputsRewriter for RustOutputsRewriter {
                     }
                     // Write the depinfo file
                     let f =
-                        fs::File::create(&dep_info).context("Failed to recreate dep info file")?;
+                        fs::File::create(dep_info).context("Failed to recreate dep info file")?;
                     { f }.write_all(deps.as_bytes())?;
                     return Ok(());
                 }
