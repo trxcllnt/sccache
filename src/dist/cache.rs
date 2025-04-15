@@ -1,30 +1,28 @@
-use crate::dist::Toolchain;
-use crate::lru_disk_cache::Result as LruResult;
-use crate::lru_disk_cache::{LruDiskCache, ReadSeek};
-use anyhow::{anyhow, Result};
-use fs_err as fs;
-use std::io;
-use std::path::{Path, PathBuf};
-
 #[cfg(feature = "dist-client")]
 pub use self::client::ClientToolchains;
-use crate::util::Digest;
-use std::io::Read;
+#[cfg(feature = "dist-server")]
+pub use self::server::ServerToolchains;
 
 #[cfg(feature = "dist-client")]
 mod client {
+
+    use anyhow::{bail, Context, Error, Result};
+    use fs_err as fs;
+    use futures::lock::Mutex;
+    use std::collections::{HashMap, HashSet};
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+
     use crate::config;
     use crate::dist::pkg::ToolchainPackager;
     use crate::dist::Toolchain;
     use crate::lru_disk_cache::Error as LruError;
-    use anyhow::{bail, Context, Error, Result};
-    use fs_err as fs;
-    use std::collections::{HashMap, HashSet};
-    use std::io::Write;
-    use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+    use crate::lru_disk_cache::LruDiskCache;
+    use crate::util::Digest;
 
-    use super::{path_key, TcCache};
+    async fn path_key(path: &Path) -> Result<String> {
+        Digest::file(path, &tokio::runtime::Handle::current()).await
+    }
 
     #[derive(Clone, Debug)]
     pub struct CustomToolchain {
@@ -35,7 +33,7 @@ mod client {
     // TODO: possibly shouldn't be public
     pub struct ClientToolchains {
         cache_dir: PathBuf,
-        cache: Mutex<TcCache>,
+        cache: Mutex<LruDiskCache>,
         // Lookup from dist toolchain -> path to custom toolchain archive
         custom_toolchain_archives: Mutex<HashMap<Toolchain, PathBuf>>,
         // Lookup from local path -> toolchain details
@@ -96,7 +94,7 @@ mod client {
                 ))?;
 
             let tc_cache_dir = cache_dir.join("tc");
-            let cache = TcCache::new(&tc_cache_dir, cache_size)
+            let cache = LruDiskCache::new(&tc_cache_dir, cache_size)
                 .map(Mutex::new)
                 .context("failed to initialise a toolchain cache")?;
 
@@ -166,10 +164,10 @@ mod client {
 
         // Get the bytes of a toolchain tar
         // TODO: by this point the toolchain should be known to exist
-        pub fn get_toolchain(&self, tc: &Toolchain) -> Result<Option<fs::File>> {
+        pub async fn get_toolchain(&self, tc: &Toolchain) -> Result<Option<fs::File>> {
             // TODO: be more relaxed about path casing and slashes on Windows
             let file = if let Some(custom_tc_archive) =
-                self.custom_toolchain_archives.lock().unwrap().get(tc)
+                self.custom_toolchain_archives.lock().await.get(tc)
             {
                 fs::File::open(custom_tc_archive).with_context(|| {
                     format!(
@@ -178,7 +176,7 @@ mod client {
                     )
                 })?
             } else {
-                match self.cache.lock().unwrap().get_file(tc) {
+                match self.cache.lock().await.get_file(&tc.archive_id) {
                     Ok(file) => file,
                     Err(LruError::FileNotInCache) => return Ok(None),
                     Err(e) => return Err(e).context("error while retrieving toolchain from cache"),
@@ -187,7 +185,7 @@ mod client {
             Ok(Some(file))
         }
         // If the toolchain doesn't already exist, create it and insert into the cache
-        pub fn put_toolchain(
+        pub async fn put_toolchain(
             &self,
             compiler_path: &Path,
             weak_key: &str,
@@ -199,36 +197,39 @@ mod client {
                     compiler_path.display()
                 )
             }
-            if let Some(tc_and_paths) = self.get_custom_toolchain(compiler_path) {
+            if let Some(tc_and_paths) = self.get_custom_toolchain(compiler_path).await {
                 debug!("Using custom toolchain for {:?}", compiler_path);
                 let (tc, compiler_path, archive) = tc_and_paths?;
                 return Ok((tc, Some((compiler_path, archive))));
             }
             // Only permit one toolchain creation at a time. Not an issue if there are multiple attempts
             // to create the same toolchain, just a waste of time
-            let mut cache = self.cache.lock().unwrap();
-            if let Some(archive_id) = self.weak_to_strong(weak_key) {
-                debug!("Using cached toolchain {} -> {}", weak_key, archive_id);
+            let mut cache = self.cache.lock().await;
+            if let Some(archive_id) = self.weak_to_strong(weak_key).await {
+                trace!("Using cached toolchain {} -> {}", weak_key, archive_id);
                 return Ok((Toolchain { archive_id }, None));
             }
             debug!("Weak key {} appears to be new", weak_key);
             let tmpfile = tempfile::NamedTempFile::new_in(self.cache_dir.join("toolchain_tmp"))?;
-            toolchain_packager
+            let archive_id = toolchain_packager
                 .write_pkg(fs_err::File::from_parts(tmpfile.reopen()?, tmpfile.path()))
+                .await
                 .context("Could not package toolchain")?;
-            let tc = cache.insert_file(tmpfile.path())?;
-            self.record_weak(weak_key.to_owned(), tc.archive_id.clone())?;
+            let tc = Toolchain { archive_id };
+            cache.insert_file(&tc.archive_id, tmpfile.path())?;
+            self.record_weak(weak_key.to_owned(), tc.archive_id.clone())
+                .await?;
             Ok((tc, None))
         }
 
-        pub fn get_custom_toolchain(
+        pub async fn get_custom_toolchain(
             &self,
             compiler_path: &Path,
         ) -> Option<Result<(Toolchain, String, PathBuf)>> {
             match self
                 .custom_toolchain_paths
                 .lock()
-                .unwrap()
+                .await
                 .get_mut(compiler_path)
             {
                 Some((custom_tc, Some(tc))) => Some(Ok((
@@ -237,7 +238,7 @@ mod client {
                     custom_tc.archive.clone(),
                 ))),
                 Some((custom_tc, maybe_tc @ None)) => {
-                    let archive_id = match path_key(&custom_tc.archive) {
+                    let archive_id = match path_key(&custom_tc.archive).await {
                         Ok(archive_id) => archive_id,
                         Err(e) => return Some(Err(e)),
                     };
@@ -247,7 +248,7 @@ mod client {
                     if let Some(old_path) = self
                         .custom_toolchain_archives
                         .lock()
-                        .unwrap()
+                        .await
                         .insert(tc.clone(), custom_tc.archive.clone())
                     {
                         // Log a warning if the user has identical toolchains at two different locations - it's
@@ -270,15 +271,16 @@ mod client {
             }
         }
 
-        fn weak_to_strong(&self, weak_key: &str) -> Option<String> {
+        async fn weak_to_strong(&self, weak_key: &str) -> Option<String> {
             self.weak_map
                 .lock()
-                .unwrap()
+                .await
                 .get(weak_key)
                 .map(String::to_owned)
         }
-        fn record_weak(&self, weak_key: String, key: String) -> Result<()> {
-            let mut weak_map = self.weak_map.lock().unwrap();
+
+        async fn record_weak(&self, weak_key: String, key: String) -> Result<()> {
+            let mut weak_map = self.weak_map.lock().await;
             weak_map.insert(weak_key, key);
             let weak_map_path = self.cache_dir.join("weak_map.json");
             fs::File::create(weak_map_path)
@@ -292,6 +294,11 @@ mod client {
     mod test {
         use crate::config;
         use crate::test::utils::create_file;
+        #[cfg(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+        ))]
+        use async_trait::async_trait;
         use std::io::Write;
 
         use super::ClientToolchains;
@@ -302,15 +309,26 @@ mod client {
                 Box::new(PanicToolchainPackager)
             }
         }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+        ))]
+        #[async_trait]
+        #[cfg(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+        ))]
         impl crate::dist::pkg::ToolchainPackager for PanicToolchainPackager {
-            fn write_pkg(self: Box<Self>, _f: super::fs::File) -> crate::errors::Result<()> {
+            async fn write_pkg(
+                self: Box<Self>,
+                _f: super::fs::File,
+            ) -> crate::errors::Result<String> {
                 panic!("should not have called packager")
             }
         }
 
-        #[test]
-        fn test_client_toolchains_custom() {
+        #[tokio::test]
+        async fn test_client_toolchains_custom() {
             let td = tempfile::Builder::new()
                 .prefix("sccache")
                 .tempdir()
@@ -336,12 +354,13 @@ mod client {
                     "weak_key",
                     PanicToolchainPackager::new(),
                 )
+                .await
                 .unwrap();
             assert!(newpath.unwrap() == ("/my/compiler/in_archive".to_string(), ct1));
         }
 
-        #[test]
-        fn test_client_toolchains_custom_multiuse_archive() {
+        #[tokio::test]
+        async fn test_client_toolchains_custom_multiuse_archive() {
             let td = tempfile::Builder::new()
                 .prefix("sccache")
                 .tempdir()
@@ -381,6 +400,7 @@ mod client {
                     "weak_key",
                     PanicToolchainPackager::new(),
                 )
+                .await
                 .unwrap();
             assert!(newpath.unwrap() == ("/my/compiler/in_archive".to_string(), ct1.clone()));
             let (_tc, newpath) = client_toolchains
@@ -389,6 +409,7 @@ mod client {
                     "weak_key2",
                     PanicToolchainPackager::new(),
                 )
+                .await
                 .unwrap();
             assert!(newpath.unwrap() == ("/my/compiler2/in_archive".to_string(), ct1.clone()));
             let (_tc, newpath) = client_toolchains
@@ -397,12 +418,13 @@ mod client {
                     "weak_key2",
                     PanicToolchainPackager::new(),
                 )
+                .await
                 .unwrap();
             assert!(newpath.unwrap() == ("/my/compiler/in_archive".to_string(), ct1));
         }
 
-        #[test]
-        fn test_client_toolchains_nodist() {
+        #[tokio::test]
+        async fn test_client_toolchains_nodist() {
             let td = tempfile::Builder::new()
                 .prefix("sccache")
                 .tempdir()
@@ -423,6 +445,7 @@ mod client {
                     "weak_key",
                     PanicToolchainPackager::new()
                 )
+                .await
                 .is_err());
         }
 
@@ -455,76 +478,247 @@ mod client {
     }
 }
 
-pub struct TcCache {
-    inner: LruDiskCache,
-}
+#[cfg(feature = "dist-server")]
+mod server {
+    use async_compression::futures::bufread::GzipDecoder;
+    use async_trait::async_trait;
 
-impl TcCache {
-    pub fn new(cache_dir: &Path, cache_size: u64) -> Result<TcCache> {
-        trace!("Using TcCache({:?}, {})", cache_dir, cache_size);
-        Ok(TcCache {
-            inner: LruDiskCache::new(cache_dir, cache_size)?,
-        })
+    use futures::{io::BufReader, StreamExt};
+    use tokio_retry2::RetryError;
+
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use crate::cache::disk::DiskCache;
+    use crate::cache::{cache, Storage};
+    use crate::dist::http::retry_with_jitter;
+    use crate::dist::metrics::{Metrics, TimeRecorder};
+    use crate::dist::{Toolchain, ToolchainService};
+    use crate::errors::*;
+
+    const TC_LOAD: &str = "sccache::server::toolchain::load_time";
+    const TC_LOAD_INFLATED: &str = "sccache::server::toolchain::load_inflated_time";
+    const TC_LOAD_DEFLATED: &str = "sccache::server::toolchain::load_deflated_time";
+    const TC_LOAD_DEFLATED_SIZE: &str = "sccache::server::toolchain::load_deflated_size_time";
+    const TC_LOAD_INFLATED_SIZE: &str = "sccache::server::toolchain::load_inflated_size_time";
+    const TC_UNPACK_INFLATED: &str = "sccache::server::toolchain::unpack_inflated_time";
+
+    #[derive(Clone, Default)]
+    pub struct ServerToolchainsMetrics {
+        metrics: Metrics,
     }
 
-    pub fn contains_toolchain(&self, tc: &Toolchain) -> bool {
-        self.inner.contains_key(make_lru_key_path(&tc.archive_id))
-    }
+    impl ServerToolchainsMetrics {
+        pub fn new(metrics: Metrics) -> Self {
+            metrics::describe_histogram!(
+                TC_LOAD,
+                metrics::Unit::Seconds,
+                "The time to load a toolchain"
+            );
+            metrics::describe_histogram!(
+                TC_LOAD_INFLATED,
+                metrics::Unit::Seconds,
+                "The time to load, inflate, and unpack a toolchain"
+            );
+            metrics::describe_histogram!(
+                TC_LOAD_DEFLATED,
+                metrics::Unit::Seconds,
+                "The time to load a deflated toolchain"
+            );
+            metrics::describe_histogram!(
+                TC_LOAD_DEFLATED_SIZE,
+                metrics::Unit::Seconds,
+                "The time to calculate the deflated size of a toolchain"
+            );
+            metrics::describe_histogram!(
+                TC_LOAD_INFLATED_SIZE,
+                metrics::Unit::Seconds,
+                "The time to calculate the inflated size of a toolchain"
+            );
+            metrics::describe_histogram!(
+                TC_UNPACK_INFLATED,
+                metrics::Unit::Seconds,
+                "The time to inflate and unpack a toolchain"
+            );
+            Self { metrics }
+        }
 
-    pub fn insert_with<F: FnOnce(fs::File) -> io::Result<()>>(
-        &mut self,
-        tc: &Toolchain,
-        with: F,
-    ) -> Result<()> {
-        self.inner
-            .insert_with(make_lru_key_path(&tc.archive_id), with)?;
-        let verified_archive_id = file_key(self.get(tc)?)?;
-        // TODO: remove created toolchain?
-        if verified_archive_id == tc.archive_id {
-            Ok(())
-        } else {
-            Err(anyhow!("written file does not match expected hash key"))
+        pub fn load_timer(&self) -> TimeRecorder {
+            self.metrics.timer(TC_LOAD, &[])
+        }
+
+        pub fn load_inflated_timer(&self) -> TimeRecorder {
+            self.metrics.timer(TC_LOAD_INFLATED, &[])
+        }
+
+        pub fn load_deflated_timer(&self) -> TimeRecorder {
+            self.metrics.timer(TC_LOAD_DEFLATED, &[])
+        }
+
+        pub fn load_deflated_size_timer(&self) -> TimeRecorder {
+            self.metrics.timer(TC_LOAD_DEFLATED_SIZE, &[])
+        }
+
+        pub fn load_inflated_size_timer(&self) -> TimeRecorder {
+            self.metrics.timer(TC_LOAD_INFLATED_SIZE, &[])
+        }
+
+        pub fn unpack_inflated_timer(&self) -> TimeRecorder {
+            self.metrics.timer(TC_UNPACK_INFLATED, &[])
         }
     }
 
-    pub fn get_file(&mut self, tc: &Toolchain) -> LruResult<fs::File> {
-        self.inner.get_file(make_lru_key_path(&tc.archive_id))
+    #[derive(Clone)]
+    pub struct ServerToolchains {
+        cache: Arc<DiskCache>,
+        store: Arc<dyn cache::Storage>,
+        metrics: ServerToolchainsMetrics,
     }
 
-    pub fn get(&mut self, tc: &Toolchain) -> LruResult<Box<dyn ReadSeek>> {
-        self.inner.get(make_lru_key_path(&tc.archive_id))
+    #[async_trait]
+    impl ToolchainService for ServerToolchains {
+        async fn load_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
+            self.load(tc).await
+        }
     }
 
-    pub fn len(&self) -> usize {
-        self.inner.len()
+    impl ServerToolchains {
+        pub fn new<P: AsRef<OsStr>>(
+            root: P,
+            max_size: u64,
+            store: Arc<dyn cache::Storage>,
+            metrics: Metrics,
+        ) -> Self {
+            Self {
+                cache: Arc::new(DiskCache::new(
+                    root,
+                    max_size,
+                    Default::default(),
+                    crate::cache::CacheMode::ReadWrite,
+                )),
+                store,
+                metrics: ServerToolchainsMetrics::new(metrics),
+            }
+        }
+
+        async fn load(&self, tc: &Toolchain) -> Result<PathBuf> {
+            // Record toolchain load time after retrying
+            let _timer = self.metrics.load_timer();
+            retry_with_jitter(3, || async {
+                // Load and cache the deflated toolchain.
+                // Inflate, unpack, and cache it in a directory.
+                // Return the path to the unpacked toolchain dir.
+                self.load_inflated_toolchain(tc).await.map_err(|err| {
+                    tracing::warn!(
+                        "[ServerToolchains({})]: Error loading toolchain: {err:?}",
+                        &tc.archive_id
+                    );
+                    RetryError::transient(err)
+                })
+            })
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    "[ServerToolchains({})]: Error loading toolchain: {err:?}",
+                    &tc.archive_id
+                );
+                err
+            })
+        }
+
+        async fn load_inflated_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
+            // Record toolchain load_inflated time
+            let _timer = self.metrics.load_inflated_timer();
+            if let Ok((inflated_path, _)) = self.cache.entry(&tc.archive_id).await {
+                // Return early if the toolchain is already loaded and unpacked
+                Ok(inflated_path)
+            } else {
+                // Load the compressed toolchain
+                let deflated_path = self.load_deflated_toolchain(tc).await?;
+                // Compute the toolchain's inflated size
+                let inflated_size = self.load_inflated_toolchain_size(&deflated_path).await?;
+                // Inflate and unpack the toolchain archive
+                let inflated_path = self
+                    .unpack_inflated_toolchain(&deflated_path, &tc.archive_id, inflated_size)
+                    .await?;
+                Ok(inflated_path)
+            }
+        }
+
+        async fn load_deflated_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
+            // Record toolchain load_deflated time
+            let _timer = self.metrics.load_deflated_timer();
+            let deflated_key = format!("{}.tgz", tc.archive_id);
+            if !self.cache.has(&deflated_key).await {
+                let deflated_size = self.load_deflated_toolchain_size(tc).await?;
+                let reader = self.store.get_stream(&tc.archive_id).await?;
+                self.cache
+                    .put_stream(&deflated_key, deflated_size, std::pin::pin!(reader))
+                    .await?;
+            }
+            self.cache.entry(&deflated_key).await.map(|(path, _)| path)
+        }
+
+        async fn load_deflated_toolchain_size(&self, tc: &Toolchain) -> Result<u64> {
+            // Record toolchain load_deflated_size time
+            let _timer = self.metrics.load_deflated_size_timer();
+            self.store.size(&tc.archive_id).await
+        }
+
+        async fn load_inflated_toolchain_size(&self, deflated_path: &Path) -> Result<u64> {
+            // Record toolchain load_inflated_size time
+            let _timer = self.metrics.load_inflated_size_timer();
+            let deflated_file = tokio::fs::File::open(&deflated_path)
+                .await?
+                .into_std()
+                .await;
+            let buffer_reader = BufReader::new(futures::io::AllowStdIo::new(deflated_file));
+            let inflated_size = async_tar::Archive::new(GzipDecoder::new(buffer_reader))
+                .entries()?
+                .fold(0, |inflated_size, entry| async move {
+                    if let Ok(inflated_entry_size) = entry.and_then(|e| e.header().size()) {
+                        inflated_size + inflated_entry_size
+                    } else {
+                        inflated_size
+                    }
+                })
+                .await;
+            Ok(inflated_size)
+        }
+
+        async fn unpack_inflated_toolchain(
+            &self,
+            deflated_path: &Path,
+            inflated_key: &str,
+            inflated_size: u64,
+        ) -> Result<PathBuf> {
+            // Record toolchain unpack_inflated time
+            let _timer = self.metrics.unpack_inflated_timer();
+            self.cache
+                .insert_with(inflated_key, inflated_size, |inflated_path: &Path| {
+                    let deflated_path = deflated_path.to_owned();
+                    let inflated_path = inflated_path.to_owned();
+                    async move {
+                        // Ensure the inflated dir exists first
+                        tokio::fs::create_dir_all(&inflated_path).await?;
+                        let deflated_file = tokio::fs::File::open(&deflated_path)
+                            .await?
+                            .into_std()
+                            .await;
+                        let buffer_reader =
+                            BufReader::new(futures::io::AllowStdIo::new(deflated_file));
+                        let targz_archive =
+                            async_tar::Archive::new(GzipDecoder::new(buffer_reader));
+                        // Unpack the tgz into the inflated dir
+                        targz_archive
+                            .unpack(&inflated_path)
+                            .await
+                            .map(|_| inflated_size)
+                    }
+                })
+                .await
+                .map(|(path, _)| path)
+        }
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    pub fn remove(&mut self, tc: &Toolchain) -> LruResult<()> {
-        self.inner.remove(make_lru_key_path(&tc.archive_id))
-    }
-
-    #[cfg(feature = "dist-client")]
-    fn insert_file(&mut self, path: &Path) -> Result<Toolchain> {
-        let archive_id = path_key(path)?;
-        self.inner
-            .insert_file(make_lru_key_path(&archive_id), path)?;
-        Ok(Toolchain { archive_id })
-    }
-}
-
-#[cfg(feature = "dist-client")]
-fn path_key(path: &Path) -> Result<String> {
-    file_key(fs::File::open(path)?)
-}
-
-fn file_key<R: Read>(rdr: R) -> Result<String> {
-    Digest::reader_sync(rdr)
-}
-/// Make a path to the cache entry with key `key`.
-fn make_lru_key_path(key: &str) -> PathBuf {
-    Path::new(&key[0..1]).join(&key[1..2]).join(key)
 }

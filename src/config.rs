@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::result::Result as StdResult;
 use std::str::FromStr;
 use std::sync::Mutex;
+use std::time::Duration;
 
 pub use crate::cache::PreprocessorCacheModeConfig;
 use crate::errors::*;
@@ -113,13 +114,14 @@ impl<'a> Deserialize<'a> for HTTPUrl {
     {
         use serde::de::Error;
         let helper: String = Deserialize::deserialize(deserializer)?;
-        let url = parse_http_url(&helper).map_err(D::Error::custom)?;
+        let url = parse_http_url(helper).map_err(D::Error::custom)?;
         Ok(HTTPUrl(url))
     }
 }
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
-fn parse_http_url(url: &str) -> Result<reqwest::Url> {
+fn parse_http_url<K: AsRef<str>>(str: K) -> Result<reqwest::Url> {
     use std::net::SocketAddr;
+    let url = str.as_ref();
     let url = if let Ok(sa) = url.parse::<SocketAddr>() {
         warn!("Url {} has no scheme, assuming http", url);
         reqwest::Url::parse(&format!("http://{}", sa))
@@ -145,7 +147,7 @@ impl HTTPUrl {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AzureCacheConfig {
     pub connection_string: String,
@@ -153,7 +155,7 @@ pub struct AzureCacheConfig {
     pub key_prefix: String,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(default)]
 pub struct DiskCacheConfig {
@@ -193,7 +195,7 @@ impl From<CacheModeConfig> for CacheMode {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GCSCacheConfig {
     pub bucket: String,
@@ -204,7 +206,7 @@ pub struct GCSCacheConfig {
     pub credential_url: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GHACacheConfig {
     pub enabled: bool,
@@ -226,7 +228,7 @@ fn default_memcached_cache_expiration() -> u32 {
     DEFAULT_MEMCACHED_CACHE_EXPIRATION
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MemcachedCacheConfig {
     #[serde(alias = "endpoint")]
@@ -256,7 +258,7 @@ pub struct MemcachedCacheConfig {
 /// Please change this value freely if we have a better choice.
 const DEFAULT_REDIS_CACHE_TTL: u64 = 0;
 pub const DEFAULT_REDIS_DB: u32 = 0;
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RedisCacheConfig {
     /// The single-node redis endpoint.
@@ -293,7 +295,7 @@ pub struct RedisCacheConfig {
     pub key_prefix: String,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebdavCacheConfig {
     pub endpoint: String,
@@ -304,7 +306,7 @@ pub struct WebdavCacheConfig {
     pub token: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct S3CacheConfig {
     pub bucket: String,
@@ -318,7 +320,7 @@ pub struct S3CacheConfig {
     pub enable_virtual_host_style: Option<bool>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OSSCacheConfig {
     pub bucket: String,
@@ -328,7 +330,7 @@ pub struct OSSCacheConfig {
     pub no_credentials: bool,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CacheType {
     Azure(AzureCacheConfig),
     GCS(GCSCacheConfig),
@@ -340,7 +342,7 @@ pub enum CacheType {
     OSS(OSSCacheConfig),
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CacheConfigs {
     pub azure: Option<AzureCacheConfig>,
@@ -430,6 +432,45 @@ impl CacheConfigs {
     }
 }
 
+impl From<CacheType> for CacheConfigs {
+    fn from(cache_type: CacheType) -> Self {
+        match cache_type {
+            CacheType::Azure(opts) => Self {
+                azure: Some(opts),
+                ..Default::default()
+            },
+            CacheType::GCS(opts) => Self {
+                gcs: Some(opts),
+                ..Default::default()
+            },
+            CacheType::GHA(opts) => Self {
+                gha: Some(opts),
+                ..Default::default()
+            },
+            CacheType::Memcached(opts) => Self {
+                memcached: Some(opts),
+                ..Default::default()
+            },
+            CacheType::Redis(opts) => Self {
+                redis: Some(opts),
+                ..Default::default()
+            },
+            CacheType::S3(opts) => Self {
+                s3: Some(opts),
+                ..Default::default()
+            },
+            CacheType::Webdav(opts) => Self {
+                webdav: Some(opts),
+                ..Default::default()
+            },
+            CacheType::OSS(opts) => Self {
+                oss: Some(opts),
+                ..Default::default()
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(tag = "type")]
@@ -457,6 +498,89 @@ pub enum DistAuth {
     },
     #[serde(rename = "oauth2_implicit")]
     Oauth2Implicit { client_id: String, auth_url: String },
+}
+
+impl DistAuth {
+    fn with_env_or_config(&self) -> Self {
+        let mut env_or_cfg_token = env::var("SCCACHE_DIST_AUTH_TOKEN");
+        let mut env_or_cfg_client_id = env::var("SCCACHE_DIST_AUTH_CLIENT_ID");
+        let mut env_or_cfg_auth_url = env::var("SCCACHE_DIST_AUTH_URL");
+        let mut env_or_cfg_token_url = env::var("SCCACHE_DIST_AUTH_TOKEN_URL");
+
+        match self {
+            Self::Token { token } => {
+                env_or_cfg_token = env_or_cfg_token.or(Ok(token.clone()));
+            }
+            Self::Oauth2CodeGrantPKCE {
+                client_id,
+                auth_url,
+                token_url,
+            } => {
+                env_or_cfg_client_id = env_or_cfg_client_id.or(Ok(client_id.clone()));
+                env_or_cfg_auth_url = env_or_cfg_auth_url.or(Ok(auth_url.clone()));
+                env_or_cfg_token_url = env_or_cfg_token_url.or(Ok(token_url.clone()));
+            }
+            Self::Oauth2Implicit {
+                client_id,
+                auth_url,
+            } => {
+                env_or_cfg_client_id = env_or_cfg_client_id.or(Ok(client_id.clone()));
+                env_or_cfg_auth_url = env_or_cfg_auth_url.or(Ok(auth_url.clone()));
+            }
+        }
+
+        let into_token = || {
+            env_or_cfg_token
+                .map(|token| Self::Token { token })
+                .unwrap_or(self.clone())
+        };
+
+        let into_oauth2_code_grant_pkce = || {
+            env_or_cfg_client_id
+                .iter()
+                .zip(env_or_cfg_auth_url.iter())
+                .zip(env_or_cfg_token_url.iter())
+                .map(
+                    |((client_id, auth_url), token_url)| Self::Oauth2CodeGrantPKCE {
+                        client_id: client_id.clone(),
+                        auth_url: auth_url.clone(),
+                        token_url: token_url.clone(),
+                    },
+                )
+                .next_back()
+                .unwrap_or(self.clone())
+        };
+
+        let into_oauth2_implicit = || {
+            env_or_cfg_client_id
+                .iter()
+                .zip(env_or_cfg_auth_url.iter())
+                .map(|(client_id, auth_url)| Self::Oauth2Implicit {
+                    client_id: client_id.clone(),
+                    auth_url: auth_url.clone(),
+                })
+                .next_back()
+                .unwrap_or(self.clone())
+        };
+
+        if let Ok(auth_type) = env::var("SCCACHE_DIST_AUTH_TYPE") {
+            match auth_type.as_ref() {
+                "token" => into_token(),
+                "oauth2_code_grant_pkce" => into_oauth2_code_grant_pkce(),
+                "oauth2_implicit" => into_oauth2_implicit(),
+                _ => {
+                    warn!("Unknown SCCACHE_DIST_AUTH_TYPE {auth_type:?}");
+                    self.clone()
+                }
+            }
+        } else {
+            match self {
+                Self::Token { .. } => into_token(),
+                Self::Oauth2CodeGrantPKCE { .. } => into_oauth2_code_grant_pkce(),
+                Self::Oauth2Implicit { .. } => into_oauth2_implicit(),
+            }
+        }
+    }
 }
 
 // Convert a type = "mozilla" immediately into an actual oauth configuration
@@ -521,36 +645,144 @@ impl Default for DistAuth {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct DistNetworking {
+    pub connect_timeout: u64,
+    pub request_timeout: u64,
+    pub connection_pool: bool,
+    pub keepalive: DistNetworkingKeepalive,
+}
+
+impl DistNetworking {
+    pub fn with_env_or_config(&self) -> Self {
+        Self {
+            connect_timeout: number_from_env_var("SCCACHE_DIST_CONNECT_TIMEOUT")
+                .map(|val| val.unwrap_or(self.connect_timeout))
+                .unwrap_or(self.connect_timeout),
+            request_timeout: number_from_env_var("SCCACHE_DIST_REQUEST_TIMEOUT")
+                .map(|val| val.unwrap_or(self.request_timeout))
+                .unwrap_or(self.request_timeout),
+            connection_pool: bool_from_env_var("SCCACHE_DIST_CONNECTION_POOL")
+                .map(|val| val.unwrap_or(self.connection_pool))
+                .unwrap_or(self.connection_pool),
+            keepalive: self.keepalive.with_env_or_config(),
+        }
+    }
+}
+
+impl Default for DistNetworking {
+    fn default() -> Self {
+        Self {
+            // Default timeout for connections to an sccache-dist server
+            connect_timeout: 5,
+            // Default timeout for compile requests to an sccache-dist server.
+            // Users should set their load balancer's idle timeout to match or
+            // exceed this value.
+            request_timeout: 600,
+            // Default to not using reqwest's connection pool
+            connection_pool: false,
+            keepalive: Default::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct DistNetworkingKeepalive {
+    pub enabled: bool,
+    pub timeout: u64,
+    pub interval: u64,
+}
+
+impl DistNetworkingKeepalive {
+    pub fn with_env_or_config(&self) -> Self {
+        Self {
+            enabled: bool_from_env_var("SCCACHE_DIST_KEEPALIVE_ENABLED")
+                .map(|val| val.unwrap_or(self.enabled))
+                .unwrap_or(self.enabled),
+            interval: number_from_env_var("SCCACHE_DIST_KEEPALIVE_INTERVAL")
+                .map(|val| val.unwrap_or(self.interval))
+                .unwrap_or(self.interval),
+            timeout: number_from_env_var("SCCACHE_DIST_KEEPALIVE_TIMEOUT")
+                .map(|val| val.unwrap_or(self.timeout))
+                .unwrap_or(self.timeout),
+        }
+    }
+}
+
+impl Default for DistNetworkingKeepalive {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout: 60,
+            interval: 20,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct DistConfig {
     pub auth: DistAuth,
+    pub cache_dir: PathBuf,
+    pub fallback_to_local_compile: bool,
+    // f64 to allow `max_retries = inf`, i.e. never fallback to local compile
+    pub max_retries: f64,
+    pub net: DistNetworking,
+    pub rewrite_includes_only: bool,
     #[cfg(any(feature = "dist-client", feature = "dist-server"))]
     pub scheduler_url: Option<HTTPUrl>,
     #[cfg(not(any(feature = "dist-client", feature = "dist-server")))]
     pub scheduler_url: Option<String>,
-    pub cache_dir: PathBuf,
     pub toolchains: Vec<DistToolchainConfig>,
     pub toolchain_cache_size: u64,
-    pub rewrite_includes_only: bool,
+}
+
+impl DistConfig {
+    pub fn with_env_or_config(&self) -> Self {
+        Self {
+            auth: self.auth.with_env_or_config(),
+            net: self.net.with_env_or_config(),
+            #[cfg(any(feature = "dist-client", feature = "dist-server"))]
+            scheduler_url: env::var("SCCACHE_DIST_SCHEDULER_URL")
+                .map_err(Into::into)
+                .and_then(parse_http_url)
+                .map(HTTPUrl::from_url)
+                .ok()
+                .or(self.scheduler_url.clone()),
+            fallback_to_local_compile: bool_from_env_var("SCCACHE_DIST_FALLBACK_TO_LOCAL_COMPILE")
+                .map(|val| val.unwrap_or(self.fallback_to_local_compile))
+                .unwrap_or(self.fallback_to_local_compile),
+            max_retries: number_from_env_var("SCCACHE_DIST_MAX_RETRIES")
+                .map(|val| val.unwrap_or(self.max_retries))
+                .unwrap_or(self.max_retries),
+            ..self.clone()
+        }
+    }
 }
 
 impl Default for DistConfig {
     fn default() -> Self {
         Self {
             auth: Default::default(),
-            scheduler_url: Default::default(),
             cache_dir: default_dist_cache_dir(),
+            fallback_to_local_compile: true,
+            max_retries: 0f64,
+            net: Default::default(),
+            rewrite_includes_only: false,
+            scheduler_url: Default::default(),
             toolchains: Default::default(),
             toolchain_cache_size: default_toolchain_cache_size(),
-            rewrite_includes_only: false,
         }
     }
 }
 
 // TODO: fields only pub for tests
-#[derive(Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
@@ -632,16 +864,21 @@ fn bool_from_env_var(env_var_name: &str) -> Result<Option<bool>> {
         .transpose()
 }
 
-fn config_from_env() -> Result<EnvConfig> {
+fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvConfig> {
+    let envvar_prefix = envvar_prefix.into().unwrap_or("SCCACHE_").to_owned();
+    let envvar = |key: &str| envvar_prefix.clone() + key;
     // ======= AWS =======
-    let s3 = if let Ok(bucket) = env::var("SCCACHE_BUCKET") {
-        let region = env::var("SCCACHE_REGION").ok();
-        let no_credentials = bool_from_env_var("SCCACHE_S3_NO_CREDENTIALS")?.unwrap_or(false);
-        let use_ssl = bool_from_env_var("SCCACHE_S3_USE_SSL")?;
-        let server_side_encryption = bool_from_env_var("SCCACHE_S3_SERVER_SIDE_ENCRYPTION")?;
-        let endpoint = env::var("SCCACHE_ENDPOINT").ok();
-        let key_prefix = key_prefix_from_env_var("SCCACHE_S3_KEY_PREFIX");
-        let enable_virtual_host_style = bool_from_env_var("SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE")?;
+    let s3 = if let Some(bucket) = env::var(envvar("BUCKET"))
+        .ok()
+        .and_then(|bucket| (!bucket.is_empty()).then_some(bucket))
+    {
+        let region = env::var(envvar("REGION")).ok();
+        let no_credentials = bool_from_env_var(&envvar("S3_NO_CREDENTIALS"))?.unwrap_or(false);
+        let use_ssl = bool_from_env_var(&envvar("S3_USE_SSL"))?;
+        let server_side_encryption = bool_from_env_var(&envvar("S3_SERVER_SIDE_ENCRYPTION"))?;
+        let endpoint = env::var(envvar("ENDPOINT")).ok();
+        let key_prefix = key_prefix_from_env_var(&envvar("S3_KEY_PREFIX"));
+        let enable_virtual_host_style = bool_from_env_var(&envvar("S3_ENABLE_VIRTUAL_HOST_STYLE"))?;
 
         Some(S3CacheConfig {
             bucket,
@@ -661,30 +898,33 @@ fn config_from_env() -> Result<EnvConfig> {
         && (env::var_os("AWS_ACCESS_KEY_ID").is_some()
             || env::var_os("AWS_SECRET_ACCESS_KEY").is_some())
     {
-        bail!("If setting S3 credentials, SCCACHE_S3_NO_CREDENTIALS must not be set.");
+        bail!(
+            "If setting S3 credentials, {} must not be set.",
+            envvar("S3_NO_CREDENTIALS")
+        );
     }
 
     // ======= redis =======
     let redis = match (
-        env::var("SCCACHE_REDIS").ok(),
-        env::var("SCCACHE_REDIS_ENDPOINT").ok(),
-        env::var("SCCACHE_REDIS_CLUSTER_ENDPOINTS").ok(),
+        env::var(envvar("REDIS")).ok(),
+        env::var(envvar("REDIS_ENDPOINT")).ok(),
+        env::var(envvar("REDIS_CLUSTER_ENDPOINTS")).ok(),
     ) {
         (None, None, None) => None,
         (url, endpoint, cluster_endpoints) => {
-            let db = number_from_env_var("SCCACHE_REDIS_DB")
+            let db = number_from_env_var(&envvar("REDIS_DB"))
                 .transpose()?
                 .unwrap_or(DEFAULT_REDIS_DB);
 
-            let username = env::var("SCCACHE_REDIS_USERNAME").ok();
-            let password = env::var("SCCACHE_REDIS_PASSWORD").ok();
+            let username = env::var(envvar("REDIS_USERNAME")).ok();
+            let password = env::var(envvar("REDIS_PASSWORD")).ok();
 
-            let ttl = number_from_env_var("SCCACHE_REDIS_EXPIRATION")
-                .or_else(|| number_from_env_var("SCCACHE_REDIS_TTL"))
+            let ttl = number_from_env_var(&envvar("REDIS_EXPIRATION"))
+                .or_else(|| number_from_env_var(&envvar("REDIS_TTL")))
                 .transpose()?
                 .unwrap_or(DEFAULT_REDIS_CACHE_TTL);
 
-            let key_prefix = key_prefix_from_env_var("SCCACHE_REDIS_KEY_PREFIX");
+            let key_prefix = key_prefix_from_env_var(&envvar("REDIS_KEY_PREFIX"));
 
             Some(RedisCacheConfig {
                 url,
@@ -699,24 +939,28 @@ fn config_from_env() -> Result<EnvConfig> {
         }
     };
 
-    if env::var_os("SCCACHE_REDIS_EXPIRATION").is_some()
-        && env::var_os("SCCACHE_REDIS_TTL").is_some()
+    if env::var_os(envvar("REDIS_EXPIRATION")).is_some()
+        && env::var_os(envvar("REDIS_TTL")).is_some()
     {
-        bail!("You mustn't set both SCCACHE_REDIS_EXPIRATION and SCCACHE_REDIS_TTL. Use only one.");
+        bail!(
+            "You mustn't set both {} and {}. Use only one.",
+            envvar("REDIS_EXPIRATION"),
+            envvar("REDIS_TTL")
+        );
     }
 
     // ======= memcached =======
     let memcached = if let Ok(url) =
-        env::var("SCCACHE_MEMCACHED").or_else(|_| env::var("SCCACHE_MEMCACHED_ENDPOINT"))
+        env::var(envvar("MEMCACHED")).or_else(|_| env::var(envvar("MEMCACHED_ENDPOINT")))
     {
-        let username = env::var("SCCACHE_MEMCACHED_USERNAME").ok();
-        let password = env::var("SCCACHE_MEMCACHED_PASSWORD").ok();
+        let username = env::var(envvar("MEMCACHED_USERNAME")).ok();
+        let password = env::var(envvar("MEMCACHED_PASSWORD")).ok();
 
-        let expiration = number_from_env_var("SCCACHE_MEMCACHED_EXPIRATION")
+        let expiration = number_from_env_var(&envvar("MEMCACHED_EXPIRATION"))
             .transpose()?
             .unwrap_or(DEFAULT_MEMCACHED_CACHE_EXPIRATION);
 
-        let key_prefix = key_prefix_from_env_var("SCCACHE_MEMCACHED_KEY_PREFIX");
+        let key_prefix = key_prefix_from_env_var(&envvar("MEMCACHED_KEY_PREFIX"));
 
         Some(MemcachedCacheConfig {
             url,
@@ -729,47 +973,54 @@ fn config_from_env() -> Result<EnvConfig> {
         None
     };
 
-    if env::var_os("SCCACHE_MEMCACHED").is_some()
-        && env::var_os("SCCACHE_MEMCACHED_ENDPOINT").is_some()
-    {
-        bail!("You mustn't set both SCCACHE_MEMCACHED and SCCACHE_MEMCACHED_ENDPOINT. Please, use only SCCACHE_MEMCACHED_ENDPOINT.");
-    }
-
-    // ======= GCP/GCS =======
-    if (env::var("SCCACHE_GCS_CREDENTIALS_URL").is_ok()
-        || env::var("SCCACHE_GCS_OAUTH_URL").is_ok()
-        || env::var("SCCACHE_GCS_KEY_PATH").is_ok())
-        && env::var("SCCACHE_GCS_BUCKET").is_err()
+    if env::var_os(envvar("MEMCACHED")).is_some()
+        && env::var_os(envvar("MEMCACHED_ENDPOINT")).is_some()
     {
         bail!(
-            "If setting GCS credentials, SCCACHE_GCS_BUCKET and an auth mechanism need to be set."
+            "You mustn't set both {} and {}. Please, use only {}.",
+            envvar("MEMCACHED"),
+            envvar("MEMCACHED_ENDPOINT"),
+            envvar("MEMCACHED_ENDPOINT")
         );
     }
 
-    let gcs = env::var("SCCACHE_GCS_BUCKET").ok().map(|bucket| {
-        let key_prefix = key_prefix_from_env_var("SCCACHE_GCS_KEY_PREFIX");
+    // ======= GCP/GCS =======
+    if (env::var(envvar("GCS_CREDENTIALS_URL")).is_ok()
+        || env::var(envvar("GCS_OAUTH_URL")).is_ok()
+        || env::var(envvar("GCS_KEY_PATH")).is_ok())
+        && env::var(envvar("GCS_BUCKET")).is_err()
+    {
+        bail!(
+            "If setting GCS credentials, {} and an auth mechanism need to be set.",
+            envvar("GCS_BUCKET")
+        );
+    }
 
-        if env::var("SCCACHE_GCS_OAUTH_URL").is_ok() {
-            eprintln!("SCCACHE_GCS_OAUTH_URL has been deprecated");
+    let gcs = env::var(envvar("GCS_BUCKET")).ok().map(|bucket| {
+        let key_prefix = key_prefix_from_env_var(&envvar("GCS_KEY_PREFIX"));
+
+        if env::var(envvar("GCS_OAUTH_URL")).is_ok() {
+            eprintln!("{} has been deprecated", envvar("GCS_OAUTH_URL"));
             eprintln!("if you intend to use vm metadata for auth, please set correct service account instead");
         }
 
-        let credential_url = env::var("SCCACHE_GCS_CREDENTIALS_URL").ok();
+        let credential_url = env::var(envvar("GCS_CREDENTIALS_URL")).ok();
 
-        let cred_path = env::var("SCCACHE_GCS_KEY_PATH").ok();
-        let service_account = env::var("SCCACHE_GCS_SERVICE_ACCOUNT").ok();
+        let cred_path = env::var(envvar("GCS_KEY_PATH")).ok();
+        let service_account = env::var(envvar("GCS_SERVICE_ACCOUNT")).ok();
 
-        let rw_mode = match env::var("SCCACHE_GCS_RW_MODE").as_ref().map(String::as_str) {
+        let rw_mode = match env::var(envvar("GCS_RW_MODE")).as_ref().map(String::as_str) {
             Ok("READ_ONLY") => CacheModeConfig::ReadOnly,
             Ok("READ_WRITE") => CacheModeConfig::ReadWrite,
             // TODO: unsure if these should warn during the configuration loading
             // or at the time when they're actually used to connect to GCS
             Ok(_) => {
-                warn!("Invalid SCCACHE_GCS_RW_MODE -- defaulting to READ_ONLY.");
+                warn!("Invalid {} -- defaulting to READ_ONLY.",
+                envvar("GCS_RW_MODE"));
                 CacheModeConfig::ReadOnly
             }
             _ => {
-                warn!("No SCCACHE_GCS_RW_MODE specified -- defaulting to READ_ONLY.");
+                warn!("No {} specified -- defaulting to READ_ONLY.", envvar("GCS_RW_MODE"));
                 CacheModeConfig::ReadOnly
             }
         };
@@ -785,14 +1036,14 @@ fn config_from_env() -> Result<EnvConfig> {
     });
 
     // ======= GHA =======
-    let gha = if let Ok(version) = env::var("SCCACHE_GHA_VERSION") {
+    let gha = if let Ok(version) = env::var(envvar("GHA_VERSION")) {
         // If SCCACHE_GHA_VERSION has been set, we don't need to check
         // SCCACHE_GHA_ENABLED's value anymore.
         Some(GHACacheConfig {
             enabled: true,
             version,
         })
-    } else if bool_from_env_var("SCCACHE_GHA_ENABLED")?.unwrap_or(false) {
+    } else if bool_from_env_var(&envvar("GHA_ENABLED"))?.unwrap_or(false) {
         // If only SCCACHE_GHA_ENABLED has been set to the true value, enable with
         // default version.
         Some(GHACacheConfig {
@@ -805,10 +1056,10 @@ fn config_from_env() -> Result<EnvConfig> {
 
     // ======= Azure =======
     let azure = if let (Ok(connection_string), Ok(container)) = (
-        env::var("SCCACHE_AZURE_CONNECTION_STRING"),
-        env::var("SCCACHE_AZURE_BLOB_CONTAINER"),
+        env::var(envvar("AZURE_CONNECTION_STRING")),
+        env::var(envvar("AZURE_BLOB_CONTAINER")),
     ) {
-        let key_prefix = key_prefix_from_env_var("SCCACHE_AZURE_KEY_PREFIX");
+        let key_prefix = key_prefix_from_env_var(&envvar("AZURE_KEY_PREFIX"));
         Some(AzureCacheConfig {
             connection_string,
             container,
@@ -819,11 +1070,11 @@ fn config_from_env() -> Result<EnvConfig> {
     };
 
     // ======= WebDAV =======
-    let webdav = if let Ok(endpoint) = env::var("SCCACHE_WEBDAV_ENDPOINT") {
-        let key_prefix = key_prefix_from_env_var("SCCACHE_WEBDAV_KEY_PREFIX");
-        let username = env::var("SCCACHE_WEBDAV_USERNAME").ok();
-        let password = env::var("SCCACHE_WEBDAV_PASSWORD").ok();
-        let token = env::var("SCCACHE_WEBDAV_TOKEN").ok();
+    let webdav = if let Ok(endpoint) = env::var(envvar("WEBDAV_ENDPOINT")) {
+        let key_prefix = key_prefix_from_env_var(&envvar("WEBDAV_KEY_PREFIX"));
+        let username = env::var(envvar("WEBDAV_USERNAME")).ok();
+        let password = env::var(envvar("WEBDAV_PASSWORD")).ok();
+        let token = env::var(envvar("WEBDAV_TOKEN")).ok();
 
         Some(WebdavCacheConfig {
             endpoint,
@@ -837,11 +1088,11 @@ fn config_from_env() -> Result<EnvConfig> {
     };
 
     // ======= OSS =======
-    let oss = if let Ok(bucket) = env::var("SCCACHE_OSS_BUCKET") {
-        let endpoint = env::var("SCCACHE_OSS_ENDPOINT").ok();
-        let key_prefix = key_prefix_from_env_var("SCCACHE_OSS_KEY_PREFIX");
+    let oss = if let Ok(bucket) = env::var(envvar("OSS_BUCKET")) {
+        let endpoint = env::var(envvar("OSS_ENDPOINT")).ok();
+        let key_prefix = key_prefix_from_env_var(&envvar("OSS_KEY_PREFIX"));
 
-        let no_credentials = bool_from_env_var("SCCACHE_OSS_NO_CREDENTIALS")?.unwrap_or(false);
+        let no_credentials = bool_from_env_var(&envvar("OSS_NO_CREDENTIALS"))?.unwrap_or(false);
 
         Some(OSSCacheConfig {
             bucket,
@@ -860,31 +1111,37 @@ fn config_from_env() -> Result<EnvConfig> {
         && (env::var_os("ALIBABA_CLOUD_ACCESS_KEY_ID").is_some()
             || env::var_os("ALIBABA_CLOUD_ACCESS_KEY_SECRET").is_some())
     {
-        bail!("If setting OSS credentials, SCCACHE_OSS_NO_CREDENTIALS must not be set.");
+        bail!(
+            "If setting OSS credentials, {} must not be set.",
+            envvar("OSS_NO_CREDENTIALS")
+        );
     }
 
     // ======= Local =======
-    let disk_dir = env::var_os("SCCACHE_DIR").map(PathBuf::from);
-    let disk_sz = env::var("SCCACHE_CACHE_SIZE")
+    let disk_dir = env::var_os(envvar("DIR")).map(PathBuf::from);
+    let disk_sz = env::var(envvar("CACHE_SIZE"))
         .ok()
         .and_then(|v| parse_size(&v));
 
     let mut preprocessor_mode_config = PreprocessorCacheModeConfig::activated();
-    let preprocessor_mode_overridden = if let Some(value) = bool_from_env_var("SCCACHE_DIRECT")? {
+    let preprocessor_mode_overridden = if let Some(value) = bool_from_env_var(&envvar("DIRECT"))? {
         preprocessor_mode_config.use_preprocessor_cache_mode = value;
         true
     } else {
         false
     };
 
-    let (disk_rw_mode, disk_rw_mode_overridden) = match env::var("SCCACHE_LOCAL_RW_MODE")
+    let (disk_rw_mode, disk_rw_mode_overridden) = match env::var(envvar("LOCAL_RW_MODE"))
         .as_ref()
         .map(String::as_str)
     {
         Ok("READ_ONLY") => (CacheModeConfig::ReadOnly, true),
         Ok("READ_WRITE") => (CacheModeConfig::ReadWrite, true),
         Ok(_) => {
-            warn!("Invalid SCCACHE_LOCAL_RW_MODE -- defaulting to READ_WRITE.");
+            warn!(
+                "Invalid {} -- defaulting to READ_WRITE.",
+                envvar("LOCAL_RW_MODE")
+            );
             (CacheModeConfig::ReadWrite, false)
         }
         _ => (CacheModeConfig::ReadWrite, false),
@@ -943,24 +1200,28 @@ fn config_file(env_var: &str, leaf: &str) -> PathBuf {
     dirs.config_dir().join(leaf)
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Config {
     pub cache: Option<CacheType>,
     pub fallback_cache: DiskCacheConfig,
     pub dist: DistConfig,
-    pub server_startup_timeout: Option<std::time::Duration>,
+    pub server_startup_timeout: Option<Duration>,
 }
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let env_conf = config_from_env()?;
+        let env_conf = config_from_env("SCCACHE_")?;
 
         let file_conf_path = config_file("SCCACHE_CONF", "config");
         let file_conf = try_read_config_file(&file_conf_path)
             .context("Failed to load config file")?
             .unwrap_or_default();
 
-        Ok(Self::from_env_and_file_configs(env_conf, file_conf))
+        let mut conf = Self::from_env_and_file_configs(env_conf, file_conf);
+
+        conf.dist = conf.dist.with_env_or_config();
+
+        Ok(conf)
     }
 
     fn from_env_and_file_configs(env_conf: EnvConfig, file_conf: FileConfig) -> Self {
@@ -971,10 +1232,10 @@ impl Config {
             dist,
             server_startup_timeout_ms,
         } = file_conf;
+
         conf_caches.merge(cache);
 
-        let server_startup_timeout =
-            server_startup_timeout_ms.map(std::time::Duration::from_millis);
+        let server_startup_timeout = server_startup_timeout_ms.map(Duration::from_millis);
 
         let EnvConfig { cache } = env_conf;
         conf_caches.merge(cache);
@@ -1074,15 +1335,124 @@ impl CachedConfig {
 }
 
 #[cfg(feature = "dist-server")]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MessageBroker {
+    #[serde(rename = "amqp")]
+    AMQP(String),
+    #[serde(rename = "redis")]
+    Redis(String),
+}
+
+#[cfg(feature = "dist-server")]
+impl MessageBroker {
+    fn from_env() -> Option<MessageBroker> {
+        None.or(std::env::var("AMQP_ADDR").ok().map(MessageBroker::AMQP))
+            .or(std::env::var("REDIS_ADDR").ok().map(MessageBroker::Redis))
+    }
+}
+
+#[cfg(feature = "dist-server")]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DogStatsDAggregationMode {
+    #[serde(rename = "aggressive")]
+    Aggressive,
+    #[serde(rename = "conservative")]
+    Conservative,
+}
+
+#[cfg(feature = "dist-server")]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DogStatsDMetricsConfig {
+    pub remote_addr: String,
+    // Write timeout (in milliseconds) for forwarding metrics to dogstatsd
+    pub write_timeout: Option<u64>,
+    // Maximum payload length for forwarding metrics
+    pub maximum_payload_length: Option<usize>,
+    // The aggregation mode for the exporter
+    pub aggregation_mode: Option<DogStatsDAggregationMode>,
+    // The flush interval of the aggregator
+    pub flush_interval: Option<u64>,
+    // Whether or not to enable telemetry for the exporter
+    pub telemetry: Option<bool>,
+    // Whether or not to enable histogram sampling
+    pub histogram_sampling: Option<bool>,
+    // The reservoir size for histogram sampling
+    pub histogram_reservoir_size: Option<usize>,
+    // Whether or not to send histograms as distributions
+    pub histograms_as_distributions: Option<bool>,
+}
+
+#[cfg(feature = "dist-server")]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type")]
+#[serde(deny_unknown_fields)]
+pub enum PrometheusMetricsConfig {
+    #[serde(rename = "bind")]
+    ListenAddr { addr: Option<std::net::SocketAddr> },
+    #[serde(rename = "path")]
+    ListenPath { path: Option<String> },
+    #[serde(rename = "push")]
+    PushGateway {
+        endpoint: String,
+        // Interval (in milliseconds) to push metrics to prometheus
+        interval: Option<u64>,
+        username: Option<String>,
+        password: Option<String>,
+        http_method: Option<String>,
+    },
+}
+
+#[cfg(feature = "dist-server")]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MetricsConfigs {
+    pub dogstatsd: Option<DogStatsDMetricsConfig>,
+    pub prometheus: Option<PrometheusMetricsConfig>,
+}
+
+#[cfg(feature = "dist-server")]
+#[derive(Clone, Debug, Default)]
+pub struct StorageConfig {
+    pub storage: Option<CacheType>,
+    pub fallback: DiskCacheConfig,
+}
+
+#[cfg(feature = "dist-server")]
+impl From<CacheConfigs> for StorageConfig {
+    fn from(conf: CacheConfigs) -> Self {
+        let (storage, fallback) = conf.into_fallback();
+        Self { storage, fallback }
+    }
+}
+
+#[cfg(feature = "dist-server")]
+impl From<StorageConfig> for CacheConfigs {
+    fn from(conf: StorageConfig) -> Self {
+        conf.storage
+            .map(|x| x.clone().into())
+            .unwrap_or_else(|| Self {
+                disk: Some(conf.fallback),
+                ..Default::default()
+            })
+    }
+}
+
+#[cfg(feature = "dist-server")]
 pub mod scheduler {
-    use std::net::SocketAddr;
-    use std::path::Path;
+    use std::env;
+    use std::path::PathBuf;
+    use std::{net::SocketAddr, str::FromStr};
 
     use crate::errors::*;
 
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Serialize, Deserialize)]
+    use super::{
+        config_from_env, default_disk_cache_dir, default_disk_cache_size, number_from_env_var,
+        try_read_config_file, CacheConfigs, CacheModeConfig, DiskCacheConfig, MessageBroker,
+        MetricsConfigs, StorageConfig,
+    };
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
     #[serde(tag = "type")]
     #[serde(deny_unknown_fields)]
     pub enum ClientAuth {
@@ -1106,36 +1476,162 @@ pub mod scheduler {
     }
 
     #[derive(Debug, Serialize, Deserialize)]
-    #[serde(tag = "type")]
+    #[serde(default)]
     #[serde(deny_unknown_fields)]
-    pub enum ServerAuth {
-        #[serde(rename = "DANGEROUSLY_INSECURE")]
-        Insecure,
-        #[serde(rename = "jwt_hs256")]
-        JwtHS256 { secret_key: String },
-        #[serde(rename = "token")]
-        Token { token: String },
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub struct Config {
-        pub public_addr: SocketAddr,
+    pub struct FileConfig {
         pub client_auth: ClientAuth,
-        pub server_auth: ServerAuth,
+        pub job_time_limit: Option<u32>,
+        pub jobs: CacheConfigs,
+        pub max_body_size: Option<usize>,
+        pub message_broker: Option<MessageBroker>,
+        pub metrics: MetricsConfigs,
+        pub public_addr: SocketAddr,
+        pub scheduler_id: Option<String>,
+        pub toolchains: CacheConfigs,
     }
 
-    pub fn from_path(conf_path: &Path) -> Result<Option<Config>> {
-        super::try_read_config_file(conf_path).context("Failed to load scheduler config file")
+    impl Default for FileConfig {
+        fn default() -> Self {
+            Self {
+                client_auth: ClientAuth::Insecure,
+                job_time_limit: None,
+                jobs: CacheConfigs {
+                    disk: Some(DiskCacheConfig {
+                        dir: default_disk_cache_dir().join("jobs"),
+                        preprocessor_cache_mode: Default::default(),
+                        rw_mode: CacheModeConfig::ReadWrite,
+                        size: default_disk_cache_size(),
+                    }),
+                    ..Default::default()
+                },
+                max_body_size: None,
+                message_broker: None,
+                metrics: Default::default(),
+                public_addr: SocketAddr::from_str("0.0.0.0:10500").unwrap(),
+                scheduler_id: None,
+                toolchains: CacheConfigs {
+                    disk: Some(DiskCacheConfig {
+                        dir: default_disk_cache_dir().join("toolchains"),
+                        preprocessor_cache_mode: Default::default(),
+                        rw_mode: CacheModeConfig::ReadWrite,
+                        size: default_disk_cache_size(),
+                    }),
+                    ..Default::default()
+                },
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Config {
+        pub client_auth: ClientAuth,
+        pub job_time_limit: u32,
+        pub jobs: StorageConfig,
+        pub max_body_size: usize,
+        pub message_broker: Option<MessageBroker>,
+        pub metrics: MetricsConfigs,
+        pub public_addr: SocketAddr,
+        pub scheduler_id: String,
+        pub toolchains: StorageConfig,
+    }
+
+    impl Config {
+        pub fn load(conf_path: Option<PathBuf>) -> Result<Self> {
+            let FileConfig {
+                client_auth,
+                job_time_limit,
+                jobs,
+                max_body_size,
+                message_broker,
+                metrics,
+                public_addr,
+                scheduler_id,
+                toolchains,
+            } = conf_path
+                .map(|path| {
+                    let conf = try_read_config_file::<FileConfig>(&path)
+                        .context("Failed to load scheduler config file");
+                    match conf {
+                        Ok(conf) => conf.unwrap_or_default(),
+                        Err(err) => {
+                            warn!("{err:?}");
+                            Default::default()
+                        }
+                    }
+                })
+                .unwrap_or_default();
+
+            let mut jobs_storage = CacheConfigs::default();
+            jobs_storage.merge(jobs);
+            jobs_storage.merge(config_from_env("SCCACHE_DIST_JOBS_")?.cache);
+
+            let mut toolchains_storage = CacheConfigs::default();
+            toolchains_storage.merge(toolchains);
+            toolchains_storage.merge(config_from_env("SCCACHE_DIST_TOOLCHAINS_")?.cache);
+
+            let job_time_limit = number_from_env_var("SCCACHE_DIST_JOB_TIME_LIMIT_SECS")
+                .transpose()?
+                .or(job_time_limit)
+                .unwrap_or(600);
+
+            let max_body_size = number_from_env_var("SCCACHE_DIST_MAX_BODY_SIZE")
+                .transpose()?
+                .or(max_body_size)
+                // 1GiB should be enough for toolchains and compile inputs, right?
+                .unwrap_or(1024 * 1024 * 1024);
+
+            let message_broker = MessageBroker::from_env().or(message_broker);
+
+            let scheduler_id = env::var("SCCACHE_DIST_SCHEDULER_ID")
+                .ok()
+                .or(scheduler_id)
+                .unwrap_or(uuid::Uuid::new_v4().simple().to_string());
+
+            Ok(Self {
+                client_auth,
+                job_time_limit,
+                jobs: jobs_storage.into(),
+                max_body_size,
+                message_broker,
+                metrics,
+                public_addr,
+                scheduler_id,
+                toolchains: toolchains_storage.into(),
+            })
+        }
+
+        pub fn into_file(self) -> FileConfig {
+            self.into()
+        }
+    }
+
+    impl From<Config> for FileConfig {
+        fn from(scheduler_config: Config) -> Self {
+            Self {
+                client_auth: scheduler_config.client_auth.clone(),
+                job_time_limit: Some(scheduler_config.job_time_limit),
+                jobs: scheduler_config.jobs.into(),
+                max_body_size: Some(scheduler_config.max_body_size),
+                message_broker: scheduler_config.message_broker,
+                metrics: scheduler_config.metrics,
+                public_addr: scheduler_config.public_addr,
+                scheduler_id: Some(scheduler_config.scheduler_id),
+                toolchains: scheduler_config.toolchains.into(),
+            }
+        }
     }
 }
 
 #[cfg(feature = "dist-server")]
 pub mod server {
-    use super::HTTPUrl;
+    use super::{
+        config_from_env, default_disk_cache_dir, default_disk_cache_size, number_from_env_var,
+        try_read_config_file, CacheConfigs, CacheModeConfig, DiskCacheConfig, MessageBroker,
+        MetricsConfigs, PrometheusMetricsConfig, StorageConfig,
+    };
     use serde::{Deserialize, Serialize};
-    use std::net::SocketAddr;
-    use std::path::{Path, PathBuf};
+    use std::env;
+    use std::path::PathBuf;
 
     use crate::errors::*;
 
@@ -1168,7 +1664,7 @@ pub mod server {
             .collect()
     }
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
     #[serde(tag = "type")]
     #[serde(deny_unknown_fields)]
     pub enum BuilderType {
@@ -1193,32 +1689,231 @@ pub mod server {
     }
 
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
-    #[serde(tag = "type")]
+    #[serde(default)]
     #[serde(deny_unknown_fields)]
-    pub enum SchedulerAuth {
-        #[serde(rename = "DANGEROUSLY_INSECURE")]
-        Insecure,
-        #[serde(rename = "jwt_token")]
-        JwtToken { token: String },
-        #[serde(rename = "token")]
-        Token { token: String },
+    pub struct FileConfig {
+        pub builder: BuilderType,
+        pub cache_dir: PathBuf,
+        pub heartbeat_interval_ms: Option<u64>,
+        pub jobs: CacheConfigs,
+        pub max_per_core_load: Option<f64>,
+        pub max_per_core_prefetch: Option<f64>,
+        pub message_broker: Option<MessageBroker>,
+        pub metrics: MetricsConfigs,
+        pub server_id: Option<String>,
+        pub toolchain_cache_size: Option<u64>,
+        pub toolchains: CacheConfigs,
     }
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
-    #[serde(deny_unknown_fields)]
+    impl Default for FileConfig {
+        fn default() -> Self {
+            Self {
+                builder: BuilderType::Docker,
+                cache_dir: Default::default(),
+                heartbeat_interval_ms: None,
+                jobs: CacheConfigs {
+                    disk: Some(DiskCacheConfig {
+                        dir: default_disk_cache_dir().join("jobs"),
+                        preprocessor_cache_mode: Default::default(),
+                        rw_mode: CacheModeConfig::ReadWrite,
+                        size: default_disk_cache_size(),
+                    }),
+                    ..Default::default()
+                },
+                max_per_core_load: None,
+                max_per_core_prefetch: None,
+                message_broker: None,
+                metrics: Default::default(),
+                server_id: None,
+                toolchain_cache_size: None,
+                toolchains: CacheConfigs {
+                    disk: Some(DiskCacheConfig {
+                        dir: default_disk_cache_dir().join("toolchains"),
+                        preprocessor_cache_mode: Default::default(),
+                        rw_mode: CacheModeConfig::ReadWrite,
+                        size: default_disk_cache_size(),
+                    }),
+                    ..Default::default()
+                },
+            }
+        }
+    }
+
+    #[derive(Debug)]
     pub struct Config {
         pub builder: BuilderType,
         pub cache_dir: PathBuf,
-        pub public_addr: SocketAddr,
-        pub bind_address: Option<SocketAddr>,
-        pub scheduler_url: HTTPUrl,
-        pub scheduler_auth: SchedulerAuth,
-        #[serde(default = "default_toolchain_cache_size")]
+        pub heartbeat_interval_ms: u64,
+        pub jobs: StorageConfig,
+        pub max_per_core_load: f64,
+        pub max_per_core_prefetch: f64,
+        pub message_broker: Option<MessageBroker>,
+        pub metrics: MetricsConfigs,
+        pub server_id: String,
         pub toolchain_cache_size: u64,
+        pub toolchains: StorageConfig,
     }
 
-    pub fn from_path(conf_path: &Path) -> Result<Option<Config>> {
-        super::try_read_config_file(conf_path).context("Failed to load server config file")
+    impl Config {
+        pub fn load(conf_path: Option<PathBuf>) -> Result<Self> {
+            let FileConfig {
+                message_broker,
+                builder,
+                cache_dir,
+                heartbeat_interval_ms,
+                jobs,
+                max_per_core_load,
+                max_per_core_prefetch,
+                metrics,
+                server_id,
+                toolchain_cache_size,
+                toolchains,
+            } = conf_path
+                .map(|path| {
+                    let conf = try_read_config_file::<FileConfig>(&path)
+                        .context("Failed to load server config file");
+                    match conf {
+                        Ok(conf) => conf.unwrap_or_default(),
+                        Err(err) => {
+                            warn!("{err:?}");
+                            Default::default()
+                        }
+                    }
+                })
+                .unwrap_or_default();
+
+            if let Some(PrometheusMetricsConfig::ListenPath { .. }) = metrics.prometheus {
+                return Err(anyhow!("Invalid config `metrics.prometheus.type=\"path\"`. Choose `type = \"addr\"` or `type = \"push\"`"));
+            }
+
+            let builder = if let Ok(builder_type) = env::var("SCCACHE_DIST_BUILDER_TYPE") {
+                match builder_type.as_ref() {
+                    "docker" => BuilderType::Docker,
+                    "overlay" => BuilderType::Overlay {
+                        build_dir: env::var("SCCACHE_DIST_BUILD_DIR").map(|p| p.into())?,
+                        bwrap_path: env::var("SCCACHE_DIST_BWRAP_PATH").map(|p| p.into())?,
+                    },
+                    "pot" => BuilderType::Pot {
+                        clone_from: default_pot_clone_from(),
+                        pot_clone_args: default_pot_clone_args(),
+                        pot_cmd: env::var("SCCACHE_DIST_POT_CMD")
+                            .map(|p| p.into())
+                            .unwrap_or_else(|_| default_pot_cmd()),
+                        pot_fs_root: env::var("SCCACHE_DIST_BUILD_DIR")
+                            .map(|p| p.into())
+                            .unwrap_or_else(|_| default_pot_fs_root()),
+                    },
+                    _ => builder,
+                }
+            } else {
+                builder
+            };
+
+            let builder = match builder {
+                BuilderType::Overlay {
+                    build_dir,
+                    bwrap_path,
+                } => BuilderType::Overlay {
+                    build_dir: env::var("SCCACHE_DIST_BUILD_DIR")
+                        .map(|p| p.into())
+                        .unwrap_or(build_dir),
+                    bwrap_path: env::var("SCCACHE_DIST_BWRAP_PATH")
+                        .map(|p| p.into())
+                        .unwrap_or(bwrap_path),
+                },
+                BuilderType::Pot {
+                    clone_from,
+                    pot_cmd,
+                    pot_fs_root,
+                    pot_clone_args,
+                } => BuilderType::Pot {
+                    clone_from,
+                    pot_clone_args,
+                    pot_cmd: env::var("SCCACHE_DIST_POT_CMD")
+                        .map(|p| p.into())
+                        .unwrap_or(pot_cmd),
+                    pot_fs_root: env::var("SCCACHE_DIST_BUILD_DIR")
+                        .map(|p| p.into())
+                        .unwrap_or(pot_fs_root),
+                },
+                builder => builder,
+            };
+
+            let mut jobs_storage = CacheConfigs::default();
+            jobs_storage.merge(jobs);
+            jobs_storage.merge(config_from_env("SCCACHE_DIST_JOBS_")?.cache);
+
+            let mut toolchains_storage = CacheConfigs::default();
+            toolchains_storage.merge(toolchains);
+            toolchains_storage.merge(config_from_env("SCCACHE_DIST_TOOLCHAINS_")?.cache);
+
+            let heartbeat_interval_ms =
+                number_from_env_var("SCCACHE_DIST_SERVER_HEARTBEAT_INTERVAL")
+                    .transpose()?
+                    .or(heartbeat_interval_ms)
+                    // Default to 5s
+                    .unwrap_or(5000);
+
+            let max_per_core_load = number_from_env_var("SCCACHE_DIST_MAX_PER_CORE_LOAD")
+                .transpose()?
+                .or(max_per_core_load)
+                // Default to 1.1
+                .unwrap_or(1.1f64);
+
+            let max_per_core_prefetch = number_from_env_var("SCCACHE_DIST_MAX_PER_CORE_PREFETCH")
+                .transpose()?
+                .or(max_per_core_prefetch)
+                // Default to 1
+                .unwrap_or(1f64);
+
+            let message_broker = MessageBroker::from_env().or(message_broker);
+
+            let server_id = env::var("SCCACHE_DIST_SERVER_ID")
+                .ok()
+                .or(server_id)
+                .unwrap_or(uuid::Uuid::new_v4().simple().to_string());
+
+            let toolchain_cache_size = number_from_env_var("SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE")
+                .transpose()?
+                .or(toolchain_cache_size)
+                .unwrap_or(default_toolchain_cache_size());
+
+            Ok(Self {
+                builder,
+                cache_dir,
+                heartbeat_interval_ms,
+                jobs: jobs_storage.into(),
+                max_per_core_load,
+                max_per_core_prefetch,
+                message_broker,
+                metrics,
+                server_id,
+                toolchain_cache_size,
+                toolchains: toolchains_storage.into(),
+            })
+        }
+
+        pub fn into_file(self) -> FileConfig {
+            self.into()
+        }
+    }
+
+    impl From<Config> for FileConfig {
+        fn from(server_config: Config) -> Self {
+            Self {
+                builder: server_config.builder.clone(),
+                cache_dir: server_config.cache_dir.clone(),
+                heartbeat_interval_ms: Some(server_config.heartbeat_interval_ms),
+                jobs: server_config.jobs.into(),
+                max_per_core_load: Some(server_config.max_per_core_load),
+                max_per_core_prefetch: Some(server_config.max_per_core_prefetch),
+                message_broker: server_config.message_broker,
+                metrics: server_config.metrics,
+                server_id: Some(server_config.server_id),
+                toolchain_cache_size: Some(server_config.toolchain_cache_size),
+                toolchains: server_config.toolchains.into(),
+            }
+        }
     }
 }
 
@@ -1320,7 +2015,7 @@ fn test_s3_no_credentials_conflict() {
     env::set_var("AWS_ACCESS_KEY_ID", "aws-access-key-id");
     env::set_var("AWS_SECRET_ACCESS_KEY", "aws-secret-access-key");
 
-    let cfg = config_from_env();
+    let cfg = config_from_env("SCCACHE_");
 
     env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
     env::remove_var("SCCACHE_BUCKET");
@@ -1340,7 +2035,7 @@ fn test_s3_no_credentials_invalid() {
     env::set_var("SCCACHE_S3_NO_CREDENTIALS", "yes");
     env::set_var("SCCACHE_BUCKET", "my-bucket");
 
-    let cfg = config_from_env();
+    let cfg = config_from_env("SCCACHE_");
 
     env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
     env::remove_var("SCCACHE_BUCKET");
@@ -1358,7 +2053,7 @@ fn test_s3_no_credentials_valid_true() {
     env::set_var("SCCACHE_S3_NO_CREDENTIALS", "true");
     env::set_var("SCCACHE_BUCKET", "my-bucket");
 
-    let cfg = config_from_env();
+    let cfg = config_from_env("SCCACHE_");
 
     env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
     env::remove_var("SCCACHE_BUCKET");
@@ -1383,7 +2078,7 @@ fn test_s3_no_credentials_valid_false() {
     env::set_var("SCCACHE_S3_NO_CREDENTIALS", "false");
     env::set_var("SCCACHE_BUCKET", "my-bucket");
 
-    let cfg = config_from_env();
+    let cfg = config_from_env("SCCACHE_");
 
     env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
     env::remove_var("SCCACHE_BUCKET");
@@ -1406,11 +2101,12 @@ fn test_s3_no_credentials_valid_false() {
 #[serial]
 #[cfg(feature = "gcs")]
 fn test_gcs_service_account() {
+    env::set_var("SCCACHE_S3_NO_CREDENTIALS", "false");
     env::set_var("SCCACHE_GCS_BUCKET", "my-bucket");
     env::set_var("SCCACHE_GCS_SERVICE_ACCOUNT", "my@example.com");
     env::set_var("SCCACHE_GCS_RW_MODE", "READ_WRITE");
 
-    let cfg = config_from_env();
+    let cfg = config_from_env("SCCACHE_");
 
     env::remove_var("SCCACHE_GCS_BUCKET");
     env::remove_var("SCCACHE_GCS_SERVICE_ACCOUNT");
@@ -1582,6 +2278,10 @@ no_credentials = true
                 auth: DistAuth::Token {
                     token: "secrettoken".to_owned()
                 },
+                cache_dir: PathBuf::from("/home/user/.cache/sccache-dist-client"),
+                rewrite_includes_only: false,
+                toolchains: vec![],
+                toolchain_cache_size: 5368709120,
                 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
                 scheduler_url: Some(
                     parse_http_url("http://1.2.3.4:10600")
@@ -1590,10 +2290,7 @@ no_credentials = true
                 ),
                 #[cfg(not(any(feature = "dist-client", feature = "dist-server")))]
                 scheduler_url: Some("http://1.2.3.4:10600".to_owned()),
-                cache_dir: PathBuf::from("/home/user/.cache/sccache-dist-client"),
-                toolchains: vec![],
-                toolchain_cache_size: 5368709120,
-                rewrite_includes_only: false,
+                ..Default::default()
             },
             server_startup_timeout_ms: Some(10000),
         }
@@ -1604,20 +2301,17 @@ no_credentials = true
 #[cfg(feature = "dist-server")]
 fn server_toml_parse() {
     use server::BuilderType;
-    use server::SchedulerAuth;
     const CONFIG_STR: &str = r#"
     # This is where client toolchains will be stored.
     cache_dir = "/tmp/toolchains"
+    # Dedicate (nproc * 1.25) CPUs to building
+    max_per_core_load = 1.25
+    # Prefetch (nproc * 1) jobs
+    max_per_core_prefetch = 1
+    server_id = "server-1"
     # The maximum size of the toolchain cache, in bytes.
     # If unspecified the default is 10GB.
     toolchain_cache_size = 10737418240
-    # A public IP address and port that clients will use to connect to this builder.
-    public_addr = "192.168.1.1:10501"
-    # The socket address the builder will listen on.
-    bind_address = "0.0.0.0:10501"
-    # The URL used to connect to the scheduler (should use https, given an ideal
-    # setup of a HTTPS server in front of the scheduler)
-    scheduler_url = "https://192.168.1.1"
 
     [builder]
     type = "overlay"
@@ -1626,38 +2320,43 @@ fn server_toml_parse() {
     # The path to the bubblewrap version 0.3.0+ `bwrap` binary.
     bwrap_path = "/usr/bin/bwrap"
 
-    [scheduler_auth]
-    type = "jwt_token"
-    # This will be generated by the `generate-jwt-hs256-server-token` command or
-    # provided by an administrator of the sccache cluster.
-    token = "my server's token"
+    [message_broker]
+    amqp = "amqp://127.0.0.1:5672//"
+
+    [metrics.prometheus]
+    type = "push"
+    endpoint = "http://127.0.0.1:9091/metrics/job/server"
+    interval = 1000
+    username = "sccache"
+    password = "sccache"
+
     "#;
 
-    let server_config: server::Config = toml::from_str(CONFIG_STR).expect("Is valid toml.");
+    let server_config: server::FileConfig = toml::from_str(CONFIG_STR).expect("Is valid toml.");
     assert_eq!(
         server_config,
-        server::Config {
+        server::FileConfig {
             builder: BuilderType::Overlay {
                 build_dir: PathBuf::from("/tmp/build"),
                 bwrap_path: PathBuf::from("/usr/bin/bwrap"),
             },
             cache_dir: PathBuf::from("/tmp/toolchains"),
-            public_addr: "192.168.1.1:10501"
-                .parse()
-                .expect("Public address must be valid socket address"),
-            bind_address: Some(
-                "0.0.0.0:10501"
-                    .parse()
-                    .expect("Bind address must be valid socket address")
-            ),
-
-            scheduler_url: parse_http_url("https://192.168.1.1")
-                .map(|url| { HTTPUrl::from_url(url) })
-                .expect("Scheduler url must be valid url str"),
-            scheduler_auth: SchedulerAuth::JwtToken {
-                token: "my server's token".to_owned()
+            max_per_core_load: Some(1.25),
+            max_per_core_prefetch: Some(1.0),
+            message_broker: Some(MessageBroker::AMQP("amqp://127.0.0.1:5672//".into())),
+            metrics: MetricsConfigs {
+                prometheus: Some(PrometheusMetricsConfig::PushGateway {
+                    endpoint: "http://127.0.0.1:9091/metrics/job/server".into(),
+                    interval: Some(1000),
+                    username: Some("sccache".into()),
+                    password: Some("sccache".into()),
+                    http_method: None,
+                }),
+                ..Default::default()
             },
-            toolchain_cache_size: 10737418240,
+            server_id: Some("server-1".into()),
+            toolchain_cache_size: Some(10737418240),
+            ..Default::default()
         }
     )
 }

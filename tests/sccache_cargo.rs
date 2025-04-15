@@ -362,7 +362,7 @@ fn test_rust_cargo_cmd_readonly_preemtive_block() -> Result<()> {
         &test_info,
         Some(vec![
             ("SCCACHE_LOCAL_RW_MODE".into(), "READ_ONLY".into()),
-            ("SCCACHE_LOG".into(), "trace".into()),
+            ("SCCACHE_LOG".into(), "sccache=debug".into()),
             (
                 "SCCACHE_ERROR_LOG".into(),
                 sccache_log.to_str().unwrap().into(),

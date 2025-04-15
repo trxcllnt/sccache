@@ -17,15 +17,18 @@ use crate::compiler::PreprocessorCacheEntry;
 use crate::lru_disk_cache::LruDiskCache;
 use crate::lru_disk_cache::{Error as LruError, ReadSeek};
 use async_trait::async_trait;
+use bytes::Buf;
+use futures::lock::Mutex;
 use std::ffi::{OsStr, OsString};
-use std::io::{BufWriter, Write};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::errors::*;
 
-use super::{normalize_key, PreprocessorCacheModeConfig};
+use super::PreprocessorCacheModeConfig;
 
 enum LazyDiskCache {
     Uninit { root: OsString, max_size: u64 },
@@ -69,10 +72,7 @@ impl LazyDiskCache {
 pub struct DiskCache {
     /// `LruDiskCache` does all the real work here.
     lru: Arc<Mutex<LazyDiskCache>>,
-    /// Thread pool to execute disk I/O
-    pool: tokio::runtime::Handle,
     preprocessor_cache_mode_config: PreprocessorCacheModeConfig,
-    preprocessor_cache: Arc<Mutex<LazyDiskCache>>,
     rw_mode: CacheMode,
 }
 
@@ -81,7 +81,6 @@ impl DiskCache {
     pub fn new<T: AsRef<OsStr>>(
         root: T,
         max_size: u64,
-        pool: &tokio::runtime::Handle,
         preprocessor_cache_mode_config: PreprocessorCacheModeConfig,
         rw_mode: CacheMode,
     ) -> DiskCache {
@@ -90,50 +89,116 @@ impl DiskCache {
                 root: root.as_ref().to_os_string(),
                 max_size,
             })),
-            pool: pool.clone(),
             preprocessor_cache_mode_config,
-            preprocessor_cache: Arc::new(Mutex::new(LazyDiskCache::Uninit {
-                root: Path::new(root.as_ref())
-                    .join("preprocessor")
-                    .into_os_string(),
-                max_size,
-            })),
             rw_mode,
         }
     }
 }
 
-/// Make a path to the cache entry with key `key`.
-fn make_key_path(key: &str) -> PathBuf {
-    Path::new(&key[0..1]).join(&key[1..2]).join(key)
+impl DiskCache {
+    pub async fn entry(&self, key: &str) -> Result<(PathBuf, u64)> {
+        match self.lru.lock().await.get_or_init() {
+            Err(err) => Err(err),
+            Ok(lru) => Ok((lru.key_to_abs_path(key), lru.get_size(key)?)),
+        }
+    }
+
+    pub async fn insert_with<F, Fut>(
+        &self,
+        key: &str,
+        size: u64,
+        with_fn: F,
+    ) -> Result<(PathBuf, u64)>
+    where
+        F: FnOnce(&Path) -> Fut,
+        Fut: std::future::Future<Output = std::io::Result<u64>>,
+    {
+        // Separate lru locks so concurrent insertions aren't serialized
+
+        let tmp = self
+            .lru
+            .lock()
+            .await
+            .get_or_init()?
+            .prepare_dir(key, size)?;
+
+        let tmp_path = tmp.as_path();
+
+        // Do the actual I/O now that the LRU lock dropped
+        let res = with_fn(tmp_path).await;
+
+        // Clean up and commit the dir
+        match res {
+            Ok(_) => self
+                .lru
+                .lock()
+                .await
+                .get_or_init()?
+                .commit_dir(Ok(tmp))
+                .await
+                .map_err(|e| e.into()),
+            Err(err) => {
+                self.lru
+                    .lock()
+                    .await
+                    .get_or_init()?
+                    .commit_dir(Err(tmp))
+                    .await?;
+                Err(err.into())
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl Storage for DiskCache {
     async fn get(&self, key: &str) -> Result<Cache> {
         trace!("DiskCache::get({})", key);
-        let path = make_key_path(key);
-        let lru = self.lru.clone();
-        let key = key.to_owned();
+        let file = match self.lru.lock().await.get_or_init()?.get(key) {
+            Ok(file) => file,
+            Err(LruError::FileNotInCache) => {
+                trace!("DiskCache::get({}): FileNotInCache", key.to_owned());
+                return Ok(Cache::Miss);
+            }
+            Err(LruError::Io(e)) => {
+                trace!("DiskCache::get({}): IoError: {:?}", key.to_owned(), e);
+                return Err(e.into());
+            }
+            Err(_) => unreachable!(),
+        };
+        Ok(Cache::Hit(CacheRead::from(file)?))
+    }
 
-        self.pool
-            .spawn_blocking(move || {
-                let io = match lru.lock().unwrap().get_or_init()?.get(&path) {
-                    Ok(f) => f,
-                    Err(LruError::FileNotInCache) => {
-                        trace!("DiskCache::get({}): FileNotInCache", key);
-                        return Ok(Cache::Miss);
-                    }
-                    Err(LruError::Io(e)) => {
-                        trace!("DiskCache::get({}): IoError: {:?}", key, e);
-                        return Err(e.into());
-                    }
-                    Err(_) => unreachable!(),
-                };
-                let hit = CacheRead::from(io)?;
-                Ok(Cache::Hit(hit))
-            })
-            .await?
+    async fn get_stream(&self, key: &str) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>> {
+        trace!("DiskCache::get_stream({})", key);
+        let file = match self.lru.lock().await.get_or_init()?.get(key) {
+            Ok(file) => file,
+            Err(LruError::FileNotInCache) => {
+                trace!("DiskCache::get_stream({}): FileNotInCache", key.to_owned());
+                return Err(anyhow!("FileNotInCache"));
+            }
+            Err(LruError::Io(e)) => {
+                trace!(
+                    "DiskCache::get_stream({}): IoError: {:?}",
+                    key.to_owned(),
+                    e
+                );
+                return Err(e.into());
+            }
+            Err(_) => unreachable!(),
+        };
+        Ok(Box::new(futures::io::AllowStdIo::new(file)))
+    }
+
+    async fn del(&self, key: &str) -> Result<()> {
+        match self.lru.lock().await.get_or_init() {
+            Err(err) => Err(err),
+            Ok(lru) => lru.remove(key).await.map_err(|e| e.into()),
+        }
+    }
+
+    async fn has(&self, key: &str) -> bool {
+        self.size(key).await.is_ok()
     }
 
     async fn put(&self, key: &str, entry: CacheWrite) -> Result<Duration> {
@@ -145,52 +210,86 @@ impl Storage for DiskCache {
             return Err(anyhow!("Cannot write to a read-only cache"));
         }
 
-        let lru = self.lru.clone();
-        let key = make_key_path(key);
+        let start = Instant::now();
+        let v = entry.finish()?;
+        let mut f = self
+            .lru
+            .lock()
+            .await
+            .get_or_init()?
+            .prepare_add(key, v.len() as u64)?;
 
-        self.pool
-            .spawn_blocking(move || {
-                let start = Instant::now();
-                let v = entry.finish()?;
-                let mut f = lru
-                    .lock()
-                    .unwrap()
-                    .get_or_init()?
-                    .prepare_add(key, v.len() as u64)?;
-                f.as_file_mut().write_all(&v)?;
-                lru.lock().unwrap().get().unwrap().commit(f)?;
-                Ok(start.elapsed())
-            })
-            .await?
+        futures::io::copy(
+            &mut futures::io::AllowStdIo::new(v.reader()),
+            &mut futures::io::AllowStdIo::new(f.as_file_mut()),
+        )
+        .await?;
+
+        self.lru.lock().await.get_or_init()?.commit(f)?;
+
+        Ok(start.elapsed())
+    }
+
+    async fn put_stream(
+        &self,
+        key: &str,
+        size: u64,
+        mut source: Pin<&mut (dyn futures::AsyncRead + Send)>,
+    ) -> Result<()> {
+        if self.rw_mode == CacheMode::ReadOnly {
+            return Err(anyhow!("Cannot write to a read-only cache"));
+        }
+
+        let mut f = self
+            .lru
+            .lock()
+            .await
+            .get_or_init()?
+            .prepare_add(key, size)?;
+
+        futures::io::copy(
+            &mut source,
+            &mut futures::io::AllowStdIo::new(f.as_file_mut()),
+        )
+        .await?;
+
+        self.lru.lock().await.get_or_init()?.commit(f)?;
+
+        Ok(())
+    }
+
+    async fn size(&self, key: &str) -> Result<u64> {
+        self.lru
+            .lock()
+            .await
+            .get_or_init()
+            .and_then(|lru| lru.get_size(key).map_err(|e| e.into()))
     }
 
     async fn check(&self) -> Result<CacheMode> {
         Ok(self.rw_mode)
     }
 
-    fn location(&self) -> String {
-        format!("Local disk: {:?}", self.lru.lock().unwrap().path())
+    async fn location(&self) -> String {
+        format!("Local disk: {:?}", self.lru.lock().await.path())
     }
 
     async fn current_size(&self) -> Result<Option<u64>> {
-        Ok(self.lru.lock().unwrap().get().map(|l| l.size()))
+        Ok(self.lru.lock().await.get().map(|l| l.size()))
     }
+
     async fn max_size(&self) -> Result<Option<u64>> {
-        Ok(Some(self.lru.lock().unwrap().capacity()))
+        Ok(Some(self.lru.lock().await.capacity()))
     }
+
     fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
         self.preprocessor_cache_mode_config
     }
+
     async fn get_preprocessor_cache_entry(&self, key: &str) -> Result<Option<Box<dyn ReadSeek>>> {
-        let key = normalize_key(key);
-        Ok(self
-            .preprocessor_cache
-            .lock()
-            .unwrap()
-            .get_or_init()?
-            .get(key)
-            .ok())
+        Ok(self.lru.lock().await.get_or_init()?.get(key).ok())
     }
+
     async fn put_preprocessor_cache_entry(
         &self,
         key: &str,
@@ -200,20 +299,10 @@ impl Storage for DiskCache {
             return Err(anyhow!("Cannot write to a read-only cache"));
         }
 
-        let key = normalize_key(key);
-        let mut f = self
-            .preprocessor_cache
-            .lock()
-            .unwrap()
-            .get_or_init()?
-            .prepare_add(key, 0)?;
+        let mut f = self.lru.lock().await.get_or_init()?.prepare_add(key, 0)?;
+
         preprocessor_cache_entry.serialize_to(BufWriter::new(f.as_file_mut()))?;
-        Ok(self
-            .preprocessor_cache
-            .lock()
-            .unwrap()
-            .get()
-            .unwrap()
-            .commit(f)?)
+
+        Ok(self.lru.lock().await.get().unwrap().commit(f)?)
     }
 }

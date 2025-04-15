@@ -21,7 +21,7 @@ use crate::compiler::gcc::ArgData::*;
 use crate::compiler::{
     gcc, write_temp_file, CCompileCommand, Cacheable, CompileCommand, CompilerArguments, Language,
 };
-use crate::mock_command::{CommandCreator, CommandCreatorSync, RunCommand};
+use crate::mock_command::{CommandCreator, CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist};
 use async_trait::async_trait;
@@ -33,6 +33,7 @@ use std::future::Future;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::str::FromStr;
 
 use crate::errors::*;
 
@@ -81,7 +82,7 @@ impl CCompilerImpl for Nvhpc {
         may_dist: bool,
         rewrite_includes_only: bool,
         _preprocessor_cache_mode: bool,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
@@ -165,6 +166,7 @@ impl CCompilerImpl for Nvhpc {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         rewrite_includes_only: bool,
+        _hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,
@@ -184,6 +186,23 @@ impl CCompilerImpl for Nvhpc {
             gcc::language_to_gcc_arg,
         )
         .map(|(command, dist_command, cacheable)| {
+            // Cannot currently dist-compile NVHPC CUDA code.
+            // We'll have to do the same `nvc++ --dryrun` trick as we do with nvcc.
+            if parsed_args
+                .common_args
+                .contains(&OsString::from_str("-gpu").unwrap())
+            {
+                return (CCompileCommand::new(command), None, cacheable);
+            }
+            for arg in ["-acc", "-mp", "-stdpar", "-target"] {
+                if let Some(idx) = parsed_args.common_args.iter().position(|x| x == arg) {
+                    if let Some(val) = parsed_args.common_args.get(idx + 1) {
+                        if val == "gpu" {
+                            return (CCompileCommand::new(command), None, cacheable);
+                        }
+                    }
+                }
+            }
             (CCompileCommand::new(command), dist_command, cacheable)
         })
     }

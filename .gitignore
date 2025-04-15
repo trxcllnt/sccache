@@ -13,7 +13,34 @@ target
 /*.snap
 
 # Ignore lockfiles of test crates used in the integration tests
-tests/**/Cargo.lock
+/tests/**/Cargo.lock
+/tests/benchmarks/cuda/build
+
+# Don't ignore devcontainers and sample configurations
+/.devcontainer/*
+!/.devcontainer/Dockerfile
+!/.devcontainer/docker-compose.yml
+!/.devcontainer/cuda11.8-amd64
+!/.devcontainer/cuda12.8-amd64
+!/.devcontainer/nvhpc25.3-amd64
+!/.devcontainer/bin
+!/.devcontainer/docker-compose.yml
+!/.devcontainer/.config
+/.devcontainer/.config/*
+!/.devcontainer/.config/grafana
+/.devcontainer/.config/grafana/*
+!/.devcontainer/.config/grafana/dashboards
+!/.devcontainer/.config/grafana/etc
+!/.devcontainer/.config/grafana/var
+/.devcontainer/.config/grafana/var/lib/grafana/*
+!/.devcontainer/.config/grafana/var/lib/grafana/.keepDir
+!/.devcontainer/.config/prometheus
+!/.devcontainer/.config/sccache
+!/.devcontainer/.config/vector
 
 # VSCode Workspace files
 **.code-workspace
+
+# Don't ignore VSCode debugger launch config
+/.vscode/*
+!/.vscode/launch.json

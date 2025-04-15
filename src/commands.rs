@@ -104,12 +104,19 @@ fn run_server_process(startup_timeout: Option<Duration>) -> Result<ServerStartup
         tokio::net::UnixListener::bind(&socket_path)?
     };
 
-    let _child = process::Command::new(&exe_path)
-        .current_dir(workdir)
+    let mut cmd = process::Command::new(&exe_path);
+
+    cmd.current_dir(workdir)
         .env("SCCACHE_START_SERVER", "1")
         .env("SCCACHE_STARTUP_NOTIFY", &socket_path)
-        .env("RUST_BACKTRACE", "1")
-        .spawn()?;
+        .env("RUST_BACKTRACE", "1");
+
+    // Don't output colorized logs if redirecting to a file.
+    if env::var("SCCACHE_ERROR_LOG").is_ok() {
+        cmd.env("RUST_LOG_STYLE", "never");
+    }
+
+    let _child = cmd.spawn()?;
 
     let startup = async move {
         let (socket, _) = listener.accept().await?;
@@ -471,20 +478,20 @@ fn handle_compile_finished(
     write_output(
         std::io::stdout(),
         stdout,
-        &response.stdout,
+        &response.output.stdout,
         response.color_mode,
     )?;
     write_output(
         std::io::stderr(),
         stderr,
-        &response.stderr,
+        &response.output.stderr,
         response.color_mode,
     )?;
 
-    if let Some(ret) = response.retcode {
-        trace!("compiler exited with status {}", ret);
-        Ok(ret)
-    } else if let Some(signal) = response.signal {
+    if let Some(code) = response.output.code() {
+        trace!("compiler exited with status {}", code);
+        Ok(code as i32)
+    } else if let Some(signal) = response.output.signal() {
         println!("sccache: Compiler killed by signal {}", signal);
         Ok(-2)
     } else {
@@ -625,7 +632,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 // anyways, so we can just return (mostly) empty stats directly.
                 Err(_) => {
                     let runtime = Runtime::new()?;
-                    let storage = storage_from_config(config, runtime.handle()).ok();
+                    let storage = storage_from_config(&config.cache, &config.fallback_cache).ok();
                     runtime.block_on(ServerInfo::new(ServerStats::default(), storage.as_deref()))?
                 }
             };
@@ -771,9 +778,12 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             let pool = runtime.handle().clone();
             runtime.block_on(async move {
                 compiler::get_compiler_info(creator, &executable, &cwd, &args, &env, &pool, None)
+                    .await?
+                    .0
+                    .get_toolchain_packager()
+                    .write_pkg(out_file)
                     .await
-                    .map(|compiler| compiler.0.get_toolchain_packager())
-                    .and_then(|packager| packager.write_pkg(out_file))
+                    .map(|_| ())
             })?
         }
         #[cfg(not(feature = "dist-client"))]

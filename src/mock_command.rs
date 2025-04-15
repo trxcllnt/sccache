@@ -48,12 +48,14 @@
 use crate::errors::*;
 use crate::jobserver::{Acquired, Client};
 use async_trait::async_trait;
+use core::str;
+use serde::{Deserialize, Serialize};
 use std::boxed::Box;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
@@ -77,7 +79,7 @@ pub trait CommandChild {
     /// Wait for the process to complete and return its exit status.
     async fn wait(self) -> io::Result<ExitStatus>;
     /// Wait for the process to complete and return its output.
-    async fn wait_with_output(self) -> io::Result<Output>;
+    async fn wait_with_output(self) -> io::Result<ProcessOutput>;
 }
 
 /// A trait that provides a subset of the methods of `std::process::Command`.
@@ -113,6 +115,14 @@ pub trait RunCommand: fmt::Debug + Send {
     fn stderr(&mut self, cfg: Stdio) -> &mut Self;
     /// Execute the process and return a process object.
     async fn spawn(&mut self) -> Result<Self::C>;
+    /// Executes the command as a child process, waiting for it to finish and
+    /// collecting all of its output.
+    ///
+    /// By default, stdout and stderr are captured (and used to provide the
+    /// resulting output). Stdin is not inherited from the parent and any
+    /// attempt by the child process to read from the stdin stream will result
+    /// in the stream immediately closing.
+    async fn output(&mut self) -> Result<ProcessOutput>;
 }
 
 /// A trait that provides a means to create objects implementing `RunCommand`.
@@ -170,11 +180,11 @@ impl CommandChild for Child {
         })
     }
 
-    async fn wait_with_output(self) -> io::Result<Output> {
+    async fn wait_with_output(self) -> io::Result<ProcessOutput> {
         let Child { inner, token } = self;
         inner.wait_with_output().await.map(|ret| {
             drop(token);
-            ret
+            ret.into()
         })
     }
 }
@@ -247,6 +257,17 @@ impl RunCommand for AsyncCommand {
     fn stderr(&mut self, cfg: Stdio) -> &mut AsyncCommand {
         self.inner().stderr(cfg);
         self
+    }
+    async fn output(&mut self) -> Result<ProcessOutput> {
+        let child = self
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .await?;
+        child
+            .wait_with_output()
+            .await
+            .context("failed to wait for child")
     }
     async fn spawn(&mut self) -> Result<Child> {
         let mut inner = self.inner.take().unwrap();
@@ -388,7 +409,7 @@ impl CommandChild for MockChild {
         self.wait_result.take().unwrap()
     }
 
-    async fn wait_with_output(self) -> io::Result<Output> {
+    async fn wait_with_output(self) -> io::Result<ProcessOutput> {
         let MockChild {
             stdout,
             stderr,
@@ -396,10 +417,13 @@ impl CommandChild for MockChild {
             ..
         } = self;
 
-        wait_result.unwrap().map(|status| Output {
-            status,
-            stdout: stdout.map(|c| c.into_inner()).unwrap_or_else(Vec::new),
-            stderr: stderr.map(|c| c.into_inner()).unwrap_or_else(Vec::new),
+        wait_result.unwrap().map(|status| {
+            std::process::Output {
+                status,
+                stdout: stdout.map(|c| c.into_inner()).unwrap_or_else(Vec::new),
+                stderr: stderr.map(|c| c.into_inner()).unwrap_or_else(Vec::new),
+            }
+            .into()
         })
     }
 }
@@ -475,6 +499,13 @@ impl RunCommand for MockCommand {
             ChildOrCall::Call(f) => f(&self.args),
         }
     }
+    async fn output(&mut self) -> Result<ProcessOutput> {
+        self.spawn()
+            .await?
+            .wait_with_output()
+            .await
+            .context("failed to wait for child")
+    }
 }
 
 /// `MockCommandCreator` allows mocking out process creation by providing `MockChild` instances to be used in advance.
@@ -534,6 +565,194 @@ impl<T: CommandCreator + 'static + Send> CommandCreatorSync for Arc<Mutex<T>> {
     }
 }
 
+/// Serializable version of std::process::Output that works across Unix and Windows
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessOutput {
+    status: ProcessStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+impl ProcessOutput {
+    pub fn new(code: i64, stdout: Vec<u8>, stderr: Vec<u8>) -> Self {
+        Self {
+            status: ProcessStatus::Exit {
+                flag: code,
+                desc: String::new(),
+            },
+            stdout,
+            stderr,
+        }
+    }
+
+    pub fn code(&self) -> Option<i64> {
+        self.status.code()
+    }
+
+    pub fn exit(&self) -> bool {
+        self.status.exit()
+    }
+
+    pub fn term(&self) -> bool {
+        self.status.term()
+    }
+
+    pub fn signal(&self) -> Option<i64> {
+        self.status.signal()
+    }
+
+    pub fn died(&self) -> bool {
+        self.status.died()
+    }
+
+    pub fn desc(&self) -> String {
+        self.status.desc()
+    }
+
+    pub fn success(&self) -> bool {
+        self.status.success()
+    }
+}
+
+impl From<std::process::Output> for ProcessOutput {
+    fn from(output: std::process::Output) -> Self {
+        let std::process::Output {
+            status,
+            stdout,
+            stderr,
+        } = output;
+
+        #[cfg(windows)]
+        let signal = Option::<i32>::None;
+        #[cfg(not(windows))]
+        let signal = status.signal();
+
+        let status = if let Some(code) = status.code() {
+            ProcessStatus::Exit {
+                flag: code as i64,
+                desc: signal
+                    // Use ExitStatus's fmt::Display implementation if signal is Some()
+                    .map(|_| format!("{status}"))
+                    // Otherwise, just print the exit code
+                    .unwrap_or_else(|| format!("status: (exit {code})")),
+            }
+        } else if let Some(signal) = signal {
+            ProcessStatus::Term {
+                flag: signal as i64,
+                desc: format!("{status}"),
+            }
+        } else {
+            ProcessStatus::Died {
+                flag: -1,
+                desc: format!("{status}"),
+            }
+        };
+
+        Self {
+            status,
+            stdout,
+            stderr,
+        }
+    }
+}
+
+impl fmt::Debug for ProcessOutput {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let stdout_utf8 = str::from_utf8(&self.stdout);
+        let stdout_debug: &dyn fmt::Debug = match stdout_utf8 {
+            Ok(ref str) => str,
+            Err(_) => &self.stdout,
+        };
+
+        let stderr_utf8 = str::from_utf8(&self.stderr);
+        let stderr_debug: &dyn fmt::Debug = match stderr_utf8 {
+            Ok(ref str) => str,
+            Err(_) => &self.stderr,
+        };
+
+        fmt.debug_struct("Output")
+            .field("status", &self.status)
+            .field("stdout", stdout_debug)
+            .field("stderr", stderr_debug)
+            .finish()
+    }
+}
+
+/// There are 3 exit cases we expect:
+///
+/// 1. Process exited with code 0 (success) or !0 (failure). Exit code stored as flag (normal exit case).
+/// 2. Process terminated by OS with a signal. Term signal stored as flag (exceptional exit case).
+/// 3. Process died for unknown reason, flag is -1 (very exceptional case).
+///
+/// `flag` i64 because Unix codes are i32 and Windows codes are u32, so it needs to be wide enough to handle both
+#[derive(Clone, Serialize, Deserialize)]
+pub enum ProcessStatus {
+    Exit { flag: i64, desc: String },
+    Term { flag: i64, desc: String },
+    Died { flag: i64, desc: String },
+}
+
+impl ProcessStatus {
+    pub fn code(&self) -> Option<i64> {
+        match self {
+            ProcessStatus::Exit { ref flag, .. } => Some(*flag),
+            _ => None,
+        }
+    }
+
+    pub fn signal(&self) -> Option<i64> {
+        match self {
+            ProcessStatus::Term { ref flag, .. } => Some(*flag),
+            ProcessStatus::Died { ref flag, .. } => Some(*flag),
+            _ => None,
+        }
+    }
+
+    pub fn desc(&self) -> String {
+        match self {
+            ProcessStatus::Exit { ref desc, .. } => desc.clone(),
+            ProcessStatus::Term { ref desc, .. } => desc.clone(),
+            ProcessStatus::Died { ref desc, .. } => desc.clone(),
+        }
+    }
+
+    pub fn exit(&self) -> bool {
+        matches!(self, ProcessStatus::Exit { .. })
+    }
+
+    pub fn term(&self) -> bool {
+        matches!(self, ProcessStatus::Term { .. })
+    }
+
+    pub fn died(&self) -> bool {
+        matches!(self, ProcessStatus::Died { .. })
+    }
+
+    pub fn success(&self) -> bool {
+        if let Some(code) = self.code() {
+            code == 0
+        } else {
+            false
+        }
+    }
+}
+
+impl fmt::Debug for ProcessStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.desc())
+    }
+}
+
+impl Default for ProcessStatus {
+    fn default() -> Self {
+        Self::Exit {
+            flag: 0,
+            desc: String::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -541,7 +760,7 @@ mod test {
     use crate::test::utils::*;
     use std::ffi::OsStr;
     use std::io;
-    use std::process::{ExitStatus, Output};
+    use std::process::ExitStatus;
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -562,7 +781,7 @@ mod test {
     fn spawn_output_command<T: CommandCreator, S: AsRef<OsStr>>(
         creator: &mut T,
         program: S,
-    ) -> Result<Output> {
+    ) -> Result<ProcessOutput> {
         Ok(spawn_command(creator, program)?.wait_with_output().wait()?)
     }
 

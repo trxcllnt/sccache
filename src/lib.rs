@@ -22,9 +22,6 @@
 
 #[macro_use]
 extern crate log;
-#[cfg(feature = "rouille")]
-#[macro_use(router)]
-extern crate rouille;
 // To get macros in scope, this has to be first.
 #[cfg(test)]
 #[macro_use]
@@ -33,16 +30,16 @@ mod test;
 #[macro_use]
 pub mod errors;
 
-mod cache;
+pub mod cache;
 mod client;
 mod cmdline;
 mod commands;
-mod compiler;
+pub mod compiler;
 pub mod config;
 pub mod dist;
 mod jobserver;
 pub mod lru_disk_cache;
-mod mock_command;
+pub mod mock_command;
 mod net;
 mod protocol;
 pub mod server;
@@ -60,9 +57,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Used to denote the environment variable that controls
 /// logging for sccache, and sccache-dist.
 pub const LOGGING_ENV: &str = "SCCACHE_LOG";
+pub const SERVER_LOG_ENV: &str = "SCCACHE_SERVER_LOG";
 
 pub fn main() {
-    init_logging();
+    // We only care if it's `1`
+    init_logging(env::var("SCCACHE_START_SERVER").is_ok_and(|x| x == "1"));
 
     let command = match cmdline::try_parse() {
         Ok(cmd) => cmd,
@@ -91,11 +90,29 @@ pub fn main() {
     });
 }
 
-fn init_logging() {
-    if env::var(LOGGING_ENV).is_ok() {
-        match env_logger::Builder::from_env(LOGGING_ENV).try_init() {
-            Ok(_) => (),
-            Err(e) => panic!("Failed to initialize logging: {:?}", e),
+fn init_logging(is_server: bool) {
+    //
+    // If starting the server, first check if SCCACHE_SERVER_LOG is set
+    //
+    // This allows users to configure server logging independently from
+    // client logs.
+    //
+    // A user doesn't necessarily want to see each sccache client's logs
+    // in their `make -j` stderr output, but does want to see the server
+    // logs redirected to $SCCACHE_ERROR_LOG.
+    //
+    if !is_server
+        || env::var(SERVER_LOG_ENV).is_err()
+        || env_logger::Builder::from_env(SERVER_LOG_ENV)
+            .try_init()
+            .is_err()
+    {
+        // Both client and server will use SCCACHE_LOG if SCCACHE_SERVER_LOG is unset
+        if env::var(LOGGING_ENV).is_ok() {
+            match env_logger::Builder::from_env(LOGGING_ENV).try_init() {
+                Ok(_) => (),
+                Err(e) => panic!("Failed to initialize logging: {:?}", e),
+            }
         }
     }
 }

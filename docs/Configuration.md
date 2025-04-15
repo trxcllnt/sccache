@@ -138,6 +138,11 @@ configuration variables
   - This option will only applied to newly compressed cache and don't affect existing cache.
   - If you want to be apply to all cache, you should reset cache and make new cache.
 
+### dist
+* `SCCACHE_DIST_CONNECT_TIMEOUT` timeout in seconds for connections to an sccache-dist server. Default is `5`.
+* `SCCACHE_DIST_REQUEST_TIMEOUT` timeout in seconds for compile requests to an sccache-dist server. Default is `600`.
+* `SCCACHE_DIST_RETRY_LIMIT` number of times the client should retry failed distributed compilations. The default is `0` (no retries). If set to `inf`, the client will infinitely retry compilations and never fallback to building locally.
+
 ### cache configs
 
 #### disk (local)

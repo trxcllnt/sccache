@@ -20,7 +20,7 @@ use crate::compiler::gcc::ArgData::*;
 use crate::compiler::{
     gcc, write_temp_file, CCompileCommand, Cacheable, CompileCommand, CompilerArguments, Language,
 };
-use crate::mock_command::{CommandCreator, CommandCreatorSync, RunCommand};
+use crate::mock_command::{CommandCreator, CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist};
 use async_trait::async_trait;
@@ -116,7 +116,7 @@ impl CCompilerImpl for Clang {
         may_dist: bool,
         rewrite_includes_only: bool,
         preprocessor_cache_mode: bool,
-    ) -> Result<process::Output>
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
@@ -154,6 +154,7 @@ impl CCompilerImpl for Clang {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         rewrite_includes_only: bool,
+        _hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,
@@ -220,6 +221,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     flag!("-fcxx-modules", TooHardFlag),
     take_arg!("-fdebug-compilation-dir", OsString, Separated, PassThrough),
     take_arg!("-fembed-offload-object", PathBuf, Concatenated('='), ExtraHashFile),
+    flag!("-fgpu-rdc", PassThroughFlag),
     flag!("-fmodules", TooHardFlag),
     flag!("-fno-color-diagnostics", NoDiagnosticsColorFlag),
     flag!("-fno-pch-timestamp", PassThroughFlag),
@@ -411,6 +413,7 @@ mod test {
             "-x",
             "cuda",
             "--cuda-gpu-arch=sm_50",
+            "--cuda-noopt-device-debug",
             "-o",
             "foo.o"
         );
@@ -427,7 +430,10 @@ mod test {
             )
         );
         assert!(a.preprocessor_args.is_empty());
-        assert_eq!(ovec!["--cuda-gpu-arch=sm_50"], a.common_args);
+        assert_eq!(
+            ovec!["--cuda-gpu-arch=sm_50", "--cuda-noopt-device-debug"],
+            a.common_args
+        );
 
         let b = parses!(
             "-c",

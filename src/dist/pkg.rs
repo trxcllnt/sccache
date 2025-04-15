@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::dist;
+use async_trait::async_trait;
 use fs_err as fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -20,49 +21,62 @@ use std::str;
 
 use crate::errors::*;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+))]
 pub use self::toolchain_imp::*;
 
+#[async_trait]
 pub trait ToolchainPackager: Send {
-    fn write_pkg(self: Box<Self>, f: fs::File) -> Result<()>;
+    async fn write_pkg(self: Box<Self>, f: fs::File) -> Result<String>;
 }
 
 pub trait InputsPackager: Send {
-    fn write_inputs(self: Box<Self>, wtr: &mut dyn io::Write) -> Result<dist::PathTransformer>;
+    fn write_inputs(
+        self: Box<Self>,
+        path_transformer: &mut dist::PathTransformer,
+        wtr: &mut dyn io::Write,
+    ) -> Result<()>;
 }
 
-pub trait OutputsRepackager {
-    fn repackage_outputs(self: Box<Self>, wtr: &mut dyn io::Write)
-        -> Result<dist::PathTransformer>;
-}
-
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+#[cfg(not(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+)))]
 mod toolchain_imp {
     use super::ToolchainPackager;
+    use async_trait::async_trait;
     use fs_err as fs;
 
     use crate::errors::*;
 
     // Distributed client, but an unsupported platform for toolchain packaging so
     // create a failing implementation that will conflict with any others.
+    #[async_trait]
     impl<T: Send> ToolchainPackager for T {
-        fn write_pkg(self: Box<Self>, _f: fs::File) -> Result<()> {
+        async fn write_pkg(self: Box<Self>, _f: fs::File) -> Result<String> {
             bail!("Automatic packaging not supported on this platform")
         }
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+))]
 mod toolchain_imp {
     use super::SimplifyPath;
     use fs_err as fs;
     use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::io::{Read, Write};
     use std::path::{Component, Path, PathBuf};
     use std::process;
     use std::str;
     use walkdir::WalkDir;
 
+    use super::tar_safe_path;
     use crate::errors::*;
 
     pub struct ToolchainPackageBuilder {
@@ -88,7 +102,11 @@ mod toolchain_imp {
             self.add_dir(PathBuf::from("/tmp"))
         }
 
-        pub fn add_executable_and_deps(&mut self, executable: PathBuf) -> Result<()> {
+        pub fn add_executable_and_deps(
+            &mut self,
+            env_vars: &[(OsString, OsString)],
+            executable: PathBuf,
+        ) -> Result<()> {
             let mut remaining = vec![executable];
             while let Some(obj_path) = remaining.pop() {
                 assert!(obj_path.is_absolute());
@@ -101,10 +119,11 @@ mod toolchain_imp {
                 if self.file_set.contains_key(&tar_path) {
                     continue;
                 }
-                let ldd_libraries = find_ldd_libraries(&obj_path).with_context(|| {
+                let ldd_libraries = find_ldd_libraries(env_vars, &obj_path).with_context(|| {
                     format!("Failed to analyse {} with ldd", obj_path.display())
                 })?;
                 remaining.extend(ldd_libraries);
+                trace!("add_executable_and_deps {}", obj_path.display());
                 self.file_set.insert(tar_path, obj_path);
             }
             Ok(())
@@ -126,6 +145,7 @@ mod toolchain_imp {
             {
                 return Ok(());
             }
+            trace!("add_dir {}", dir_path.display());
             let tar_path = self.tarify_path(&dir_path)?;
             self.dir_set.insert(tar_path, dir_path);
             Ok(())
@@ -139,6 +159,7 @@ mod toolchain_imp {
                     file_path.to_string_lossy()
                 ))
             }
+            trace!("add_file {}", file_path.display());
             let tar_path = self.tarify_path(&file_path)?;
             self.file_set.insert(tar_path, file_path);
             Ok(())
@@ -169,38 +190,73 @@ mod toolchain_imp {
             Ok(())
         }
 
-        pub fn into_compressed_tar<W: Write + Send + 'static>(self, writer: W) -> Result<()> {
+        pub async fn into_compressed_tar<W: Write + Send + 'static>(
+            self,
+            writer: W,
+        ) -> Result<String> {
+            use crate::util::Digest;
+
             use gzp::{
                 deflate::Gzip,
-                par::compress::{Compression, ParCompress, ParCompressBuilder},
+                par::compress::{Compression, ParCompressBuilder},
             };
 
-            let ToolchainPackageBuilder {
-                dir_set,
-                file_set,
-                symlinks,
-            } = self;
-            let par: ParCompress<Gzip> = ParCompressBuilder::new()
-                .compression_level(Compression::default())
-                .from_writer(writer);
-            let mut builder = tar::Builder::new(par);
+            let clone_pair = |(a, b): (&PathBuf, &PathBuf)| (a.to_owned(), b.to_owned());
 
-            for (tar_path, dir_path) in dir_set {
-                builder.append_dir(tar_path, dir_path)?
-            }
-            for (tar_path, file_path) in file_set {
-                let file = &mut fs::File::open(file_path)?;
-                builder.append_file(tar_path, file.file_mut())?
-            }
-            for (from_path, to_path) in symlinks {
-                let mut header = tar::Header::new_gnu();
-                header.set_entry_type(tar::EntryType::Symlink);
-                header.set_size(0);
-                // Leave `to_path` as absolute, assuming the tar will be used in a chroot-like
-                // environment.
-                builder.append_link(&mut header, tar_safe_path(from_path), to_path)?
-            }
-            builder.finish().map_err(Into::into)
+            // Compute the archive first so we can feed bytes to ParCompress as fast as possible
+            let dir_set = self.dir_set.iter().map(clone_pair).collect::<Vec<_>>();
+            let file_set = self.file_set.iter().map(clone_pair).collect::<Vec<_>>();
+            let symlinks = self.symlinks.iter().map(clone_pair).collect::<Vec<_>>();
+
+            tokio::task::spawn_blocking(move || {
+                let compressor = ParCompressBuilder::<Gzip>::new()
+                    .compression_level(Compression::default())
+                    .from_writer(writer);
+
+                let mut builder = tar::Builder::new(compressor);
+
+                for (tar_path, dir_path) in dir_set.iter() {
+                    builder.append_dir(tar_path, dir_path)?;
+                }
+                for (tar_path, file_path) in file_set.iter() {
+                    builder.append_file(tar_path, fs::File::open(file_path)?.file_mut())?;
+                }
+                for (from_path, to_path) in symlinks.iter() {
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(0);
+                    header.set_entry_type(tar::EntryType::Symlink);
+                    // Leave `to_path` as absolute, assuming the tar will
+                    // be used in a chroot-like environment.
+                    builder.append_link(&mut header, tar_safe_path(from_path), to_path)?;
+                }
+
+                builder.finish()
+            })
+            .await??;
+
+            let dir_set = self.dir_set.iter().map(clone_pair).collect::<Vec<_>>();
+            let file_set = self.file_set.iter().map(clone_pair).collect::<Vec<_>>();
+            let symlinks = self.symlinks.iter().map(clone_pair).collect::<Vec<_>>();
+
+            // Now compute the digest so it doesn't block ParCompress
+            tokio::task::spawn_blocking(move || {
+                let mut digest = Digest::new();
+
+                for (_, dir_path) in dir_set.iter() {
+                    digest.update(dir_path.to_string_lossy().as_bytes());
+                }
+                for (_, file_path) in file_set.iter() {
+                    digest.update(Digest::reader_sync(fs::File::open(file_path)?)?.as_bytes());
+                    digest.update(file_path.to_string_lossy().as_bytes());
+                }
+                for (from_path, to_path) in symlinks.iter() {
+                    digest.update(to_path.to_string_lossy().as_bytes());
+                    digest.update(from_path.to_string_lossy().as_bytes());
+                }
+
+                Ok(digest.finish())
+            })
+            .await?
         }
 
         /// Simplify the path and strip the leading slash.
@@ -213,13 +269,6 @@ mod toolchain_imp {
             .simplify(path)
             .map(tar_safe_path)
         }
-    }
-
-    /// Strip a leading slash, if any.
-    fn tar_safe_path(path: PathBuf) -> PathBuf {
-        path.strip_prefix(Component::RootDir)
-            .map(ToOwned::to_owned)
-            .unwrap_or(path)
     }
 
     // The dynamic linker is the only thing that truly knows how dynamic libraries will be
@@ -243,12 +292,18 @@ mod toolchain_imp {
     // - static + non-PIE = ET_EXEC, ldd stderrs something like "\tnot a dynamic executable" or
     //   "ldd: a.out: Not a valid dynamic program" and exits with code 1
     //
-    fn find_ldd_libraries(executable: &Path) -> Result<Vec<PathBuf>> {
+    fn find_ldd_libraries(
+        env_vars: &[(OsString, OsString)],
+        executable: &Path,
+    ) -> Result<Vec<PathBuf>> {
         let process::Output {
             status,
             stdout,
             stderr,
-        } = process::Command::new("ldd").arg(executable).output()?;
+        } = process::Command::new("ldd")
+            .envs(env_vars.to_vec())
+            .arg(executable)
+            .output()?;
 
         // Not a file ldd can handle. This can be a non-executable, or a static non-PIE
         if !status.success() {
@@ -265,9 +320,9 @@ mod toolchain_imp {
                 _ => bail!("Invalid endianness in elf header"),
             };
             let e_type = if little_endian {
-                (elf_bytes[0x11] as u16) << 8 | elf_bytes[0x10] as u16
+                ((elf_bytes[0x11] as u16) << 8) | elf_bytes[0x10] as u16
             } else {
-                (elf_bytes[0x10] as u16) << 8 | elf_bytes[0x11] as u16
+                ((elf_bytes[0x10] as u16) << 8) | elf_bytes[0x11] as u16
             };
             if e_type != 0x02 {
                 bail!("ldd failed on a non-ET_EXEC elf")
@@ -401,7 +456,15 @@ mod toolchain_imp {
     }
 }
 
-pub fn make_tar_header(src: &Path, dest: &str) -> io::Result<tar::Header> {
+/// Strip a leading slash, if any.
+pub fn tar_safe_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    path.as_ref()
+        .strip_prefix(Component::RootDir)
+        .map(ToOwned::to_owned)
+        .unwrap_or(path.as_ref().to_path_buf())
+}
+
+pub fn make_tar_header(src: &Path, dest: &str) -> io::Result<(tar::Header, PathBuf)> {
     let metadata_res = fs::metadata(src);
 
     let mut file_header = tar::Header::new_ustar();
@@ -427,17 +490,7 @@ pub fn make_tar_header(src: &Path, dest: &str) -> io::Result<tar::Header> {
         file_header.set_entry_type(tar::EntryType::file());
     }
 
-    // tar-rs imposes that `set_path` takes a relative path
-    assert!(dest.starts_with('/'));
-    let dest = dest.trim_start_matches('/');
-    assert!(!dest.starts_with('/'));
-    // `set_path` converts its argument to a Path and back to bytes on Windows, so this is
-    // a bit of an inefficient round-trip. Windows path separators will also be normalised
-    // to be like Unix, and the path is (now) relative so there should be no funny results
-    // due to Windows
-    // TODO: should really use a `set_path_str` or similar
-    file_header.set_path(dest)?;
-    Ok(file_header)
+    Ok((file_header, tar_safe_path(dest)))
 }
 
 /// Simplify a path to one without any relative components, erroring if it looks
