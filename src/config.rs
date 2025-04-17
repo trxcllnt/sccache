@@ -119,8 +119,9 @@ impl<'a> Deserialize<'a> for HTTPUrl {
     }
 }
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
-fn parse_http_url(url: &str) -> Result<reqwest::Url> {
+fn parse_http_url<K: AsRef<str>>(str: K) -> Result<reqwest::Url> {
     use std::net::SocketAddr;
+    let url = str.as_ref();
     let url = if let Ok(sa) = url.parse::<SocketAddr>() {
         warn!("Url {} has no scheme, assuming http", url);
         reqwest::Url::parse(&format!("http://{}", sa))
@@ -1078,6 +1079,13 @@ impl Config {
             .unwrap_or_default();
 
         let mut conf = Self::from_env_and_file_configs(env_conf, file_conf);
+
+        conf.dist.scheduler_url = env::var("SCCACHE_DIST_SCHEDULER_URL")
+            .map_err(Into::into)
+            .and_then(parse_http_url)
+            .map(HTTPUrl::from_url)
+            .ok()
+            .or(conf.dist.scheduler_url);
 
         conf.dist.fallback_to_local_compile =
             bool_from_env_var("SCCACHE_DIST_FALLBACK_TO_LOCAL_COMPILE")?
