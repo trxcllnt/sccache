@@ -114,7 +114,7 @@ impl<'a> Deserialize<'a> for HTTPUrl {
     {
         use serde::de::Error;
         let helper: String = Deserialize::deserialize(deserializer)?;
-        let url = parse_http_url(&helper).map_err(D::Error::custom)?;
+        let url = parse_http_url(helper).map_err(D::Error::custom)?;
         Ok(HTTPUrl(url))
     }
 }
@@ -500,6 +500,89 @@ pub enum DistAuth {
     Oauth2Implicit { client_id: String, auth_url: String },
 }
 
+impl DistAuth {
+    fn with_env_or_config(&self) -> Self {
+        let mut env_or_cfg_token = env::var("SCCACHE_DIST_AUTH_TOKEN");
+        let mut env_or_cfg_client_id = env::var("SCCACHE_DIST_AUTH_CLIENT_ID");
+        let mut env_or_cfg_auth_url = env::var("SCCACHE_DIST_AUTH_URL");
+        let mut env_or_cfg_token_url = env::var("SCCACHE_DIST_AUTH_TOKEN_URL");
+
+        match self {
+            Self::Token { token } => {
+                env_or_cfg_token = env_or_cfg_token.or(Ok(token.clone()));
+            }
+            Self::Oauth2CodeGrantPKCE {
+                client_id,
+                auth_url,
+                token_url,
+            } => {
+                env_or_cfg_client_id = env_or_cfg_client_id.or(Ok(client_id.clone()));
+                env_or_cfg_auth_url = env_or_cfg_auth_url.or(Ok(auth_url.clone()));
+                env_or_cfg_token_url = env_or_cfg_token_url.or(Ok(token_url.clone()));
+            }
+            Self::Oauth2Implicit {
+                client_id,
+                auth_url,
+            } => {
+                env_or_cfg_client_id = env_or_cfg_client_id.or(Ok(client_id.clone()));
+                env_or_cfg_auth_url = env_or_cfg_auth_url.or(Ok(auth_url.clone()));
+            }
+        }
+
+        let into_token = || {
+            env_or_cfg_token
+                .map(|token| Self::Token { token })
+                .unwrap_or(self.clone())
+        };
+
+        let into_oauth2_code_grant_pkce = || {
+            env_or_cfg_client_id
+                .iter()
+                .zip(env_or_cfg_auth_url.iter())
+                .zip(env_or_cfg_token_url.iter())
+                .map(
+                    |((client_id, auth_url), token_url)| Self::Oauth2CodeGrantPKCE {
+                        client_id: client_id.clone(),
+                        auth_url: auth_url.clone(),
+                        token_url: token_url.clone(),
+                    },
+                )
+                .next_back()
+                .unwrap_or(self.clone())
+        };
+
+        let into_oauth2_implicit = || {
+            env_or_cfg_client_id
+                .iter()
+                .zip(env_or_cfg_auth_url.iter())
+                .map(|(client_id, auth_url)| Self::Oauth2Implicit {
+                    client_id: client_id.clone(),
+                    auth_url: auth_url.clone(),
+                })
+                .next_back()
+                .unwrap_or(self.clone())
+        };
+
+        if let Ok(auth_type) = env::var("SCCACHE_DIST_AUTH_TYPE") {
+            match auth_type.as_ref() {
+                "token" => into_token(),
+                "oauth2_code_grant_pkce" => into_oauth2_code_grant_pkce(),
+                "oauth2_implicit" => into_oauth2_implicit(),
+                _ => {
+                    warn!("Unknown SCCACHE_DIST_AUTH_TYPE {auth_type:?}");
+                    self.clone()
+                }
+            }
+        } else {
+            match self {
+                Self::Token { .. } => into_token(),
+                Self::Oauth2CodeGrantPKCE { .. } => into_oauth2_code_grant_pkce(),
+                Self::Oauth2Implicit { .. } => into_oauth2_implicit(),
+            }
+        }
+    }
+}
+
 // Convert a type = "mozilla" immediately into an actual oauth configuration
 // https://github.com/serde-rs/serde/issues/595 could help if implemented
 impl<'a> Deserialize<'a> for DistAuth {
@@ -572,6 +655,23 @@ pub struct DistNetworking {
     pub keepalive: DistNetworkingKeepalive,
 }
 
+impl DistNetworking {
+    pub fn with_env_or_config(&self) -> Self {
+        Self {
+            connect_timeout: number_from_env_var("SCCACHE_DIST_CONNECT_TIMEOUT")
+                .map(|val| val.unwrap_or(self.connect_timeout))
+                .unwrap_or(self.connect_timeout),
+            request_timeout: number_from_env_var("SCCACHE_DIST_REQUEST_TIMEOUT")
+                .map(|val| val.unwrap_or(self.request_timeout))
+                .unwrap_or(self.request_timeout),
+            connection_pool: bool_from_env_var("SCCACHE_DIST_CONNECTION_POOL")
+                .map(|val| val.unwrap_or(self.connection_pool))
+                .unwrap_or(self.connection_pool),
+            keepalive: self.keepalive.with_env_or_config(),
+        }
+    }
+}
+
 impl Default for DistNetworking {
     fn default() -> Self {
         Self {
@@ -597,6 +697,22 @@ pub struct DistNetworkingKeepalive {
     pub interval: u64,
 }
 
+impl DistNetworkingKeepalive {
+    pub fn with_env_or_config(&self) -> Self {
+        Self {
+            enabled: bool_from_env_var("SCCACHE_DIST_KEEPALIVE_ENABLED")
+                .map(|val| val.unwrap_or(self.enabled))
+                .unwrap_or(self.enabled),
+            interval: number_from_env_var("SCCACHE_DIST_KEEPALIVE_INTERVAL")
+                .map(|val| val.unwrap_or(self.interval))
+                .unwrap_or(self.interval),
+            timeout: number_from_env_var("SCCACHE_DIST_KEEPALIVE_TIMEOUT")
+                .map(|val| val.unwrap_or(self.timeout))
+                .unwrap_or(self.timeout),
+        }
+    }
+}
+
 impl Default for DistNetworkingKeepalive {
     fn default() -> Self {
         Self {
@@ -607,7 +723,7 @@ impl Default for DistNetworkingKeepalive {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct DistConfig {
@@ -624,6 +740,29 @@ pub struct DistConfig {
     pub scheduler_url: Option<String>,
     pub toolchains: Vec<DistToolchainConfig>,
     pub toolchain_cache_size: u64,
+}
+
+impl DistConfig {
+    pub fn with_env_or_config(&self) -> Self {
+        Self {
+            auth: self.auth.with_env_or_config(),
+            net: self.net.with_env_or_config(),
+            #[cfg(any(feature = "dist-client", feature = "dist-server"))]
+            scheduler_url: env::var("SCCACHE_DIST_SCHEDULER_URL")
+                .map_err(Into::into)
+                .and_then(parse_http_url)
+                .map(HTTPUrl::from_url)
+                .ok()
+                .or(self.scheduler_url.clone()),
+            fallback_to_local_compile: bool_from_env_var("SCCACHE_DIST_FALLBACK_TO_LOCAL_COMPILE")
+                .map(|val| val.unwrap_or(self.fallback_to_local_compile))
+                .unwrap_or(self.fallback_to_local_compile),
+            max_retries: number_from_env_var("SCCACHE_DIST_MAX_RETRIES")
+                .map(|val| val.unwrap_or(self.max_retries))
+                .unwrap_or(self.max_retries),
+            ..self.clone()
+        }
+    }
 }
 
 impl Default for DistConfig {
@@ -1080,42 +1219,7 @@ impl Config {
 
         let mut conf = Self::from_env_and_file_configs(env_conf, file_conf);
 
-        conf.dist.scheduler_url = env::var("SCCACHE_DIST_SCHEDULER_URL")
-            .map_err(Into::into)
-            .and_then(parse_http_url)
-            .map(HTTPUrl::from_url)
-            .ok()
-            .or(conf.dist.scheduler_url);
-
-        conf.dist.fallback_to_local_compile =
-            bool_from_env_var("SCCACHE_DIST_FALLBACK_TO_LOCAL_COMPILE")?
-                .unwrap_or(conf.dist.fallback_to_local_compile);
-
-        conf.dist.max_retries = number_from_env_var("SCCACHE_DIST_MAX_RETRIES")
-            .transpose()?
-            .unwrap_or(conf.dist.max_retries);
-
-        conf.dist.net.connect_timeout = number_from_env_var("SCCACHE_DIST_CONNECT_TIMEOUT")
-            .transpose()?
-            .unwrap_or(conf.dist.net.connect_timeout);
-
-        conf.dist.net.request_timeout = number_from_env_var("SCCACHE_DIST_REQUEST_TIMEOUT")
-            .transpose()?
-            .unwrap_or(conf.dist.net.request_timeout);
-
-        conf.dist.net.connection_pool = bool_from_env_var("SCCACHE_DIST_CONNECTION_POOL")?
-            .unwrap_or(conf.dist.net.connection_pool);
-
-        conf.dist.net.keepalive.enabled = bool_from_env_var("SCCACHE_DIST_KEEPALIVE_ENABLED")?
-            .unwrap_or(conf.dist.net.keepalive.enabled);
-
-        conf.dist.net.keepalive.interval = number_from_env_var("SCCACHE_DIST_KEEPALIVE_INTERVAL")
-            .transpose()?
-            .unwrap_or(conf.dist.net.keepalive.interval);
-
-        conf.dist.net.keepalive.timeout = number_from_env_var("SCCACHE_DIST_KEEPALIVE_TIMEOUT")
-            .transpose()?
-            .unwrap_or(conf.dist.net.keepalive.timeout);
+        conf.dist = conf.dist.with_env_or_config();
 
         Ok(conf)
     }
