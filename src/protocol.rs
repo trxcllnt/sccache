@@ -50,16 +50,9 @@ pub enum CompileResponse {
 /// Information about a finished compile, either from cache or executed locally.
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct CompileFinished {
-    // /// The return code of the compile process, if available.
-    // pub retcode: Option<i32>,
-    // /// The signal that terminated the compile process, if available.
-    // pub signal: Option<i32>,
-    // /// The compiler's stdout.
-    // pub stdout: Vec<u8>,
-    // /// The compiler's stderr.
-    // pub stderr: Vec<u8>,
     /// The state of any compiler options passed to control color output.
     pub color_mode: ColorMode,
+    /// The output of the compile process.
     pub output: ProcessOutput,
 }
 
