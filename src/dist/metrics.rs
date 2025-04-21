@@ -317,13 +317,10 @@ impl PrometheusMetrics {
                         interval,
                         username.clone(),
                         password.clone(),
-                        http_method.clone().map(|m| {
-                            if m.to_uppercase() == "POST" {
-                                hyper::Method::POST
-                            } else {
-                                hyper::Method::PUT
-                            }
-                        }),
+                        http_method
+                            .clone()
+                            .map(|m| m.to_uppercase() == "POST")
+                            .unwrap_or_default(),
                     )?
                     .build()?;
                 (recorder, exporter, None)
