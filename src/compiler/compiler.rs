@@ -1375,6 +1375,7 @@ impl DistCompile {
                     // loop instead of for so we can break with the Err instead of
                     // returning to ensure we still delete the job (below) in case
                     // of client errors.
+                    // TODO: Make this use asyncio
                     let unpack_outputs_res = loop {
                         if let Some((path, output_data)) = result_outputs_iter.next() {
                             let len = output_data.lens().actual;
@@ -1387,10 +1388,19 @@ impl DistCompile {
                             // Do this first so cleanup works correctly
                             output_paths.push(local_path.clone());
 
-                            // TODO: Make this use asyncio
+                            // Ensure the parent paths exist
+                            if let Some(parent) = local_path.parent() {
+                                if !parent.as_os_str().is_empty() {
+                                    try_or_cleanup!(fs::create_dir_all(parent).with_context(
+                                        || format!("Failed to create output dir {}", parent.display())
+                                    ));
+                                }
+                            }
+
                             let mut file = try_or_cleanup!(File::create(&local_path).with_context(
                                 || format!("Failed to create output file {}", local_path.display())
                             ));
+
                             let count = try_or_cleanup!(io::copy(
                                 &mut output_data.into_reader(),
                                 &mut file
