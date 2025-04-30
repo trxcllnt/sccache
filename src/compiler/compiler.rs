@@ -1392,7 +1392,10 @@ impl DistCompile {
                             if let Some(parent) = local_path.parent() {
                                 if !parent.as_os_str().is_empty() {
                                     try_or_cleanup!(fs::create_dir_all(parent).with_context(
-                                        || format!("Failed to create output dir {}", parent.display())
+                                        || format!(
+                                            "Failed to create output dir {}",
+                                            parent.display()
+                                        )
                                     ));
                                 }
                             }
