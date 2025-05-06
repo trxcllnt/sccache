@@ -1,20 +1,5 @@
 # Distributed sccache
 
-Background:
-
- - You should read about JSON Web Tokens - https://jwt.io/.
-   - HS256 in short: you can sign a piece of (typically unencrypted)
-     data with a key. Verification involves signing the data again
-     with the same key and comparing the result. As a result, if you
-     want two parties to verify each others messages, the key must be
-     shared beforehand.
- - Secure token's referenced below should be generated with a CSPRNG
-   (your OS random number generator should suffice).
-   For example, on Linux this is accessible with: `openssl rand -hex 64`.
- - When relying on random number generators (for generating keys or
-   tokens), be aware that a lack of entropy is possible in cloud or
-   virtualized environments in some scenarios.
-
 ## Overview
 
 Distributed sccache consists of five parts:
@@ -205,16 +190,6 @@ If a client is malicious, they can cause a DoS of distributed sccache servers or
 explore ways to escape the build sandbox. To protect against this, clients must
 be authenticated.
 
-Each client will use an authentication token for the initial job allocation request
-to the scheduler. A successful allocation will return a job token that is used
-to authorise requests to the appropriate server for that specific job.
-
-This job token is a JWT HS256 token of the job id, signed with a server key.
-The key for each server is randomly generated on server startup and given to
-the scheduler during registration. This means that the server can verify users
-without either a) adding client authentication to every server or b) needing
-secret transfer between scheduler and server on every job allocation.
-
 #### OAuth2
 
 This is a group of similar methods for achieving the same thing - the client
@@ -230,7 +205,7 @@ the scheduler will validate tokens from the client:
 # Use the known settings for Mozilla OAuth2 token validation
 client_auth = { type = "mozilla" }
 
-# Will forward the valid JWT token onto another URL in the `Bearer` header, with a
+# Will forward the client token onto another URL in the `Bearer` header, with a
 # success response indicating the token is valid. Optional `cache_secs` how long
 # to cache successful authentication for.
 client_auth = { type = "proxy_token", url = "...", cache_secs = 60 }
