@@ -63,21 +63,7 @@ mod common {
         fn bincode<T: serde::Serialize + ?Sized>(self, bincode: &T) -> Result<Self>;
         fn bytes(self, bytes: Vec<u8>) -> Self;
     }
-    impl ReqwestRequestBuilderExt for reqwest::blocking::RequestBuilder {
-        fn bincode<T: serde::Serialize + ?Sized>(self, bincode: &T) -> Result<Self> {
-            let bytes =
-                bincode::serialize(bincode).context("Failed to serialize body to bincode")?;
-            Ok(self.bytes(bytes))
-        }
-        fn bytes(self, bytes: Vec<u8>) -> Self {
-            self.header(
-                header::CONTENT_TYPE,
-                mime::APPLICATION_OCTET_STREAM.to_string(),
-            )
-            .header(header::CONTENT_LENGTH, bytes.len())
-            .body(bytes)
-        }
-    }
+
     impl ReqwestRequestBuilderExt for reqwest::RequestBuilder {
         fn bincode<T: serde::Serialize + ?Sized>(self, bincode: &T) -> Result<Self> {
             let bytes =

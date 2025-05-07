@@ -341,12 +341,14 @@ impl ClientAuthCheck for ValidJWTCheck {
 }
 
 impl ValidJWTCheck {
-    pub fn new(audience: String, issuer: String, jwks_url: &str) -> Result<Self> {
-        let res = reqwest::blocking::get(jwks_url).context("Failed to make request to JWKs url")?;
+    pub async fn new(audience: String, issuer: String, jwks_url: &str) -> Result<Self> {
+        let res = reqwest::get(jwks_url)
+            .await
+            .context("Failed to make request to JWKs url")?;
         if !res.status().is_success() {
             bail!("Could not retrieve JWKs, HTTP error: {}", res.status())
         }
-        let jwks: Jwks = res.json().context("Failed to parse JWKs json")?;
+        let jwks: Jwks = res.json().await.context("Failed to parse JWKs json")?;
         let kid_to_pkcs1 = jwks
             .keys
             .into_iter()
@@ -382,24 +384,22 @@ impl ValidJWTCheck {
     }
 }
 
-impl From<ClientAuth> for Box<dyn ClientAuthCheck> {
-    fn from(client_auth: ClientAuth) -> Box<dyn ClientAuthCheck> {
-        match client_auth {
-            ClientAuth::Insecure => Box::new(EqCheck::new(INSECURE_DIST_CLIENT_TOKEN.to_owned())),
-            ClientAuth::Token { token } => Box::new(EqCheck::new(token)),
-            ClientAuth::JwtValidate {
-                audience,
-                issuer,
-                jwks_url,
-            } => Box::new(
-                ValidJWTCheck::new(audience, issuer, &jwks_url)
-                    .context("Failed to create a checker for valid JWTs")
-                    .unwrap(),
-            ),
-            ClientAuth::Mozilla { required_groups } => Box::new(MozillaCheck::new(required_groups)),
-            ClientAuth::ProxyToken { url, cache_secs } => {
-                Box::new(ProxyTokenCheck::new(url, cache_secs))
-            }
+pub async fn new_client_auth_check(client_auth: ClientAuth) -> Result<Box<dyn ClientAuthCheck>> {
+    Ok(match client_auth {
+        ClientAuth::Insecure => Box::new(EqCheck::new(INSECURE_DIST_CLIENT_TOKEN.to_owned())),
+        ClientAuth::Token { token } => Box::new(EqCheck::new(token)),
+        ClientAuth::JwtValidate {
+            audience,
+            issuer,
+            jwks_url,
+        } => Box::new(
+            ValidJWTCheck::new(audience, issuer, &jwks_url)
+                .await
+                .context("Failed to create a checker for valid JWTs")?,
+        ),
+        ClientAuth::Mozilla { required_groups } => Box::new(MozillaCheck::new(required_groups)),
+        ClientAuth::ProxyToken { url, cache_secs } => {
+            Box::new(ProxyTokenCheck::new(url, cache_secs))
         }
-    }
+    })
 }

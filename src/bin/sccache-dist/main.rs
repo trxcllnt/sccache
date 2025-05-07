@@ -17,8 +17,9 @@ use sccache::{
         self, env_info,
         metrics::Metrics,
         scheduler::{self, SchedulerMetrics, SchedulerTasks},
-        scheduler_to_servers_queue, server, tasks, to_scheduler_queue, BuilderIncoming,
-        ServerToolchains,
+        scheduler_to_servers_queue, server, tasks, to_scheduler_queue,
+        token_check::new_client_auth_check,
+        BuilderIncoming, ServerToolchains,
     },
     errors::*,
 };
@@ -124,6 +125,9 @@ fn run(command: Command) -> Result<()> {
                         }
                     }
 
+                    // Create ClientAuthCheck and bail on Err before registering with Celery
+                    let client_auth_check = new_client_auth_check(client_auth).await?;
+
                     let scheduler = scheduler::Scheduler::new(
                         jobs_storage,
                         SchedulerMetrics::new(metrics.clone()),
@@ -139,7 +143,7 @@ fn run(command: Command) -> Result<()> {
                         toolchains_storage,
                     )?;
 
-                    let server = dist::http::Scheduler::new(scheduler.clone(), client_auth.into())
+                    let server = dist::http::Scheduler::new(scheduler.clone(), client_auth_check)
                         .serve(public_addr, max_body_size, metrics);
 
                     let celery = scheduler.start();
