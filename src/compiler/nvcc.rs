@@ -42,7 +42,7 @@ use std::future::{Future, IntoFuture};
 use std::io::{self, BufRead, Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
+use std::path::{Display, Path, PathBuf};
 use std::{env, process};
 use which::which_in;
 
@@ -609,6 +609,126 @@ impl CompileCommandImpl for NvccCompileCommand {
 
         let num_parallel = device_compile_range.len().min(*num_parallel).max(1);
 
+        {
+            use dot_generator::*;
+            use dot_structures::*;
+            use graphviz_rust::printer::{DotPrinter, PrinterContext};
+
+            let mut graphs: Vec<Subgraph> = vec![];
+            for (name, command_group_chunks) in [
+                (
+                    "preprocess",
+                    nvcc_subcommand_groups[cuda_front_end_range.clone()].chunks(1),
+                ),
+                // compile multiple device architectures in parallel when `nvcc -t=N` is specified
+                (
+                    "device_compile_assemble",
+                    nvcc_subcommand_groups[device_compile_range.clone()].chunks(num_parallel),
+                ),
+                (
+                    "host_assemble_and_link",
+                    nvcc_subcommand_groups[final_assembly_range.clone()].chunks(1),
+                ),
+            ] {
+                let mut inner: Vec<Subgraph> = vec![];
+
+                for (i, command_groups) in command_group_chunks.enumerate() {
+                    for (j, commands) in command_groups.iter().enumerate() {
+                        let nodes = commands
+                            .iter()
+                            .enumerate()
+                            .map(|(k, cmd)| {
+                                let mut node = Node::from(cmd);
+                                node.id.0 = id!(format!("{name}_{i}_{j}_{k}"));
+                                node
+                            })
+                            .collect::<Vec<_>>();
+                        if !nodes.is_empty() {
+                            inner.push(subgraph!(
+                                id!(&format!("{name}_{i}_{j}")),
+                                [
+                                    nodes.iter().map(|n| stmt!(n.clone())).collect::<Vec<_>>(),
+                                    nodes
+                                        .iter()
+                                        .zip(nodes.iter().skip(1))
+                                        .map(|(n0, n1)| stmt!(edge!(n0.id.clone() => n1.id.clone())))
+                                        .collect::<Vec<_>>()
+                                ]
+                                .concat()
+                            ))
+                        }
+                    }
+                }
+
+                if !inner.is_empty() {
+                    graphs.push(subgraph!(
+                        id!(name),
+                        inner.into_iter().map(Stmt::Subgraph).collect::<Vec<_>>()
+                    ));
+                }
+            }
+
+            fn first_nodes(g: &Subgraph) -> Vec<&Node> {
+                g.stmts
+                    .iter()
+                    .filter_map(|s| match s {
+                        Stmt::Subgraph(s) => s
+                            .stmts
+                            .iter()
+                            .filter_map(|s| match s {
+                                Stmt::Node(n) => Some(n),
+                                _ => None,
+                            })
+                            .next(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            }
+
+            fn last_nodes(g: &Subgraph) -> Vec<&Node> {
+                g.stmts
+                    .iter()
+                    .filter_map(|s| match s {
+                        Stmt::Subgraph(s) => s
+                            .stmts
+                            .iter()
+                            .filter_map(|s| match s {
+                                Stmt::Node(n) => Some(n),
+                                _ => None,
+                            })
+                            .next_back(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            }
+
+            let g = graph!(strict di id!("G"),
+                [
+                    graphs.iter().map(|g| stmt!(g.clone())).collect::<Vec<_>>(),
+                    graphs.iter()
+                        .map(last_nodes)
+                        .zip(graphs
+                            .iter()
+                            .skip(1)
+                            .map(first_nodes)
+                        )
+                        .flat_map(|(n0, n1)| {
+                            n0.iter().flat_map(|n0| n1.iter().map(|n1| {
+                                stmt!(edge!(n0.id.clone() => n1.id.clone()))
+                            }))
+                            .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>()
+                ]
+                .concat()
+            );
+
+            debug!(
+                "nvcc dot:\n{}",
+                g.print(&mut graphviz_rust::printer::PrinterContext::default())
+            );
+        }
+
         service.stats.lock().await.decrement_pending_compilations();
 
         for command_group_chunks in [
@@ -650,6 +770,59 @@ pub struct NvccGeneratedSubcommand {
     pub cwd: PathBuf,
     pub env_vars: Vec<(OsString, OsString)>,
     pub cacheable: Cacheable,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+}
+
+impl std::fmt::Display for NvccGeneratedSubcommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let args = [
+            &[self.exe.to_str().unwrap_or_default().to_string()][..],
+            &self.args[..],
+        ]
+        .concat()
+        .iter()
+        .map(|arg| arg.replace('"', "").replace("'", ""))
+        .collect::<Vec<_>>();
+
+        write!(
+            f,
+            "{}",
+            shlex::try_join(args.iter().map(|arg| arg.as_str())).unwrap()
+        )
+    }
+}
+
+impl From<&NvccGeneratedSubcommand> for dot_structures::Node {
+    fn from(cmd: &NvccGeneratedSubcommand) -> dot_structures::Node {
+        use dot_generator::*;
+        use dot_structures::*;
+        let name = cmd
+            .exe
+            .file_name()
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or_default();
+        let stem = cmd
+            .exe
+            .file_stem()
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or_default();
+        node!(
+            &name,
+            vec![
+                attr!("label", &format!("\"{stem}\"")),
+                attr!("inputs", &format!("\"{}\"", cmd.inputs.join(";"))),
+                attr!("outputs", &format!("\"{}\"", cmd.outputs.join(";"))),
+                attr!("command", &format!("\"{}\"", cmd)),
+                attr!(
+                    "cwd",
+                    &format!("\"{}\"", cmd.cwd.to_str().unwrap_or_default())
+                ),
+            ]
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -668,6 +841,27 @@ async fn group_nvcc_subcommands_by_compilation_stage<T>(
 where
     T: CommandCreatorSync,
 {
+    fn merge_commands(
+        cwd: &Path,
+        out: &Path,
+        nvcc_commands: &[(usize, PathBuf, Vec<String>)],
+        host_commands: &[(usize, PathBuf, Vec<String>)],
+    ) -> Vec<(PathBuf, PathBuf, Vec<String>)> {
+        nvcc_commands
+            .iter()
+            // Run cudafe++, nvlink, cicc, ptxas, and fatbinary in `out`
+            .map(|(idx, exe, args)| (idx, out, exe, args))
+            .chain(
+                host_commands
+                    .iter()
+                    // Run host preprocessing and compilation steps in `cwd`
+                    .map(|(idx, exe, args)| (idx, cwd, exe, args)),
+            )
+            .sorted_by(|a, b| Ord::cmp(&a.0, &b.0))
+            .map(|(_, dir, exe, args)| (dir.to_owned(), exe.to_owned(), args.to_owned()))
+            .collect::<Vec<_>>()
+    }
+
     // Run `nvcc --dryrun` twice to ensure the commands are correct
     // relative to the directory where they're run.
     //
@@ -724,6 +918,8 @@ where
         ),
     )
     .await?;
+
+    let original_commands = merge_commands(cwd, out, &nvcc_commands, &host_commands);
 
     drop(env_vars_2);
     let env_vars = env_vars_1;
@@ -787,19 +983,7 @@ where
 
     // Now zip the two lists of commands again by sorting on original line index.
     // Transform to tuples that include the dir in which each command should run.
-    let mut all_commands = nvcc_commands
-        .iter()
-        // Run cudafe++, nvlink, cicc, ptxas, and fatbinary in `out`
-        .map(|(idx, exe, args)| (idx, out, exe, args))
-        .chain(
-            host_commands
-                .iter()
-                // Run host preprocessing and compilation steps in `cwd`
-                .map(|(idx, exe, args)| (idx, cwd, exe, args)),
-        )
-        .sorted_by(|a, b| Ord::cmp(&a.0, &b.0))
-        .map(|(_, dir, exe, args)| (dir.to_owned(), exe.to_owned(), args.to_owned()))
-        .collect::<Vec<_>>();
+    let mut all_commands = merge_commands(cwd, out, &nvcc_commands, &host_commands);
 
     // First pass over commands because in CTK < 12.0, `cudafe++` is at the end of the commands list,
     // but we need to set `cudafe_has_gen_module_id_file_flag` in order to adjust the cicc commands.
@@ -831,14 +1015,53 @@ where
     let mut final_assembly_group = Vec::<NvccGeneratedSubcommand>::new();
     let mut device_compile_groups = HashMap::<String, Vec<NvccGeneratedSubcommand>>::new();
 
+    fn get_concatenated_arg_values(args: &[String], flags: &[&str]) -> Vec<String> {
+        flags
+            .iter()
+            .flat_map(|&flag| {
+                args.iter()
+                    .filter(move |arg| arg.starts_with(flag))
+                    .filter_map(|arg| arg.split("=").last().map(|arg| arg.to_owned()))
+            })
+            .collect::<Vec<_>>()
+    }
+
+    fn get_separated_arg_values(args: &[String], flags: &[&str]) -> Vec<String> {
+        flags
+            .iter()
+            .filter_map(|flag| args.iter().position(|arg| arg == flag))
+            .filter_map(|idx| args.get(idx + 1).cloned())
+            .collect::<Vec<_>>()
+    }
+
     for (dir, exe, args) in all_commands.iter_mut() {
-        if let (env_vars, cacheable, Some(group)) = match exe.file_stem().and_then(|s| s.to_str()) {
+        if let (env_vars, cacheable, inputs, outputs, Some(group)) = match exe
+            .file_stem()
+            .and_then(|s| s.to_str())
+        {
             // fatbinary and nvlink are not cacheable
-            Some("fatbinary") | Some("nvlink") => (
-                env_vars.clone(),
-                Cacheable::No,
-                Some(&mut final_assembly_group),
-            ),
+            Some("fatbinary") => {
+                let inputs = get_concatenated_arg_values(args, &["--image3"]);
+                let outputs = get_concatenated_arg_values(args, &["--embedded-fatbin"]);
+                (
+                    env_vars.clone(),
+                    Cacheable::No,
+                    inputs,
+                    outputs,
+                    Some(&mut final_assembly_group),
+                )
+            }
+            Some("nvlink") => {
+                let inputs = get_concatenated_arg_values(args, &["--register-link-binaries"]);
+                let outputs = get_separated_arg_values(args, &["-o"]);
+                (
+                    env_vars.clone(),
+                    Cacheable::No,
+                    inputs,
+                    outputs,
+                    Some(&mut final_assembly_group),
+                )
+            }
             // cicc and ptxas are cacheable
             Some("cicc") => {
                 // Fix for CTK < 12.0:
@@ -873,26 +1096,50 @@ where
                     }
                 }
 
-                let group = device_compile_groups.get_mut(&args[args.len() - 3]);
-                (env_vars.clone(), Cacheable::Yes, group)
+                let inputs = vec![args[args.len() - 3].clone()];
+                let outputs = get_separated_arg_values(args, &["-o"]);
+                let group = device_compile_groups.get_mut(&inputs[0]);
+
+                (env_vars.clone(), Cacheable::Yes, inputs, outputs, group)
             }
             Some("ptxas") => {
+                let input = args[args.len() - 3].clone();
                 let group = device_compile_groups.values_mut().find(|cmds| {
                     if let Some(cicc) = cmds.last() {
                         if let Some(cicc_out) = cicc.args.last() {
-                            return cicc_out == &args[args.len() - 3];
+                            return cicc_out == &input;
                         }
                     }
                     false
                 });
-                (env_vars.clone(), Cacheable::Yes, group)
+
+                let inputs = vec![input];
+                let outputs = get_separated_arg_values(args, &["-o"]);
+
+                (env_vars.clone(), Cacheable::Yes, inputs, outputs, group)
             }
             // cudafe++ _must be_ cached, because the `.module_id` file is unique to each invocation (new in CTK 12.8)
-            Some("cudafe++") => (
-                env_vars.clone(),
-                Cacheable::Yes,
-                Some(&mut cuda_front_end_group),
-            ),
+            Some("cudafe++") => {
+                let inputs = vec![args.iter().last().unwrap().clone()];
+                let outputs = get_separated_arg_values(
+                    args,
+                    &[
+                        &gen_c_file_name_flag,
+                        &stub_file_name_flag,
+                        &gen_device_file_name_flag,
+                        &module_id_file_name_flag,
+                        "-o",
+                    ],
+                );
+
+                (
+                    env_vars.clone(),
+                    Cacheable::Yes,
+                    inputs,
+                    outputs,
+                    Some(&mut cuda_front_end_group),
+                )
+            }
             _ => {
                 // All generated host compiler commands include one of these defines.
                 // If one of these isn't present, this command is either a new binary
@@ -937,17 +1184,23 @@ where
                             None
                         }
                     }) {
+                        let inputs = vec![args[args.len() - 3].clone()];
+                        let outputs = vec![out_file.clone()];
                         let new_device_compile_group = vec![];
                         device_compile_groups.insert(out_file.clone(), new_device_compile_group);
                         (
                             env_vars.clone(),
                             Cacheable::No,
+                            inputs,
+                            outputs,
                             device_compile_groups.get_mut(&out_file),
                         )
                     } else {
                         (
                             env_vars.clone(),
                             Cacheable::No,
+                            vec![],
+                            vec![],
                             Some(&mut cuda_front_end_group),
                         )
                     }
@@ -963,6 +1216,14 @@ where
                     //
                     // Specifically, `nvcc -E` always defines __CUDA_ARCH__, which means changes to host-only
                     // code guarded by an `#ifndef __CUDA_ARCH__` will _not_ be captured in `nvcc -E` output.
+
+                    let inputs = if args.iter().any(|arg| arg.starts_with("-Wl")) {
+                        vec![]
+                    } else {
+                        vec![args[args.len() - 3].clone()]
+                    };
+                    let outputs = get_separated_arg_values(args, &["-o"]);
+
                     (
                         env_vars
                             .iter()
@@ -980,6 +1241,8 @@ where
                             .cloned()
                             .collect::<Vec<_>>(),
                         Cacheable::Yes,
+                        inputs,
+                        outputs,
                         Some(&mut final_assembly_group),
                     )
                 }
@@ -1005,8 +1268,33 @@ where
                 cwd: dir.to_owned(),
                 env_vars,
                 cacheable,
+                inputs,
+                outputs,
             });
         }
+    }
+
+    for (old, new) in original_commands.iter().zip(all_commands.iter()) {
+        let (old_dir, old_exe, old_args) = old;
+        let (new_dir, new_exe, new_args) = new;
+        debug!(
+            "[{}]: old and new command: old=\"{}\", new=\"{}\"",
+            output_path.display(),
+            [
+                &[format!("cd {} &&", old_dir.to_string_lossy()).to_string()],
+                &[old_exe.to_str().unwrap_or_default().to_string()][..],
+                &old_args[..]
+            ]
+            .concat()
+            .join(" "),
+            [
+                &[format!("cd {} &&", new_dir.to_string_lossy()).to_string()],
+                &[new_exe.to_str().unwrap_or_default().to_string()][..],
+                &new_args[..]
+            ]
+            .concat()
+            .join(" ")
+        );
     }
 
     let mut command_groups = vec![];
@@ -1495,6 +1783,7 @@ where
             cwd,
             env_vars,
             cacheable,
+            ..
         } = cmd;
 
         let mut cmd = creator.clone().new_command_sync(exe);
@@ -1516,6 +1805,7 @@ where
             cwd,
             env_vars,
             cacheable,
+            ..
         } = cmd;
 
         if log_enabled!(log::Level::Trace) {

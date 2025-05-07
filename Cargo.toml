@@ -35,6 +35,8 @@ bytes = "1"
 chrono = "0.4"
 clap = { version = "4.5.13", features = ["derive", "env", "wrap_help"] }
 directories = "5.0.1"
+dot-generator = "0.2.0"
+dot-structures = "0.1.2"
 encoding_rs = "0.8"
 env_logger = "0.10"
 filetime = "0.2"
@@ -43,6 +45,7 @@ flate2 = { version = "1.1", optional = true, default-features = false, features 
 ] }
 fs-err = "2.11"
 futures = "0.3"
+graphviz-rust = "0.9.4"
 gzp = { version = "0.11.3", default-features = false, features = [
   "deflate_rust",
 ] }
