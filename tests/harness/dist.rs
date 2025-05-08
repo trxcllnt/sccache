@@ -407,11 +407,12 @@ impl SchedulerHandle {
         HTTPUrl::from_url(reqwest::Url::parse(&url).unwrap())
     }
     pub fn status(&self) -> SchedulerStatus {
-        let mut req = reqwest::blocking::Client::builder()
+        let req = reqwest::blocking::Client::builder()
             .build()
             .unwrap()
-            .get(scheduler_status_url(&self.url().to_url()));
-        req = req.bearer_auth(INSECURE_DIST_CLIENT_TOKEN);
+            .get(scheduler_status_url(&self.url().to_url()))
+            .header(http::header::ACCEPT, "application/octet-stream")
+            .bearer_auth(INSECURE_DIST_CLIENT_TOKEN);
         let res = req.send().unwrap();
         assert!(res.status().is_success());
         bincode::deserialize_from(res).unwrap()

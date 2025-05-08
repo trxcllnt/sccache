@@ -13,7 +13,7 @@ pub mod client;
 #[cfg(feature = "dist-server")]
 pub mod dist;
 
-pub const TC_CACHE_SIZE: u64 = 1024 * 1024 * 1024; // 1 gig
+pub const TC_CACHE_SIZE: u64 = 2 * 1024 * 1024 * 1024; // 2GiB
 
 pub fn init_cargo(path: &Path, cargo_name: &str) -> PathBuf {
     let cargo_path = path.join(cargo_name);

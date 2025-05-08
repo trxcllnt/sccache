@@ -355,56 +355,77 @@ mod scheduler {
         T: serde::Serialize,
     {
         move |content: T| {
-            if let Some(header) = headers.get("Accept") {
-                // This is the only function we use from rouille.
-                // Maybe we can find a replacement?
-                match rouille::input::priority_header_preferred(
-                    header.to_str().unwrap_or("*/*"),
-                    ["application/octet-stream", "application/json"]
-                        .iter()
-                        .cloned(),
-                ) {
-                    // application/octet-stream
-                    Some(0) => match bincode::serialize(&content) {
-                        Ok(body) => Ok((StatusCode::OK, body).into_response()),
-                        Err(err) => {
-                            tracing::error!("Failed to serialize response body: {err:?}");
-                            Err((
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                format!("Failed to serialize response body: {err}").into_bytes(),
-                            )
-                                .into_response())
+            let mut accept = headers
+                .get(http::header::ACCEPT)
+                .map_or_else(|| "/*", |h| h.to_str().unwrap_or("/*"))
+                .split(",")
+                .map(|s| s.trim())
+                .filter_map(|s| {
+                    let mut mimetype_and_quality = (String::new(), 1.0);
+                    if s.contains(";") {
+                        let mut parts = s.split(";");
+                        if let Some(mime) = parts.next() {
+                            mimetype_and_quality.0 = mime.to_owned();
+                        } else {
+                            return None;
                         }
-                    },
-                    // application/json
-                    Some(1) => Ok((
-                        StatusCode::OK,
-                        json!(content).as_str().unwrap().to_string().into_bytes(),
-                    )
-                        .into_response()),
-                    _ => {
-                        tracing::error!(
-                            "Request must accept application/json or application/octet-stream"
-                        );
-                        Err((
-                            StatusCode::BAD_REQUEST,
-                            "Request must accept application/json or application/octet-stream"
-                                .to_string()
-                                .into_bytes(),
-                        )
-                            .into_response())
+                        if let Some(qual) = parts.next() {
+                            if let Some(qual) = qual.split("=").last() {
+                                if let Ok(qual) = qual.parse() {
+                                    mimetype_and_quality.1 = qual;
+                                }
+                            }
+                        }
+                    } else {
+                        mimetype_and_quality.0 = s.to_owned();
                     }
+                    Some(mimetype_and_quality)
+                })
+                .collect::<Vec<_>>();
+
+            accept.sort_by(|(lhs, lhs_q), (rhs, rhs_q)| {
+                if rhs_q > lhs_q {
+                    return std::cmp::Ordering::Greater;
                 }
-            } else {
-                tracing::error!("Request must accept application/json or application/octet-stream");
-                Err((
-                    StatusCode::BAD_REQUEST,
-                    "Request must accept application/json or application/octet-stream"
-                        .to_string()
-                        .into_bytes(),
-                )
-                    .into_response())
+                match (lhs.ends_with("/*"), rhs.ends_with("/*")) {
+                    (true, true) => std::cmp::Ordering::Equal,
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    (false, false) => std::cmp::Ordering::Equal,
+                }
+            });
+
+            for (mimetype, _) in accept {
+                match mimetype.as_ref() {
+                    "application/json" => {
+                        return Ok(axum::response::Json(json!(content)).into_response());
+                    }
+                    "application/octet-stream" | "*/*" => {
+                        return match bincode::serialize(&content) {
+                            Ok(body) => Ok((StatusCode::OK, body).into_response()),
+                            Err(err) => {
+                                tracing::error!("Failed to serialize response body: {err:?}");
+                                Err((
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    format!("Failed to serialize response body: {err}")
+                                        .into_bytes(),
+                                )
+                                    .into_response())
+                            }
+                        }
+                    }
+                    _ => continue,
+                }
             }
+
+            tracing::error!("Request must accept application/json or application/octet-stream");
+            Err((
+                StatusCode::BAD_REQUEST,
+                "Request must accept application/json or application/octet-stream"
+                    .to_string()
+                    .into_bytes(),
+            )
+                .into_response())
         }
     }
 
@@ -933,9 +954,9 @@ mod client {
                 Ok(Some(file)) => {
                     let body = futures::io::AllowStdIo::new(file);
                     let body = tokio_util::io::ReaderStream::new(body.compat());
-                    let url = urls::scheduler_submit_toolchain(scheduler_url, id);
                     let req = client
-                        .put(url)
+                        .put(urls::scheduler_submit_toolchain(scheduler_url, id))
+                        .header(http::header::ACCEPT, "application/octet-stream")
                         .bearer_auth(auth_token)
                         .body(Body::wrap_stream(body));
                     bincode_req_fut::<SubmitToolchainResult>(req).await
@@ -1016,6 +1037,7 @@ mod client {
             bincode_req_fut(
                 self.client
                     .post(urls::scheduler_new_job(&self.scheduler_url))
+                    .header(http::header::ACCEPT, "application/octet-stream")
                     .bearer_auth(self.auth_token.clone())
                     .body(Body::wrap_stream({
                         let bincode = bincode_serialize(toolchain).await?;
@@ -1043,6 +1065,7 @@ mod client {
             bincode_req_fut(
                 self.client
                     .put(urls::scheduler_put_job(&self.scheduler_url, job_id))
+                    .header(http::header::ACCEPT, "application/octet-stream")
                     .bearer_auth(self.auth_token.clone())
                     .body(Body::wrap_stream(body)),
             )
@@ -1060,6 +1083,7 @@ mod client {
             bincode_req_fut(
                 self.client
                     .post(urls::scheduler_run_job(&self.scheduler_url, job_id))
+                    .header(http::header::ACCEPT, "application/octet-stream")
                     .bearer_auth(self.auth_token.clone())
                     .timeout(timeout)
                     .bincode(&RunJobRequest {
@@ -1075,6 +1099,7 @@ mod client {
             bincode_req_fut(
                 self.client
                     .delete(urls::scheduler_del_job(&self.scheduler_url, job_id))
+                    .header(http::header::ACCEPT, "application/octet-stream")
                     .bearer_auth(self.auth_token.clone()),
             )
             .await
@@ -1084,6 +1109,7 @@ mod client {
             bincode_req_fut(
                 self.client
                     .get(urls::scheduler_status(&self.scheduler_url))
+                    .header(http::header::ACCEPT, "application/octet-stream")
                     .bearer_auth(self.auth_token.clone()),
             )
             .await
