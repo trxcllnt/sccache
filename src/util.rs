@@ -956,12 +956,7 @@ pub fn new_reqwest_client(config: Option<crate::config::DistNetworking>) -> reqw
         builder.pool_idle_timeout(request_timeout)
     } else {
         // Disable connection pool
-        let mut headers = http::HeaderMap::new();
-        headers.insert(
-            http::header::CONNECTION,
-            http::HeaderValue::from_static("close"),
-        );
-        builder.pool_max_idle_per_host(0).default_headers(headers)
+        builder.pool_max_idle_per_host(0)
     };
 
     // keepalive
@@ -980,7 +975,12 @@ pub fn new_reqwest_client(config: Option<crate::config::DistNetworking>) -> reqw
             builder
         }
     } else {
-        builder
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("close"),
+        );
+        builder.default_headers(headers)
     };
 
     builder
