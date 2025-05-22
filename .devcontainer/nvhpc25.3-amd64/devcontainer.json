@@ -85,6 +85,7 @@
       "version": "25.3"
     },
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+      "moby": "false"
     }
   },
 
@@ -119,6 +120,9 @@
           "${localEnv:HOME}/.local/share/**/*": true,
           "${localEnv:HOME}/.vscode-server/**/*": true
         },
+        "rust-analyzer.checkOnSave": true,
+        "rust-analyzer.check.command": "clippy",
+        "rust-analyzer.cargo.features": "all",
         "search.exclude": {
           "**/build/**": true,
           "**/target/**": true,
@@ -127,9 +131,13 @@
           "${localEnv:HOME}/.local/share/**/*": true,
           "${localEnv:HOME}/.vscode-server/**/*": true
         },
-        "rust-analyzer.checkOnSave": true,
-        "rust-analyzer.check.command": "clippy",
-        "rust-analyzer.cargo.features": "all"
+        "terminal.integrated.profiles.linux": {
+          "bash": {
+            "path": "bash",
+            "icon": "terminal-bash",
+            "args": ["-l"]
+          }
+        }
       }
     }
   }
