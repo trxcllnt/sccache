@@ -43,8 +43,7 @@
   "workspaceFolder": "/opt/sccache",
   "workspaceMount": "type=bind,src=${localWorkspaceFolder},dst=${localWorkspaceFolder}",
   "mounts": [
-    "type=bind,src=/tmp,dst=/tmp",
-    "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock"
+    "type=bind,src=/tmp,dst=/tmp"
   ],
 
   "containerEnv": {
