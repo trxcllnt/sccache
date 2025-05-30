@@ -195,6 +195,7 @@ const INPUT_MACRO_EXPANSION: &str = "test_macro_expansion.c";
 const INPUT_WITH_DEFINE: &str = "test_with_define.c";
 const INPUT_FOR_CUDA_A: &str = "test_a.cu";
 const INPUT_FOR_CUDA_A_COPY: &str = "test_a_copy.cu";
+const INPUT_FOR_CUDA_A_INTERNAL_LINKAGE: &str = "test_a_internal_linkage.cu";
 const INPUT_FOR_CUDA_B: &str = "test_b.cu";
 const INPUT_FOR_CUDA_C: &str = "test_c.cu";
 const INPUT_FOR_HIP_A: &str = "test_a.hip";
@@ -759,7 +760,12 @@ fn test_nvcc_cuda_compiles(
     println!("test_nvcc_cuda_compiles: {}", name);
     // Compile multiple source files.
     copy_to_tempdir(
-        &[INPUT_FOR_CUDA_A, INPUT_FOR_CUDA_A_COPY, INPUT_FOR_CUDA_B],
+        &[
+            INPUT_FOR_CUDA_A,
+            INPUT_FOR_CUDA_A_COPY,
+            INPUT_FOR_CUDA_A_INTERNAL_LINKAGE,
+            INPUT_FOR_CUDA_B,
+        ],
         tempdir,
     );
 
@@ -961,6 +967,47 @@ fn test_nvcc_cuda_compiles(
         },
     );
 
+    trace!("compile A (internal linkage)");
+    run_cuda_test(
+        "-c",
+        Path::new(INPUT_FOR_CUDA_A_INTERNAL_LINKAGE), // relative path for input
+        &build_dir.join(OUTPUT),                      // relative path for output
+        &extra_args,
+        AdditionalStats {
+            cache_writes: Some(4),
+            compilations: Some(5),
+            compile_requests: Some(1),
+            requests_executed: Some(5),
+            cache_misses: Some(vec![
+                (CCompilerKind::Cicc, Language::Ptx, 1),
+                (CCompilerKind::Nvcc, Language::Cuda, 1),
+                (CCompilerKind::CudaFE, Language::CudaFE, 1),
+                (CCompilerKind::Ptxas, Language::Cubin, 1),
+            ]),
+            ..Default::default()
+        },
+    );
+
+    trace!("compile A (internal linkage) (cached)");
+    run_cuda_test(
+        "-c",
+        &tempdir.join(INPUT_FOR_CUDA_A_INTERNAL_LINKAGE), // absolute path for input
+        &tempdir.join(&build_dir).join(OUTPUT),           // absolute path for output
+        &extra_args,
+        AdditionalStats {
+            compilations: Some(1),
+            compile_requests: Some(1),
+            requests_executed: Some(5),
+            cache_hits: Some(vec![
+                (CCompilerKind::Nvcc, Language::Cuda, 1),
+                (CCompilerKind::CudaFE, Language::CudaFE, 1),
+                (CCompilerKind::Cicc, Language::Ptx, 1),
+                (CCompilerKind::Ptxas, Language::Cubin, 1),
+            ]),
+            ..Default::default()
+        },
+    );
+
     // By compiling another input source we verify that the pre-processor
     // phase is correctly running and outputting text
     trace!("compile B");
@@ -1115,6 +1162,30 @@ int main(int argc, char** argv) {
         },
     );
 
+    // Precompile sm_86 PTX and cubin so their cache entries potentially have a different .module_id file
+    trace!("compile A (internal linkage) cubin sm_86");
+    run_cuda_test(
+        "-cubin",
+        Path::new(INPUT_FOR_CUDA_A_INTERNAL_LINKAGE), // relative path for input
+        &build_dir.join(OUTPUT),                      // relative path for output
+        &[
+            extra_args.as_slice(),
+            &["-gencode=arch=compute_86,code=[sm_86]".into()],
+        ]
+        .concat(),
+        AdditionalStats {
+            cache_writes: Some(2),
+            compilations: Some(3),
+            compile_requests: Some(1),
+            requests_executed: Some(3),
+            cache_misses: Some(vec![
+                (CCompilerKind::Cicc, Language::Ptx, 1),
+                (CCompilerKind::Ptxas, Language::Cubin, 1),
+            ]),
+            ..Default::default()
+        },
+    );
+
     // Test compiling a file whose PTX yields a cache hit for a cubin from another file (`test_a.cu`)
     trace!("compile B cubin sm_86");
     run_cuda_test(
@@ -1219,6 +1290,44 @@ int main(int argc, char** argv) {
                     CCompilerKind::Ptxas,
                     Language::Cubin,
                     2 * with_debug_flags as u64,
+                ),
+            ]),
+            ..Default::default()
+        },
+    );
+
+    // Test compiling a multiarch object where the PTX and cubin for one of the archs is cached
+    trace!("compile A (internal linkage) sm_80,sm_86");
+    run_cuda_test(
+        "-c",
+        Path::new(INPUT_FOR_CUDA_A_INTERNAL_LINKAGE), // relative path for input
+        &build_dir.join(OUTPUT),                      // relative path for output
+        &[
+            extra_args.as_slice(),
+            &[
+                "-gencode=arch=compute_80,code=[sm_80]".into(),
+                "-gencode=arch=compute_86,code=[compute_86,sm_86]".into(),
+            ],
+        ]
+        .concat(),
+        AdditionalStats {
+            cache_writes: Some(5 + with_debug_flags as u64),
+            compilations: Some(6 + with_debug_flags as u64),
+            compile_requests: Some(1),
+            requests_executed: Some(7),
+            cache_hits: Some(vec![(
+                CCompilerKind::Ptxas,
+                Language::Cubin,
+                !with_debug_flags as u64,
+            )]),
+            cache_misses: Some(vec![
+                (CCompilerKind::Nvcc, Language::Cuda, 1),
+                (CCompilerKind::CudaFE, Language::CudaFE, 1),
+                (CCompilerKind::Cicc, Language::Ptx, 2),
+                (
+                    CCompilerKind::Ptxas,
+                    Language::Cubin,
+                    1 + with_debug_flags as u64,
                 ),
             ]),
             ..Default::default()
@@ -1452,6 +1561,36 @@ int main(int argc, char** argv) {
             "",
             Path::new(INPUT_FOR_CUDA_A_COPY), // relative path for input
             &build_dir.join("test_a_copy"),   // relative path for output
+            &[
+                extra_args.as_slice(),
+                &[
+                    "-gencode=arch=compute_80,code=[sm_80]".into(),
+                    "-gencode=arch=compute_86,code=[compute_86,sm_86]".into(),
+                ],
+            ]
+            .concat(),
+            AdditionalStats {
+                cache_writes: Some(1),
+                compilations: Some(2),
+                compile_requests: Some(1),
+                requests_executed: Some(8),
+                cache_hits: Some(vec![
+                    (CCompilerKind::Nvcc, Language::Cuda, 1),
+                    (CCompilerKind::CudaFE, Language::CudaFE, 1),
+                    (CCompilerKind::Cicc, Language::Ptx, 2),
+                    (CCompilerKind::Ptxas, Language::Cubin, 2),
+                ]),
+                cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
+                ..Default::default()
+            },
+        );
+
+        // Test compiling an executable (`nvcc -x cu test_a_internal_linkage.cu -o test_a_internal_linkage`)
+        trace!("compile A (internal linkage) to executable");
+        run_cuda_test(
+            "",
+            Path::new(INPUT_FOR_CUDA_A_INTERNAL_LINKAGE), // relative path for input
+            &build_dir.join("test_a_internal_linkage"),   // relative path for output
             &[
                 extra_args.as_slice(),
                 &[
