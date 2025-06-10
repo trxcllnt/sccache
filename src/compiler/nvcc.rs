@@ -580,24 +580,47 @@ impl CompileCommandImpl for NvccCompileCommand {
             // `-keep` and `-keep-dir` in our `nvcc --dryrun` call.
             //
             // Renames the files back to the original names nvcc gave them.
-            if let Some(dst) = keep_dir {
-                if fs::create_dir_all(dst).is_ok() {
-                    nvcc_internal_files
-                        .drain()
-                        .filter_map(|(orig, path)| {
-                            let path = out_dir.join(path);
-                            if path.exists() {
-                                PathBuf::from(orig)
-                                    .file_name()
-                                    .map(|name| (path, name.to_owned()))
-                            } else {
-                                None
+            let temps_kept = {
+                if let Some(keep_dir) = keep_dir.as_ref() {
+                    // Ensure `--keep-dir` exists
+                    fs::create_dir_all(keep_dir)?;
+
+                    // Rename files back to original nvcc names
+                    for (curr, prev) in nvcc_internal_files.drain() {
+                        let src = out_dir.join(curr);
+                        let dst = out_dir.join(prev);
+                        if dst == src || !src.exists() {
+                            continue;
+                        }
+                        trace!(
+                            "[{}]: maybe_keep_temps_then_clean rename {src:?} -> {dst:?}",
+                            output_path.display(),
+                        );
+                        fs::rename(src, dst)?;
+                    }
+
+                    // Move intermediate files to `--keep-dir`
+                    if let Ok(entries) = fs::read_dir(out_dir) {
+                        for entry in entries {
+                            let entry = entry?;
+                            let src = entry.path();
+                            let dst = keep_dir.join(entry.file_name());
+                            if dst == src || !src.exists() {
+                                continue;
                             }
-                        })
-                        .try_fold((), |_, (src, name)| fs::rename(src, dst.join(name)).ok());
+                            trace!(
+                                "[{}]: maybe_keep_temps_then_clean move {src:?} -> {dst:?}",
+                                output_path.display()
+                            );
+                            fs::rename(src, dst)?;
+                        }
+                    }
                 }
-            }
-            fs::remove_dir_all(out_dir).ok();
+                Ok(())
+            };
+
+            // Delete sccache internal intermediate files dir
+            temps_kept.and(fs::remove_dir_all(out_dir))
         };
 
         let mut output = ProcessOutput::default();
@@ -630,7 +653,7 @@ impl CompileCommandImpl for NvccCompileCommand {
                 if !output.success() {
                     output.stdout.shrink_to_fit();
                     output.stderr.shrink_to_fit();
-                    maybe_keep_temps_then_clean();
+                    maybe_keep_temps_then_clean()?;
                     return Err(ProcessError(output).into());
                 }
             }
@@ -638,7 +661,7 @@ impl CompileCommandImpl for NvccCompileCommand {
 
         output.stdout.shrink_to_fit();
         output.stderr.shrink_to_fit();
-        maybe_keep_temps_then_clean();
+        maybe_keep_temps_then_clean()?;
         Ok(output)
     }
 }
