@@ -2128,14 +2128,15 @@ compiler_version=__VERSION__
             // In case the compiler didn't expand the macro.
             .filter(|&line| line != "__VERSION__")
             .map(str::to_owned);
+        let ver_str = |ver: &Option<String>| ver.clone().unwrap_or(String::from("<unknown>"));
         match kind {
             "clang" | "clang++" | "apple-clang" | "apple-clang++" => {
-                trace!("Found {}", kind);
+                trace!("Found {kind} (version: {})", ver_str(&version));
                 return CCompiler::new(
                     Clang {
                         clangplusplus: kind.ends_with("++"),
                         is_appleclang: kind.starts_with("apple-"),
-                        version: version.clone(),
+                        version,
                     },
                     executable,
                     &pool,
@@ -2144,23 +2145,17 @@ compiler_version=__VERSION__
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "diab" => {
-                trace!("Found diab");
-                return CCompiler::new(
-                    Diab {
-                        version: version.clone(),
-                    },
-                    executable,
-                    &pool,
-                )
-                .await
-                .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
+                trace!("Found {kind} (version: {})", ver_str(&version));
+                return CCompiler::new(Diab { version }, executable, &pool)
+                    .await
+                    .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "gcc" | "g++" => {
-                trace!("Found {}", kind);
+                trace!("Found {kind} (version: {})", ver_str(&version));
                 return CCompiler::new(
                     Gcc {
                         gplusplus: kind == "g++",
-                        version: version.clone(),
+                        version,
                     },
                     executable,
                     &pool,
@@ -2170,7 +2165,7 @@ compiler_version=__VERSION__
             }
             "msvc" | "msvc-clang" => {
                 let is_clang = kind == "msvc-clang";
-                trace!("Found MSVC (is clang: {})", is_clang);
+                trace!("Found {kind} (version: {})", ver_str(&version));
                 let prefix = msvc::detect_showincludes_prefix(
                     &creator,
                     executable.as_ref(),
@@ -2185,7 +2180,7 @@ compiler_version=__VERSION__
                     Msvc {
                         includes_prefix: prefix,
                         is_clang,
-                        version: version.clone(),
+                        version,
                     },
                     executable,
                     &pool,
@@ -2206,6 +2201,12 @@ compiler_version=__VERSION__
                     .filter(|&line| line != "__VERSION__")
                     .map(str::to_owned);
 
+                trace!(
+                    "Found {kind} (version: {}/{})",
+                    ver_str(&version),
+                    ver_str(&host_compiler_version)
+                );
+
                 return CCompiler::new(
                     Nvcc {
                         host_compiler,
@@ -2219,11 +2220,11 @@ compiler_version=__VERSION__
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "nvhpc" => {
-                trace!("Found NVHPC");
+                trace!("Found {kind} (version: {})", ver_str(&version));
                 return CCompiler::new(
                     Nvhpc {
                         nvcplusplus: kind == "nvc++",
-                        version: version.clone(),
+                        version,
                     },
                     executable,
                     &pool,
