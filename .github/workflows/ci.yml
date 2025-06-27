@@ -152,23 +152,23 @@ jobs:
             extra_desc: cuda11.8
             no_coverage: ${{ needs.checks.outputs.has-codecov-token != 'true' }}
           - os: windows-2022
-            cuda: "12.8"
+            cuda: "12.5"
             # Oldest supported version, keep in sync with README.md
             rustc: "1.75.0"
             extra_args: --no-fail-fast
-            extra_desc: cuda12.8
+            extra_desc: cuda12.5
             no_coverage: ${{ needs.checks.outputs.has-codecov-token != 'true' }}
           - os: windows-2022
-            cuda: "12.8"
+            cuda: "12.5"
             rustc: nightly
             allow_failure: true
             extra_args: --features=unstable
-            extra_desc: cuda12.8
+            extra_desc: cuda12.5
             no_coverage: ${{ needs.checks.outputs.has-codecov-token != 'true' }}
           - os: windows-2022
-            cuda: "12.8"
+            cuda: "12.5"
             rustc: beta
-            extra_desc: cuda12.8
+            extra_desc: cuda12.5
             no_coverage: true
     env:
       RUST_BACKTRACE: 1
