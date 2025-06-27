@@ -142,18 +142,17 @@ jobs:
             cuda: "12.8"
             # Oldest supported version, keep in sync with README.md
             rustc: "1.75.0"
-            extra_args: --no-fail-fast -- --nocapture
+            extra_args: --no-fail-fast
             extra_desc: cuda12.8
           - os: windows-2022
             cuda: "12.8"
             rustc: nightly
             allow_failure: true
-            extra_args: --features=unstable -- --nocapture
+            extra_args: --features=unstable
             extra_desc: cuda12.8
           - os: windows-2022
             cuda: "12.8"
             rustc: beta
-            extra_args: -- --nocapture
             extra_desc: cuda12.8
             no_coverage: true
     env:
