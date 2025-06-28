@@ -417,6 +417,7 @@ where
         }
 
         let use_preprocessor_cache_mode = {
+            // Disable preprocessor cache when doing distributed compilation (+ other conditions)
             let can_use_preprocessor_cache_mode = !may_dist
                 && preprocessor_cache_mode_config.use_preprocessor_cache_mode
                 && !too_hard_for_preprocessor_cache_mode;
@@ -445,7 +446,6 @@ where
             use_preprocessor_cache_mode
         };
 
-        // Disable preprocessor cache when doing distributed compilation
         let mut preprocessor_key = if use_preprocessor_cache_mode {
             preprocessor_cache_entry_hash_key(
                 &executable_digest,
