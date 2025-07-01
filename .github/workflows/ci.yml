@@ -12,7 +12,7 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         if: "${{ env.CODECOV_TOKEN != '' }}"
-        run: echo "::set-output name=defined::true"
+        run: echo "defined=true" >> "$GITHUB_OUTPUT"
   lint:
     name: ${{ matrix.component }} ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -113,47 +113,47 @@ jobs:
             cuda: "11.8"
             extra_desc: cuda11.8
           - os: ubuntu-24.04
-            cuda: "12.8"
+            cuda: "12.9"
             # Oldest supported version, keep in sync with README.md
             rustc: "1.75.0"
-            extra_desc: cuda12.8
+            extra_desc: cuda12.9
           - os: macos-13
             no_coverage: true
           # # M1 CPU
           - os: macos-14
-          - os: windows-2019
-            cuda: "11.8"
+          - os: windows-2022
+            cuda: "12.0"
             # Oldest supported version, keep in sync with README.md
             rustc: "1.75.0"
             extra_args: --no-fail-fast
-            extra_desc: cuda11.8
-          - os: windows-2019
-            cuda: "11.8"
+            extra_desc: cuda12.0
+          - os: windows-2022
+            cuda: "12.0"
             rustc: nightly
             allow_failure: true
             extra_args: --features=unstable
-            extra_desc: cuda11.8
+            extra_desc: cuda12.0
             no_coverage: true
-          - os: windows-2019
-            cuda: "11.8"
-            rustc: beta
-            extra_desc: cuda11.8
           - os: windows-2022
-            cuda: "12.8"
+            cuda: "12.0"
+            rustc: beta
+            extra_desc: cuda12.0
+          - os: windows-2025
+            cuda: "12.9"
             # Oldest supported version, keep in sync with README.md
             rustc: "1.75.0"
             extra_args: --no-fail-fast
-            extra_desc: cuda12.8
-          - os: windows-2022
-            cuda: "12.8"
+            extra_desc: cuda12.9
+          - os: windows-2025
+            cuda: "12.9"
             rustc: nightly
             allow_failure: true
             extra_args: --features=unstable
-            extra_desc: cuda12.8
-          - os: windows-2022
-            cuda: "12.8"
+            extra_desc: cuda12.9
+          - os: windows-2025
+            cuda: "12.9"
             rustc: beta
-            extra_desc: cuda12.8
+            extra_desc: cuda12.9
             no_coverage: true
     env:
       RUST_BACKTRACE: 1
@@ -292,10 +292,10 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             macosx_deployment_target: 11.0
-          - os: windows-2019
+          - os: windows-2022
             target: x86_64-pc-windows-msvc
             rustflags: -Ctarget-feature=+crt-static
-          - os: windows-2019
+          - os: windows-2022
             target: aarch64-pc-windows-msvc
             rustflags: -Ctarget-feature=+crt-static
     steps:
