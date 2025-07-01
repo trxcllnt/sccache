@@ -18,7 +18,7 @@
   "runArgs": [
     "--rm",
     "--name",
-    "${localEnv:USER:anon}-${localWorkspaceFolderBasename}-nvhpc25.3-amd64",
+    "${localEnv:USER:anon}-${localWorkspaceFolderBasename}-cuda12.9-amd64",
     "--network",
     "host",
     "--platform",
@@ -47,9 +47,9 @@
   ],
 
   "containerEnv": {
-    "CC": "nvc",
-    "CXX": "nvc++",
-    "CUDAHOSTCXX": "nvc++",
+    "CC": "gcc",
+    "CXX": "g++",
+    "CUDAHOSTCXX": "g++",
     "CARGO_BUILD_TARGET": "x86_64-unknown-linux-musl",
     "HISTFILE": "${localWorkspaceFolder}/.devcontainer/._bash_history",
     "HISTSIZE": "",
@@ -74,14 +74,22 @@
       "version": "latest"
     },
     "ghcr.io/devcontainers/features/github-cli:1": {},
-    "ghcr.io/rapidsai/devcontainers/features/gcc:25.6": {
+    "ghcr.io/rapidsai/devcontainers/features/gcc:25.8": {
       "version": "11"
     },
-    "ghcr.io/rapidsai/devcontainers/features/llvm:25.6": {
+    "ghcr.io/rapidsai/devcontainers/features/llvm:25.8": {
       "version": "20"
     },
-    "ghcr.io/rapidsai/devcontainers/features/nvhpc:25.6": {
-      "version": "25.3"
+    "ghcr.io/rapidsai/devcontainers/features/cuda:25.8": {
+      "version": "12.9",
+      "installCompilers": "true",
+      "installProfilers": "false",
+      "installCTKLibraries": "false",
+      "installcuRAND": "true",
+      "installDevPackages": "true",
+      "installNCCL": "false",
+      "installCUDARuntime": "true",
+      "pruneStaticLibs": "true"
     },
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
       "moby": "false"
@@ -93,7 +101,7 @@
     "ghcr.io/devcontainers/features/git",
     "ghcr.io/devcontainers/features/github-cli",
     "ghcr.io/rapidsai/devcontainers/features/gcc",
-    "ghcr.io/rapidsai/devcontainers/features/nvhpc",
+    "ghcr.io/rapidsai/devcontainers/features/cuda",
     "ghcr.io/rapidsai/devcontainers/features/llvm",
     "ghcr.io/devcontainers/features/docker-outside-of-docker"
   ],

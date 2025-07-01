@@ -21,8 +21,8 @@ target
 !/.devcontainer/Dockerfile
 !/.devcontainer/docker-compose.yml
 !/.devcontainer/cuda11.8-amd64
-!/.devcontainer/cuda12.8-amd64
-!/.devcontainer/nvhpc25.3-amd64
+!/.devcontainer/cuda12.9-amd64
+!/.devcontainer/nvhpc25.5-amd64
 !/.devcontainer/bin
 !/.devcontainer/docker-compose.yml
 !/.devcontainer/.config
