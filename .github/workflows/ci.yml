@@ -166,7 +166,7 @@ jobs:
       # Don't colorize logs
       NO_COLOR: 1
     steps:
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
 
       - name: Clone repository
         uses: actions/checkout@v4
@@ -345,7 +345,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Prepare, build and test
-        uses: vmactions/freebsd-vm@v1
+        uses: vmactions/freebsd-vm@966989c456d41351f095a421f60e71342d3bce41
         with:
           mem: 8192
           usesh: true
