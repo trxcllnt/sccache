@@ -1,0 +1,36 @@
+name: free-disk-space
+
+description: Free up disk space on the GitHub-hosted runners
+
+inputs:
+  tool_cache:
+    type: string
+    required: true
+    description: Runner tool_cache
+
+runs:
+  using: composite
+  steps:
+    - name: Free up disk space
+      shell: bash --noprofile --norc -x -eo pipefail {0}
+      run: |
+          df -h;
+          docker images;
+          docker rmi $(docker image ls -aq) || true;
+          docker images;
+          sudo swapoff -a;
+          sudo rm -f /swapfile /mnt/swapfile;
+          sudo apt clean;
+          sudo rm -rf                                               \
+            /opt/{az,ghc,google,microsoft}                          \
+            /usr/lib/mono                                           \
+            /usr/local/julia*                                       \
+            /usr/local/.ghcup                                       \
+            /usr/share/az_*                                         \
+            /usr/share/gradle-*                                     \
+            /usr/share/{swift,dotnet,kotlinc,miniconda}             \
+            /usr/local/lib/android                                  \
+            /usr/local/share/{boost,chromium,powershell}            \
+            /home/linuxbrew/.linuxbrew                              \
+            "${{ inputs.tool_cache }}"/{go,Ruby,PyPy,CodeQL,Python} ;
+          df -h;
