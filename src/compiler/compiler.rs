@@ -802,8 +802,9 @@ where
                 .spawn_blocking(move || -> Result<_> {
                     // Write the job inputs to a tempfile because they can be huge
                     // and we don't want to OOM the server during parallel builds.
-                    let mut job_inputs =
-                        tempfile::Builder::new().prefix("sccache_tmp_").tempfile()?;
+                    let dir = std::env::temp_dir().join("sccache_temp");
+                    fs::create_dir_all(&dir)?;
+                    let mut job_inputs = tempfile::Builder::new().tempfile_in(dir)?;
 
                     let mut compressor = flate2::write::ZlibEncoder::new(
                         &mut job_inputs,
