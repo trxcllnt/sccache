@@ -116,7 +116,7 @@ fn parse_http_url<K: AsRef<str>>(str: K) -> Result<reqwest::Url> {
     let url = str.as_ref();
     let url = if let Ok(sa) = url.parse::<SocketAddr>() {
         warn!("Url {} has no scheme, assuming http", url);
-        reqwest::Url::parse(&format!("http://{}", sa))
+        reqwest::Url::parse(&format!("http://{sa}"))
     } else {
         reqwest::Url::parse(url)
     }?;

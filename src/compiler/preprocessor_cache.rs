@@ -473,8 +473,7 @@ impl std::fmt::Display for Error {
             Error::Io(e) => e.fmt(f),
             Error::Deserialization(e) => e.fmt(f),
             Error::UnknownFormat(format) => f.write_fmt(format_args!(
-                "Unknown preprocessor cache entry format {:x}",
-                format
+                "Unknown preprocessor cache entry format {format:x}"
             )),
         }
     }

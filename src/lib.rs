@@ -81,9 +81,9 @@ pub fn main() {
     std::process::exit(match commands::run_command(command) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("sccache: error: {}", e);
+            eprintln!("sccache: error: {e}");
             for e in e.chain().skip(1) {
-                eprintln!("sccache: caused by: {}", e);
+                eprintln!("sccache: caused by: {e}");
             }
             2
         }
@@ -111,7 +111,7 @@ fn init_logging(is_server: bool) {
         if env::var(LOGGING_ENV).is_ok() {
             match env_logger::Builder::from_env(LOGGING_ENV).try_init() {
                 Ok(_) => (),
-                Err(e) => panic!("Failed to initialize logging: {:?}", e),
+                Err(e) => panic!("Failed to initialize logging: {e:?}"),
             }
         }
     }

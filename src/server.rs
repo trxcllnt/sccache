@@ -399,7 +399,7 @@ impl DistClientContainer {
         let cached_config = config::CachedConfig::reload()?;
         cached_config
             .with(|c| c.dist.auth_tokens.get(auth_url).map(String::to_owned))
-            .with_context(|| format!("token for url {} not present in cached config", auth_url))
+            .with_context(|| format!("token for url {auth_url} not present in cached config"))
     }
 }
 
@@ -1558,7 +1558,7 @@ where
                                     let _ = writeln!(error, "sccache: error: {err}");
                                     for e in err.chain() {
                                         error!("[{out_pretty}] \t{e}");
-                                        let _ = writeln!(error, "sccache: caused by: {}", e);
+                                        let _ = writeln!(error, "sccache: caused by: {e}");
                                     }
                                     //TODO: figure out a better way to communicate this?
                                     res.output = ProcessOutput::new(-2, res.output.stdout, error.into_bytes());
@@ -1903,13 +1903,7 @@ impl ServerStats {
             let mut counts: Vec<_> = self.not_cached.iter().collect();
             counts.sort_by(|(_, c1), (_, c2)| c1.cmp(c2).reverse());
             for (reason, count) in counts {
-                writer.write(&format!(
-                    "{:<name_width$} {:>stat_width$}",
-                    reason,
-                    count,
-                    name_width = name_width,
-                    stat_width = stat_width,
-                ));
+                writer.write(&format!("{reason:<name_width$} {count:>stat_width$}",));
             }
             writer.write("");
         }
@@ -1962,7 +1956,7 @@ impl ServerStats {
                 stats_vec,
                 count_hits,
                 count_hits + count_misses,
-                &format!("Cache hits rate ({})", lang),
+                &format!("Cache hits rate ({lang})"),
             );
         }
     }
@@ -2062,18 +2056,9 @@ impl ServerInfo {
             if let Some(val) = *val {
                 let (val, suffix) = match NumberPrefix::binary(val as f64) {
                     NumberPrefix::Standalone(bytes) => (bytes.to_string(), "bytes".to_string()),
-                    NumberPrefix::Prefixed(prefix, n) => {
-                        (format!("{:.0}", n), format!("{}B", prefix))
-                    }
+                    NumberPrefix::Prefixed(prefix, n) => (format!("{n:.0}"), format!("{prefix}B")),
                 };
-                println!(
-                    "{:<name_width$} {:>stat_width$} {}",
-                    name,
-                    val,
-                    suffix,
-                    name_width = name_width,
-                    stat_width = stat_width
-                );
+                println!("{name:<name_width$} {val:>stat_width$} {suffix}");
             }
         }
     }
@@ -2324,7 +2309,7 @@ mod tests {
 
     impl ServerStatsWriter for StringWriter {
         fn write(&mut self, text: &str) {
-            self.buffer.push_str(&format!("{}\n", text));
+            self.buffer.push_str(&format!("{text}\n"));
         }
     }
 

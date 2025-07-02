@@ -1632,18 +1632,18 @@ impl fmt::Debug for CompileResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             CompileResult::Error => write!(f, "CompileResult::Error"),
-            CompileResult::CacheHit(ref d) => write!(f, "CompileResult::CacheHit({:?})", d),
+            CompileResult::CacheHit(ref d) => write!(f, "CompileResult::CacheHit({d:?})"),
             CompileResult::CacheMiss(ref m, ref dt, ref d, _) => {
-                write!(f, "CompileResult::CacheMiss({:?}, {:?}, {:?}, _)", d, m, dt)
+                write!(f, "CompileResult::CacheMiss({d:?}, {m:?}, {dt:?}, _)")
             }
             CompileResult::NotCached(ref dt, ref d) => {
-                write!(f, "CompileResult::NotCached({:?}, {:?}_", dt, d)
+                write!(f, "CompileResult::NotCached({dt:?}, {d:?}_")
             }
             CompileResult::NotCacheable(ref dt, ref d) => {
-                write!(f, "CompileResult::NotCacheable({:?}, {:?}_", dt, d)
+                write!(f, "CompileResult::NotCacheable({dt:?}, {d:?}_")
             }
             CompileResult::CompileFailed(ref dt, ref d) => {
-                write!(f, "CompileResult::CompileFailed({:?}, {:?})", dt, d)
+                write!(f, "CompileResult::CompileFailed({dt:?}, {d:?})")
             }
         }
     }
@@ -2385,7 +2385,7 @@ mod test {
             s = &s[4..];
         }
         let prefix = String::from("blah: ");
-        let stdout = format!("{}{}\r\n", prefix, s);
+        let stdout = format!("{prefix}{s}\r\n");
         // Compiler detection output
         next_command(
             &creator,
@@ -2645,7 +2645,7 @@ LLVM version: 6.0",
         let results: Vec<_> = [11, 12]
             .iter()
             .map(|version| {
-                let output = format!("compiler_id=clang\ncompiler_version=\"{}.0.0\"", version);
+                let output = format!("compiler_id=clang\ncompiler_version=\"{version}.0.0\"");
                 next_command(&creator, Ok(MockChild::new(exit_status(0), output, "")));
                 let c = detect_compiler(
                     creator.clone(),
@@ -2665,7 +2665,7 @@ LLVM version: 6.0",
                 );
                 let hasher = match c.parse_arguments(&arguments, ".".as_ref(), &[]) {
                     CompilerArguments::Ok(h) => h,
-                    o => panic!("Bad result from parse_arguments: {:?}", o),
+                    o => panic!("Bad result from parse_arguments: {o:?}"),
                 };
                 hasher
                     .generate_hash_key(
@@ -2733,7 +2733,7 @@ LLVM version: 6.0",
                 );
                 let hasher = match c.parse_arguments(argument, ".".as_ref(), &[]) {
                     CompilerArguments::Ok(h) => h,
-                    o => panic!("Bad result from parse_arguments: {:?}", o),
+                    o => panic!("Bad result from parse_arguments: {o:?}"),
                 };
                 hasher
                     .generate_hash_key(
@@ -2841,7 +2841,7 @@ LLVM version: 6.0",
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
         let hasher = match c.parse_arguments(&arguments, ".".as_ref(), &[]) {
             CompilerArguments::Ok(h) => h,
-            o => panic!("Bad result from parse_arguments: {:?}", o),
+            o => panic!("Bad result from parse_arguments: {o:?}"),
         };
         let hasher2 = hasher.clone();
         let (cached, res) = runtime
@@ -2868,7 +2868,7 @@ LLVM version: 6.0",
                 // wait on cache write future so we don't race with it!
                 f.wait().unwrap();
             }
-            _ => panic!("Unexpected compile result: {:?}", cached),
+            _ => panic!("Unexpected compile result: {cached:?}"),
         }
         assert_eq!(0, res.code().unwrap());
         assert_eq!(COMPILER_STDOUT, res.stdout.as_slice());
@@ -2970,7 +2970,7 @@ LLVM version: 6.0",
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
         let hasher = match c.parse_arguments(&arguments, ".".as_ref(), &[]) {
             CompilerArguments::Ok(h) => h,
-            o => panic!("Bad result from parse_arguments: {:?}", o),
+            o => panic!("Bad result from parse_arguments: {o:?}"),
         };
         let hasher2 = hasher.clone();
         let (cached, res) = runtime
@@ -2997,7 +2997,7 @@ LLVM version: 6.0",
                 // wait on cache write future so we don't race with it!
                 f.wait().unwrap();
             }
-            _ => panic!("Unexpected compile result: {:?}", cached),
+            _ => panic!("Unexpected compile result: {cached:?}"),
         }
         assert_eq!(0, res.code().unwrap());
         assert_eq!(COMPILER_STDOUT, res.stdout.as_slice());
@@ -3093,7 +3093,7 @@ LLVM version: 6.0",
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
         let hasher = match c.parse_arguments(&arguments, ".".as_ref(), &[]) {
             CompilerArguments::Ok(h) => h,
-            o => panic!("Bad result from parse_arguments: {:?}", o),
+            o => panic!("Bad result from parse_arguments: {o:?}"),
         };
         // The cache will return an error.
         storage.next_get(Err(anyhow!("Some Error")));
@@ -3117,7 +3117,7 @@ LLVM version: 6.0",
                 // wait on cache write future so we don't race with it!
                 let _ = f.wait();
             }
-            _ => panic!("Unexpected compile result: {:?}", cached),
+            _ => panic!("Unexpected compile result: {cached:?}"),
         }
 
         assert_eq!(0, res.code().unwrap());
@@ -3186,7 +3186,7 @@ LLVM version: 6.0",
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
         let hasher = match c.parse_arguments(&arguments, ".".as_ref(), &[]) {
             CompilerArguments::Ok(h) => h,
-            o => panic!("Bad result from parse_arguments: {:?}", o),
+            o => panic!("Bad result from parse_arguments: {o:?}"),
         };
         storage.next_get(Ok(Cache::Hit(entry)));
         let (cached, _res) = runtime
@@ -3206,7 +3206,7 @@ LLVM version: 6.0",
             CompileResult::CacheHit(duration) => {
                 assert!(duration >= storage_delay);
             }
-            _ => panic!("Unexpected compile result: {:?}", cached),
+            _ => panic!("Unexpected compile result: {cached:?}"),
         }
     }
 
@@ -3277,7 +3277,7 @@ LLVM version: 6.0",
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
         let hasher = match c.parse_arguments(&arguments, ".".as_ref(), &[]) {
             CompilerArguments::Ok(h) => h,
-            o => panic!("Bad result from parse_arguments: {:?}", o),
+            o => panic!("Bad result from parse_arguments: {o:?}"),
         };
         let hasher2 = hasher.clone();
         let (cached, res) = runtime
@@ -3304,7 +3304,7 @@ LLVM version: 6.0",
                 // wait on cache write future so we don't race with it!
                 f.wait().unwrap();
             }
-            _ => panic!("Unexpected compile result: {:?}", cached),
+            _ => panic!("Unexpected compile result: {cached:?}"),
         }
         assert_eq!(0, res.code().unwrap());
         assert_eq!(COMPILER_STDOUT, res.stdout.as_slice());
@@ -3332,7 +3332,7 @@ LLVM version: 6.0",
                 // wait on cache write future so we don't race with it!
                 f.wait().unwrap();
             }
-            _ => panic!("Unexpected compile result: {:?}", cached),
+            _ => panic!("Unexpected compile result: {cached:?}"),
         }
         assert_eq!(0, res.code().unwrap());
         assert_eq!(COMPILER_STDOUT, res.stdout.as_slice());
@@ -3399,7 +3399,7 @@ LLVM version: 6.0",
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
         let hasher = match c.parse_arguments(&arguments, ".".as_ref(), &[]) {
             CompilerArguments::Ok(h) => h,
-            o => panic!("Bad result from parse_arguments: {:?}", o),
+            o => panic!("Bad result from parse_arguments: {o:?}"),
         };
         let (cached, res) = runtime
             .block_on(async {
@@ -3500,7 +3500,7 @@ LLVM version: 6.0",
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
         let hasher = match c.parse_arguments(&arguments, ".".as_ref(), &[]) {
             CompilerArguments::Ok(h) => h,
-            o => panic!("Bad result from parse_arguments: {:?}", o),
+            o => panic!("Bad result from parse_arguments: {o:?}"),
         };
         // All these dist clients will fail, but should still result in successful compiles
         for dist_client in dist_clients {
@@ -3535,7 +3535,7 @@ LLVM version: 6.0",
                     // wait on cache write future so we don't race with it!
                     f.wait().unwrap();
                 }
-                _ => panic!("Unexpected compile result: {:?}", cached),
+                _ => panic!("Unexpected compile result: {cached:?}"),
             }
             assert_eq!(0, res.code().unwrap());
             assert_eq!(COMPILER_STDOUT, res.stdout.as_slice());
@@ -3904,7 +3904,7 @@ mod test_dist {
             let outputs = outputs
                 .into_iter()
                 .map(|name| {
-                    let data = format!("some data in {}", name);
+                    let data = format!("some data in {name}");
                     let data = OutputData::try_from_reader(data.as_bytes()).unwrap();
                     (name, data)
                 })

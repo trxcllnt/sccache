@@ -111,8 +111,7 @@ pub fn find_sccache_binary() -> PathBuf {
         .next()
         .unwrap_or_else(|| {
             panic!(
-            "Error: sccache binary not found, looked in `{:?}`. Do you need to run `cargo build`?",
-            dirs
+            "Error: sccache binary not found, looked in `{dirs:?}`. Do you need to run `cargo build`?"
         )
         })
 }

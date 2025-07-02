@@ -83,7 +83,7 @@ pub fn connect_with_retry(addr: &crate::net::SocketAddr) -> io::Result<ServerCon
         Ok(conn) => Ok(conn),
         Err(e) => Err(io::Error::new(
             io::ErrorKind::TimedOut,
-            format!("Connection to server timed out: {:?}", e),
+            format!("Connection to server timed out: {e:?}"),
         )),
     }
 }

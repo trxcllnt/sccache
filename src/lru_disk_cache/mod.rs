@@ -137,7 +137,7 @@ impl fmt::Display for Error {
         match self {
             Error::FileTooLarge => write!(f, "File too large"),
             Error::FileNotInCache => write!(f, "File not in cache"),
-            Error::Io(ref e) => write!(f, "{}", e),
+            Error::Io(ref e) => write!(f, "{e}"),
         }
     }
 }
@@ -789,7 +789,7 @@ mod tests {
         let mut c = LruDiskCache::new(f.tmp(), 1).unwrap();
         match c.insert_bytes("abc", &[0; 2]) {
             Err(Error::FileTooLarge) => {}
-            x => panic!("Unexpected result: {:?}", x),
+            x => panic!("Unexpected result: {x:?}"),
         }
     }
 

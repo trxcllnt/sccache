@@ -111,7 +111,7 @@ fn compile_cmdline<T: AsRef<OsStr>>(
             vec_from!(OsString, exe.as_ref(), "-c", input, "-o", output)
         }
         "cl.exe" => vec_from!(OsString, exe, "-c", input, format!("-Fo{}", output)),
-        _ => panic!("Unsupported compiler: {}", compiler),
+        _ => panic!("Unsupported compiler: {compiler}"),
     };
     if !extra_args.is_empty() {
         arg.append(&mut extra_args)
@@ -152,7 +152,7 @@ fn compile_cuda_cmdline<T: AsRef<OsStr>>(
                 output
             )
         }
-        _ => panic!("Unsupported compiler: {}", compiler),
+        _ => panic!("Unsupported compiler: {compiler}"),
     };
     if !extra_args.is_empty() {
         args.append(&mut extra_args.to_vec())
@@ -179,10 +179,10 @@ fn compile_hip_cmdline<T: AsRef<OsStr>>(
         "clang" => {
             vec_from!(OsString, exe, "-x", "hip", "-c", input, "-o", output)
         }
-        _ => panic!("Unsupported compiler: \"{}\"", compiler),
+        _ => panic!("Unsupported compiler: \"{compiler}\""),
     };
     for arch in archs {
-        arg.push(format!("--offload-arch={}", arch).into());
+        arg.push(format!("--offload-arch={arch}").into());
     }
     if !extra_args.is_empty() {
         arg.append(&mut extra_args)
@@ -230,7 +230,7 @@ fn test_basic_compile(client: &SccacheClient, compiler: Compiler, tempdir: &Path
         exe,
         env_vars,
     } = compiler;
-    println!("test_basic_compile: {}", name);
+    println!("test_basic_compile: {name}");
     // Compile a source file.
     copy_to_tempdir(&[INPUT, INPUT_ERR], tempdir);
 
@@ -282,7 +282,7 @@ fn test_noncacheable_stats(client: &SccacheClient, compiler: Compiler, tempdir: 
         exe,
         env_vars,
     } = compiler;
-    println!("test_noncacheable_stats: {}", name);
+    println!("test_noncacheable_stats: {name}");
     copy_to_tempdir(&[INPUT], tempdir);
 
     trace!("compile");
@@ -556,7 +556,7 @@ fn test_gcc_clang_no_warnings_from_macro_expansion(
         exe,
         env_vars,
     } = compiler;
-    println!("test_gcc_clang_no_warnings_from_macro_expansion: {}", name);
+    println!("test_gcc_clang_no_warnings_from_macro_expansion: {name}");
     // Compile a source file.
     copy_to_tempdir(&[INPUT_MACRO_EXPANSION], tempdir);
 
@@ -583,7 +583,7 @@ fn test_compile_with_define(client: &SccacheClient, compiler: Compiler, tempdir:
         exe,
         env_vars,
     } = compiler;
-    println!("test_compile_with_define: {}", name);
+    println!("test_compile_with_define: {name}");
     // Compile a source file.
     copy_to_tempdir(&[INPUT_WITH_DEFINE], tempdir);
 
@@ -610,7 +610,7 @@ fn test_gcc_clang_depfile(client: &SccacheClient, compiler: Compiler, tempdir: &
         exe,
         env_vars,
     } = compiler;
-    println!("test_gcc_clang_depfile: {}", name);
+    println!("test_gcc_clang_depfile: {name}");
     copy_to_tempdir(&[INPUT], tempdir);
     fs::copy(tempdir.join(INPUT), tempdir.join("same-content.c")).unwrap();
 
@@ -693,7 +693,7 @@ fn run_sccache_command_tests(
 
         let version_output = match str::from_utf8(&version_cmd.stdout) {
             Ok(v) => v,
-            Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
+            Err(e) => panic!("Invalid UTF-8 sequence: {e}"),
         };
 
         // Regex to match "Apple LLVM clang version" or "Apple clang version"
@@ -703,10 +703,7 @@ fn run_sccache_command_tests(
                 c.name("major").unwrap().as_str().parse::<usize>().unwrap(),
                 c.name("apple").is_some(),
             ),
-            None => panic!(
-                "Version info not found in --version output: {}",
-                version_output
-            ),
+            None => panic!("Version info not found in --version output: {version_output}"),
         };
         test_clang_cache_whitespace_normalization(
             client,
@@ -761,7 +758,7 @@ fn test_nvcc_cuda_compiles(
         exe,
         env_vars,
     } = compiler;
-    println!("test_nvcc_cuda_compiles: {}", name);
+    println!("test_nvcc_cuda_compiles: {name}");
     // Compile multiple source files.
     copy_to_tempdir(
         &[
@@ -1676,7 +1673,7 @@ fn test_nvcc_proper_lang_stat_tracking(
         env_vars,
     } = compiler;
 
-    println!("test_nvcc_proper_lang_stat_tracking: {}", name);
+    println!("test_nvcc_proper_lang_stat_tracking: {name}");
     // Compile multiple source files.
     copy_to_tempdir(&[INPUT_FOR_CUDA_C, INPUT], tempdir);
 
@@ -1874,7 +1871,7 @@ fn test_clang_cuda_compiles(
         exe,
         env_vars,
     } = compiler;
-    println!("test_clang_cuda_compiles: {}", name);
+    println!("test_clang_cuda_compiles: {name}");
     // Compile multiple source files.
     copy_to_tempdir(&[INPUT_FOR_CUDA_A, INPUT_FOR_CUDA_B], tempdir);
 
@@ -2009,7 +2006,7 @@ fn test_clang_proper_lang_stat_tracking(
         env_vars,
     } = compiler;
 
-    println!("test_clang_proper_lang_stat_tracking: {}", name);
+    println!("test_clang_proper_lang_stat_tracking: {name}");
     // Compile multiple source files.
     copy_to_tempdir(&[INPUT_FOR_CUDA_C, INPUT], tempdir);
 
@@ -2162,7 +2159,7 @@ fn test_hip_compiles(client: &SccacheClient, compiler: &Compiler, tempdir: &Path
         exe,
         env_vars,
     } = compiler;
-    println!("test_hip_compiles: {}", name);
+    println!("test_hip_compiles: {name}");
     // Compile multiple source files.
     copy_to_tempdir(&[INPUT_FOR_HIP_A, INPUT_FOR_HIP_B], tempdir);
 
@@ -2259,7 +2256,7 @@ fn test_hip_compiles_multi_targets(client: &SccacheClient, compiler: &Compiler, 
         exe,
         env_vars,
     } = compiler;
-    println!("test_hip_compiles_multi_targets: {}", name);
+    println!("test_hip_compiles_multi_targets: {name}");
     // Compile multiple source files.
     copy_to_tempdir(&[INPUT_FOR_HIP_A, INPUT_FOR_HIP_B], tempdir);
 
@@ -2366,7 +2363,7 @@ fn test_clang_multicall(client: &SccacheClient, compiler: Compiler, tempdir: &Pa
         exe,
         env_vars,
     } = compiler;
-    println!("test_clang_multicall: {}", name);
+    println!("test_clang_multicall: {name}");
     // Compile a source file.
     copy_to_tempdir(&[INPUT_CLANG_MULTICALL], tempdir);
 
@@ -2398,7 +2395,7 @@ fn test_clang_cache_whitespace_normalization(
         exe,
         env_vars,
     } = compiler;
-    println!("test_clang_cache_whitespace_normalization: {}", name);
+    println!("test_clang_cache_whitespace_normalization: {name}");
     debug!("expecting hit: {}", hit);
     // Compile a source file.
     copy_to_tempdir(&[INPUT_WITH_WHITESPACE, INPUT_WITH_WHITESPACE_ALT], tempdir);

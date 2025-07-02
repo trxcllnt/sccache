@@ -264,12 +264,12 @@ impl CacheWrite {
             } in objects
             {
                 let f = fs::File::open(&path)
-                    .with_context(|| format!("failed to open file `{:?}`", path));
+                    .with_context(|| format!("failed to open file `{path:?}`"));
                 match (f, optional) {
                     (Ok(mut f), _) => {
                         let mode = get_file_mode(&f)?;
                         entry.put_object(&key, &mut f, mode).with_context(|| {
-                            format!("failed to put object `{:?}` in cache entry", path)
+                            format!("failed to put object `{path:?}` in cache entry")
                         })?;
                     }
                     (Err(e), false) => return Err(e),

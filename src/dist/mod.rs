@@ -113,7 +113,7 @@ pub fn init_logging() {
             .try_init()
         {
             Ok(_) => (),
-            Err(e) => panic!("Failed to initialize logging: {:?}", e),
+            Err(e) => panic!("Failed to initialize logging: {e:?}"),
         }
     }
 }

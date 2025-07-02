@@ -99,7 +99,7 @@ impl Digest {
     pub async fn reader(path: PathBuf, pool: &tokio::runtime::Handle) -> Result<String> {
         pool.spawn_blocking(move || {
             let reader = File::open(&path)
-                .with_context(|| format!("Failed to open file for hashing: {:?}", path))?;
+                .with_context(|| format!("Failed to open file for hashing: {path:?}"))?;
             Digest::reader_sync(reader)
         })
         .await?
@@ -353,7 +353,7 @@ pub async fn hash_all_archives(
         pool.spawn_blocking(move || -> Result<String> {
             let mut m = Digest::new();
             let archive_file = File::open(&path)
-                .with_context(|| format!("Failed to open file for hashing: {:?}", path))?;
+                .with_context(|| format!("Failed to open file for hashing: {path:?}"))?;
             let archive_mmap =
                 unsafe { memmap2::MmapOptions::new().map_copy_read_only(&archive_file)? };
 
@@ -913,7 +913,7 @@ pub fn daemonize() -> Result<()> {
         }
 
         unsafe {
-            let _ = writeln!(Stderr, "signal {} received", signum);
+            let _ = writeln!(Stderr, "signal {signum} received");
 
             // Configure the old handler and then resume the program. This'll
             // likely go on to create a runtime dump if one's configured to be
@@ -1189,7 +1189,7 @@ mod tests {
             }
             output.extend(input.as_slice().escape_ascii());
             let result = super::ascii_unescape_default(&output).unwrap();
-            assert_eq!(input, result, "{:?}", output);
+            assert_eq!(input, result, "{output:?}");
             tested_cases += 1;
             for idx in &mut alphabet_indexes {
                 *idx += 1;
@@ -1203,6 +1203,6 @@ mod tests {
         }
         assert_eq!(tested_cases, (alphabet.len() + 1).pow(3) - 1);
         let empty_result = super::ascii_unescape_default(&[]).unwrap();
-        assert!(empty_result.is_empty(), "{:?}", empty_result);
+        assert!(empty_result.is_empty(), "{empty_result:?}");
     }
 }

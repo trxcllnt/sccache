@@ -280,7 +280,7 @@ impl RunCommand for AsyncCommand {
         let mut inner = tokio::process::Command::from(inner);
         let child = inner
             .spawn()
-            .with_context(|| format!("failed to spawn {:?}", inner))?;
+            .with_context(|| format!("failed to spawn {inner:?}"))?;
 
         Ok(Child {
             inner: child,
@@ -436,7 +436,7 @@ pub enum ChildOrCall {
 impl fmt::Debug for ChildOrCall {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            ChildOrCall::Child(ref r) => write!(f, "ChildOrCall::Child({:?}", r),
+            ChildOrCall::Child(ref r) => write!(f, "ChildOrCall::Child({r:?}"),
             ChildOrCall::Call(_) => write!(f, "ChildOrCall::Call(...)"),
         }
     }
@@ -865,10 +865,7 @@ mod test {
     fn test_mock_wait_error() {
         let client = Client::new_num(1);
         let mut creator = MockCommandCreator::new(&client);
-        creator.next_command_spawns(Ok(MockChild::with_error(io::Error::new(
-            io::ErrorKind::Other,
-            "error",
-        ))));
+        creator.next_command_spawns(Ok(MockChild::with_error(io::Error::other("error"))));
         let e = spawn_wait_command(&mut creator, "foo").err().unwrap();
         assert_eq!("error", e.to_string());
     }

@@ -492,7 +492,7 @@ fn handle_compile_finished(
         trace!("compiler exited with status {}", code);
         Ok(code as i32)
     } else if let Some(signal) = response.output.signal() {
-        println!("sccache: Compiler killed by signal {}", signal);
+        println!("sccache: Compiler killed by signal {signal}");
         Ok(-2)
     } else {
         println!("sccache: Missing compiler exit status!");
@@ -580,7 +580,7 @@ where
 
     Ok(status.code().unwrap_or_else(|| {
         if let Some(sig) = status_signal(status) {
-            println!("sccache: Compile terminated by signal {}", sig);
+            println!("sccache: Compile terminated by signal {sig}");
         }
         // Arbitrary.
         2
@@ -655,7 +655,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 let contents = std::fs::read(path)?;
                 let preprocessor_cache_entry =
                     crate::compiler::PreprocessorCacheEntry::read(&contents)?;
-                println!("{:#?}", preprocessor_cache_entry);
+                println!("{preprocessor_cache_entry:#?}");
                 println!("=========================");
             }
         }
@@ -804,8 +804,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 .for_each(|incr_str| match env::var(incr_str) {
                     Ok(incr_val) if incr_val == "1" => {
                         println!(
-                            "sccache: incremental compilation is prohibited: Unset {} to continue.",
-                            incr_str
+                            "sccache: incremental compilation is prohibited: Unset {incr_str} to continue."
                         );
                         std::process::exit(1);
                     }

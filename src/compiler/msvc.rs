@@ -986,10 +986,10 @@ where
         let mut f = BufWriter::new(f);
 
         encode_path(&mut f, objfile)
-            .with_context(|| format!("Couldn't encode objfile filename: '{:?}'", objfile))?;
+            .with_context(|| format!("Couldn't encode objfile filename: '{objfile:?}'"))?;
         write!(f, ": ")?;
         encode_path(&mut f, &parsed_args.input)
-            .with_context(|| format!("Couldn't encode input filename: '{:?}'", objfile))?;
+            .with_context(|| format!("Couldn't encode input filename: '{objfile:?}'"))?;
         write!(f, " ")?;
         let stderr =
             from_local_codepage(&output.stderr).context("Failed to convert preprocessor stderr")?;
@@ -1000,7 +1000,7 @@ where
                 let dep = normpath(line[includes_prefix.len()..].trim());
                 trace!("included: {}", dep);
                 if deps.insert(dep.clone()) && !dep.contains(' ') {
-                    write!(f, "{} ", dep)?;
+                    write!(f, "{dep} ")?;
                 }
                 if !parsed_args.msvc_show_includes {
                     continue;
@@ -1019,7 +1019,7 @@ where
         sorted.sort();
         for dep in sorted {
             if !dep.contains(' ') {
-                writeln!(f, "{}:", dep)?;
+                writeln!(f, "{dep}:")?;
             }
         }
         output.stderr = stderr_bytes;
@@ -1393,7 +1393,7 @@ mod test {
         if s.starts_with("\\\\?\\") {
             s = &s[4..];
         }
-        let stdout = format!("blah: {}\r\n", s);
+        let stdout = format!("blah: {s}\r\n");
         let stderr = String::from("some\r\nstderr\r\n");
         next_command(&creator, Ok(MockChild::new(exit_status(0), stdout, stderr)));
         assert_eq!(
@@ -1418,7 +1418,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1448,7 +1448,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.cpp"), input.to_str());
         assert_eq!(Language::Cxx, language);
@@ -1488,7 +1488,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1518,7 +1518,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1551,7 +1551,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1580,7 +1580,7 @@ mod test {
             ..
         } = match parse_arguments(args.clone()) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         // MSVC doesn't support double dashes. If we got one, we'll pass them
@@ -1595,7 +1595,7 @@ mod test {
             ..
         } = match parse_arguments_clang(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert!(double_dash_input);
@@ -1609,7 +1609,7 @@ mod test {
             ..
         } = match parse_arguments_clang(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         // Double dash after input file is ignored.
@@ -1642,7 +1642,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1692,7 +1692,7 @@ mod test {
                 ..
             } = match parse_arguments(args) {
                 CompilerArguments::Ok(args) => args,
-                o => panic!("Got unexpected parse result: {:?}", o),
+                o => panic!("Got unexpected parse result: {o:?}"),
             };
             assert_eq!(Some("foo.c"), input.to_str());
             assert_eq!(Language::C, language);
@@ -1741,7 +1741,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert!(profile_generate);
         assert!(preprocessor_args.is_empty());
@@ -1786,7 +1786,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1829,7 +1829,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1862,7 +1862,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1911,7 +1911,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1961,7 +1961,7 @@ mod test {
                 ..
             } = match parse_arguments(args) {
                 CompilerArguments::Ok(args) => args,
-                o => panic!("Got unexpected parse result: {:?}", o),
+                o => panic!("Got unexpected parse result: {o:?}"),
             };
             assert_eq!(Some("foo.c"), input.to_str());
             assert_eq!(Language::C, language);
@@ -1979,7 +1979,7 @@ mod test {
             assert!(preprocessor_args.is_empty());
             assert_eq!(
                 common_args,
-                ovec!["/experimental:external", format!("/external:W{}", n)]
+                ovec!["/experimental:external", format!("/external:W{n}")]
             );
             assert!(!msvc_show_includes);
         }
@@ -2019,7 +2019,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("dictionary.c"), input.to_str());
         assert!(preprocessor_args.is_empty());
@@ -2109,7 +2109,7 @@ mod test {
             ..
         } = match parse_arguments(ovec![arg]) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Failed to parse @-file, err: {:?}", o),
+            o => panic!("Failed to parse @-file, err: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -2157,7 +2157,7 @@ mod test {
             ..
         } = match parse_arguments(ovec![arg]) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Failed to parse @-file, err: {:?}", o),
+            o => panic!("Failed to parse @-file, err: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -2199,7 +2199,7 @@ mod test {
             ..
         } = match parse_arguments(ovec![arg]) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Failed to parse @-file, err: {:?}", o),
+            o => panic!("Failed to parse @-file, err: {o:?}"),
         };
         assert_eq!(Some("Foo Bar.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -2241,7 +2241,7 @@ mod test {
             ..
         } = match parse_arguments(ovec![arg]) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Failed to parse @-file, err: {:?}", o),
+            o => panic!("Failed to parse @-file, err: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -2283,7 +2283,7 @@ mod test {
             ..
         } = match parse_arguments(ovec![arg]) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Failed to parse @-file, err: {:?}", o),
+            o => panic!("Failed to parse @-file, err: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -2332,7 +2332,7 @@ mod test {
             ..
         } = match parse_arguments(ovec![arg]) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Failed to parse @-file, err: {:?}", o),
+            o => panic!("Failed to parse @-file, err: {o:?}"),
         };
         assert_eq!(Some("foo€.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -2380,7 +2380,7 @@ mod test {
             ..
         } = match parse_arguments(ovec![arg]) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Failed to parse @-file, err: {:?}", o),
+            o => panic!("Failed to parse @-file, err: {o:?}"),
         };
         assert_eq!(Some("foo€.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -2420,7 +2420,7 @@ mod test {
         let args = ovec!["-c", "-Fofoo.o.bj", "--", "foo.c"];
         let parsed_args = match parse_arguments_clang(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         let mut cmd = MockCommand {
             child: None,
@@ -2494,7 +2494,7 @@ mod test {
         let args = ovec!["-c", "-Fofoo.obj", "--", "foo.c"];
         let parsed_args = match parse_arguments_clang(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         let f = TestFixture::new();
         let compiler = &f.bins[0];
@@ -2594,7 +2594,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(ovec!["-fsanitize-blacklist=list.txt"], common_args);
         assert_eq!(

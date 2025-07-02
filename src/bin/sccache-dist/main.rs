@@ -39,8 +39,7 @@ fn main() {
         .for_each(|incr_str| match env::var(incr_str) {
             Ok(incr_val) if incr_val == "1" => {
                 println!(
-                    "sccache: incremental compilation is prohibited: Unset {} to continue.",
-                    incr_str
+                    "sccache: incremental compilation is prohibited: Unset {incr_str} to continue."
                 );
                 std::process::exit(1);
             }
@@ -64,10 +63,10 @@ fn main() {
     std::process::exit(match run(command) {
         Ok(_) => 0,
         Err(e) => {
-            eprintln!("sccache-dist: error: {}", e);
+            eprintln!("sccache-dist: error: {e}");
 
             for e in e.chain().skip(1) {
-                eprintln!("sccache-dist: caused by: {}", e);
+                eprintln!("sccache-dist: caused by: {e}");
             }
             2
         }
@@ -286,7 +285,7 @@ async fn init_builder(
         )),
         _ => bail!(
             "Builder type `{}` not supported on this platform",
-            format!("{:?}", config)
+            format!("{config:?}")
                 .split_whitespace()
                 .next()
                 .unwrap_or("")

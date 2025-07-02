@@ -314,8 +314,6 @@ fn test_server_port_in_use() {
     const MSG: &str = "Server startup failed:";
     assert!(
         s.contains(MSG),
-        "Output did not contain '{}':\n========\n{}\n========",
-        MSG,
-        s
+        "Output did not contain '{MSG}':\n========\n{s}\n========"
     );
 }

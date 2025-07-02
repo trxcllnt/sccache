@@ -199,7 +199,7 @@ mod test {
 
         for (name, endpoint, use_ssl, expected) in cases {
             let actual = endpoint_resolver(endpoint, use_ssl)?;
-            assert_eq!(actual, expected, "{}", name);
+            assert_eq!(actual, expected, "{name}");
         }
 
         Ok(())

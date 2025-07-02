@@ -827,7 +827,7 @@ impl DistSystem {
                 if matches!(status, SchedulerStatus { .. }) {
                     Ok(())
                 } else {
-                    Err(format!("{:?}", status))
+                    Err(format!("{status:?}"))
                 }
             },
             Duration::from_millis(1000),
@@ -985,7 +985,7 @@ impl DistSystem {
                 {
                     Ok(())
                 } else {
-                    Err(format!("{:?}", statuses))
+                    Err(format!("{statuses:?}"))
                 }
             },
             Duration::from_millis(1000),
@@ -1040,5 +1040,5 @@ fn wait_for<F: Fn() -> Result<(), String>>(f: F, interval: Duration, max_wait: D
         }
         thread::sleep(interval)
     }
-    panic!("wait timed out, last error result: {}", lasterr)
+    panic!("wait timed out, last error result: {lasterr}")
 }

@@ -757,7 +757,7 @@ fn preprocess_cmd<F, T>(
         .filter(|&arg| arg.ne(ARCH_FLAG))
         .filter_map(|arg| {
             arg.to_str()
-                .map(|arg_string| format!("-D__{}__=1", arg_string).into())
+                .map(|arg_string| format!("-D__{arg_string}__=1").into())
         })
         .collect::<Vec<OsString>>();
 
@@ -1084,7 +1084,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1117,7 +1117,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1141,7 +1141,7 @@ mod test {
         let args = stringvec!["-c", "/tmp/foo.c"];
         let ParsedArguments { outputs, .. } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_map_contains!(
             outputs,
@@ -1168,7 +1168,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         let mut common_and_arch_args = common_args.clone();
         common_and_arch_args.extend(common_args.to_vec());
@@ -1225,7 +1225,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1258,7 +1258,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.cpp"), input.to_str());
         assert_eq!(Language::Cxx, language);
@@ -1299,7 +1299,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.cpp"), input.to_str());
         assert_eq!(Language::Cxx, language);
@@ -1340,7 +1340,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.cpp"), input.to_str());
         assert_eq!(Language::Cxx, language);
@@ -1373,7 +1373,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.cc"), input.to_str());
         assert_eq!(Language::Cxx, language);
@@ -1407,7 +1407,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.cxx"), input.to_str());
         assert_eq!(Language::Cxx, language);
@@ -1451,7 +1451,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1481,7 +1481,7 @@ mod test {
             ..
         } = match parse_arguments_(args.clone(), false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         // GCC doesn't support double dashes. If we got one, we'll pass them
@@ -1496,7 +1496,7 @@ mod test {
             ..
         } = match parse_arguments_clang(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert!(double_dash_input);
@@ -1510,7 +1510,7 @@ mod test {
             ..
         } = match parse_arguments_clang(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         // Double dash after input file is ignored.
@@ -1544,7 +1544,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1579,7 +1579,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1618,7 +1618,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1647,7 +1647,7 @@ mod test {
             let args = stringvec!["-c", "foo.c", color_flag];
             match parse_arguments_(args, false) {
                 CompilerArguments::Ok(args) => args.color_mode,
-                o => panic!("Got unexpected parse result: {:?}", o),
+                o => panic!("Got unexpected parse result: {o:?}"),
             }
         }
 
@@ -1663,7 +1663,7 @@ mod test {
         let args = stringvec!["-c", "foo.c", "-fdiagnostics-color"];
         let args = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
 
         assert!(args.common_args.contains(&"-fdiagnostics-color".into()));
@@ -1675,7 +1675,7 @@ mod test {
             let args = stringvec!["-arch", "arm64", "-arch", "i386", "-c", "foo.cc"];
             let parsed_args = match parse_arguments_(args, false) {
                 CompilerArguments::Ok(args) => args,
-                o => panic!("Got unexpected parse result: {:?}", o),
+                o => panic!("Got unexpected parse result: {o:?}"),
             };
             let mut cmd = MockCommand {
                 child: None,
@@ -1711,7 +1711,7 @@ mod test {
         let args = stringvec!["-arch", "arm64", "-c", "foo.cc"];
         let parsed_args = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         let mut cmd = MockCommand {
             child: None,
@@ -1746,7 +1746,7 @@ mod test {
         let args = stringvec!["-c", "-o", "foo.o", "--", "foo.c"];
         let parsed_args = match parse_arguments_clang(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         let mut cmd = MockCommand {
             child: None,
@@ -1772,7 +1772,7 @@ mod test {
         let args = stringvec!["-pedantic", "-c", "foo.cc"];
         let parsed_args = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         let mut cmd = MockCommand {
             child: None,
@@ -1798,7 +1798,7 @@ mod test {
         let args = stringvec!["-pedantic-errors", "-c", "-std=c++14", "foo.cc"];
         let parsed_args = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         let mut cmd = MockCommand {
             child: None,
@@ -1824,7 +1824,7 @@ mod test {
         let args = stringvec!["-pedantic-errors", "-c", "-std=gnu++14", "foo.cc"];
         let parsed_args = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         let mut cmd = MockCommand {
             child: None,
@@ -1858,7 +1858,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -1893,7 +1893,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo/bar.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -2037,7 +2037,7 @@ mod test {
             false,
         ) {
             CompilerArguments::Ok(_) => {}
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         }
 
         with_var("SCCACHE_CACHE_MULTIARCH", Some("1"), || {
@@ -2046,7 +2046,7 @@ mod test {
                 false,
             ) {
                 CompilerArguments::Ok(_) => {}
-                o => panic!("Got unexpected parse result: {:?}", o),
+                o => panic!("Got unexpected parse result: {o:?}"),
             }
 
             let args = stringvec![
@@ -2064,7 +2064,7 @@ mod test {
                 ..
             } = match parse_arguments_(args, false) {
                 CompilerArguments::Ok(args) => args,
-                o => panic!("Got unexpected parse result: {:?}", o),
+                o => panic!("Got unexpected parse result: {o:?}"),
             };
             assert_eq!(Some("foo.cpp"), input.to_str());
             assert_eq!(Language::Cxx, language);
@@ -2111,7 +2111,7 @@ mod test {
             ..
         } = match parse_arguments_(vec![arg], false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -2314,7 +2314,7 @@ mod test {
         let args = stringvec!["-c", "-o", "foo.o", "--", "foo.c"];
         let parsed_args = match parse_arguments_clang(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         let f = TestFixture::new();
         let compiler = &f.bins[0];
@@ -2348,7 +2348,7 @@ mod test {
             ..
         } = match parse_arguments_(args, true) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::Cxx, language);
@@ -2373,7 +2373,7 @@ mod test {
         let args = stringvec!["-c", "-x", "c++-header", "pch.h", "-o", "pch.pch"];
         let parsed_args = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         let mut cmd = MockCommand {
             child: None,
@@ -2398,7 +2398,7 @@ mod test {
         let args = stringvec!["-c", "pch.hpp", "-o", "pch.pch"];
         let parsed_args = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         let mut cmd = MockCommand {
             child: None,
@@ -2423,7 +2423,7 @@ mod test {
         let args = stringvec!["-c", "pch.h", "-o", "pch.pch"];
         let parsed_args = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         let mut cmd = MockCommand {
             child: None,
@@ -2448,14 +2448,14 @@ mod test {
         let args = stringvec!["-c", "foo.c", "-o", "foo.o"];
         let parsed_args = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert!(parsed_args.too_hard_for_preprocessor_cache_mode.is_none());
 
         let args = stringvec!["-c", "foo.c", "-o", "foo.o", "-Xpreprocessor", "-M"];
         let parsed_args = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(
             parsed_args.too_hard_for_preprocessor_cache_mode,
@@ -2465,7 +2465,7 @@ mod test {
         let args = stringvec!["-c", "foo.c", "-o", "foo.o", r#"-Wp,-DFOO="something""#];
         let parsed_args = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(
             parsed_args.too_hard_for_preprocessor_cache_mode,

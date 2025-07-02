@@ -613,12 +613,9 @@ mod scheduler {
             _state: &S,
         ) -> std::result::Result<Self, Self::Rejection> {
             // Convert the request body stream into an `AsyncRead`
-            let reader = StreamReader::new(
-                req.into_body()
-                    .into_data_stream()
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err)),
-            )
-            .compat();
+            let reader =
+                StreamReader::new(req.into_body().into_data_stream().map_err(io::Error::other))
+                    .compat();
 
             Ok(Self(
                 Box::new(reader) as Box<dyn futures::AsyncRead + Send + Unpin>

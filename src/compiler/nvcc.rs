@@ -1158,9 +1158,9 @@ fn fold_env_vars_or_split_into_exe_and_args(
 ) -> Result<Option<(PathBuf, Vec<String>)>> {
     fn envvar_in_shell_format(var: &str) -> String {
         if cfg!(target_os = "windows") {
-            format!("%{}%", var) // %CICC_PATH%
+            format!("%{var}%") // %CICC_PATH%
         } else {
-            format!("${}", var) // $CICC_PATH
+            format!("${var}") // $CICC_PATH
         }
     }
 
@@ -1468,7 +1468,7 @@ fn remap_generated_filenames(
                         };
 
                         if arg_is_msvc_preprocessor_output {
-                            format!("-Fi{}", arg)
+                            format!("-Fi{arg}")
                         } else {
                             arg
                         }

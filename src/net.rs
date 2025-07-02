@@ -33,7 +33,7 @@ pub enum SocketAddr {
 impl fmt::Display for SocketAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SocketAddr::Net(addr) => write!(f, "{}", addr),
+            SocketAddr::Net(addr) => write!(f, "{addr}"),
             #[cfg(unix)]
             SocketAddr::Unix(p) => write!(f, "{}", p.display()),
             #[cfg(any(target_os = "linux", target_os = "android"))]

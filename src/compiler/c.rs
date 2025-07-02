@@ -1341,7 +1341,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
         // files by path.
         let named_file = |kind: &str, name: &str| -> Option<PathBuf> {
             let mut output = std::process::Command::new(&self.executable)
-                .arg(format!("-print-{}-name={}", kind, name))
+                .arg(format!("-print-{kind}-name={name}"))
                 .output()
                 .ok()?;
             debug!(
@@ -1780,7 +1780,7 @@ mod test {
     #[test]
     fn test_language_from_file_name() {
         fn t(extension: &str, expected: Language) {
-            let path_str = format!("input.{}", extension);
+            let path_str = format!("input.{extension}");
             let path = Path::new(&path_str);
             let actual = Language::from_file_name(path);
             assert_eq!(actual, Some(expected));
@@ -1819,7 +1819,7 @@ mod test {
     #[test]
     fn test_language_from_file_name_none() {
         fn t(extension: &str) {
-            let path_str = format!("input.{}", extension);
+            let path_str = format!("input.{extension}");
             let path = Path::new(&path_str);
             let actual = Language::from_file_name(path);
             let expected = None;
