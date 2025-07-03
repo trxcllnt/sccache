@@ -1591,6 +1591,7 @@ where
                     ArtifactDescriptor {
                         path: p,
                         optional: false,
+                        must_be_non_empty: false,
                     },
                 )
             })
@@ -1602,6 +1603,7 @@ where
                 ArtifactDescriptor {
                     path: p.clone(),
                     optional: false,
+                    must_be_non_empty: false,
                 },
             );
             Some(p)
@@ -1615,6 +1617,7 @@ where
                 ArtifactDescriptor {
                     path: p,
                     optional: true,
+                    must_be_non_empty: false,
                 },
             );
         }
@@ -1625,6 +1628,7 @@ where
                 ArtifactDescriptor {
                     path: p,
                     optional: true,
+                    must_be_non_empty: false,
                 },
             );
         }
@@ -1869,6 +1873,7 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
             key: k.to_string(),
             path: v.path.clone(),
             optional: v.optional,
+            must_be_non_empty: v.must_be_non_empty,
         }))
     }
 }

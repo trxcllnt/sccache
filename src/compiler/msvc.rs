@@ -747,6 +747,7 @@ pub fn parse_arguments(
                 ArtifactDescriptor {
                     path: Path::new(&input).with_extension("obj"),
                     optional: false,
+                    must_be_non_empty: false,
                 },
             );
         }
@@ -757,6 +758,7 @@ pub fn parse_arguments(
                     ArtifactDescriptor {
                         path: o.with_extension("obj"),
                         optional: false,
+                        must_be_non_empty: false,
                     },
                 );
             } else {
@@ -765,6 +767,7 @@ pub fn parse_arguments(
                     ArtifactDescriptor {
                         path: o,
                         optional: false,
+                        must_be_non_empty: false,
                     },
                 );
             }
@@ -790,6 +793,7 @@ pub fn parse_arguments(
                 ArtifactDescriptor {
                     path: tlh,
                     optional: true,
+                    must_be_non_empty: false,
                 },
             );
 
@@ -799,6 +803,7 @@ pub fn parse_arguments(
                 ArtifactDescriptor {
                     path: tli,
                     optional: true,
+                    must_be_non_empty: false,
                 },
             );
         }
@@ -812,6 +817,7 @@ pub fn parse_arguments(
                 ArtifactDescriptor {
                     path: p,
                     optional: false,
+                    must_be_non_empty: false,
                 },
             ),
             None => {
@@ -1429,7 +1435,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.obj"),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -1458,21 +1465,24 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.obj"),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             ),
             (
                 "tlh",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.tlh"),
-                    optional: true
+                    optional: true,
+                    must_be_non_empty: false,
                 }
             ),
             (
                 "tli",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.tli"),
-                    optional: true
+                    optional: true,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -1498,7 +1508,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.obj"),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -1529,7 +1540,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.obj"),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -1561,7 +1573,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.obj"),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -1652,7 +1665,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.obj"),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -1703,7 +1717,8 @@ mod test {
                     "obj",
                     ArtifactDescriptor {
                         path: PathBuf::from("foo.obj"),
-                        optional: false
+                        optional: false,
+                        must_be_non_empty: false,
                     }
                 )
             );
@@ -1796,7 +1811,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.obj"),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -1839,7 +1855,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.obj"),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -1872,14 +1889,16 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.obj"),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             ),
             (
                 "pdb",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.pdb"),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -1921,7 +1940,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.obj"),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -1971,7 +1991,8 @@ mod test {
                     "obj",
                     ArtifactDescriptor {
                         path: PathBuf::from("foo.obj"),
-                        optional: false
+                        optional: false,
+                        must_be_non_empty: false,
                     }
                 )
             );
@@ -2119,7 +2140,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -2167,7 +2189,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -2209,7 +2232,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -2251,7 +2275,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -2293,7 +2318,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -2342,7 +2368,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -2390,7 +2417,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -2446,6 +2474,7 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.obj".into(),
                     optional: false,
+                    must_be_non_empty: false,
                 },
             )]
             .into_iter()
@@ -2528,6 +2557,7 @@ mod test {
                     ArtifactDescriptor {
                         path: "foo.obj".into(),
                         optional: false,
+                        must_be_non_empty: false,
                     },
                 ),
                 (
@@ -2535,6 +2565,7 @@ mod test {
                     ArtifactDescriptor {
                         path: pdb,
                         optional: false,
+                        must_be_non_empty: false,
                     },
                 ),
             ]

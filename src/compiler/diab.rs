@@ -293,6 +293,7 @@ where
         ArtifactDescriptor {
             path: output,
             optional: false,
+            must_be_non_empty: false,
         },
     );
 
@@ -496,7 +497,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -528,7 +530,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -560,7 +563,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -594,7 +598,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -636,7 +641,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -750,7 +756,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -774,6 +781,7 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
+                    must_be_non_empty: false,
                 },
             )]
             .into_iter()

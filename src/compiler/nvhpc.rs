@@ -281,7 +281,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -300,7 +301,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -334,7 +336,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -369,7 +372,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );
@@ -400,7 +404,8 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );

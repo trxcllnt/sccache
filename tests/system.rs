@@ -2615,12 +2615,14 @@ fn test_stats_no_server() {
     );
 }
 
-#[test_case(true, false, false ; "preprocessor_cache=true, device_debug=false, rdc=false")]
-#[test_case(false, false, false ; "preprocessor_cache=false, device_debug=false, rdc=false")]
-#[test_case(true, true, false ; "preprocessor_cache=true, device_debug=true, rdc=false")]
-#[test_case(false, true, false ; "preprocessor_cache=false, device_debug=true, rdc=false")]
 #[test_case(true, true, true ; "preprocessor_cache=true, device_debug=true, rdc=true")]
+#[test_case(true, true, false ; "preprocessor_cache=true, device_debug=true, rdc=false")]
+#[test_case(true, false, true ; "preprocessor_cache=true, device_debug=false, rdc=true")]
+#[test_case(true, false, false ; "preprocessor_cache=true, device_debug=false, rdc=false")]
 #[test_case(false, true, true ; "preprocessor_cache=false, device_debug=true, rdc=true")]
+#[test_case(false, true, false ; "preprocessor_cache=false, device_debug=true, rdc=false")]
+#[test_case(false, false, true ; "preprocessor_cache=false, device_debug=false, rdc=true")]
+#[test_case(false, false, false ; "preprocessor_cache=false, device_debug=false, rdc=false")]
 #[cfg(any(unix, target_env = "msvc"))]
 fn test_cuda_sccache_command(
     preprocessor_cache_mode: bool,

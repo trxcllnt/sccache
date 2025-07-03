@@ -137,6 +137,7 @@ where
                                 ArtifactDescriptor {
                                     path,
                                     optional: false,
+                                    must_be_non_empty: false,
                                 },
                             );
                         }
@@ -154,6 +155,7 @@ where
                             ArtifactDescriptor {
                                 path,
                                 optional: false,
+                                must_be_non_empty: false,
                             },
                         );
                         continue;
@@ -161,6 +163,19 @@ where
                     Some(GenModuleIdFileFlag) => {
                         take_next = false;
                         &mut common_args
+                    }
+                    Some(ModuleIdFileNameOutput(o)) => {
+                        take_next = false;
+                        let path = cwd.join(o);
+                        outputs.insert(
+                            "obj",
+                            ArtifactDescriptor {
+                                path,
+                                optional: false,
+                                must_be_non_empty: true,
+                            },
+                        );
+                        continue;
                     }
                     Some(ModuleIdFileName(o)) => {
                         take_next = false;
@@ -203,6 +218,7 @@ where
             ArtifactDescriptor {
                 path: module_id_path,
                 optional: false,
+                must_be_non_empty: true,
             },
         );
     }
@@ -324,6 +340,7 @@ ArgData! { pub
     ExtraOutput(PathBuf),
     GenModuleIdFileFlag,
     ModuleIdFileName(PathBuf),
+    ModuleIdFileNameOutput(PathBuf),
     Output(PathBuf),
     PassThrough(OsString),
     UnhashedPassThrough(OsString),

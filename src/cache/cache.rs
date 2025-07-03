@@ -94,6 +94,8 @@ pub struct FileObjectSource {
     pub path: PathBuf,
     /// Whether the file must be present on disk and is essential for the compilation.
     pub optional: bool,
+    /// Whether the file size must be greater than 0 bytes.
+    pub must_be_non_empty: bool,
 }
 
 /// Result of a cache lookup.
@@ -209,6 +211,7 @@ impl CacheRead {
                 key,
                 path,
                 optional,
+                must_be_non_empty,
             } in objects
             {
                 let dir = match path.parent() {
@@ -221,6 +224,9 @@ impl CacheRead {
                 let mut tmp = NamedTempFile::new_in(dir)?;
                 match (self.get_object(&key, &mut tmp), optional) {
                     (Ok(mode), _) => {
+                        if must_be_non_empty && tmp.as_file_mut().metadata()?.len() == 0 {
+                            return Err(anyhow!("{path:?} must be a non-empty file"));
+                        }
                         tmp.persist(&path)?;
                         if let Some(mode) = mode {
                             set_file_mode(&path, mode)?;
@@ -261,12 +267,16 @@ impl CacheWrite {
                 key,
                 path,
                 optional,
+                must_be_non_empty,
             } in objects
             {
                 let f = fs::File::open(&path)
                     .with_context(|| format!("failed to open file `{path:?}`"));
                 match (f, optional) {
                     (Ok(mut f), _) => {
+                        if must_be_non_empty && f.metadata()?.len() == 0 {
+                            return Err(anyhow!("{path:?} must be a non-empty file"));
+                        }
                         let mode = get_file_mode(&f)?;
                         entry.put_object(&key, &mut f, mode).with_context(|| {
                             format!("failed to put object `{path:?}` in cache entry")

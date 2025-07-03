@@ -1417,12 +1417,22 @@ impl DistCompile {
                             if count != len {
                                 break Err(anyhow!("Expected {len} outputs, but received {count}"));
                             }
+
+                            if let Some(output) = outputs.iter().find(|o| o.path == local_path) {
+                                if output.must_be_non_empty && count == 0 {
+                                    break Err(anyhow!("{local_path:?} must be a non-empty file"));
+                                }
+                            }
                         } else {
                             break Ok(());
                         }
                     };
 
                     if let Err(err) = unpack_outputs_res {
+                        if should_retry(&err, Some(job_id)) {
+                            tokio::time::sleep(retry_delay.next().unwrap()).await;
+                            continue;
+                        }
                         break Err(err);
                     }
 
