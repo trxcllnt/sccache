@@ -248,22 +248,24 @@ impl CacheRead {
                 let mut tmp = NamedTempFile::new_in(dir)?;
                 match (self.get_object(&key, &mut tmp), optional) {
                     (Ok(mode), _) => {
-                        if must_be_non_empty
-                            && tmp
-                                .flush()
-                                .and_then(|_| tmp.as_file_mut().sync_all())
-                                .and_then(|_| tmp.as_file_mut().metadata())?
-                                .len()
-                                == 0
-                        {
-                            bail!(anyhow!(UnexpectedEmptyFile(path)));
+                        let file = match tmp.persist_noclobber(&path) {
+                            Ok(file) => {
+                                if let Some(mode) = mode {
+                                    set_file_mode(&path, mode)?;
+                                }
+                                Ok(file)
+                            }
+                            Err(err) => match err.error.kind() {
+                                io::ErrorKind::AlreadyExists => std::fs::File::open(&path),
+                                _ => Err(err.error),
+                            },
+                        }?;
+                        if must_be_non_empty {
+                            let size_on_disk = file.metadata()?.len();
+                            if size_on_disk == 0 {
+                                bail!(anyhow!(UnexpectedEmptyFile(path)));
+                            }
                         }
-                        tmp.persist(&path)?;
-                        if let Some(mode) = mode {
-                            set_file_mode(&path, mode)?;
-                        }
-                        // Ignore errors on Windows
-                        let _ = fs::File::open(&path)?.sync_all();
                     }
                     (Err(e), false) => return Err(e),
                     // skip if no object found and it's optional
@@ -303,15 +305,18 @@ impl CacheWrite {
                 must_be_non_empty,
             } in objects
             {
-                let f = fs::File::open(&path)
+                let file = fs::File::open(&path)
                     .with_context(|| format!("failed to open file `{path:?}`"));
-                match (f, optional) {
-                    (Ok(mut f), _) => {
-                        if must_be_non_empty && f.metadata()?.len() == 0 {
-                            bail!(anyhow!(UnexpectedEmptyFile(path)));
+                match (file, optional) {
+                    (Ok(mut file), _) => {
+                        if must_be_non_empty {
+                            let size_on_disk = file.metadata()?.len();
+                            if size_on_disk == 0 {
+                                bail!(anyhow!(UnexpectedEmptyFile(path)));
+                            }
                         }
-                        let mode = get_file_mode(&f)?;
-                        entry.put_object(&key, &mut f, mode).with_context(|| {
+                        let mode = get_file_mode(&file)?;
+                        entry.put_object(&key, &mut file, mode).with_context(|| {
                             format!("failed to put object `{path:?}` in cache entry")
                         })?;
                     }

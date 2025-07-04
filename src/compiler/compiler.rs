@@ -1345,6 +1345,8 @@ impl DistCompile {
                     .collect::<Vec<_>>()
             );
 
+            let mut outputs = outputs.iter().collect::<Vec<_>>();
+
             let unpack_result = build_result
                 .outputs
                 .into_iter()
@@ -1360,23 +1362,33 @@ impl DistCompile {
                     output_paths.push(path.clone());
 
                     // Ensure the parent paths exist
-                    if let Some(parent) = path.parent() {
-                        if !parent.as_os_str().is_empty() {
-                            fs::create_dir_all(parent).with_context(|| {
-                                format!("Failed to create output dir {}", parent.display())
-                            })
-                            .map_err(|err| (output_paths.clone(), err))?;
-                        }
-                    }
+                    let dir = match path.parent() {
+                        Some(dir) => {
+                            if !dir.as_os_str().is_empty() {
+                                fs::create_dir_all(dir).with_context(|| {
+                                    format!("Failed to create output dir {dir:?}")
+                                })
+                                .map_err(|err| (output_paths.clone(), err))?;
+                            }
+                            dir
+                        },
+                        None => return Err((output_paths, anyhow!("Output file without a parent: {path:?}"))),
+                    };
 
-                    // Create the output file
-                    let mut file = File::create(&path).with_context(|| {
-                        format!("Failed to create output file {}", path.display())
-                    }).map_err(|err| (output_paths.clone(), err))?;
+                    // Write the output file to a tempfile and then atomically
+                    // move it to its final location so that other compiler invocations
+                    // happening in parallel don't see a partially-written file.
+
+                    // Create the output tempfile
+                    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+                        .with_context(|| {
+                            format!("Failed to create tempfile for output path {path:?}")
+                        })
+                        .map_err(|err| (output_paths.clone(), err))?;
 
                     // Write the output file
                     let expected_size = data.lens().actual;
-                    let bytes_written = io::copy(&mut data.into_reader(), &mut file)
+                    let bytes_written = io::copy(&mut data.into_reader(), tmp.as_file_mut())
                         .with_context(|| format!("Failed to write output to {path:?}"))
                         .map_err(|err| (output_paths.clone(), err))?;
 
@@ -1385,10 +1397,29 @@ impl DistCompile {
                         return Err((output_paths, anyhow!(UnexpectedFileSize(expected_size, bytes_written))));
                     }
 
-                    // Verify the file isn't empty
-                    if let Some(output) = outputs.iter().find(|o| o.path == path) {
-                        if output.must_be_non_empty && bytes_written == 0 {
-                            return Err((output_paths, anyhow!(UnexpectedEmptyFile(path))));
+                    // Persist the tempfile to its real location, but don't overwrite
+                    // if it already exists (e.g. nvcc's .module_id files).
+                    let file = match tmp.persist_noclobber(&path) {
+                        Ok(file) => Ok(file),
+                        Err(err) => {
+                            match err.error.kind() {
+                                io::ErrorKind::AlreadyExists => std::fs::File::open(&path),
+                                _ => Err(err.error)
+                            }
+                        }
+                    }
+                    .with_context(|| format!("Failed to persist tempfile to {path:?}"))
+                    .map_err(|err| (output_paths.clone(), anyhow!(err)))?;
+
+                    // Verify the output file isn't empty
+                    if let Some(idx) = outputs.iter().position(|o| o.path == path) {
+                        if outputs.swap_remove(idx).must_be_non_empty {
+                            let size_on_disk = file.metadata()
+                                .map_err(|err| (output_paths.clone(), anyhow!(err)))?
+                                .len();
+                            if size_on_disk == 0 {
+                                return Err((output_paths, anyhow!(UnexpectedEmptyFile(path))));
+                            }
                         }
                     }
 
