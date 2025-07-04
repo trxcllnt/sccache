@@ -250,8 +250,8 @@ impl CacheRead {
                     (Ok(mode), _) => {
                         if must_be_non_empty
                             && tmp
-                                .as_file_mut()
-                                .sync_all()
+                                .flush()
+                                .and_then(|_| tmp.as_file_mut().sync_all())
                                 .and_then(|_| tmp.as_file_mut().metadata())?
                                 .len()
                                 == 0
@@ -262,6 +262,8 @@ impl CacheRead {
                         if let Some(mode) = mode {
                             set_file_mode(&path, mode)?;
                         }
+                        // Ignore errors on Windows
+                        let _ = fs::File::open(&path)?.sync_all();
                     }
                     (Err(e), false) => return Err(e),
                     // skip if no object found and it's optional

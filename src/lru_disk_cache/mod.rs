@@ -503,7 +503,7 @@ impl LruDiskCache {
         self.cleanup_pending(&key, size);
         let abs_path = self.rel_to_abs_path(&key);
         fs::create_dir_all(abs_path.parent().unwrap())?;
-        file.persist(abs_path).map_err(|e| e.error)?;
+        file.persist(&abs_path).map_err(|e| e.error)?;
         self.lru.insert(key, real_size);
         Ok(())
     }
