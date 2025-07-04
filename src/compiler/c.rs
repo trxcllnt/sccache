@@ -679,6 +679,13 @@ where
     fn language(&self) -> Language {
         self.parsed_args.language
     }
+
+    fn should_do_cache_lookup(&self, cache_control: CacheControl) -> CacheControl {
+        match self.compiler.kind() {
+            CCompilerKind::Nvcc => CacheControl::Nvcc,
+            _ => cache_control,
+        }
+    }
 }
 
 const PRAGMA_GCC_PCH_PREPROCESS: &[u8] = b"pragma GCC pch_preprocess";

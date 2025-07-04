@@ -441,19 +441,21 @@ where
     ) -> Result<(CompileResult, ProcessOutput)> {
         let out_pretty = self.output_pretty().into_owned();
         if log_enabled!(log::Level::Debug) {
-            // [<file>] get_cached_or_compile: "/path/to/exe" <args...>
+            // [<file>] get_cached_or_compile: "/path/to/exe <args...>"
             debug!(
-                "[{out_pretty}]: get_cached_or_compile: {}",
-                [
-                    &[format!("{:?}", self.get_executable().as_path().display())],
-                    &dist::osstrings_to_strings(&arguments).unwrap_or_default()[..]
-                ]
-                .concat()
-                .join(" ")
+                "[{out_pretty}]: get_cached_or_compile: {:?}",
+                shlex::try_join(
+                    std::iter::empty()
+                        .chain(&[format!("{}", self.get_executable().as_path().display())])
+                        .chain(&dist::osstrings_to_strings(&arguments).unwrap_or_default()[..])
+                        .map(|s| s.as_str())
+                )?
             );
         }
 
         let start = Instant::now();
+
+        let cache_control = self.should_do_cache_lookup(cache_control);
 
         let dist_client = dist_client.filter(|_| {
             // Clients might want to set this when configuring
@@ -632,6 +634,8 @@ where
     fn language(&self) -> Language;
 
     fn get_executable(&self) -> PathBuf;
+
+    fn should_do_cache_lookup(&self, cache_control: CacheControl) -> CacheControl;
 }
 
 struct CacheLookupAndCompile<'a, T: CommandCreatorSync> {
@@ -708,8 +712,12 @@ where
 
         let start = Instant::now();
 
-        // If `ForceNoCache` or `ForceRecache` is enabled, don't check the cache.
+        // If cache_control is `ForceNoCache`, `ForceRecache`, or `Nvcc`, don't check the cache.
         match cache_control {
+            CacheControl::Nvcc => Ok((
+                CacheLookupResult::Miss(MissType::Nvcc),
+                self.into_compile_result().await?,
+            )),
             CacheControl::ForceNoCache => {
                 trace!(
                     "[{out_pretty}]: Cache none in {}",
@@ -1619,6 +1627,8 @@ pub enum MissType {
     TimedOut,
     /// Error reading from cache
     CacheReadError,
+    /// Never lookup outer nvcc calls.
+    Nvcc,
 }
 
 /// Information about a successful cache write.
@@ -1717,6 +1727,8 @@ pub enum CacheControl {
     ForceNoCache,
     /// Ignore existing cache entries, force recompilation.
     ForceRecache,
+    /// Never lookup outer nvcc calls.
+    Nvcc,
 }
 
 /// Creates a future that will write `contents` to `path` inside of a temporary
@@ -1827,7 +1839,7 @@ async fn detect_compiler<T>(
 where
     T: CommandCreatorSync,
 {
-    trace!("detect_compiler: {}", executable.display());
+    trace!("detect_compiler: {executable:?}");
     // First, see if this looks like rustc.
 
     let maybe_rustc_executable = if is_rustc_like(executable) {
