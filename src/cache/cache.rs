@@ -248,7 +248,14 @@ impl CacheRead {
                 let mut tmp = NamedTempFile::new_in(dir)?;
                 match (self.get_object(&key, &mut tmp), optional) {
                     (Ok(mode), _) => {
-                        if must_be_non_empty && tmp.as_file_mut().metadata()?.len() == 0 {
+                        if must_be_non_empty
+                            && tmp
+                                .as_file_mut()
+                                .sync_all()
+                                .and_then(|_| tmp.as_file_mut().metadata())?
+                                .len()
+                                == 0
+                        {
                             bail!(anyhow!(UnexpectedEmptyFile(path)));
                         }
                         tmp.persist(&path)?;
