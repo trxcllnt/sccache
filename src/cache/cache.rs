@@ -152,6 +152,18 @@ impl std::fmt::Display for DecompressionFailure {
 
 impl std::error::Error for DecompressionFailure {}
 
+/// Represents a failure to decompress stored object data.
+#[derive(Debug)]
+pub struct UnexpectedFileSize(pub u64, pub u64);
+
+impl std::fmt::Display for UnexpectedFileSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Expected {} bytes, but unpacked {}", self.0, self.1)
+    }
+}
+
+impl std::error::Error for UnexpectedFileSize {}
+
 /// Error that indicates we expected a file to be larger than 0 bytes.
 #[derive(Debug)]
 pub struct UnexpectedEmptyFile(pub PathBuf);

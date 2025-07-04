@@ -15,6 +15,7 @@
 
 use crate::cache::{
     Cache, CacheWrite, DecompressionFailure, FileObjectSource, Storage, UnexpectedEmptyFile,
+    UnexpectedFileSize,
 };
 use crate::compiler::args::*;
 use crate::compiler::c::{CCompiler, CCompilerKind};
@@ -1381,9 +1382,7 @@ impl DistCompile {
 
                     // Verify we wrote the number of bytes we expected to
                     if bytes_written != expected_size {
-                        return Err((output_paths, anyhow!(
-                            "Expected {expected_size} bytes, but received {bytes_written}"
-                        )));
+                        return Err((output_paths, anyhow!(UnexpectedFileSize(expected_size, bytes_written))));
                     }
 
                     // Verify the file isn't empty
@@ -1424,9 +1423,18 @@ impl DistCompile {
             match unpack_result {
                 Ok(res) => break Ok(res),
                 Err(err) => {
-                    if err.downcast_ref::<UnexpectedEmptyFile>().is_some() {
+                    if err.downcast_ref::<UnexpectedFileSize>().is_some() {
                         debug!("[{out_pretty}]: {err:?}");
                         retry_or_bail!(err);
+                    } else if err.downcast_ref::<UnexpectedEmptyFile>().is_some() {
+                        debug!("[{out_pretty}]: {err:?}");
+                        match dist_client.del_job(job_id).await {
+                            Ok(_) => {
+                                has_inputs = false;
+                                retry_or_bail!(err)
+                            }
+                            Err(err) => break Err(err),
+                        }
                     }
                     break Err(err);
                 }
