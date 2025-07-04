@@ -152,6 +152,18 @@ impl std::fmt::Display for DecompressionFailure {
 
 impl std::error::Error for DecompressionFailure {}
 
+/// Error that indicates we expected a file to be larger than 0 bytes.
+#[derive(Debug)]
+pub struct UnexpectedEmptyFile(pub PathBuf);
+
+impl std::fmt::Display for UnexpectedEmptyFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Expected {:?} to be larger than 0 bytes", self.0)
+    }
+}
+
+impl std::error::Error for UnexpectedEmptyFile {}
+
 impl CacheRead {
     /// Create a cache entry from `reader`.
     pub fn from<R>(reader: R) -> Result<CacheRead>
@@ -225,7 +237,7 @@ impl CacheRead {
                 match (self.get_object(&key, &mut tmp), optional) {
                     (Ok(mode), _) => {
                         if must_be_non_empty && tmp.as_file_mut().metadata()?.len() == 0 {
-                            return Err(anyhow!("{path:?} must be a non-empty file"));
+                            bail!(anyhow!(UnexpectedEmptyFile(path)));
                         }
                         tmp.persist(&path)?;
                         if let Some(mode) = mode {
@@ -275,7 +287,7 @@ impl CacheWrite {
                 match (f, optional) {
                     (Ok(mut f), _) => {
                         if must_be_non_empty && f.metadata()?.len() == 0 {
-                            return Err(anyhow!("{path:?} must be a non-empty file"));
+                            bail!(anyhow!(UnexpectedEmptyFile(path)));
                         }
                         let mode = get_file_mode(&f)?;
                         entry.put_object(&key, &mut f, mode).with_context(|| {

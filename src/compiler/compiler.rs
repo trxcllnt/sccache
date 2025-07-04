@@ -13,7 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cache::{Cache, CacheWrite, DecompressionFailure, FileObjectSource, Storage};
+use crate::cache::{
+    Cache, CacheWrite, DecompressionFailure, FileObjectSource, Storage, UnexpectedEmptyFile,
+};
 use crate::compiler::args::*;
 use crate::compiler::c::{CCompiler, CCompilerKind};
 use crate::compiler::cicc::Cicc;
@@ -944,7 +946,10 @@ impl<'a> CacheLookup<'a> {
                     )),
                     Err(e) => {
                         if e.downcast_ref::<DecompressionFailure>().is_some() {
-                            debug!("[{}]: Failed to decompress object", out_pretty);
+                            debug!("[{out_pretty}]: Failed to decompress object");
+                            Ok(CacheLookupResult::Miss(MissType::CacheReadError))
+                        } else if let Some(err) = e.downcast_ref::<UnexpectedEmptyFile>() {
+                            debug!("[{out_pretty}]: {err:?}");
                             Ok(CacheLookupResult::Miss(MissType::CacheReadError))
                         } else {
                             Err(e)
@@ -1190,7 +1195,31 @@ impl DistCompile {
             .decrement_pending_compilations();
 
         let dist_compile_res = loop {
-            let (job_id, timeout) = if let Some((ref job_id, timeout)) = job {
+            let job_id: &String;
+            let timeout: u32;
+
+            macro_rules! retry_or_bail {
+                ($err:ident, $job_id:expr) => {{
+                    if should_retry(&$err, $job_id) {
+                        tokio::time::sleep(retry_delay.next().unwrap()).await;
+                        continue;
+                    }
+                    break Err($err);
+                }};
+                ($err:expr, $job_id:expr) => {{
+                    let err = $err;
+                    retry_or_bail!(err, $job_id);
+                }};
+                ($err:expr) => {{
+                    let err = $err;
+                    retry_or_bail!(err, Some(job_id));
+                }};
+                ($err:ident) => {{
+                    retry_or_bail!($err, Some(job_id));
+                }};
+            }
+
+            (job_id, timeout) = if let Some((ref job_id, timeout)) = job {
                 (job_id, timeout)
             } else {
                 trace!("[{out_pretty}]: Requesting job allocation");
@@ -1207,13 +1236,7 @@ impl DistCompile {
                         continue;
                     }
                     // Maybe retry network errors
-                    Err(err) => {
-                        if should_retry(&err, None) {
-                            tokio::time::sleep(retry_delay.next().unwrap()).await;
-                            continue;
-                        }
-                        break Err(err);
-                    }
+                    Err(err) => retry_or_bail!(err, None),
                 }
             };
 
@@ -1228,13 +1251,7 @@ impl DistCompile {
                         has_inputs = true;
                     }
                     // Maybe retry network errors
-                    Err(err) => {
-                        if should_retry(&err, Some(job_id)) {
-                            tokio::time::sleep(retry_delay.next().unwrap()).await;
-                            continue;
-                        }
-                        break Err(err);
-                    }
+                    Err(err) => retry_or_bail!(err),
                 }
             }
 
@@ -1244,27 +1261,16 @@ impl DistCompile {
                         has_toolchain = true;
                     }
                     Ok(dist::SubmitToolchainResult::Error { message }) => {
-                        let err = anyhow!(message);
-                        if should_retry(&err, Some(job_id)) {
-                            tokio::time::sleep(retry_delay.next().unwrap()).await;
-                            continue;
-                        }
-                        break Err(err);
+                        retry_or_bail!(anyhow!(message));
                     }
                     // Maybe retry network errors
-                    Err(err) => {
-                        if should_retry(&err, Some(job_id)) {
-                            tokio::time::sleep(retry_delay.next().unwrap()).await;
-                            continue;
-                        }
-                        break Err(err);
-                    }
+                    Err(err) => retry_or_bail!(err),
                 }
             }
 
             debug!("[{out_pretty}, {job_id}]: Running job");
 
-            let job_result = match dist_client
+            let (build_result, server_id) = match dist_client
                 .run_job(
                     job_id,
                     Duration::from_secs(timeout as u64),
@@ -1275,7 +1281,7 @@ impl DistCompile {
                 .await
             {
                 // Job completed, regardless of whether compilation succeeded or failed
-                Ok(RunJobResponse::Complete { result, server_id }) => Ok((result, server_id)),
+                Ok(RunJobResponse::Complete { result, server_id }) => (result, server_id),
                 // Job failed with an unrecoverable fatal error. These should be rare, since
                 // There aren't many cases where we want to explicitly fail the build without
                 // allowing the client to retry.
@@ -1286,165 +1292,143 @@ impl DistCompile {
                 // a fatal error so clients see their build fail and can either increase the
                 // job time limit, or apply source optimizations so their files compile in a
                 // reasonable amount of time.
+                //
+                // Fatal errors are not retryable.
                 Ok(RunJobResponse::FatalError { message, server_id }) => {
                     error!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation job failed: {message}");
-                    // Break because fatal errors are not retryable
                     break Err(anyhow!(message));
                 }
                 // Missing inputs (S3 cleared, Redis rebooted, etc.)
+                // Can be retried.
                 Ok(RunJobResponse::MissingJobInputs { server_id }) => {
                     // If we retry, send the inputs again
                     has_inputs = false;
                     debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job inputs");
-                    // Don't break because these errors can be retried
-                    Err(anyhow!("Missing distributed compilation job inputs"))
+                    retry_or_bail!(anyhow!("Missing distributed compilation job inputs"));
                 }
                 // Missing toolchain (S3 cleared, Redis rebooted, etc.)
+                // Can be retried.
                 Ok(RunJobResponse::MissingToolchain { server_id }) => {
                     // If we retry, send the toolchain again
                     has_toolchain = false;
                     debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job toolchain");
-                    // Don't break because these errors can be retried
-                    Err(anyhow!("Missing distributed compilation job toolchain"))
+                    retry_or_bail!(anyhow!("Missing distributed compilation job toolchain"));
                 }
                 // Missing result (S3 cleared, Redis rebooted, etc.),
                 // or build server failed to write the job result due
                 // to e.g. network error, server shutdown, etc.
+                // Can be retried.
                 Ok(RunJobResponse::MissingJobResult { server_id }) => {
                     debug!(
                         "[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job result"
                     );
-                    // Don't break because these errors can be retried
-                    Err(anyhow!("Missing distributed compilation job result"))
+                    retry_or_bail!(anyhow!("Missing distributed compilation job result"));
                 }
                 // Disk errors, build process killed, server shutdown, etc.
+                // Can be retried.
                 Ok(RunJobResponse::RetryableError { message, server_id }) => {
                     debug!("[{out_pretty}, {job_id}, {server_id}]: {message:?}");
-                    // Don't break because these errors can be retried
-                    Err(anyhow!("{message:?}"))
+                    retry_or_bail!(anyhow!("{message:?}"));
                 }
                 // Other (e.g. client network, timeout, etc.) errors
-                Err(err) => {
-                    // Don't break because these errors can be retried
-                    Err(anyhow!(err))
-                }
+                // Can be retried.
+                Err(err) => retry_or_bail!(anyhow!(err)),
             };
 
-            match job_result {
-                // Maybe retry errors
-                Err(err) => {
-                    if should_retry(&err, Some(job_id)) {
-                        tokio::time::sleep(retry_delay.next().unwrap()).await;
-                        continue;
-                    }
-                    break Err(err);
-                }
-                Ok((result, server_id)) => {
-                    debug!(
-                        "[{out_pretty}, {job_id}]: Fetched {:?}",
-                        result
-                            .outputs
-                            .iter()
-                            .map(|(p, bs)| (p, bs.lens().to_string()))
-                            .collect::<Vec<_>>()
-                    );
+            debug!(
+                "[{out_pretty}, {job_id}]: Fetched {:?}",
+                build_result
+                    .outputs
+                    .iter()
+                    .map(|(p, bs)| (p, bs.lens().to_string()))
+                    .collect::<Vec<_>>()
+            );
 
-                    let mut output_paths: Vec<PathBuf> = vec![];
+            let unpack_result = build_result
+                .outputs
+                .into_iter()
+                .try_fold(vec![], |mut output_paths, (path, data)| {
+                    let path = path_transformer
+                        .to_local(&path)
+                        .with_context(|| format!(
+                            "[{out_pretty}, {job_id}]: unable to transform output path {path}"
+                        ))
+                        .map_err(|err| (output_paths.clone(), err))?;
 
-                    macro_rules! try_or_cleanup {
-                        ($v:expr) => {{
-                            match $v {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    // Do our best to clear up. We may end up deleting a file that we just wrote over
-                                    // the top of, but it's better to clear up too much than too little
-                                    for local_path in output_paths.iter() {
-                                        if let Err(e) = fs::remove_file(local_path) {
-                                            if e.kind() != io::ErrorKind::NotFound {
-                                                warn!("[{out_pretty}, {job_id}]: {e} while attempting to remove `{}`", local_path.display())
-                                            }
-                                        }
-                                    }
-                                    break Err(e)
-                                },
-                            }
-                        }};
-                    }
+                    // Do this first so cleanup works correctly
+                    output_paths.push(path.clone());
 
-                    let mut result_outputs_iter = result.outputs.into_iter();
-
-                    // loop instead of for so we can break with the Err instead of
-                    // returning to ensure we still delete the job (below) in case
-                    // of client errors.
-                    // TODO: Make this use asyncio
-                    let unpack_outputs_res = loop {
-                        if let Some((path, output_data)) = result_outputs_iter.next() {
-                            let len = output_data.lens().actual;
-                            let local_path = try_or_cleanup!(path_transformer
-                                .to_local(&path)
-                                .with_context(|| format!(
-                                    "[{out_pretty}, {job_id}]: unable to transform output path {path}"
-                                )));
-
-                            // Do this first so cleanup works correctly
-                            output_paths.push(local_path.clone());
-
-                            // Ensure the parent paths exist
-                            if let Some(parent) = local_path.parent() {
-                                if !parent.as_os_str().is_empty() {
-                                    try_or_cleanup!(fs::create_dir_all(parent).with_context(
-                                        || format!(
-                                            "Failed to create output dir {}",
-                                            parent.display()
-                                        )
-                                    ));
-                                }
-                            }
-
-                            let mut file = try_or_cleanup!(File::create(&local_path).with_context(
-                                || format!("Failed to create output file {}", local_path.display())
-                            ));
-
-                            let count = try_or_cleanup!(io::copy(
-                                &mut output_data.into_reader(),
-                                &mut file
-                            )
-                            .with_context(|| format!(
-                                "Failed to write output to {}",
-                                local_path.display()
-                            )));
-
-                            if count != len {
-                                break Err(anyhow!("Expected {len} outputs, but received {count}"));
-                            }
-
-                            if let Some(output) = outputs.iter().find(|o| o.path == local_path) {
-                                if output.must_be_non_empty && count == 0 {
-                                    break Err(anyhow!("{local_path:?} must be a non-empty file"));
-                                }
-                            }
-                        } else {
-                            break Ok(());
+                    // Ensure the parent paths exist
+                    if let Some(parent) = path.parent() {
+                        if !parent.as_os_str().is_empty() {
+                            fs::create_dir_all(parent).with_context(|| {
+                                format!("Failed to create output dir {}", parent.display())
+                            })
+                            .map_err(|err| (output_paths.clone(), err))?;
                         }
-                    };
-
-                    if let Err(err) = unpack_outputs_res {
-                        if should_retry(&err, Some(job_id)) {
-                            tokio::time::sleep(retry_delay.next().unwrap()).await;
-                            continue;
-                        }
-                        break Err(err);
                     }
 
+                    // Create the output file
+                    let mut file = File::create(&path).with_context(|| {
+                        format!("Failed to create output file {}", path.display())
+                    }).map_err(|err| (output_paths.clone(), err))?;
+
+                    // Write the output file
+                    let expected_size = data.lens().actual;
+                    let bytes_written = io::copy(&mut data.into_reader(), &mut file)
+                        .with_context(|| format!("Failed to write output to {path:?}"))
+                        .map_err(|err| (output_paths.clone(), err))?;
+
+                    // Verify we wrote the number of bytes we expected to
+                    if bytes_written != expected_size {
+                        return Err((output_paths, anyhow!(
+                            "Expected {expected_size} bytes, but received {bytes_written}"
+                        )));
+                    }
+
+                    // Verify the file isn't empty
+                    if let Some(output) = outputs.iter().find(|o| o.path == path) {
+                        if output.must_be_non_empty && bytes_written == 0 {
+                            return Err((output_paths, anyhow!(UnexpectedEmptyFile(path))));
+                        }
+                    }
+
+                    Ok(output_paths)
+                })
+                .and_then(|output_paths| {
                     let extra_inputs = tc_archive
                         .as_ref()
                         .map(|p| vec![p.as_path()])
                         .unwrap_or_default();
-                    try_or_cleanup!(outputs_rewriter
+                    outputs_rewriter
                         .handle_outputs(path_transformer, &output_paths, extra_inputs.as_slice())
-                        .with_context(|| "Failed to rewrite outputs from compile"));
+                        .with_context(|| "Failed to rewrite outputs from compile")
+                        .map_err(|err| (output_paths, err))
+                })
+                .map_or_else(
+                    |(output_paths, err)| {
+                        // Do our best to clean up. We may end up deleting a file that we just wrote over
+                        // the top of, but it's better to clean up too much than too little
+                        for path in output_paths.iter() {
+                            if let Err(e) = fs::remove_file(path) {
+                                if e.kind() != io::ErrorKind::NotFound {
+                                    debug!("[{out_pretty}, {job_id}]: {e} while attempting to remove {path:?}")
+                                }
+                            }
+                        }
+                        Err(err)
+                    },
+                    |_| Ok((DistType::Ok(server_id), build_result.output))
+                );
 
-                    break Ok((DistType::Ok(server_id), result.output));
+            match unpack_result {
+                Ok(res) => break Ok(res),
+                Err(err) => {
+                    if err.downcast_ref::<UnexpectedEmptyFile>().is_some() {
+                        debug!("[{out_pretty}]: {err:?}");
+                        retry_or_bail!(err);
+                    }
+                    break Err(err);
                 }
             }
         };
