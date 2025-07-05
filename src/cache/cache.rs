@@ -248,6 +248,16 @@ impl CacheRead {
                 let mut tmp = NamedTempFile::new_in(dir)?;
                 match (self.get_object(&key, &mut tmp), optional) {
                     (Ok(mode), _) => {
+                        if must_be_non_empty {
+                            let size_on_disk = tmp
+                                .flush()
+                                .and_then(|_| tmp.as_file_mut().metadata())?
+                                .len();
+                            if size_on_disk == 0 {
+                                bail!(anyhow!(UnexpectedEmptyFile(path)));
+                            }
+                        }
+
                         let file = match tmp.persist_noclobber(&path) {
                             Ok(file) => {
                                 if let Some(mode) = mode {
@@ -260,6 +270,7 @@ impl CacheRead {
                                 _ => Err(err.error),
                             },
                         }?;
+
                         if must_be_non_empty {
                             let size_on_disk = file.metadata()?.len();
                             if size_on_disk == 0 {

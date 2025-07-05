@@ -1383,6 +1383,12 @@ impl DistCompile {
                         None => return Err((output_paths, anyhow!("Output file without a parent: {path:?}"))),
                     };
 
+                    let must_be_non_empty = if let Some(idx) = outputs.iter().position(|o| o.path == path) {
+                        outputs.swap_remove(idx).must_be_non_empty
+                    } else {
+                        false
+                    };
+
                     // Write the output file to a tempfile and then atomically
                     // move it to its final location so that other compiler invocations
                     // happening in parallel don't see a partially-written file.
@@ -1405,6 +1411,11 @@ impl DistCompile {
                         return Err((output_paths, anyhow!(UnexpectedFileSize(expected_size, bytes_written))));
                     }
 
+                    // Verify the tempfile file isn't empty
+                    if must_be_non_empty && bytes_written == 0 {
+                        return Err((output_paths, anyhow!(UnexpectedEmptyFile(path))));
+                    }
+
                     // Persist the tempfile to its real location, but don't overwrite
                     // if it already exists (e.g. nvcc's .module_id files).
                     let file = match tmp.persist_noclobber(&path) {
@@ -1420,14 +1431,12 @@ impl DistCompile {
                     .map_err(|err| (output_paths.clone(), anyhow!(err)))?;
 
                     // Verify the output file isn't empty
-                    if let Some(idx) = outputs.iter().position(|o| o.path == path) {
-                        if outputs.swap_remove(idx).must_be_non_empty {
-                            let size_on_disk = file.metadata()
-                                .map_err(|err| (output_paths.clone(), anyhow!(err)))?
-                                .len();
-                            if size_on_disk == 0 {
-                                return Err((output_paths, anyhow!(UnexpectedEmptyFile(path))));
-                            }
+                    if must_be_non_empty {
+                        let size_on_disk = file.metadata()
+                            .map_err(|err| (output_paths.clone(), anyhow!(err)))?
+                            .len();
+                        if size_on_disk == 0 {
+                            return Err((output_paths, anyhow!(UnexpectedEmptyFile(path))));
                         }
                     }
 
