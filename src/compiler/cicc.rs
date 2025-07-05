@@ -122,7 +122,6 @@ where
     let mut module_id_file_name = Option::<PathBuf>::None;
 
     let mut common_args = vec![];
-    let mut unhashed_args = vec![];
 
     for arg in ArgsIter::new(args.iter().cloned(), arg_info) {
         match arg {
@@ -182,10 +181,6 @@ where
                         module_id_file_name = Some(cwd.join(o));
                         &mut common_args
                     }
-                    Some(UnhashedPassThrough(o)) => {
-                        take_next = false;
-                        &mut unhashed_args
-                    }
                     None => match arg {
                         Argument::Raw(ref p) => {
                             if take_next {
@@ -234,7 +229,7 @@ where
         preprocessor_args: vec![],
         common_args,
         arch_args: vec![],
-        unhashed_args,
+        unhashed_args: vec![],
         extra_dist_files: extra_dist_files.clone(),
         extra_hash_files: extra_dist_files,
         msvc_show_includes: false,
@@ -343,14 +338,13 @@ ArgData! { pub
     ModuleIdFileNameOutput(PathBuf),
     Output(PathBuf),
     PassThrough(OsString),
-    UnhashedPassThrough(OsString),
 }
 
 use self::ArgData::*;
 
 counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
-    take_arg!("--gen_c_file_name", PathBuf, Separated, ExtraOutput),
-    take_arg!("--gen_device_file_name", PathBuf, Separated, ExtraOutput),
+    take_arg!("--gen_c_file_name", OsString, Separated, PassThrough),
+    take_arg!("--gen_device_file_name", OsString, Separated, PassThrough),
     flag!("--gen_module_id_file", GenModuleIdFileFlag),
     take_arg!("--include_file_name", OsString, Separated, PassThrough),
     take_arg!("--module_id_file_name", PathBuf, Separated, ModuleIdFileName),
