@@ -78,7 +78,7 @@
       "version": "11"
     },
     "ghcr.io/rapidsai/devcontainers/features/llvm:25.8": {
-      "version": "20"
+      "version": "16"
     },
     "ghcr.io/rapidsai/devcontainers/features/cuda:25.8": {
       "version": "11.8",
