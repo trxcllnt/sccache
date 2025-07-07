@@ -729,6 +729,7 @@ struct AdditionalStats {
     cache_writes: Option<u64>,
     compilations: Option<u64>,
     compile_requests: Option<u64>,
+    non_cacheable_compilations: Option<u64>,
     requests_executed: Option<u64>,
     cache_hits: Option<Vec<(CCompilerKind, Language, u64)>>,
     cache_misses: Option<Vec<(CCompilerKind, Language, u64)>>,
@@ -806,7 +807,8 @@ fn test_nvcc_cuda_compiles(
         stats.compilations += additional_stats.compilations.unwrap_or(0);
         stats.compile_requests += additional_stats.compile_requests.unwrap_or(0);
         stats.requests_executed += additional_stats.requests_executed.unwrap_or(0);
-        stats.non_cacheable_compilations = stats.compilations.saturating_sub(stats.cache_writes);
+        stats.non_cacheable_compilations +=
+            additional_stats.non_cacheable_compilations.unwrap_or(0);
 
         for (kind, lang, count) in additional_stats.cache_hits.unwrap_or_default() {
             let kind = CompilerKind::C(kind);
@@ -844,6 +846,7 @@ fn test_nvcc_cuda_compiles(
             cache_writes: Some(1),
             compilations: Some(2),
             compile_requests: Some(1),
+            non_cacheable_compilations: Some(1),
             requests_executed: Some(2),
             cache_misses: Some(vec![(CCompilerKind::Cicc, Language::Ptx, 1)]),
             ..Default::default()
@@ -860,6 +863,7 @@ fn test_nvcc_cuda_compiles(
             cache_writes: Some(1),
             compilations: Some(2),
             compile_requests: Some(1),
+            non_cacheable_compilations: Some(1),
             requests_executed: Some(3),
             cache_hits: Some(vec![(CCompilerKind::Cicc, Language::Ptx, 1)]),
             cache_misses: Some(vec![(CCompilerKind::Ptxas, Language::Cubin, 1)]),
@@ -874,9 +878,9 @@ fn test_nvcc_cuda_compiles(
         &extra_args,
         AdditionalStats {
             cache_writes: Some(3 + with_debug_flags as u64),
-            compilations: Some(3 + with_debug_flags as u64),
+            compilations: Some(4 + with_debug_flags as u64),
             compile_requests: Some(1),
-            requests_executed: Some(4),
+            requests_executed: Some(5),
             cache_hits: Some(vec![(
                 CCompilerKind::Ptxas,
                 Language::Cubin,
@@ -892,6 +896,7 @@ fn test_nvcc_cuda_compiles(
                     with_debug_flags as u64,
                 ),
             ]),
+            ..Default::default()
         },
     );
 
@@ -920,9 +925,9 @@ fn test_nvcc_cuda_compiles(
         // But -G causes cudafe++ and cicc to embed the source path their output, and we get cache misses.
         AdditionalStats {
             cache_writes: Some(3 + with_debug_flags as u64),
-            compilations: Some(3 + with_debug_flags as u64),
+            compilations: Some(4 + with_debug_flags as u64),
             compile_requests: Some(1),
-            requests_executed: Some(4),
+            requests_executed: Some(5),
             cache_hits: Some(vec![(
                 CCompilerKind::Ptxas,
                 Language::Cubin,
@@ -938,6 +943,7 @@ fn test_nvcc_cuda_compiles(
                     with_debug_flags as u64,
                 ),
             ]),
+            ..Default::default()
         },
     );
 
@@ -963,9 +969,9 @@ fn test_nvcc_cuda_compiles(
         &extra_args,
         AdditionalStats {
             cache_writes: Some(4),
-            compilations: Some(4),
+            compilations: Some(5),
             compile_requests: Some(1),
-            requests_executed: Some(4),
+            requests_executed: Some(5),
             cache_misses: Some(vec![
                 (CCompilerKind::Cicc, Language::Ptx, 1),
                 (CCompilerKind::Nvcc, Language::Cuda, 1),
@@ -1000,9 +1006,9 @@ fn test_nvcc_cuda_compiles(
         &extra_args,
         AdditionalStats {
             cache_writes: Some(4),
-            compilations: Some(4),
+            compilations: Some(5),
             compile_requests: Some(1),
-            requests_executed: Some(4),
+            requests_executed: Some(5),
             cache_misses: Some(vec![
                 (CCompilerKind::Nvcc, Language::Cuda, 1),
                 (CCompilerKind::CudaFE, Language::CudaFE, 1),
@@ -1055,9 +1061,9 @@ int main(int argc, char** argv) {
         &extra_args,
         AdditionalStats {
             cache_writes: Some(4),
-            compilations: Some(4),
+            compilations: Some(5),
             compile_requests: Some(1),
-            requests_executed: Some(4),
+            requests_executed: Some(5),
             cache_misses: Some(vec![
                 (CCompilerKind::Nvcc, Language::Cuda, 1),
                 (CCompilerKind::CudaFE, Language::CudaFE, 1),
@@ -1077,9 +1083,9 @@ int main(int argc, char** argv) {
         &extra_args,
         AdditionalStats {
             cache_writes: Some(2),
-            compilations: Some(2),
+            compilations: Some(3),
             compile_requests: Some(1),
-            requests_executed: Some(4),
+            requests_executed: Some(5),
             cache_hits: Some(vec![
                 (CCompilerKind::Cicc, Language::Ptx, 1),
                 (CCompilerKind::Ptxas, Language::Cubin, 1),
@@ -1088,6 +1094,7 @@ int main(int argc, char** argv) {
                 (CCompilerKind::Nvcc, Language::Cuda, 1),
                 (CCompilerKind::CudaFE, Language::CudaFE, 1),
             ]),
+            ..Default::default()
         },
     );
 
@@ -1122,6 +1129,7 @@ int main(int argc, char** argv) {
             cache_writes: Some(2),
             compilations: Some(3),
             compile_requests: Some(1),
+            non_cacheable_compilations: Some(1),
             requests_executed: Some(3),
             cache_misses: Some(vec![
                 (CCompilerKind::Cicc, Language::Ptx, 1),
@@ -1146,6 +1154,7 @@ int main(int argc, char** argv) {
             cache_writes: Some(2),
             compilations: Some(3),
             compile_requests: Some(1),
+            non_cacheable_compilations: Some(1),
             requests_executed: Some(3),
             cache_misses: Some(vec![
                 (CCompilerKind::Cicc, Language::Ptx, 1),
@@ -1170,6 +1179,7 @@ int main(int argc, char** argv) {
             cache_writes: Some(1 + with_debug_flags as u64),
             compilations: Some(2 + with_debug_flags as u64),
             compile_requests: Some(1),
+            non_cacheable_compilations: Some(1),
             requests_executed: Some(3),
             cache_hits: Some(vec![(
                 CCompilerKind::Ptxas,
@@ -1203,9 +1213,9 @@ int main(int argc, char** argv) {
         .concat(),
         AdditionalStats {
             cache_writes: Some(5 + with_debug_flags as u64),
-            compilations: Some(5 + with_debug_flags as u64),
+            compilations: Some(6 + with_debug_flags as u64),
             compile_requests: Some(1),
-            requests_executed: Some(6),
+            requests_executed: Some(7),
             cache_hits: Some(vec![(
                 CCompilerKind::Ptxas,
                 Language::Cubin,
@@ -1221,6 +1231,7 @@ int main(int argc, char** argv) {
                     1 + with_debug_flags as u64,
                 ),
             ]),
+            ..Default::default()
         },
     );
 
@@ -1241,9 +1252,9 @@ int main(int argc, char** argv) {
         .concat(),
         AdditionalStats {
             cache_writes: Some(4 + 2 * with_debug_flags as u64),
-            compilations: Some(4 + 2 * with_debug_flags as u64),
+            compilations: Some(5 + 2 * with_debug_flags as u64),
             compile_requests: Some(1),
-            requests_executed: Some(6),
+            requests_executed: Some(7),
             cache_hits: Some(vec![(
                 CCompilerKind::Ptxas,
                 Language::Cubin,
@@ -1259,6 +1270,7 @@ int main(int argc, char** argv) {
                     2 * with_debug_flags as u64,
                 ),
             ]),
+            ..Default::default()
         },
     );
 
@@ -1278,9 +1290,9 @@ int main(int argc, char** argv) {
         .concat(),
         AdditionalStats {
             cache_writes: Some(5 + with_debug_flags as u64),
-            compilations: Some(5 + with_debug_flags as u64),
+            compilations: Some(6 + with_debug_flags as u64),
             compile_requests: Some(1),
-            requests_executed: Some(6),
+            requests_executed: Some(7),
             cache_hits: Some(vec![(
                 CCompilerKind::Ptxas,
                 Language::Cubin,
@@ -1296,6 +1308,7 @@ int main(int argc, char** argv) {
                     1 + with_debug_flags as u64,
                 ),
             ]),
+            ..Default::default()
         },
     );
 
@@ -1314,9 +1327,9 @@ int main(int argc, char** argv) {
         .concat(),
         AdditionalStats {
             cache_writes: Some(5 + with_debug_flags as u64),
-            compilations: Some(5 + with_debug_flags as u64),
+            compilations: Some(6 + with_debug_flags as u64),
             compile_requests: Some(1),
-            requests_executed: Some(6),
+            requests_executed: Some(7),
             cache_hits: Some(vec![(
                 CCompilerKind::Ptxas,
                 Language::Cubin,
@@ -1332,6 +1345,7 @@ int main(int argc, char** argv) {
                     1 + with_debug_flags as u64,
                 ),
             ]),
+            ..Default::default()
         },
     );
 
@@ -1350,9 +1364,9 @@ int main(int argc, char** argv) {
         .concat(),
         AdditionalStats {
             cache_writes: Some(2),
-            compilations: Some(2),
+            compilations: Some(3),
             compile_requests: Some(1),
-            requests_executed: Some(4),
+            requests_executed: Some(5),
             cache_hits: Some(vec![
                 (CCompilerKind::Cicc, Language::Ptx, 1),
                 (CCompilerKind::Ptxas, Language::Cubin, 1),
@@ -1361,6 +1375,7 @@ int main(int argc, char** argv) {
                 (CCompilerKind::Nvcc, Language::Cuda, 1),
                 (CCompilerKind::CudaFE, Language::CudaFE, 1),
             ]),
+            ..Default::default()
         },
     );
 
@@ -1376,9 +1391,9 @@ int main(int argc, char** argv) {
         .concat(),
         AdditionalStats {
             cache_writes: Some(2),
-            compilations: Some(2),
+            compilations: Some(3),
             compile_requests: Some(1),
-            requests_executed: Some(4),
+            requests_executed: Some(5),
             cache_hits: Some(vec![
                 (CCompilerKind::Cicc, Language::Ptx, 1),
                 (CCompilerKind::Ptxas, Language::Cubin, 1),
@@ -1387,6 +1402,7 @@ int main(int argc, char** argv) {
                 (CCompilerKind::Nvcc, Language::Cuda, 1),
                 (CCompilerKind::CudaFE, Language::CudaFE, 1),
             ]),
+            ..Default::default()
         },
     );
 
@@ -1407,6 +1423,7 @@ int main(int argc, char** argv) {
             cache_writes: Some(1 + with_debug_flags as u64),
             compilations: Some(2 + with_debug_flags as u64),
             compile_requests: Some(1),
+            non_cacheable_compilations: Some(1),
             requests_executed: Some(3),
             cache_hits: Some(vec![(
                 CCompilerKind::Ptxas,
@@ -1438,6 +1455,7 @@ int main(int argc, char** argv) {
             cache_writes: Some(1 + with_debug_flags as u64),
             compilations: Some(2 + with_debug_flags as u64),
             compile_requests: Some(1),
+            non_cacheable_compilations: Some(1),
             requests_executed: Some(3),
             cache_hits: Some(vec![(
                 CCompilerKind::Ptxas,
@@ -1469,9 +1487,9 @@ int main(int argc, char** argv) {
         .concat(),
         AdditionalStats {
             cache_writes: Some(2),
-            compilations: Some(2),
+            compilations: Some(3),
             compile_requests: Some(1),
-            requests_executed: Some(4),
+            requests_executed: Some(5),
             cache_hits: Some(vec![
                 (CCompilerKind::Cicc, Language::Ptx, 1),
                 (CCompilerKind::CudaFE, Language::CudaFE, 1),
@@ -1480,6 +1498,7 @@ int main(int argc, char** argv) {
                 (CCompilerKind::Nvcc, Language::Cuda, 1),
                 (CCompilerKind::Ptxas, Language::Cubin, 1),
             ]),
+            ..Default::default()
         },
     );
 
@@ -1502,6 +1521,7 @@ int main(int argc, char** argv) {
                 cache_writes: Some(2),
                 compilations: Some(3),
                 compile_requests: Some(1),
+                non_cacheable_compilations: Some(1),
                 requests_executed: Some(8),
                 cache_hits: Some(vec![
                     (CCompilerKind::CudaFE, Language::CudaFE, 1),
@@ -1530,6 +1550,7 @@ int main(int argc, char** argv) {
                 cache_writes: Some(2),
                 compilations: Some(3),
                 compile_requests: Some(1),
+                non_cacheable_compilations: Some(1),
                 requests_executed: Some(8),
                 cache_hits: Some(vec![
                     (CCompilerKind::CudaFE, Language::CudaFE, 1),
@@ -1558,6 +1579,7 @@ int main(int argc, char** argv) {
                 cache_writes: Some(2),
                 compilations: Some(3),
                 compile_requests: Some(1),
+                non_cacheable_compilations: Some(1),
                 requests_executed: Some(8),
                 cache_hits: Some(vec![
                     (CCompilerKind::CudaFE, Language::CudaFE, 1),
@@ -1586,6 +1608,7 @@ int main(int argc, char** argv) {
                 cache_writes: Some(2),
                 compilations: Some(3),
                 compile_requests: Some(1),
+                non_cacheable_compilations: Some(1),
                 requests_executed: Some(8),
                 cache_hits: Some(vec![
                     (CCompilerKind::CudaFE, Language::CudaFE, 1),
@@ -1652,9 +1675,9 @@ fn test_nvcc_proper_lang_stat_tracking(
     fs::remove_file(&out_file).unwrap();
 
     stats.cache_writes += 4;
-    stats.compilations += 4;
+    stats.compilations += 5;
     stats.compile_requests += 1;
-    stats.requests_executed += 4;
+    stats.requests_executed += 5;
     stats
         .cache_misses
         .increment(&CompilerKind::C(CCompilerKind::Nvcc), &Language::Cuda);
@@ -1727,9 +1750,9 @@ fn test_nvcc_proper_lang_stat_tracking(
     fs::remove_file(&out_file).unwrap();
 
     stats.cache_writes += 1;
-    stats.compilations += 1;
+    stats.compilations += 2;
     stats.compile_requests += 1;
-    stats.requests_executed += 1;
+    stats.requests_executed += 2;
     stats
         .cache_misses
         .increment(&CompilerKind::C(CCompilerKind::Nvcc), &Language::C);
