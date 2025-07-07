@@ -1098,18 +1098,26 @@ where
                         )
                     }
                 } else {
-                    (
-                        env_vars.clone(),
-                        // If building an executable, cache the host compiler objects.
-                        // Otherwise don't cache, because the object will be cached at
-                        // the outer nvcc hash_key.
-                        if compile_flag == &NvccCompileFlag::Executable {
-                            Cacheable::Yes
-                        } else {
-                            Cacheable::No
-                        },
-                        Some(&mut final_assembly_group),
-                    )
+                    // If building an executable, cache the host compiler objects.
+                    // Otherwise don't cache, because the object will be cached at
+                    // the outer nvcc hash_key.
+                    if compile_flag == &NvccCompileFlag::Executable {
+                        (
+                            env_vars.clone(),
+                            Cacheable::Yes,
+                            Some(&mut final_assembly_group),
+                        )
+                    } else {
+                        (
+                            env_vars
+                                .iter()
+                                .chain(&[("SCCACHE_NO_CACHE".into(), "1".into())])
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                            Cacheable::Yes,
+                            Some(&mut final_assembly_group),
+                        )
+                    }
                 }
             }
         } {
