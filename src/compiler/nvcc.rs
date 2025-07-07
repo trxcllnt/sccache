@@ -168,7 +168,7 @@ impl CCompilerImpl for Nvcc {
                 // inputs that should produce cache hits.
                 let input = cwd.join(&parsed_args.input);
                 if input.exists() {
-                    parsed_args.input = input.canonicalize().unwrap();
+                    parsed_args.input = dunce::canonicalize(input).unwrap();
                 }
 
                 CompilerArguments::Ok(parsed_args)

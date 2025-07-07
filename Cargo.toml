@@ -35,6 +35,7 @@ bytes = "1"
 chrono = "0.4"
 clap = { version = "4.5.13", features = ["derive", "env", "wrap_help"] }
 directories = "5.0.1"
+dunce = "1.0.5"
 encoding_rs = "0.8"
 env_logger = "0.10"
 filetime = "0.2"
