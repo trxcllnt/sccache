@@ -462,6 +462,7 @@ impl LruDiskCache {
         let key = self.key_to_rel_path(key).into_os_string();
         self.pending.push(key.clone());
         self.pending_size += size;
+        fs::create_dir_all(&self.root)?;
         tempfile::Builder::new()
             .prefix(TEMPFILE_PREFIX)
             .tempfile_in(&self.root)
@@ -481,6 +482,7 @@ impl LruDiskCache {
         let key = self.key_to_rel_path(key).into_os_string();
         self.pending.push(key.clone());
         self.pending_size += size;
+        fs::create_dir_all(&self.root)?;
         tempfile::Builder::new()
             .prefix(TEMPFILE_PREFIX)
             .tempdir_in(&self.root)
@@ -547,18 +549,20 @@ impl LruDiskCache {
     pub fn get_size<K: AsRef<OsStr>>(&mut self, key: K) -> Result<u64> {
         let rel_path = self.key_to_rel_path(&key);
         let abs_path = self.rel_to_abs_path(&rel_path);
-        let size = if let Some(size) = self.lru.get(rel_path.as_os_str()) {
-            Some(*size)
-        } else if abs_path.exists() {
-            let size = get_entry_size(&abs_path);
-            self.insert_by(key, Some(size), |_| Ok(()))
-                .ok()
-                .map(|_| size)
+        let path_key = rel_path.as_os_str();
+        let size = if abs_path.exists() {
+            if let Some(size) = self.lru.get(path_key) {
+                Ok(*size)
+            } else {
+                let size = get_entry_size(&abs_path);
+                self.insert_by(&key, Some(size), |_| Ok(())).map(|_| size)
+            }
         } else {
-            None
+            let _ = self.lru.remove(path_key);
+            Err(Error::FileNotInCache)
         };
 
-        size.ok_or(Error::FileNotInCache).and_then(|size| {
+        size.and_then(|size| {
             let t = FileTime::now();
             set_file_times(&abs_path, t, t)?;
             Ok(size)

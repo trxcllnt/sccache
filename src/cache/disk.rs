@@ -204,7 +204,7 @@ impl Storage for DiskCache {
     async fn put(&self, key: &str, entry: CacheWrite) -> Result<Duration> {
         // We should probably do this on a background thread if we're going to buffer
         // everything in memory...
-        trace!("DiskCache::finish_put({})", key);
+        trace!("DiskCache::put({})", key);
 
         if self.rw_mode == CacheMode::ReadOnly {
             return Err(anyhow!("Cannot write to a read-only cache"));
