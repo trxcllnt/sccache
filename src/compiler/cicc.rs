@@ -119,6 +119,7 @@ where
     let mut take_next = false;
     let mut outputs = HashMap::new();
     let mut extra_dist_files = vec![];
+    let mut gen_module_id_file = false;
     let mut module_id_file_name = Option::<PathBuf>::None;
 
     let mut common_args = vec![];
@@ -142,8 +143,14 @@ where
                         }
                         &mut common_args
                     }
-                    Some(PassThrough(_)) => {
+                    Some(GenModuleIdFileFlag) => {
                         take_next = false;
+                        gen_module_id_file = true;
+                        &mut common_args
+                    }
+                    Some(ModuleIdFileName(o)) => {
+                        take_next = false;
+                        module_id_file_name = Some(cwd.join(o));
                         &mut common_args
                     }
                     Some(Output(o)) => {
@@ -159,26 +166,8 @@ where
                         );
                         continue;
                     }
-                    Some(GenModuleIdFileFlag) => {
+                    Some(PassThrough(_)) => {
                         take_next = false;
-                        &mut common_args
-                    }
-                    Some(ModuleIdFileNameOutput(o)) => {
-                        take_next = false;
-                        let path = cwd.join(o);
-                        outputs.insert(
-                            "obj",
-                            ArtifactDescriptor {
-                                path,
-                                optional: false,
-                                must_be_non_empty: true,
-                            },
-                        );
-                        continue;
-                    }
-                    Some(ModuleIdFileName(o)) => {
-                        take_next = false;
-                        module_id_file_name = Some(cwd.join(o));
                         &mut common_args
                     }
                     None => match arg {
@@ -204,10 +193,21 @@ where
         };
     }
 
-    if let Some(module_id_path) = module_id_file_name {
-        if module_id_path.exists() {
-            extra_dist_files.push(module_id_path.clone());
+    match (gen_module_id_file, module_id_file_name) {
+        (true, Some(path)) => {
+            outputs.insert(
+                "--module_id_file_name",
+                ArtifactDescriptor {
+                    path,
+                    optional: false,
+                    must_be_non_empty: true,
+                },
+            );
         }
+        (false, Some(path)) if path.exists() => {
+            extra_dist_files.push(path.clone());
+        }
+        _ => {}
     }
 
     CompilerArguments::Ok(ParsedArguments {
@@ -327,7 +327,6 @@ ArgData! { pub
     ExtraOutput(PathBuf),
     GenModuleIdFileFlag,
     ModuleIdFileName(PathBuf),
-    ModuleIdFileNameOutput(PathBuf),
     Output(PathBuf),
     PassThrough(OsString),
 }
