@@ -1471,7 +1471,7 @@ where
                                 dist_type = dt;
 
                                 match miss_type {
-                                    MissType::Normal | MissType::Nvcc => {}
+                                    MissType::Normal => {}
                                     MissType::ForcedNoCache => {}
                                     MissType::ForcedRecache => {
                                         stats.forced_recaches += 1;

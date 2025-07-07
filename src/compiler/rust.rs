@@ -1685,10 +1685,6 @@ where
     fn language(&self) -> Language {
         Language::Rust
     }
-
-    fn should_do_cache_lookup(&self, cache_control: CacheControl) -> CacheControl {
-        cache_control
-    }
 }
 
 impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {

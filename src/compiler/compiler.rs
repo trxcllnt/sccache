@@ -455,8 +455,6 @@ where
 
         let start = Instant::now();
 
-        let cache_control = self.should_do_cache_lookup(cache_control);
-
         let dist_client = dist_client.filter(|_| {
             // Clients might want to set this when configuring
             // so e.g. the CMake compiler checks execute locally
@@ -634,8 +632,6 @@ where
     fn language(&self) -> Language;
 
     fn get_executable(&self) -> PathBuf;
-
-    fn should_do_cache_lookup(&self, cache_control: CacheControl) -> CacheControl;
 }
 
 struct CacheLookupAndCompile<'a, T: CommandCreatorSync> {
@@ -714,10 +710,6 @@ where
 
         // If cache_control is `ForceNoCache`, `ForceRecache`, or `Nvcc`, don't check the cache.
         match cache_control {
-            CacheControl::Nvcc => Ok((
-                CacheLookupResult::Miss(MissType::Nvcc),
-                self.into_compile_result().await?,
-            )),
             CacheControl::ForceNoCache => {
                 trace!(
                     "[{out_pretty}]: Cache none in {}",
@@ -1636,8 +1628,6 @@ pub enum MissType {
     TimedOut,
     /// Error reading from cache
     CacheReadError,
-    /// Never lookup outer nvcc calls.
-    Nvcc,
 }
 
 /// Information about a successful cache write.
@@ -1736,8 +1726,6 @@ pub enum CacheControl {
     ForceNoCache,
     /// Ignore existing cache entries, force recompilation.
     ForceRecache,
-    /// Never lookup outer nvcc calls.
-    Nvcc,
 }
 
 /// Creates a future that will write `contents` to `path` inside of a temporary
