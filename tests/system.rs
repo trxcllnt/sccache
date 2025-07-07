@@ -2574,6 +2574,7 @@ fn test_stats_no_server() {
     );
 }
 
+#[cfg(not(target_os = "macos"))]
 macro_rules! test_cuda_sccache_command {
     ($cuda_compiler:ident, $host_compiler:ident, $cuda_compiler_name:expr, $host_compiler_name:expr) => {
         paste! {
