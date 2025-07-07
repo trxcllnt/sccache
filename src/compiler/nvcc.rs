@@ -135,9 +135,11 @@ impl CCompilerImpl for Nvcc {
 
         match parsed_args {
             CompilerArguments::Ok(mut parsed_args) => {
-                match parsed_args.compilation_flag.to_str() {
-                    Some("") => { /* no compile flag is valid */ }
-                    Some(flag) => {
+                let compile_flag = parsed_args.compilation_flag.as_os_str().into();
+
+                match compile_flag {
+                    NvccCompileFlag::Executable => { /* no compile flag is valid */ }
+                    _ => {
                         // Add the compilation flag to `parsed_args.common_args` so
                         // it's considered when computing the hash.
                         //
@@ -150,10 +152,25 @@ impl CCompilerImpl for Nvcc {
                         // The preprocessor output for all four are identical, so
                         // without including the compilation flag in the hasher's
                         // inputs, the same hash would be generated for all four.
-                        parsed_args.common_args.push(flag.into());
+                        parsed_args
+                            .common_args
+                            .push(parsed_args.compilation_flag.clone());
                     }
-                    _ => unreachable!(),
                 }
+
+                // Canonicalize here so the absolute path to the input is in the
+                // preprocessor output instead of paths relative to `cwd`.
+                //
+                // Since cicc's input is the post-processed source run through cudafe++'s
+                // transforms, its cache key is sensitive to the preprocessor output. The
+                // preprocessor embeds the name of the input file in comments, so without
+                // canonicalizing here, cicc will get cache misses on otherwise identical
+                // inputs that should produce cache hits.
+                let input = cwd.join(&parsed_args.input);
+                if input.exists() {
+                    parsed_args.input = input.canonicalize().unwrap();
+                }
+
                 CompilerArguments::Ok(parsed_args)
             }
             CompilerArguments::CannotCache(_, _) | CompilerArguments::NotCompilation => parsed_args,
@@ -189,6 +206,8 @@ impl CCompilerImpl for Nvcc {
             Language::Cuda => Ok("cu"),
             _ => Err(anyhow!("PCH not supported by nvcc")),
         }?;
+
+        let compile_flag = parsed_args.compilation_flag.as_os_str().into();
 
         let initialize_cmd_and_args = || {
             let mut command = creator.clone().new_command_sync(executable);
@@ -241,7 +260,7 @@ impl CCompilerImpl for Nvcc {
             dependency_cmd
         };
 
-        let preprocessor_command = || {
+        let preprocessor_command = |undef_forced_nvcc_preprocessor_definitions: bool| {
             let mut preprocess_cmd = initialize_cmd_and_args();
             // NVCC only supports `-E` when it comes after preprocessor and common flags.
             preprocess_cmd.arg("-E");
@@ -253,6 +272,10 @@ impl CCompilerImpl for Nvcc {
                 // other host compilers are presumed to match `gcc` behavior
                 NvccHostCompiler::Gcc => "-Xcompiler=-P",
             });
+            if undef_forced_nvcc_preprocessor_definitions {
+                preprocess_cmd.args(&["-U", "__CUDA_ARCH__"]);
+                preprocess_cmd.args(&["-U", "CUDA_DOUBLE_MATH_FUNCTIONS"]);
+            }
             if log_enabled!(Trace) {
                 let output_path = cwd.join(
                     &parsed_args
@@ -277,7 +300,13 @@ impl CCompilerImpl for Nvcc {
             run_input_output(dependencies_command(), None).await?;
         }
 
-        run_input_output(preprocessor_command(), None).await
+        match compile_flag {
+            NvccCompileFlag::Device | NvccCompileFlag::Executable => Ok(aggregate_output(
+                run_input_output(preprocessor_command(true), None).await?,
+                run_input_output(preprocessor_command(false), None).await?,
+            )),
+            _ => run_input_output(preprocessor_command(false), None).await,
+        }
     }
 
     fn generate_compile_commands<T>(
@@ -423,18 +452,7 @@ fn generate_compile_commands(
     });
     fs::create_dir_all(&out_dir).ok();
 
-    let compile_flag = match parsed_args.compilation_flag.to_str() {
-        Some("") // compile to executable
-        | Some("-c") | Some("--compile") // compile to object
-        | Some("-dc") | Some("--device-c") // compile to object with -rdc=true
-        | Some("-dw") | Some("--device-w") // compile to object with -rdc=false
-        => NvccCompileFlag::Device,
-        Some("-cubin") | Some("--cubin") => NvccCompileFlag::Cubin,
-        Some("-ptx") | Some("--ptx") => NvccCompileFlag::Ptx,
-        Some("-cuda") | Some("--cuda") => NvccCompileFlag::Preprocess,
-        Some("-fatbin") | Some("--fatbin") => NvccCompileFlag::Fatbin,
-        _ => unreachable!()
-    };
+    let compile_flag = parsed_args.compilation_flag.as_os_str().into();
 
     arguments.extend(vec![
         "-o".into(),
@@ -443,7 +461,10 @@ fn generate_compile_commands(
         // but we run the host compiler in `cwd` (the dir from which sccache was
         // executed), cicc/ptxas `-o` argument should point at the real out path
         // that's potentially relative to `cwd`.
-        if compile_flag == NvccCompileFlag::Device {
+        if matches!(
+            compile_flag,
+            NvccCompileFlag::Device | NvccCompileFlag::Executable
+        ) {
             output.clone().into()
         } else {
             cwd.join(output).into()
@@ -458,15 +479,14 @@ fn generate_compile_commands(
         arguments.push("--".into());
     }
 
-    // Canonicalize here so the absolute path to the input is in the
-    // preprocessor output instead of paths relative to `cwd`.
-    //
-    // Since cicc's input is the post-processed source run through cudafe++'s
-    // transforms, its cache key is sensitive to the preprocessor output. The
-    // preprocessor embeds the name of the input file in comments, so without
-    // canonicalizing here, cicc will get cache misses on otherwise identical
-    // inputs that should produce cache hits.
-    arguments.push(cwd.join(&parsed_args.input).canonicalize().unwrap().into());
+    arguments.push(parsed_args.input.as_path().into());
+
+    // Only cache compilations that produce object files.
+    let cacheable = if compile_flag == NvccCompileFlag::Device {
+        Cacheable::Yes
+    } else {
+        Cacheable::No
+    };
 
     let command = NvccCompileCommand {
         out_dir,
@@ -482,29 +502,42 @@ fn generate_compile_commands(
         output_path: cwd.join(output),
     };
 
-    Ok((
-        command,
-        None,
-        // Never assume the outer `nvcc` call is cacheable. We must decompose the nvcc call into
-        // its constituent subcommands with `--dryrun` and only cache the final build product.
-        //
-        // Always decomposing `nvcc --dryrun` is the only way to ensure caching nvcc invocations
-        // is fully sound, because the `nvcc -E` preprocessor output is not sufficient to detect
-        // all source code changes.
-        //
-        // Specifically, `nvcc -E` always defines __CUDA_ARCH__, which means changes to host-only
-        // code guarded by an `#ifndef __CUDA_ARCH__` will _not_ be captured in `nvcc -E` output.
-        Cacheable::No,
-    ))
+    Ok((command, None, cacheable))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NvccCompileFlag {
     Cubin,
     Device,
+    Executable,
     Fatbin,
     Preprocess,
+    LtoIR,
+    OptixIR,
     Ptx,
+}
+
+impl From<&OsStr> for NvccCompileFlag {
+    fn from(flag: &OsStr) -> Self {
+        match flag.to_str() {
+            // compile to executable
+            Some("") => NvccCompileFlag::Executable,
+            // compile to object
+            Some("-c") | Some("--compile")
+            // compile to object with -rdc=true
+            | Some("-dc") | Some("--device-c")
+            // compile to object with -rdc=false
+            | Some("-dw") | Some("--device-w")
+            => NvccCompileFlag::Device,
+            Some("-cubin") | Some("--cubin") => NvccCompileFlag::Cubin,
+            Some("-cuda") | Some("--cuda") => NvccCompileFlag::Preprocess,
+            Some("-fatbin") | Some("--fatbin") => NvccCompileFlag::Fatbin,
+            Some("-ltoir") | Some("--ltoir") => NvccCompileFlag::OptixIR,
+            Some("-optix-ir") | Some("--optix-ir") => NvccCompileFlag::LtoIR,
+            Some("-ptx") | Some("--ptx") => NvccCompileFlag::Ptx,
+            _ => unreachable!()
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -620,43 +653,77 @@ impl CompileCommandImpl for NvccCompileCommand {
             };
 
             // Delete sccache internal intermediate files dir
-            temps_kept.and(fs::remove_dir_all(out_dir))
+            temps_kept
+                .and(fs::remove_dir_all(out_dir))
+                .map_err(anyhow::Error::new)
         };
 
         let mut output = ProcessOutput::default();
 
         let n = nvcc_subcommand_groups.len();
         let cuda_front_end_range = if n > 0 { 0..1 } else { 0..0 };
-        let final_assembly_range = if n > 1 { n - 1..n } else { 0..0 };
         let device_compile_range = if n > 2 { 1..n - 1 } else { 0..0 };
 
         let num_parallel = device_compile_range.len().min(*num_parallel).max(1);
 
         service.stats.lock().await.decrement_pending_compilations();
 
-        for command_group_chunks in [
-            nvcc_subcommand_groups[cuda_front_end_range].chunks(1),
-            // compile multiple device architectures in parallel when `nvcc -t=N` is specified
-            nvcc_subcommand_groups[device_compile_range].chunks(num_parallel),
-            nvcc_subcommand_groups[final_assembly_range].chunks(1),
-        ] {
-            for command_groups in command_group_chunks {
-                let results = futures::future::join_all(command_groups.iter().map(|commands| {
-                    run_nvcc_subcommands_group(service, creator, cwd, commands, output_path)
-                }))
-                .await;
+        let run_command_groups =
+            |mut output: ProcessOutput, chunks: Vec<Vec<Vec<NvccGeneratedSubcommand>>>| async {
+                for chunk in chunks {
+                    let results = futures::future::join_all(chunk.into_iter().map(|commands| {
+                        run_nvcc_subcommands_group(service, creator, cwd, commands, output_path)
+                    }))
+                    .await;
 
-                for result in results {
-                    output = aggregate_output(output, result.unwrap_or_else(error_to_output));
-                }
+                    for result in results {
+                        output = aggregate_output(output, result.unwrap_or_else(error_to_output));
+                    }
 
-                if !output.success() {
-                    output.stdout.shrink_to_fit();
-                    output.stderr.shrink_to_fit();
-                    maybe_keep_temps_then_clean()?;
-                    return Err(ProcessError(output).into());
+                    if !output.success() {
+                        output.stdout.shrink_to_fit();
+                        output.stderr.shrink_to_fit();
+                        return Err(anyhow!(ProcessError(output)));
+                    }
                 }
-            }
+                Ok(output)
+            };
+
+        let mut cudafe_commands_group = nvcc_subcommand_groups;
+        let mut device_compile_groups = cudafe_commands_group.split_off(cuda_front_end_range.len());
+        let final_host_compiler_group = device_compile_groups.split_off(device_compile_range.len());
+
+        // Run the `cudafe++` command group first
+        if !cudafe_commands_group.is_empty() {
+            output = run_command_groups(output, vec![cudafe_commands_group])
+                .await
+                .or_else(|err| maybe_keep_temps_then_clean().and(Err(err)))?;
+        }
+
+        // Compile multiple device architectures in parallel when `nvcc -t=N` is specified
+        if !device_compile_groups.is_empty() {
+            output = run_command_groups(output, {
+                let mut chunks = vec![];
+                let mut head = device_compile_groups;
+                loop {
+                    if head.is_empty() {
+                        break;
+                    }
+                    let tail = head.split_off(head.len().min(num_parallel));
+                    chunks.push(head);
+                    head = tail;
+                }
+                chunks
+            })
+            .await
+            .or_else(|err| maybe_keep_temps_then_clean().and(Err(err)))?;
+        }
+
+        // Run the final host compile and link command group
+        if !final_host_compiler_group.is_empty() {
+            output = run_command_groups(output, vec![final_host_compiler_group])
+                .await
+                .or_else(|err| maybe_keep_temps_then_clean().and(Err(err)))?;
         }
 
         output.stdout.shrink_to_fit();
@@ -854,11 +921,28 @@ where
     let mut final_assembly_group = Vec::<NvccGeneratedSubcommand>::new();
     let mut device_compile_groups = HashMap::<String, Vec<NvccGeneratedSubcommand>>::new();
 
+    fn get_device_compile_group<'a>(
+        device_compile_groups: &'a mut HashMap<String, Vec<NvccGeneratedSubcommand>>,
+        out_file_name: &str,
+    ) -> Option<&'a mut Vec<NvccGeneratedSubcommand>> {
+        if !device_compile_groups.contains_key(out_file_name) {
+            device_compile_groups.insert(out_file_name.to_owned(), vec![]);
+        }
+        device_compile_groups.get_mut(out_file_name)
+    }
+
+    let env_vars_no_preprocessor_cache_mode = env_vars
+        .iter()
+        .filter(|(key, _)| key != "SCCACHE_DIRECT")
+        .chain([("SCCACHE_DIRECT".into(), "false".into())].iter())
+        .cloned()
+        .collect::<Vec<_>>();
+
     for (dir, exe, args) in all_commands.iter_mut() {
         if let (env_vars, cacheable, Some(group)) = match exe.file_stem().and_then(|s| s.to_str()) {
             // fatbinary and nvlink are not cacheable
             Some("fatbinary") | Some("nvlink") => (
-                env_vars.clone(),
+                env_vars_no_preprocessor_cache_mode.clone(),
                 Cacheable::No,
                 Some(&mut final_assembly_group),
             ),
@@ -871,10 +955,10 @@ where
                         args.splice(idx..idx + 1, []);
                     }
                 }
-                // Add these flags if they're missing:
+                // Add or remove these flags:
                 // * `--gen_c_file_name test_a.compute_XX.cudafe1.c`
                 // * `--stub_file_name test_a.compute_XX.cudafe1.stub.c`
-                // * `--gen_device_file_name test_a.compute_XX.cudafe1.gpu`
+                // * `--gen_device_file_name test_a.compute_XX.cudafe1.gpu` (optional)
                 //
                 // This ensures the same `cicc` command is generated regardless
                 // of whether the compilation flag is `-c`, `-ptx`, or `-cubin`
@@ -886,33 +970,77 @@ where
                 let name = name.split(".cpp1.ii").next().unwrap();
 
                 for (flag, name) in [
-                    (&gen_c_file_name_flag, format!("{name}.cudafe1.c")),
-                    (&stub_file_name_flag, format!("{name}.cudafe1.stub.c")),
-                    (&gen_device_file_name_flag, format!("{name}.cudafe1.gpu")),
+                    (&stub_file_name_flag, Some(format!("{name}.cudafe1.stub.c"))),
+                    // Only generate `.cudafe1.{c,gpu}` files when `-keep` is on.
+                    //
+                    // nvcc's cicc commands to output them by default,
+                    // but as far as I can tell, they aren't by any other part
+                    // of the compilation pipeline.
+                    //
+                    // These files can be large (`.gpu` can be hundreds of MiB),
+                    // making them really expensive to cache and/or ship around
+                    // sccache-dist servers unnecessarily.
+                    //
+                    // `nvcc -h` says users can do `nvcc -c x.gpu -o x.cubin`
+                    // to compile a `.gpu` file directly to a cubin with cicc,
+                    // but I'm not sure how the user would get the `.gpu` file
+                    // without doing `nvcc -c x.cu -o x.o -keep` first.
+                    (
+                        &gen_c_file_name_flag,
+                        keep_dir.as_ref().map(|_| format!("{name}.cudafe1.c")),
+                    ),
+                    (
+                        &gen_device_file_name_flag,
+                        keep_dir.as_ref().map(|_| format!("{name}.cudafe1.gpu")),
+                    ),
                 ] {
-                    if !args.contains(flag) {
-                        args.splice(nidx..nidx, [flag.clone(), name]);
-                        nidx = args.len() - 3;
+                    match name {
+                        Some(name) if !args.contains(flag) => {
+                            args.splice(nidx..nidx, [flag.into(), name]);
+                        }
+                        None if args.contains(flag) => {
+                            if let Some(idx) = args.iter().position(|x| x == flag) {
+                                args.splice(idx..idx + 1, []);
+                            }
+                        }
+                        _ => {}
                     }
+                    nidx = args.len() - 3;
                 }
 
-                let group = device_compile_groups.get_mut(&args[args.len() - 3]);
-                (env_vars.clone(), Cacheable::Yes, group)
+                let input = &args[nidx];
+                let group = get_device_compile_group(&mut device_compile_groups, input);
+                (
+                    env_vars_no_preprocessor_cache_mode.clone(),
+                    Cacheable::Yes,
+                    group,
+                )
             }
             Some("ptxas") => {
-                let group = device_compile_groups.values_mut().find(|cmds| {
-                    if let Some(cicc) = cmds.last() {
-                        if let Some(cicc_out) = cicc.args.last() {
-                            return cicc_out == &args[args.len() - 3];
+                let input = &args[args.len() - 3];
+                let input = device_compile_groups
+                    .values_mut()
+                    .find_map(|cmds| {
+                        if let Some(cicc) = cmds.last() {
+                            if let Some(cicc_out) = cicc.args.last() {
+                                if cicc_out == input {
+                                    return Some(cicc.args[cicc.args.len() - 3].clone());
+                                }
+                            }
                         }
-                    }
-                    false
-                });
-                (env_vars.clone(), Cacheable::Yes, group)
+                        None
+                    })
+                    .unwrap_or_else(|| input.clone());
+                let group = get_device_compile_group(&mut device_compile_groups, &input);
+                (
+                    env_vars_no_preprocessor_cache_mode.clone(),
+                    Cacheable::Yes,
+                    group,
+                )
             }
             // cudafe++ _must be_ cached, because the `.module_id` file is unique to each invocation (new in CTK 12.8)
             Some("cudafe++") => (
-                env_vars.clone(),
+                env_vars_no_preprocessor_cache_mode.clone(),
                 Cacheable::Yes,
                 Some(&mut cuda_front_end_group),
             ),
@@ -960,13 +1088,8 @@ where
                             None
                         }
                     }) {
-                        let new_device_compile_group = vec![];
-                        device_compile_groups.insert(out_file.clone(), new_device_compile_group);
-                        (
-                            env_vars.clone(),
-                            Cacheable::No,
-                            device_compile_groups.get_mut(&out_file),
-                        )
+                        let group = get_device_compile_group(&mut device_compile_groups, &out_file);
+                        (env_vars.clone(), Cacheable::No, group)
                     } else {
                         (
                             env_vars.clone(),
@@ -975,34 +1098,16 @@ where
                         )
                     }
                 } else {
-                    // Cache the host compiler calls, since we've marked the outer `nvcc` call
-                    // as non-cacheable. This ensures `sccache nvcc ...` _always_ decomposes the
-                    // nvcc call into its constituent subcommands with `--dryrun`, but only caches
-                    // the final build product once.
-                    //
-                    // Always decomposing `nvcc --dryrun` is the only way to ensure caching nvcc invocations
-                    // is fully sound, because the `nvcc -E` preprocessor output is not sufficient to detect
-                    // all source code changes.
-                    //
-                    // Specifically, `nvcc -E` always defines __CUDA_ARCH__, which means changes to host-only
-                    // code guarded by an `#ifndef __CUDA_ARCH__` will _not_ be captured in `nvcc -E` output.
                     (
-                        env_vars
-                            .iter()
-                            .chain(
-                                [
-                                    // HACK: This compilation will look like a C/C++ compilation,
-                                    // but we want to report it in the stats as a CUDA compilation.
-                                    // The SccacheService API doesn't have a great way to specify this
-                                    // case, so we set a special envvar here that it can read when the
-                                    // compilation is finished.
-                                    ("__SCCACHE_THIS_IS_A_CUDA_COMPILATION__".into(), "".into()),
-                                ]
-                                .iter(),
-                            )
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                        Cacheable::Yes,
+                        env_vars.clone(),
+                        // If building an executable, cache the host compiler objects.
+                        // Otherwise don't cache, because the object will be cached at
+                        // the outer nvcc hash_key.
+                        if compile_flag == &NvccCompileFlag::Executable {
+                            Cacheable::Yes
+                        } else {
+                            Cacheable::No
+                        },
                         Some(&mut final_assembly_group),
                     )
                 }
@@ -1010,15 +1115,17 @@ where
         } {
             if log_enabled!(log::Level::Trace) {
                 trace!(
-                    "[{}]: transformed nvcc command: \"{}\"",
+                    "[{}]: transformed nvcc command: {:?}",
                     output_path.display(),
-                    [
-                        &[format!("cd {} &&", dir.to_string_lossy()).to_string()],
-                        &[exe.to_str().unwrap_or_default().to_string()][..],
-                        &args[..]
-                    ]
-                    .concat()
-                    .join(" ")
+                    format!(
+                        "{} && {}",
+                        shlex::try_join(["cd", &format!("{}", dir.display())])?,
+                        shlex::try_join(
+                            std::iter::once(&format!("{}", exe.display()))
+                                .chain(args.iter())
+                                .map(|s| s.as_str())
+                        )?
+                    )
                 );
             }
 
@@ -1060,13 +1167,16 @@ where
         trace!(
             "[{}]: nvcc dryrun command: {:?}",
             output_path.display(),
-            [
-                &[executable.to_str().unwrap_or_default().to_string()][..],
-                &dist::osstrings_to_strings(arguments).unwrap_or_default()[..],
-                &["--dryrun".into(), "--keep".into()][..]
-            ]
-            .concat()
-            .join(" ")
+            format!(
+                "{} && {}",
+                shlex::try_join(["cd", &format!("{}", cwd.display())])?,
+                shlex::try_join(
+                    std::iter::once(&format!("{}", executable.display()))
+                        .chain(&dist::osstrings_to_strings(arguments).unwrap_or_default())
+                        .map(|s| s.as_str())
+                        .chain(["--dryrun", "--keep"])
+                )?
+            )
         );
     }
 
@@ -1270,6 +1380,8 @@ fn remap_generated_filenames(
         ".fatbin.c",
         ".fatbin",
         ".module_id",
+        ".ltoir",
+        ".optixir",
         ".ptx",
     ];
 
@@ -1288,9 +1400,17 @@ fn remap_generated_filenames(
             extensions_to_rename.push(".ptx");
         }
         // Rewrite both PTX and cubin names if the compile flag is `-c` or `-fatbin`
-        NvccCompileFlag::Device | NvccCompileFlag::Fatbin => {
+        NvccCompileFlag::Device | NvccCompileFlag::Executable | NvccCompileFlag::Fatbin => {
             extensions_to_rename.push(".ptx");
             extensions_to_rename.push(".cubin");
+            extensions_to_rename.push(".ltoir");
+            extensions_to_rename.push(".optixir");
+        }
+        NvccCompileFlag::LtoIR => {
+            extensions_to_rename.push(".ltoir");
+        }
+        NvccCompileFlag::OptixIR => {
+            extensions_to_rename.push(".optixir");
         }
         _ => {}
     }
@@ -1500,7 +1620,7 @@ async fn run_nvcc_subcommands_group<T>(
     service: &server::SccacheService<T>,
     creator: &T,
     cwd: &Path,
-    commands: &[NvccGeneratedSubcommand],
+    commands: Vec<NvccGeneratedSubcommand>,
     output_path: &Path,
 ) -> Result<ProcessOutput>
 where
@@ -1508,7 +1628,7 @@ where
 {
     let mut output = ProcessOutput::default();
 
-    async fn run_subcommand<T>(cmd: &NvccGeneratedSubcommand, creator: &T) -> ProcessOutput
+    async fn run_subcommand<T>(cmd: NvccGeneratedSubcommand, creator: &T) -> ProcessOutput
     where
         T: CommandCreatorSync,
     {
@@ -1522,7 +1642,7 @@ where
 
         let mut cmd = creator.clone().new_command_sync(exe);
 
-        cmd.args(args)
+        cmd.args(&args)
             .current_dir(cwd)
             .env_clear()
             .envs(env_vars.to_vec());
@@ -1533,36 +1653,38 @@ where
     }
 
     for cmd in commands {
-        let NvccGeneratedSubcommand {
-            exe,
-            args,
-            cwd,
-            env_vars,
-            cacheable,
-        } = cmd;
-
         if log_enabled!(log::Level::Trace) {
             trace!(
-                "[{}]: run_commands_sequential cwd={:?}, cmd=\"{}\"",
+                "[{}]: run_commands_sequential: {:?}",
                 output_path.display(),
-                cwd,
-                [
-                    vec![exe.clone().into_os_string().into_string().unwrap()],
-                    args.to_vec()
-                ]
-                .concat()
-                .join(" ")
+                format!(
+                    "{} && {}",
+                    shlex::try_join(["cd", &format!("{}", cmd.cwd.display())])?,
+                    shlex::try_join(
+                        std::iter::once(&format!("{}", cmd.exe.display()))
+                            .chain(cmd.args.iter())
+                            .map(|s| s.as_str())
+                    )?
+                )
             );
         }
 
-        let out = match cacheable {
+        let out = match cmd.cacheable {
             Cacheable::No => run_subcommand(cmd, creator).await,
             Cacheable::Yes => {
+                let NvccGeneratedSubcommand {
+                    exe,
+                    args,
+                    cwd,
+                    env_vars,
+                    cacheable,
+                } = &cmd;
+
                 let srvc = service.clone();
                 let args = dist::strings_to_osstrings(args);
 
                 match srvc
-                    .compiler_info(exe.clone(), cwd.to_owned(), &args, env_vars)
+                    .compiler_info(exe.clone(), cwd.clone(), &args, env_vars)
                     .await
                 {
                     Err(err) => error_to_output(err),
@@ -1577,18 +1699,7 @@ where
                             ))
                         }
                         CompilerArguments::Ok(hasher) => srvc
-                            .start_compile_task(
-                                compiler,
-                                hasher,
-                                args,
-                                cwd.to_owned(),
-                                env_vars
-                                    .iter()
-                                    .filter(|(key, _)| key != "SCCACHE_DIRECT")
-                                    .chain([("SCCACHE_DIRECT".into(), "false".into())].iter())
-                                    .cloned()
-                                    .collect::<Vec<_>>(),
-                            )
+                            .start_compile_task(compiler, hasher, args, cmd.cwd, cmd.env_vars)
                             .await
                             .map_or_else(error_to_output, result_to_output),
                     },

@@ -9,7 +9,10 @@ use std::{
 };
 
 use sccache::{
-    config::{CacheConfigs, DiskCacheConfig, DistConfig, FileConfig, PreprocessorCacheModeConfig},
+    config::{
+        try_read_config_file, CacheConfigs, DiskCacheConfig, DistConfig, FileConfig,
+        PreprocessorCacheModeConfig,
+    },
     server::{ServerInfo, ServerStats},
 };
 
@@ -168,6 +171,27 @@ impl SccacheClient {
                 .stderr(Stdio::null())
                 .status(),
         );
+    }
+
+    pub fn clear_disk_cache(&self) -> sccache::errors::Result<()> {
+        self.zero_stats();
+        let disk_cache = (|| {
+            if let Some(cfg_path_idx) = self.envvars.iter().position(|(k, _)| k == "SCCACHE_CONF") {
+                if let Some((_, cfg_path)) = self.envvars.get(cfg_path_idx) {
+                    if let Ok(Some(cfg)) =
+                        try_read_config_file::<FileConfig>(&PathBuf::from(cfg_path))
+                    {
+                        if let Some(disk_cache) = cfg.cache.disk {
+                            return disk_cache;
+                        }
+                    }
+                }
+            }
+            DiskCacheConfig::default()
+        })();
+        println!("clear_disk_cache: {:?}", disk_cache.dir);
+        fs::remove_dir_all(&disk_cache.dir)?;
+        Ok(())
     }
 }
 

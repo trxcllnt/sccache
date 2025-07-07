@@ -208,14 +208,6 @@ where
         if module_id_path.exists() {
             extra_dist_files.push(module_id_path.clone());
         }
-        outputs.insert(
-            "--module_id_file_name",
-            ArtifactDescriptor {
-                path: module_id_path,
-                optional: false,
-                must_be_non_empty: true,
-            },
-        );
     }
 
     CompilerArguments::Ok(ParsedArguments {
@@ -343,8 +335,8 @@ ArgData! { pub
 use self::ArgData::*;
 
 counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
-    take_arg!("--gen_c_file_name", OsString, Separated, PassThrough),
-    take_arg!("--gen_device_file_name", OsString, Separated, PassThrough),
+    take_arg!("--gen_c_file_name", PathBuf, Separated, ExtraOutput),
+    take_arg!("--gen_device_file_name", PathBuf, Separated, ExtraOutput),
     flag!("--gen_module_id_file", GenModuleIdFileFlag),
     take_arg!("--include_file_name", OsString, Separated, PassThrough),
     take_arg!("--module_id_file_name", PathBuf, Separated, ModuleIdFileName),

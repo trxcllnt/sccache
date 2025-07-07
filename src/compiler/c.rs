@@ -169,6 +169,24 @@ pub enum CCompilerKind {
     TaskingVX,
 }
 
+impl From<&str> for CCompilerKind {
+    fn from(kind: &str) -> Self {
+        match kind {
+            "clang" | "clang++" | "clang-cl" => CCompilerKind::Clang,
+            "diab" => CCompilerKind::Diab,
+            "gcc" | "g++" => CCompilerKind::Gcc,
+            "cl" => CCompilerKind::Msvc,
+            "nvcc" => CCompilerKind::Nvcc,
+            "cudafe++" => CCompilerKind::CudaFE,
+            "cicc" => CCompilerKind::Cicc,
+            "ptxas" => CCompilerKind::Ptxas,
+            "nvc" | "nvc++" => CCompilerKind::Nvhpc,
+            "taskingvx" => CCompilerKind::TaskingVX,
+            _ => unreachable!(),
+        }
+    }
+}
+
 /// An interface to a specific C compiler.
 #[async_trait]
 pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {

@@ -13,6 +13,12 @@ __global__ void cuda_entry_point(int* a) {
   cuda_device_func(a);
 }
 
+#ifdef __CUDA_ARCH__
+static const auto cuda_arch_defined = true;
+#else
+static const auto cuda_arch_defined = false;
+#endif
+
 int main() {
   int* a;
   cudaMalloc(&a, sizeof(int));
