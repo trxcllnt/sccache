@@ -867,6 +867,7 @@ where
         );
     }
 
+    let output_flag = "-o".to_owned();
     let gen_module_id_file_flag = "--gen_module_id_file".to_owned();
     let gen_c_file_name_flag = "--gen_c_file_name".to_owned();
     let gen_device_file_name_flag = "--gen_device_file_name".to_owned();
@@ -1017,26 +1018,32 @@ where
                 )
             }
             Some("ptxas") => {
-                let input = &args[args.len() - 3];
-                let input = device_compile_groups
-                    .values_mut()
-                    .find_map(|cmds| {
-                        if let Some(cicc) = cmds.last() {
-                            if let Some(cicc_out) = cicc.args.last() {
-                                if cicc_out == input {
-                                    return Some(cicc.args[cicc.args.len() - 3].clone());
+                if let Some(idx) = args.iter().position(|x| x == &output_flag) {
+                    // ptxas ... <input> -o <output>
+                    let input = &args[idx - 1];
+                    let input = device_compile_groups
+                        .values_mut()
+                        .find_map(|cmds| {
+                            if let Some(cicc) = cmds.last() {
+                                if let Some(cicc_out) = cicc.args.last() {
+                                    if cicc_out == input {
+                                        return Some(cicc.args[cicc.args.len() - 3].clone());
+                                    }
                                 }
                             }
-                        }
-                        None
-                    })
-                    .unwrap_or_else(|| input.clone());
-                let group = get_device_compile_group(&mut device_compile_groups, &input);
-                (
-                    env_vars_no_preprocessor_cache_mode.clone(),
-                    Cacheable::Yes,
-                    group,
-                )
+                            None
+                        })
+                        .unwrap_or_else(|| input.clone());
+                    let group = get_device_compile_group(&mut device_compile_groups, &input);
+                    (
+                        env_vars_no_preprocessor_cache_mode.clone(),
+                        Cacheable::Yes,
+                        group,
+                    )
+                } else {
+                    // ptxas ... <input>
+                    (vec![], Cacheable::No, None)
+                }
             }
             // cudafe++ _must be_ cached, because the `.module_id` file is unique to each invocation (new in CTK 12.8)
             Some("cudafe++") => (
