@@ -29,6 +29,7 @@ use crate::mock_command::{
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist, protocol, server};
 use async_trait::async_trait;
+use bytes::Buf;
 use fs::File;
 use fs_err as fs;
 use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt};
@@ -192,7 +193,7 @@ impl CCompilerImpl for Nvcc {
     where
         T: CommandCreatorSync,
     {
-        let env_vars = env_vars
+        let mut env_vars = env_vars
             .iter()
             .filter(|(k, _)| k != "NVCC_PREPEND_FLAGS" && k != "NVCC_APPEND_FLAGS")
             .cloned()
@@ -207,105 +208,163 @@ impl CCompilerImpl for Nvcc {
             _ => Err(anyhow!("PCH not supported by nvcc")),
         }?;
 
-        let compile_flag = parsed_args.compilation_flag.as_os_str().into();
-
-        let initialize_cmd_and_args = || {
-            let mut command = creator.clone().new_command_sync(executable);
-            command
-                .current_dir(cwd)
-                .env_clear()
-                .envs(env_vars.clone())
-                .args(&parsed_args.preprocessor_args)
-                .args(&parsed_args.common_args)
-                .arg("-x")
-                .arg(language)
-                .arg(&parsed_args.input);
-            command
-        };
-
-        let dependencies_command = || {
-            // NVCC doesn't support generating both the dependency information
-            // and the preprocessor output at the same time. So if we have
-            // need for both, we need separate compiler invocations
-            let mut dependency_cmd = initialize_cmd_and_args();
-            dependency_cmd.args(
-                &parsed_args
-                    .dependency_args
-                    .iter()
-                    .map(|arg| match arg.to_str().unwrap_or_default() {
-                        "-MD" | "--generate-dependencies-with-compile" => "-M",
-                        "-MMD" | "--generate-nonsystem-dependencies-with-compile" => "-MM",
-                        arg => arg,
-                    })
-                    // protect against duplicate -M and -MM flags after transform
-                    .unique()
-                    .collect::<Vec<_>>(),
-            );
-            if log_enabled!(Trace) {
-                let output_path = cwd.join(
-                    &parsed_args
-                        .outputs
-                        .get("obj")
-                        .context("Missing object file output")
-                        .unwrap()
-                        .path,
-                );
-
-                trace!(
-                    "[{}]: dependencies command: {:?}",
-                    output_path.display(),
-                    dependency_cmd
-                );
-            }
-            dependency_cmd
-        };
-
-        let preprocessor_command = |undef_forced_nvcc_preprocessor_definitions: bool| {
-            let mut preprocess_cmd = initialize_cmd_and_args();
-            // NVCC only supports `-E` when it comes after preprocessor and common flags.
-            preprocess_cmd.arg("-E");
-            preprocess_cmd.arg(match self.host_compiler {
-                // nvc/nvc++ don't support eliding line numbers
-                NvccHostCompiler::Nvhpc => "",
-                // msvc requires the `-EP` flag to elide line numbers
-                NvccHostCompiler::Msvc => "-Xcompiler=-EP",
-                // other host compilers are presumed to match `gcc` behavior
-                NvccHostCompiler::Gcc => "-Xcompiler=-P",
-            });
-            if undef_forced_nvcc_preprocessor_definitions {
-                preprocess_cmd.args(&["-U", "__CUDA_ARCH__"]);
-                preprocess_cmd.args(&["-U", "CUDA_DOUBLE_MATH_FUNCTIONS"]);
-            }
-            if log_enabled!(Trace) {
-                let output_path = cwd.join(
-                    &parsed_args
-                        .outputs
-                        .get("obj")
-                        .context("Missing object file output")
-                        .unwrap()
-                        .path,
-                );
-
-                trace!(
-                    "[{}]: preprocessor command: {:?}",
-                    output_path.display(),
-                    preprocess_cmd
-                );
-            }
-            preprocess_cmd
-        };
+        let (arguments, output_path, _, _) = parsed_to_nvcc_args(cwd, parsed_args);
 
         // Chain dependency generation and the preprocessor command to emulate a `proper` front end
         if !parsed_args.dependency_args.is_empty() {
-            run_input_output(dependencies_command(), None).await?;
+            run_input_output(
+                {
+                    // NVCC doesn't support generating both the dependency information
+                    // and the preprocessor output at the same time. So if we have
+                    // need for both, we need separate compiler invocations
+                    let mut dependency_cmd = creator.clone().new_command_sync(executable);
+                    dependency_cmd
+                        .current_dir(cwd)
+                        .env_clear()
+                        .envs(env_vars.clone())
+                        .args(&parsed_args.preprocessor_args)
+                        .args(&parsed_args.common_args)
+                        .arg("-x")
+                        .arg(language)
+                        .arg(&parsed_args.input)
+                        .args(
+                            &parsed_args
+                                .dependency_args
+                                .iter()
+                                .map(|arg| match arg.to_str().unwrap_or_default() {
+                                    "-MD" | "--generate-dependencies-with-compile" => "-M",
+                                    "-MMD" | "--generate-nonsystem-dependencies-with-compile" => {
+                                        "-MM"
+                                    }
+                                    arg => arg,
+                                })
+                                // protect against duplicate -M and -MM flags after transform
+                                .unique()
+                                .collect::<Vec<_>>(),
+                        );
+                    if log_enabled!(Trace) {
+                        trace!(
+                            "[{}]: dependencies command: {:?}",
+                            output_path.display(),
+                            dependency_cmd
+                        );
+                    }
+                    dependency_cmd
+                },
+                None,
+            )
+            .await?;
         }
 
-        match compile_flag {
-            NvccCompileFlag::Device | NvccCompileFlag::Executable => Ok(aggregate_output(
-                run_input_output(preprocessor_command(true), None).await?,
-                run_input_output(preprocessor_command(false), None).await?,
-            )),
-            _ => run_input_output(preprocessor_command(false), None).await,
+        let preprocessor_commands = {
+            let preprocessor_flag = match self.host_compiler {
+                NvccHostCompiler::Msvc => "-P",
+                _ => "-E",
+            }
+            .to_owned();
+
+            select_nvcc_subcommands(
+                creator,
+                executable,
+                cwd,
+                &mut env_vars,
+                &arguments,
+                |_, args| args.contains(&preprocessor_flag),
+                &self.host_compiler,
+                &output_path,
+            )
+            .await?
+        };
+
+        // Use `nvcc --dryrun` to extract all the host and device preprocessor commands.
+        // Run each preprocessor command, hash the output, then concatenate all the hashes.
+        // We don't care what the preprocessor output is (we can't compile it), we care that
+        // it's unique to this input.
+        //
+        // We have to run all of them, because `nvcc -E` isn't sufficient to capture all
+        // possible modifications, e.g.
+        // ```
+        //
+        // #ifndef __CUDA_ARCH__
+        // static_assert(false, "not CUDA compiler")
+        // #endif
+        //
+        // __global__ void kernel() {
+        //   #if __CUDA_ARCH__ > 700
+        //   sm70_logic();
+        //   #elseif __CUDA_ARCH__ > 600
+        //   sm60_logic();
+        //   #else
+        //   fallback_logic();
+        //   #endif
+        // }
+        // ```
+        let preprocessor_commands =
+            futures::stream::iter(preprocessor_commands.into_iter()).then(|(_, exe, mut args)| {
+                // Remove -o so output goes to stdout
+                if cfg!(target_os = "windows") {
+                    if let Some(idx) = args.iter().position(|x| x.starts_with("-Fi")) {
+                        args.splice(idx..idx + 1, []);
+                    }
+                } else if let Some(idx) = args.iter().position(|x| x == "-o") {
+                    args.splice(idx..idx + 2, []);
+                }
+                match self.host_compiler {
+                    // nvc/nvc++ don't support eliding line numbers
+                    NvccHostCompiler::Nvhpc => {}
+                    // msvc requires the `-EP` flag to elide line numbers
+                    NvccHostCompiler::Msvc => {
+                        if let Some(idx) = args.iter().position(|x| x == "-P") {
+                            args.splice(idx..idx + 1, ["-E".into(), "-EP".into()]);
+                        }
+                    }
+                    // other host compilers are presumed to match `gcc` behavior
+                    NvccHostCompiler::Gcc => args.push("-P".into()),
+                }
+                run_nvcc_subcommand(
+                    NvccGeneratedSubcommand {
+                        exe,
+                        args,
+                        cwd: cwd.to_owned(),
+                        env_vars: env_vars.clone(),
+                        cacheable: Cacheable::No,
+                    },
+                    creator,
+                    &output_path,
+                )
+            });
+
+        let runtime = tokio::runtime::Handle::current();
+
+        let preprocessor_outputs = preprocessor_commands
+            .fold(ProcessOutput::default(), |output, result| async {
+                match (output.success(), result.success()) {
+                    // Propagate errors
+                    (false, true) => output,
+                    (true, false) => result,
+                    (false, false) => aggregate_output(output, result),
+                    (true, true) => {
+                        // Hash immediately so we don't blow up memory.
+                        // Don't care what the actual output is, just that it's unique.
+                        let hashed = runtime
+                            .spawn_blocking(move || {
+                                crate::util::Digest::reader_sync(result.stdout.reader()).unwrap()
+                            })
+                            .await
+                            .unwrap();
+                        aggregate_output(
+                            output,
+                            ProcessOutput::new(0, hashed.as_bytes().to_vec(), vec![]),
+                        )
+                    }
+                }
+            })
+            .await;
+
+        if preprocessor_outputs.success() {
+            Ok(preprocessor_outputs)
+        } else {
+            Err(ProcessError(preprocessor_outputs).into())
         }
     }
 
@@ -348,6 +407,65 @@ fn generate_compile_commands(
     host_compiler: &NvccHostCompiler,
     hash_key: &str,
 ) -> Result<(NvccCompileCommand, Option<dist::CompileCommand>, Cacheable)> {
+    let env_vars = env_vars
+        .iter()
+        .filter(|(k, _)| k != "NVCC_PREPEND_FLAGS" && k != "NVCC_APPEND_FLAGS")
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let (arguments, output_path, keep_dir, num_parallel) = parsed_to_nvcc_args(cwd, parsed_args);
+
+    // Build nvcc's internal files in `$TMPDIR/$hash_key` so the paths are
+    // stable across compilations. This is important because this path ends
+    // up in the preprocessed output, so using random tmpdir paths leads to
+    // erroneous cache misses.
+    let out_dir = env::temp_dir().join("sccache_nvcc").join({
+        // Combine `hash_key` with the output path in case
+        // the same file is concurrently built to separate
+        // output paths.
+        let mut m = crate::util::Digest::new();
+        m.update(hash_key.as_bytes());
+        m.update(cwd.join(&output_path).as_os_str().as_encoded_bytes());
+        m.finish()
+    });
+
+    fs::create_dir_all(&out_dir).ok();
+
+    let compile_flag = parsed_args.compilation_flag.as_os_str().into();
+
+    // Only cache compilations that produce object files.
+    let cacheable = if compile_flag == NvccCompileFlag::Device {
+        Cacheable::Yes
+    } else {
+        Cacheable::No
+    };
+
+    let command = NvccCompileCommand {
+        out_dir,
+        keep_dir,
+        num_parallel,
+        executable: executable.to_owned(),
+        arguments,
+        compile_flag,
+        env_vars,
+        cwd: cwd.to_owned(),
+        host_compiler: host_compiler.clone(),
+        // Only here so we can include it in logs
+        output_path: cwd.join(output_path),
+    };
+
+    Ok((command, None, cacheable))
+}
+
+fn parsed_to_nvcc_args(
+    cwd: &Path,
+    parsed_args: &ParsedArguments,
+) -> (
+    Vec<OsString>,   // nvcc arguments
+    PathBuf,         // output path
+    Option<PathBuf>, // keep_dir
+    usize,           // num_parallel
+) {
     let mut unhashed_args = parsed_args.unhashed_args.clone();
 
     let keep_dir = {
@@ -418,16 +536,10 @@ fn generate_compile_commands(
         num_parallel
     };
 
-    let env_vars = env_vars
-        .iter()
-        .filter(|(k, _)| k != "NVCC_PREPEND_FLAGS" && k != "NVCC_APPEND_FLAGS")
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let mut arguments = vec![];
+    let mut args = vec![];
 
     if let Some(lang) = gcc::language_to_gcc_arg(parsed_args.language) {
-        arguments.extend(vec!["-x".into(), lang.into()])
+        args.extend(vec!["-x".into(), lang.into()])
     }
 
     let output = &parsed_args
@@ -437,24 +549,7 @@ fn generate_compile_commands(
         .unwrap()
         .path;
 
-    // Build nvcc's internal files in `$TMPDIR/$hash_key` so the paths are
-    // stable across compilations. This is important because this path ends
-    // up in the preprocessed output, so using random tmpdir paths leads to
-    // erroneous cache misses.
-    let out_dir = env::temp_dir().join("sccache_nvcc").join({
-        // Combine `hash_key` with the output path in case
-        // the same file is concurrently built to separate
-        // output paths.
-        let mut m = crate::util::Digest::new();
-        m.update(hash_key.as_bytes());
-        m.update(cwd.join(output).as_os_str().as_encoded_bytes());
-        m.finish()
-    });
-    fs::create_dir_all(&out_dir).ok();
-
-    let compile_flag = parsed_args.compilation_flag.as_os_str().into();
-
-    arguments.extend(vec![
+    args.extend(vec![
         "-o".into(),
         // Canonicalize the output path if the compile flag indicates we won't
         // produce an object file. Since we run cicc and ptxas in a temp dir,
@@ -462,7 +557,7 @@ fn generate_compile_commands(
         // executed), cicc/ptxas `-o` argument should point at the real out path
         // that's potentially relative to `cwd`.
         if matches!(
-            compile_flag,
+            parsed_args.compilation_flag.as_os_str().into(),
             NvccCompileFlag::Device | NvccCompileFlag::Executable
         ) {
             output.clone().into()
@@ -471,38 +566,17 @@ fn generate_compile_commands(
         },
     ]);
 
-    arguments.extend_from_slice(&parsed_args.preprocessor_args);
-    arguments.extend_from_slice(&unhashed_args);
-    arguments.extend_from_slice(&parsed_args.common_args);
-    arguments.extend_from_slice(&parsed_args.arch_args);
+    args.extend_from_slice(&parsed_args.preprocessor_args);
+    args.extend_from_slice(&unhashed_args);
+    args.extend_from_slice(&parsed_args.common_args);
+    args.extend_from_slice(&parsed_args.arch_args);
     if parsed_args.double_dash_input {
-        arguments.push("--".into());
+        args.push("--".into());
     }
 
-    arguments.push(parsed_args.input.as_path().into());
+    args.push(parsed_args.input.as_path().into());
 
-    // Only cache compilations that produce object files.
-    let cacheable = if compile_flag == NvccCompileFlag::Device {
-        Cacheable::Yes
-    } else {
-        Cacheable::No
-    };
-
-    let command = NvccCompileCommand {
-        out_dir,
-        keep_dir,
-        num_parallel,
-        executable: executable.to_owned(),
-        arguments,
-        compile_flag,
-        env_vars,
-        cwd: cwd.to_owned(),
-        host_compiler: host_compiler.clone(),
-        // Only here so we can include it in logs
-        output_path: cwd.join(output),
-    };
-
-    Ok((command, None, cacheable))
+    (args, output.clone(), keep_dir, num_parallel)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -786,8 +860,9 @@ where
     let mut env_vars_1 = env_vars.to_vec();
     let mut env_vars_2 = env_vars.to_vec();
 
-    let is_nvcc_exe =
-        |exe: &str| matches!(exe, "cicc" | "ptxas" | "cudafe++" | "nvlink" | "fatbinary");
+    let is_nvcc_exe = |exe: &str, _: &[String]| {
+        matches!(exe, "cicc" | "ptxas" | "cudafe++" | "nvlink" | "fatbinary")
+    };
 
     let (mut nvcc_commands, mut host_commands) = futures::future::try_join(
         // Get the nvcc compile command lines with paths relative to `out`
@@ -808,7 +883,7 @@ where
             cwd,
             &mut env_vars_2,
             &[arguments, &["--keep-dir".into(), out.into()][..]].concat(),
-            |exe| !is_nvcc_exe(exe),
+            |exe, args| !is_nvcc_exe(exe, args),
             host_compiler,
             output_path,
         ),
@@ -1130,7 +1205,7 @@ where
         } {
             if log_enabled!(log::Level::Trace) {
                 trace!(
-                    "[{}]: transformed nvcc command: {:?}",
+                    "[{}]: transformed nvcc command: {}",
                     output_path.display(),
                     format!(
                         "{} && {}",
@@ -1175,12 +1250,12 @@ async fn select_nvcc_subcommands<T, F>(
     output_path: &Path,
 ) -> Result<Vec<(usize, PathBuf, Vec<String>)>>
 where
-    F: Fn(&str) -> bool,
+    F: Fn(&str, &[String]) -> bool,
     T: CommandCreatorSync,
 {
     if log_enabled!(log::Level::Trace) {
         trace!(
-            "[{}]: nvcc dryrun command: {:?}",
+            "[{}]: nvcc dryrun command: {}",
             output_path.display(),
             format!(
                 "{} && {}",
@@ -1242,7 +1317,7 @@ where
         match exe.file_stem().and_then(|s| s.to_str()) {
             None => continue,
             Some(exe_name) => {
-                if select_subcommand(exe_name) {
+                if select_subcommand(exe_name, &args) {
                     lines.push((idx, exe, args));
                 }
             }
@@ -1316,14 +1391,10 @@ fn fold_env_vars_or_split_into_exe_and_args(
     // The rest of the lines are subcommands, so parse into a vec of [cmd, args..]
 
     let mut line = if cfg!(target_os = "windows") {
-        let line = line
-            .replace("\"\"", "\"")
-            .replace(r"\\?\", "")
-            .replace('\\', "/")
-            .replace(r"//?/", "");
+        let line = line.replace("\"\"", "\"");
         match host_compiler {
             NvccHostCompiler::Msvc => line.replace(" -E ", " -P ").replace(" > ", " -Fi"),
-            _ => line,
+            _ => line.to_owned(),
         }
     } else {
         line.to_owned()
@@ -1631,6 +1702,51 @@ fn remap_generated_filenames(
         .collect::<Vec<_>>()
 }
 
+async fn run_nvcc_subcommand<T>(
+    cmd: NvccGeneratedSubcommand,
+    creator: &T,
+    output_path: &Path,
+) -> ProcessOutput
+where
+    T: CommandCreatorSync,
+{
+    let NvccGeneratedSubcommand {
+        exe,
+        args,
+        cwd,
+        env_vars,
+        ..
+    } = cmd;
+
+    if log_enabled!(log::Level::Trace) {
+        trace!(
+            "[{}]: run_nvcc_subcommand: {}",
+            output_path.display(),
+            format!(
+                "{} && {}",
+                shlex::try_join(["cd", &format!("{}", cwd.display())]).unwrap(),
+                shlex::try_join(
+                    std::iter::once(&format!("{}", exe.display()))
+                        .chain(args.iter())
+                        .map(|s| s.as_str())
+                )
+                .unwrap()
+            )
+        );
+    }
+
+    let mut cmd = creator.clone().new_command_sync(exe);
+
+    cmd.args(&args)
+        .current_dir(cwd)
+        .env_clear()
+        .envs(env_vars.to_vec());
+
+    run_input_output(cmd, None)
+        .await
+        .unwrap_or_else(error_to_output)
+}
+
 async fn run_nvcc_subcommands_group<T>(
     service: &server::SccacheService<T>,
     creator: &T,
@@ -1643,56 +1759,32 @@ where
 {
     let mut output = ProcessOutput::default();
 
-    async fn run_subcommand<T>(cmd: NvccGeneratedSubcommand, creator: &T) -> ProcessOutput
-    where
-        T: CommandCreatorSync,
-    {
-        let NvccGeneratedSubcommand {
-            exe,
-            args,
-            cwd,
-            env_vars,
-            cacheable,
-        } = cmd;
-
-        let mut cmd = creator.clone().new_command_sync(exe);
-
-        cmd.args(&args)
-            .current_dir(cwd)
-            .env_clear()
-            .envs(env_vars.to_vec());
-
-        run_input_output(cmd, None)
-            .await
-            .unwrap_or_else(error_to_output)
-    }
-
     for cmd in commands {
-        if log_enabled!(log::Level::Trace) {
-            trace!(
-                "[{}]: run_commands_sequential: {:?}",
-                output_path.display(),
-                format!(
-                    "{} && {}",
-                    shlex::try_join(["cd", &format!("{}", cmd.cwd.display())])?,
-                    shlex::try_join(
-                        std::iter::once(&format!("{}", cmd.exe.display()))
-                            .chain(cmd.args.iter())
-                            .map(|s| s.as_str())
-                    )?
-                )
-            );
-        }
-
         let out = match cmd.cacheable {
-            Cacheable::No => run_subcommand(cmd, creator).await,
+            Cacheable::No => run_nvcc_subcommand(cmd, creator, output_path).await,
             Cacheable::Yes => {
+                if log_enabled!(log::Level::Trace) {
+                    trace!(
+                        "[{}]: run_commands_sequential: {}",
+                        output_path.display(),
+                        format!(
+                            "{} && {}",
+                            shlex::try_join(["cd", &format!("{}", cmd.cwd.display())])?,
+                            shlex::try_join(
+                                std::iter::once(&format!("{}", cmd.exe.display()))
+                                    .chain(cmd.args.iter())
+                                    .map(|s| s.as_str())
+                            )?
+                        )
+                    );
+                }
+
                 let NvccGeneratedSubcommand {
                     exe,
                     args,
                     cwd,
                     env_vars,
-                    cacheable,
+                    ..
                 } = &cmd;
 
                 let srvc = service.clone();
@@ -1704,7 +1796,9 @@ where
                 {
                     Err(err) => error_to_output(err),
                     Ok(compiler) => match compiler.parse_arguments(&args, cwd, env_vars) {
-                        CompilerArguments::NotCompilation => run_subcommand(cmd, creator).await,
+                        CompilerArguments::NotCompilation => {
+                            run_nvcc_subcommand(cmd, creator, output_path).await
+                        }
                         CompilerArguments::CannotCache(why, extra_info) => {
                             error_to_output(extra_info.map_or_else(
                                 || anyhow!("Cannot cache({}): {:?} {:?}", why, exe, args),
