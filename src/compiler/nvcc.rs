@@ -301,26 +301,44 @@ impl CCompilerImpl for Nvcc {
         // ```
         let preprocessor_commands =
             futures::stream::iter(preprocessor_commands.into_iter()).then(|(_, exe, mut args)| {
-                // Remove -o so output goes to stdout
-                if cfg!(target_os = "windows") {
-                    if let Some(idx) = args.iter().position(|x| x.starts_with("-Fi")) {
-                        args.splice(idx..idx + 1, []);
-                    }
-                } else if let Some(idx) = args.iter().position(|x| x == "-o") {
-                    args.splice(idx..idx + 2, []);
-                }
                 match self.host_compiler {
-                    // nvc/nvc++ don't support eliding line numbers
-                    NvccHostCompiler::Nvhpc => {}
-                    // msvc requires the `-EP` flag to elide line numbers
                     NvccHostCompiler::Msvc => {
+                        // Remove -Fi so output goes to stdout
+                        if let Some(idx) = args.iter().position(|x| x.starts_with("-Fi")) {
+                            args.splice(idx..idx + 1, []);
+                        }
+                        // Rewrite `-P` to `-E -EP`
+                        // msvc requires the `-EP` flag to elide line numbers
                         if let Some(idx) = args.iter().position(|x| x == "-P") {
-                            args.splice(idx..idx + 1, ["-E".into(), "-EP".into()]);
+                            args.splice(idx..idx + 1, []);
+                        }
+                        if !args.contains(&String::from("-E")) {
+                            args.push("-E".into());
+                        }
+                        if !args.contains(&String::from("-EP")) {
+                            args.push("-EP".into());
                         }
                     }
-                    // other host compilers are presumed to match `gcc` behavior
-                    NvccHostCompiler::Gcc => args.push("-P".into()),
+                    NvccHostCompiler::Gcc => {
+                        // Remove -o so output goes to stdout
+                        if let Some(idx) = args.iter().position(|x| x == "-o") {
+                            args.splice(idx..idx + 2, []);
+                        }
+                        // Add `-P` to elide line numbers
+                        // nvc/nvc++ don't support eliding line numbers
+                        // non-NVHPC host compilers are presumed to match `gcc` behavior
+                        if !args.contains(&String::from("-P")) {
+                            args.push("-P".into())
+                        }
+                    }
+                    NvccHostCompiler::Nvhpc => {
+                        // Remove -o so output goes to stdout
+                        if let Some(idx) = args.iter().position(|x| x == "-o") {
+                            args.splice(idx..idx + 2, []);
+                        }
+                    }
                 }
+
                 run_nvcc_subcommand(
                     NvccGeneratedSubcommand {
                         exe,
@@ -332,6 +350,7 @@ impl CCompilerImpl for Nvcc {
                     creator,
                     &output_path,
                 )
+                .unwrap_or_else(error_to_output)
             });
 
         let runtime = tokio::runtime::Handle::current();
@@ -1706,7 +1725,7 @@ async fn run_nvcc_subcommand<T>(
     cmd: NvccGeneratedSubcommand,
     creator: &T,
     output_path: &Path,
-) -> ProcessOutput
+) -> Result<ProcessOutput>
 where
     T: CommandCreatorSync,
 {
@@ -1724,13 +1743,12 @@ where
             output_path.display(),
             format!(
                 "{} && {}",
-                shlex::try_join(["cd", &format!("{}", cwd.display())]).unwrap(),
+                shlex::try_join(["cd", &format!("{}", cwd.display())])?,
                 shlex::try_join(
                     std::iter::once(&format!("{}", exe.display()))
                         .chain(args.iter())
                         .map(|s| s.as_str())
-                )
-                .unwrap()
+                )?
             )
         );
     }
@@ -1742,9 +1760,7 @@ where
         .env_clear()
         .envs(env_vars.to_vec());
 
-    run_input_output(cmd, None)
-        .await
-        .unwrap_or_else(error_to_output)
+    run_input_output(cmd, None).await
 }
 
 async fn run_nvcc_subcommands_group<T>(
@@ -1761,7 +1777,9 @@ where
 
     for cmd in commands {
         let out = match cmd.cacheable {
-            Cacheable::No => run_nvcc_subcommand(cmd, creator, output_path).await,
+            Cacheable::No => run_nvcc_subcommand(cmd, creator, output_path)
+                .await
+                .unwrap_or_else(error_to_output),
             Cacheable::Yes => {
                 if log_enabled!(log::Level::Trace) {
                     trace!(
@@ -1797,7 +1815,9 @@ where
                     Err(err) => error_to_output(err),
                     Ok(compiler) => match compiler.parse_arguments(&args, cwd, env_vars) {
                         CompilerArguments::NotCompilation => {
-                            run_nvcc_subcommand(cmd, creator, output_path).await
+                            run_nvcc_subcommand(cmd, creator, output_path)
+                                .await
+                                .unwrap_or_else(error_to_output)
                         }
                         CompilerArguments::CannotCache(why, extra_info) => {
                             error_to_output(extra_info.map_or_else(
