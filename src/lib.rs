@@ -46,7 +46,10 @@ pub mod server;
 #[doc(hidden)]
 pub mod util;
 
+use once_cell::sync::Lazy;
 use std::env;
+use std::ffi::OsString;
+use std::path::PathBuf;
 
 /// VERSION is the pkg version of sccache.
 ///
@@ -58,6 +61,23 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// logging for sccache, and sccache-dist.
 pub const LOGGING_ENV: &str = "SCCACHE_LOG";
 pub const SERVER_LOG_ENV: &str = "SCCACHE_SERVER_LOG";
+
+static SCCACHE_TMPDIR: Lazy<Result<PathBuf, std::io::Error>> = Lazy::new(|| {
+    let tmpdir = if cfg!(target_os = "windows") {
+        // There's no global temp dir for Windows, but nvcc needs an absolute path
+        // that's stable in order to get cache hits for internal device compilations.
+        // So make a dir inside of C:\Users\Public because that's guaranteed to be
+        // publicly accessible by all users, even non-admins.
+        PathBuf::from(env::var_os("PUBLIC").unwrap_or_else(|| OsString::from(r"C:\Users\Public")))
+            .join("AppData")
+            .join("Local")
+            .join("Temp")
+    } else {
+        env::temp_dir()
+    };
+    let tmpdir = tmpdir.join(".sccache_temp");
+    std::fs::create_dir_all(&tmpdir).map(|_| tmpdir)
+});
 
 pub fn main() {
     // We only care if it's `1`

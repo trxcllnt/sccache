@@ -27,7 +27,7 @@ use crate::mock_command::{
     RunCommand,
 };
 use crate::util::{run_input_output, OsStrExt};
-use crate::{counted_array, dist, protocol, server};
+use crate::{counted_array, dist, protocol, server, SCCACHE_TMPDIR};
 use async_trait::async_trait;
 use bytes::Buf;
 use fs::File;
@@ -438,7 +438,7 @@ fn generate_compile_commands(
     // stable across compilations. This is important because this path ends
     // up in the preprocessed output, so using random tmpdir paths leads to
     // erroneous cache misses.
-    let out_dir = env::temp_dir().join("sccache_nvcc").join({
+    let out_dir = SCCACHE_TMPDIR.as_ref()?.join("nvcc").join({
         // Combine `hash_key` with the output path in case
         // the same file is concurrently built to separate
         // output paths.
