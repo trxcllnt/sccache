@@ -487,9 +487,10 @@ where
         );
 
         if let Err(e) = hash_result {
+            let duration = start.elapsed();
             service.stats.lock().await.decrement_pending_compilations();
             return match e.downcast::<ProcessError>() {
-                Ok(ProcessError(output)) => Ok((CompileResult::Error, output)),
+                Ok(ProcessError(output)) => Ok((CompileResult::Error(duration), output)),
                 Err(e) => Err(e),
             };
         }
@@ -1638,7 +1639,7 @@ pub struct CacheWriteInfo {
 /// The result of a compilation or cache retrieval.
 pub enum CompileResult {
     /// An error made the compilation not possible.
-    Error,
+    Error(Duration),
     /// Result was found in cache.
     CacheHit(Duration),
     /// Result was not found in cache.
@@ -1672,7 +1673,7 @@ pub enum ColorMode {
 impl fmt::Debug for CompileResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            CompileResult::Error => write!(f, "CompileResult::Error"),
+            CompileResult::Error(ref d) => write!(f, "CompileResult::Error({d:?})"),
             CompileResult::CacheHit(ref d) => write!(f, "CompileResult::CacheHit({d:?})"),
             CompileResult::CacheMiss(ref m, ref dt, ref d, _) => {
                 write!(f, "CompileResult::CacheMiss({d:?}, {m:?}, {dt:?}, _)")
@@ -1694,7 +1695,7 @@ impl fmt::Debug for CompileResult {
 impl PartialEq<CompileResult> for CompileResult {
     fn eq(&self, other: &CompileResult) -> bool {
         match (self, other) {
-            (&CompileResult::Error, &CompileResult::Error) => true,
+            (&CompileResult::Error(_), &CompileResult::Error(_)) => true,
             (&CompileResult::CacheHit(_), &CompileResult::CacheHit(_)) => true,
             (CompileResult::CacheMiss(m, dt, _, _), CompileResult::CacheMiss(n, dt2, _, _)) => {
                 m == n && dt == dt2
@@ -3459,7 +3460,7 @@ LLVM version: 6.0",
                     .await
             })
             .unwrap();
-        assert_eq!(cached, CompileResult::Error);
+        assert_eq!(cached, CompileResult::Error(Default::default()));
         assert_eq!(1, res.code().or(res.signal()).unwrap());
         // Shouldn't get anything on stdout, since that would just be preprocessor spew!
         assert_eq!(b"", res.stdout.as_slice());

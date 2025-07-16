@@ -1443,9 +1443,9 @@ where
                         let mut dist_type = DistType::NoDist;
 
                         match compiled {
-                            CompileResult::Error => {
-                                trace!("[{}]: compile result: error", out_pretty);
-
+                            CompileResult::Error(duration) => {
+                                trace!("[{}]: compile result: request error", out_pretty);
+                                stats.compiler_write_duration += duration;
                                 stats.compile_request_errors.increment(&kind, &lang);
                             }
                             CompileResult::CacheHit(duration) => {
@@ -1486,16 +1486,14 @@ where
                             CompileResult::NotCacheable(dt, duration) => {
                                 trace!("[{}]: compile result: not cacheable", out_pretty);
                                 dist_type = dt;
-                                stats.compilations += 1;
-                                stats.compiler_write_duration += duration;
                                 stats.non_cacheable_compilations += 1;
+                                stats.compiler_write_duration += duration;
                             }
                             CompileResult::CompileFailed(dt, duration) => {
                                 trace!("[{}]: compile result: compile failed", out_pretty);
                                 dist_type = dt;
-                                stats.compilations += 1;
-                                stats.compiler_write_duration += duration;
                                 stats.compile_fails += 1;
+                                stats.compiler_write_duration += duration;
                             }
                         };
 
@@ -1521,7 +1519,6 @@ where
                                 stats.compile_fails += 1;
                                 // Make sure the write guard has been dropped ASAP.
                                 drop(stats);
-
                                 res.output = output;
                             }
                             Err(err) => match err.downcast::<HttpClientError>() {
@@ -1529,27 +1526,24 @@ where
                                     // Make sure the write guard has been dropped ASAP.
                                     drop(stats);
                                     me.dist_client.reset_state().await;
-                                    let msg = format!("[{out_pretty}] http error status: {msg}");
-                                    error!("{}", msg);
-                                    res.output = ProcessOutput::new(1, res.output.stdout, msg.as_bytes().to_vec());
+                                    let stderr = format!("[{out_pretty}] http error status: {msg}");
+                                    error!("{}", stderr);
+                                    res.output = ProcessOutput::new(1, res.output.stdout, stderr.into_bytes());
                                 }
                                 Err(err) => {
-                                    stats.compile_request_errors.increment(&kind, &lang);
+                                    stats.fatal_errors.increment(&kind, &lang);
                                     // Make sure the write guard has been dropped ASAP.
                                     drop(stats);
-
                                     use std::fmt::Write;
-
-                                    error!("[{out_pretty}] fatal error: {err}");
-
-                                    let mut error = "sccache: encountered fatal error\n".to_string();
-                                    let _ = writeln!(error, "sccache: error: {err}");
-                                    for e in err.chain() {
-                                        error!("[{out_pretty}] \t{e}");
-                                        let _ = writeln!(error, "sccache: caused by: {e}");
+                                    error!("[{out_pretty}] fatal error: {err:?}");
+                                    let mut stderr = "sccache: encountered fatal error\n".to_string();
+                                    let _ = writeln!(stderr, "sccache: error: {err}");
+                                    for err in err.chain() {
+                                        error!("[{out_pretty}] {err:?}");
+                                        let _ = writeln!(stderr, "sccache: caused by: {err}");
                                     }
                                     //TODO: figure out a better way to communicate this?
-                                    res.output = ProcessOutput::new(-2, res.output.stdout, error.into_bytes());
+                                    res.output = ProcessOutput::new(-2, res.output.stdout, stderr.into_bytes());
                                 }
                             },
                         }
@@ -1656,7 +1650,7 @@ pub struct ServerStats {
     pub cache_write_duration: Duration,
     /// The total time spent reading cache hits.
     pub cache_read_hit_duration: Duration,
-    /// The number of compilations performed.
+    /// The number of successful compilations performed.
     pub compilations: u64,
     /// The total time spent compiling.
     pub compiler_write_duration: Duration,
@@ -1669,6 +1663,8 @@ pub struct ServerStats {
     pub dist_compiles: HashMap<String, usize>,
     /// The count of compilations that were distributed but failed and had to be re-run locally
     pub dist_errors: u64,
+    /// The count of sccache fatal errors (per language).
+    pub fatal_errors: PerLanguageCount,
 }
 
 /// Info and stats about the server.
@@ -1719,6 +1715,7 @@ impl Default for ServerStats {
             not_cached: HashMap::new(),
             dist_compiles: HashMap::new(),
             dist_errors: u64::default(),
+            fatal_errors: PerLanguageCount::new(),
         }
     }
 }
@@ -1767,6 +1764,15 @@ impl ServerStats {
                 }
             }};
         }
+        macro_rules! set_counted_stat {
+            ($vec:ident, $var:expr, $name:expr) => {{
+                if advanced {
+                    set_compiler_stat!($vec, $var, $name);
+                } else {
+                    set_lang_stat!($vec, $var, $name);
+                }
+            }};
+        }
 
         macro_rules! set_duration_stat {
             ($vec:ident, $dur:expr, $num:expr, $name:expr) => {{
@@ -1785,31 +1791,18 @@ impl ServerStats {
         set_stat!(stats_vec, self.pending_compilations, "Pending compilations");
         set_stat!(stats_vec, self.active_compilations, "Active compilations");
         set_stat!(stats_vec, self.compile_requests, "Compile requests");
-        if advanced {
-            set_compiler_stat!(
-                stats_vec,
-                self.compile_request_errors,
-                "Compile request errors"
-            );
-        } else {
-            set_lang_stat!(
-                stats_vec,
-                self.compile_request_errors,
-                "Compile request errors"
-            );
-        }
         set_stat!(
             stats_vec,
             self.requests_executed,
             "Compile requests executed"
         );
-        if advanced {
-            set_compiler_stat!(stats_vec, self.cache_hits, "Cache hits");
-            set_compiler_stat!(stats_vec, self.cache_misses, "Cache misses");
-        } else {
-            set_lang_stat!(stats_vec, self.cache_hits, "Cache hits");
-            set_lang_stat!(stats_vec, self.cache_misses, "Cache misses");
-        }
+        set_counted_stat!(
+            stats_vec,
+            self.compile_request_errors,
+            "Compile request errors"
+        );
+        set_counted_stat!(stats_vec, self.cache_hits, "Cache hits");
+        set_counted_stat!(stats_vec, self.cache_misses, "Cache misses");
 
         self.set_percentage_stats(&mut stats_vec, advanced);
 
@@ -1818,7 +1811,11 @@ impl ServerStats {
         set_stat!(stats_vec, self.forced_recaches, "Forced recaches");
         set_stat!(stats_vec, self.cache_write_errors, "Cache write errors");
 
-        set_stat!(stats_vec, self.compilations, "Compilations");
+        set_stat!(
+            stats_vec,
+            self.compilations + self.compile_fails + self.non_cacheable_compilations,
+            "Compilations"
+        );
         set_stat!(stats_vec, self.compile_fails, "Compilation failures");
 
         set_stat!(
@@ -1850,7 +1847,10 @@ impl ServerStats {
         set_duration_stat!(
             stats_vec,
             self.compiler_write_duration,
-            self.compilations,
+            self.compilations
+                + self.compile_fails
+                + self.non_cacheable_compilations
+                + self.compile_request_errors.all(),
             "Average compiler"
         );
         set_duration_stat!(
@@ -1859,6 +1859,7 @@ impl ServerStats {
             self.cache_hits.all(),
             "Average cache read hit"
         );
+        set_counted_stat!(stats_vec, self.fatal_errors, "Fatal errors");
         set_stat!(
             stats_vec,
             self.dist_compiles.values().sum::<usize>(),
@@ -1880,6 +1881,24 @@ impl ServerStats {
                 stat_width = stat_width + suffix_len
             ));
         }
+        if !self.not_cached.is_empty() {
+            writer.write("\nNon-cacheable reasons:");
+            let mut counts: Vec<_> = self.not_cached.iter().collect();
+            counts.sort_by(|(_, c1), (_, c2)| c1.cmp(c2).reverse());
+            for (reason, count) in counts {
+                writer.write(&format!("{reason:<name_width$} {count:>stat_width$}",));
+            }
+            writer.write("");
+        }
+        (name_width, stat_width)
+    }
+
+    fn print_dist<T: ServerStatsWriter>(
+        &self,
+        writer: &mut T,
+        name_width: usize,
+        stat_width: usize,
+    ) {
         if !self.dist_compiles.is_empty() {
             writer.write("\nSuccessful distributed compiles");
             let mut counts: Vec<_> = self.dist_compiles.iter().collect();
@@ -1894,16 +1913,6 @@ impl ServerStats {
                 ));
             }
         }
-        if !self.not_cached.is_empty() {
-            writer.write("\nNon-cacheable reasons:");
-            let mut counts: Vec<_> = self.not_cached.iter().collect();
-            counts.sort_by(|(_, c1), (_, c2)| c1.cmp(c2).reverse());
-            for (reason, count) in counts {
-                writer.write(&format!("{reason:<name_width$} {count:>stat_width$}",));
-            }
-            writer.write("");
-        }
-        (name_width, stat_width)
     }
 
     fn set_percentage_stats(&self, stats_vec: &mut Vec<(String, String, usize)>, advanced: bool) {
@@ -2056,6 +2065,10 @@ impl ServerInfo {
                 };
                 println!("{name:<name_width$} {val:>stat_width$} {suffix}");
             }
+        }
+        if advanced {
+            self.stats
+                .print_dist(&mut StdoutServerStatsWriter, name_width, stat_width);
         }
     }
 }

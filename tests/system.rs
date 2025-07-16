@@ -844,7 +844,7 @@ fn test_nvcc_cuda_compiles(
         &extra_args,
         AdditionalStats {
             cache_writes: Some(1),
-            compilations: Some(2),
+            compilations: Some(1),
             compile_requests: Some(1),
             non_cacheable_compilations: Some(1),
             requests_executed: Some(2),
@@ -861,7 +861,7 @@ fn test_nvcc_cuda_compiles(
         &extra_args,
         AdditionalStats {
             cache_writes: Some(1),
-            compilations: Some(2),
+            compilations: Some(1),
             compile_requests: Some(1),
             non_cacheable_compilations: Some(1),
             requests_executed: Some(3),
@@ -1127,7 +1127,7 @@ int main(int argc, char** argv) {
         .concat(),
         AdditionalStats {
             cache_writes: Some(2),
-            compilations: Some(3),
+            compilations: Some(2),
             compile_requests: Some(1),
             non_cacheable_compilations: Some(1),
             requests_executed: Some(3),
@@ -1152,7 +1152,7 @@ int main(int argc, char** argv) {
         .concat(),
         AdditionalStats {
             cache_writes: Some(2),
-            compilations: Some(3),
+            compilations: Some(2),
             compile_requests: Some(1),
             non_cacheable_compilations: Some(1),
             requests_executed: Some(3),
@@ -1177,7 +1177,7 @@ int main(int argc, char** argv) {
         .concat(),
         AdditionalStats {
             cache_writes: Some(1 + with_debug_flags as u64),
-            compilations: Some(2 + with_debug_flags as u64),
+            compilations: Some(1 + with_debug_flags as u64),
             compile_requests: Some(1),
             non_cacheable_compilations: Some(1),
             requests_executed: Some(3),
@@ -1421,7 +1421,7 @@ int main(int argc, char** argv) {
         .concat(),
         AdditionalStats {
             cache_writes: Some(1 + with_debug_flags as u64),
-            compilations: Some(2 + with_debug_flags as u64),
+            compilations: Some(1 + with_debug_flags as u64),
             compile_requests: Some(1),
             non_cacheable_compilations: Some(1),
             requests_executed: Some(3),
@@ -1453,7 +1453,7 @@ int main(int argc, char** argv) {
         .concat(),
         AdditionalStats {
             cache_writes: Some(1 + with_debug_flags as u64),
-            compilations: Some(2 + with_debug_flags as u64),
+            compilations: Some(1 + with_debug_flags as u64),
             compile_requests: Some(1),
             non_cacheable_compilations: Some(1),
             requests_executed: Some(3),
@@ -1519,7 +1519,7 @@ int main(int argc, char** argv) {
             .concat(),
             AdditionalStats {
                 cache_writes: Some(2),
-                compilations: Some(3),
+                compilations: Some(2),
                 compile_requests: Some(1),
                 non_cacheable_compilations: Some(1),
                 requests_executed: Some(8),
@@ -1548,7 +1548,7 @@ int main(int argc, char** argv) {
             .concat(),
             AdditionalStats {
                 cache_writes: Some(2),
-                compilations: Some(3),
+                compilations: Some(2),
                 compile_requests: Some(1),
                 non_cacheable_compilations: Some(1),
                 requests_executed: Some(8),
@@ -1577,7 +1577,7 @@ int main(int argc, char** argv) {
             .concat(),
             AdditionalStats {
                 cache_writes: Some(2),
-                compilations: Some(3),
+                compilations: Some(2),
                 compile_requests: Some(1),
                 non_cacheable_compilations: Some(1),
                 requests_executed: Some(8),
@@ -1606,7 +1606,7 @@ int main(int argc, char** argv) {
             .concat(),
             AdditionalStats {
                 cache_writes: Some(2),
-                compilations: Some(3),
+                compilations: Some(2),
                 compile_requests: Some(1),
                 non_cacheable_compilations: Some(1),
                 requests_executed: Some(8),

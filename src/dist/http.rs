@@ -113,7 +113,6 @@ mod common {
                 return Err(err.into());
             }
         };
-        trace!("Response: url={url}, status={status}, body={}", bytes.len());
         if !status.is_success() {
             let errmsg = format!(
                 "Error {}: {}",

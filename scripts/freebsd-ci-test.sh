@@ -245,7 +245,7 @@ test_sccache_dist_01()
 	cd "$TEST_TMPDIR/buildtest"
 	cargo clean --target-dir /tmp/buildtest
 	RUSTC_WRAPPER=sccache cargo build --target-dir /tmp/buildtest
-	STATS="$(sccache -s)"
+	STATS="$(sccache --show-adv-stats)"
 	echo "Statistics of first buildtest"
 	echo "$STATS"
 	CACHE_HITS="$(echo "$STATS" | \
@@ -286,7 +286,7 @@ test_sccache_dist_02()
 	sccache -z
 	cargo clean --target-dir /tmp/buildtest
 	RUSTC_WRAPPER=sccache cargo build --target-dir /tmp/buildtest
-	STATS="$(sccache -s)"
+	STATS="$(sccache --show-adv-stats)"
 	echo "Statistics of second buildtest"
 	echo "$STATS"
 	CACHE_HITS="$(echo "$STATS" | \
