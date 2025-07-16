@@ -1446,7 +1446,7 @@ where
                             CompileResult::Error => {
                                 trace!("[{}]: compile result: error", out_pretty);
 
-                                stats.cache_errors.increment(&kind, &lang);
+                                stats.compile_request_errors.increment(&kind, &lang);
                             }
                             CompileResult::CacheHit(duration) => {
                                 trace!("[{}]: compile result: cache hit", out_pretty);
@@ -1468,7 +1468,7 @@ where
                                         stats.cache_timeouts += 1;
                                     }
                                     MissType::CacheReadError => {
-                                        stats.cache_errors.increment(&kind, &lang);
+                                        stats.cache_read_errors += 1;
                                     }
                                 }
                                 stats.compilations += 1;
@@ -1534,7 +1534,7 @@ where
                                     res.output = ProcessOutput::new(1, res.output.stdout, msg.as_bytes().to_vec());
                                 }
                                 Err(err) => {
-                                    stats.cache_errors.increment(&kind, &lang);
+                                    stats.compile_request_errors.increment(&kind, &lang);
                                     // Make sure the write guard has been dropped ASAP.
                                     drop(stats);
 
@@ -1626,6 +1626,8 @@ pub struct ServerStats {
     pub pending_compilations: u64,
     /// The count of client compile requests.
     pub compile_requests: u64,
+    /// The count of errors handling compile requests (per language).
+    pub compile_request_errors: PerLanguageCount,
     /// The count of client requests that used an unsupported compiler.
     pub requests_unsupported_compiler: u64,
     /// The count of client requests that were not compilation.
@@ -1634,8 +1636,6 @@ pub struct ServerStats {
     pub requests_not_cacheable: u64,
     /// The count of client requests that were executed.
     pub requests_executed: u64,
-    /// The count of errors handling compile requests (per language).
-    pub cache_errors: PerLanguageCount,
     /// The count of cache hits for handled compile requests (per language).
     pub cache_hits: PerLanguageCount,
     /// The count of cache misses for handled compile requests (per language).
@@ -1698,11 +1698,11 @@ impl Default for ServerStats {
             active_compilations: u64::default(),
             pending_compilations: u64::default(),
             compile_requests: u64::default(),
+            compile_request_errors: PerLanguageCount::new(),
             requests_unsupported_compiler: u64::default(),
             requests_not_compile: u64::default(),
             requests_not_cacheable: u64::default(),
             requests_executed: u64::default(),
-            cache_errors: PerLanguageCount::new(),
             cache_hits: PerLanguageCount::new(),
             cache_misses: PerLanguageCount::new(),
             cache_timeouts: u64::default(),
@@ -1785,6 +1785,19 @@ impl ServerStats {
         set_stat!(stats_vec, self.pending_compilations, "Pending compilations");
         set_stat!(stats_vec, self.active_compilations, "Active compilations");
         set_stat!(stats_vec, self.compile_requests, "Compile requests");
+        if advanced {
+            set_compiler_stat!(
+                stats_vec,
+                self.compile_request_errors,
+                "Compile request errors"
+            );
+        } else {
+            set_lang_stat!(
+                stats_vec,
+                self.compile_request_errors,
+                "Compile request errors"
+            );
+        }
         set_stat!(
             stats_vec,
             self.requests_executed,
@@ -1804,11 +1817,6 @@ impl ServerStats {
         set_stat!(stats_vec, self.cache_read_errors, "Cache read errors");
         set_stat!(stats_vec, self.forced_recaches, "Forced recaches");
         set_stat!(stats_vec, self.cache_write_errors, "Cache write errors");
-        if advanced {
-            set_compiler_stat!(stats_vec, self.cache_errors, "Cache errors");
-        } else {
-            set_lang_stat!(stats_vec, self.cache_errors, "Cache errors");
-        }
 
         set_stat!(stats_vec, self.compilations, "Compilations");
         set_stat!(stats_vec, self.compile_fails, "Compilation failures");
