@@ -1,8 +1,10 @@
 #! /usr/bin/env bash
 
 # Ensure we're in the repo root
-cd "$( cd "$( dirname "$(realpath -m "${BASH_SOURCE[0]}")" )" && pwd )/../..";
-cd "${SCCACHE_REPO:-$(pwd)}";
+cd "$( cd "$( dirname "$(realpath -m "${BASH_SOURCE[0]}")" )" && pwd )/../.."
+cd "${SCCACHE_REPO:-$(pwd)}"
+
+sudo rm -rf /tmp/{,.}sccache_*
 
 RUST_BACKTRACE=${RUST_BACKTRACE:-1} \
 cargo test -F all,vendored-openssl,dist-client,dist-server --package sccache "$@"

@@ -1,15 +1,15 @@
 #! /usr/bin/env bash
 
 # Ensure we're in the repo root
-cd "$( cd "$( dirname "$(realpath -m "${BASH_SOURCE[0]}")" )" && pwd )/../..";
-cd "${SCCACHE_REPO:-$(pwd)}";
+cd "$( cd "$( dirname "$(realpath -m "${BASH_SOURCE[0]}")" )" && pwd )/../.."
+cd "${SCCACHE_REPO:-$(pwd)}"
 
 if ! command -v sccache-dist >/dev/null 2>&1; then
     export PATH="$(realpath -m "$(pwd)/target/$(uname -m)-unknown-linux-musl/${BUILD_TYPE:-debug}"):$PATH"
 fi
 
 ulimit -n "$(ulimit -Hn)"
-sudo rm -rf /tmp/sccache/* /tmp/sccache_*
+sudo rm -rf /tmp/sccache/* /tmp/{,.}sccache_*
 mkdir -p /tmp/sccache/{jobs,toolchains}
 
 env RUST_BACKTRACE="${RUST_BACKTRACE:-1}" \

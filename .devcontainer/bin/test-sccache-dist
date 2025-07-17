@@ -1,10 +1,10 @@
 #! /usr/bin/env bash
 
 # Ensure we're in the repo root
-cd "$( cd "$( dirname "$(realpath -m "${BASH_SOURCE[0]}")" )" && pwd )/../..";
-cd "${SCCACHE_REPO:-$(pwd)}";
+cd "$( cd "$( dirname "$(realpath -m "${BASH_SOURCE[0]}")" )" && pwd )/../.."
+cd "${SCCACHE_REPO:-$(pwd)}"
 
-sudo rm -rf /tmp/sccache_*
+sudo rm -rf /tmp/{,.}sccache_*
 docker rm -f $(docker ps -aq --filter "name=sccache_dist_*") 2>/dev/null || true;
 
 if test $# -eq 0; then
