@@ -256,26 +256,6 @@ impl CCompilerImpl for Nvcc {
             .await?;
         }
 
-        let preprocessor_commands = {
-            let preprocessor_flag = match self.host_compiler {
-                NvccHostCompiler::Msvc => "-P",
-                _ => "-E",
-            }
-            .to_owned();
-
-            select_nvcc_subcommands(
-                creator,
-                executable,
-                cwd,
-                &mut env_vars,
-                &arguments,
-                |_, args| args.contains(&preprocessor_flag),
-                &self.host_compiler,
-                &output_path,
-            )
-            .await?
-        };
-
         // Use `nvcc --dryrun` to extract all the host and device preprocessor commands.
         // Run each preprocessor command, hash the output, then concatenate all the hashes.
         // We don't care what the preprocessor output is (we can't compile it), we care that
@@ -299,91 +279,110 @@ impl CCompilerImpl for Nvcc {
         //   #endif
         // }
         // ```
-        let preprocessor_commands =
-            futures::stream::iter(preprocessor_commands.into_iter()).then(|(_, exe, mut args)| {
-                match self.host_compiler {
-                    NvccHostCompiler::Msvc => {
-                        // Remove -Fi so output goes to stdout
-                        if let Some(idx) = args.iter().position(|x| x.starts_with("-Fi")) {
-                            args.splice(idx..idx + 1, []);
-                        }
-                        // Rewrite `-P` to `-E -EP`
-                        // msvc requires the `-EP` flag to elide line numbers
-                        if let Some(idx) = args.iter().position(|x| x == "-P") {
-                            args.splice(idx..idx + 1, []);
-                        }
-                        if !args.contains(&String::from("-E")) {
-                            args.push("-E".into());
-                        }
-                        if !args.contains(&String::from("-EP")) {
-                            args.push("-EP".into());
-                        }
-                    }
-                    NvccHostCompiler::Gcc => {
-                        // Remove -o so output goes to stdout
-                        if let Some(idx) = args.iter().position(|x| x == "-o") {
-                            args.splice(idx..idx + 2, []);
-                        }
-                        // Add `-P` to elide line numbers
-                        // nvc/nvc++ don't support eliding line numbers
-                        // non-NVHPC host compilers are presumed to match `gcc` behavior
-                        if !args.contains(&String::from("-P")) {
-                            args.push("-P".into())
-                        }
-                    }
-                    NvccHostCompiler::Nvhpc => {
-                        // Remove -o so output goes to stdout
-                        if let Some(idx) = args.iter().position(|x| x == "-o") {
-                            args.splice(idx..idx + 2, []);
-                        }
-                    }
-                }
 
-                run_nvcc_subcommand(
+        let preprocessor_output = {
+            let runtime = tokio::runtime::Handle::current();
+
+            let preprocessor_flag = match self.host_compiler {
+                NvccHostCompiler::Msvc => "-P",
+                _ => "-E",
+            }
+            .to_owned();
+
+            let preprocessor_commands =
+                select_nvcc_subcommands(
+                    creator,
+                    executable,
+                    cwd,
+                    &mut env_vars,
+                    &arguments,
+                    |_, args| args.contains(&preprocessor_flag),
+                    &self.host_compiler,
+                    &output_path,
+                )
+                .await?
+                .into_iter()
+                .map(|(_, exe, mut args)| {
+                    match self.host_compiler {
+                        NvccHostCompiler::Msvc => {
+                            // Remove -Fi so output goes to stdout
+                            if let Some(idx) = args.iter().position(|x| x.starts_with("-Fi")) {
+                                args.splice(idx..idx + 1, []);
+                            }
+                            // Rewrite `-P` to `-E -EP`
+                            // msvc requires the `-EP` flag to elide line numbers
+                            if let Some(idx) = args.iter().position(|x| x == "-P") {
+                                args.splice(idx..idx + 1, []);
+                            }
+                            if !args.contains(&String::from("-E")) {
+                                args.push("-E".into());
+                            }
+                            if !args.contains(&String::from("-EP")) {
+                                args.push("-EP".into());
+                            }
+                        }
+                        NvccHostCompiler::Gcc => {
+                            // Remove -o so output goes to stdout
+                            if let Some(idx) = args.iter().position(|x| x == "-o") {
+                                args.splice(idx..idx + 2, []);
+                            }
+                            // Add `-P` to elide line numbers
+                            // nvc/nvc++ don't support eliding line numbers
+                            // non-NVHPC host compilers are presumed to match `gcc` behavior
+                            if !args.contains(&String::from("-P")) {
+                                args.push("-P".into())
+                            }
+                        }
+                        NvccHostCompiler::Nvhpc => {
+                            // Remove -o so output goes to stdout
+                            if let Some(idx) = args.iter().position(|x| x == "-o") {
+                                args.splice(idx..idx + 2, []);
+                            }
+                        }
+                    }
+
                     NvccGeneratedSubcommand {
                         exe,
                         args,
                         cwd: cwd.to_owned(),
                         env_vars: env_vars.clone(),
                         cacheable: Cacheable::No,
-                    },
-                    creator,
-                    &output_path,
-                )
-                .unwrap_or_else(error_to_output)
-            });
-
-        let runtime = tokio::runtime::Handle::current();
-
-        let preprocessor_outputs = preprocessor_commands
-            .fold(ProcessOutput::default(), |output, result| async {
-                match (output.success(), result.success()) {
-                    // Propagate errors
-                    (false, true) => output,
-                    (true, false) => result,
-                    (false, false) => aggregate_output(output, result),
-                    (true, true) => {
-                        // Hash immediately so we don't blow up memory.
-                        // Don't care what the actual output is, just that it's unique.
-                        let hashed = runtime
+                    }
+                })
+                .map(|cmd| run_nvcc_subcommand(cmd, creator, &output_path))
+                .map(|fut| async {
+                    let mut res = fut.await.unwrap_or_else(error_to_output);
+                    if res.success() {
+                        res.stderr = vec![];
+                        res.stdout = runtime
                             .spawn_blocking(move || {
-                                crate::util::Digest::reader_sync(result.stdout.reader()).unwrap()
+                                crate::util::Digest::reader_sync(res.stdout.reader()).unwrap()
                             })
                             .await
-                            .unwrap();
-                        aggregate_output(
-                            output,
-                            ProcessOutput::new(0, hashed.as_bytes().to_vec(), vec![]),
-                        )
+                            .unwrap()
+                            .into_bytes()
                     }
-                }
-            })
-            .await;
+                    res
+                });
 
-        if preprocessor_outputs.success() {
-            Ok(preprocessor_outputs)
+            let outputs = futures::future::join_all(preprocessor_commands).await;
+
+            outputs
+                .into_iter()
+                .fold(ProcessOutput::default(), |output, result| {
+                    match (output.success(), result.success()) {
+                        // Propagate errors
+                        (false, true) => output,
+                        (true, false) => result,
+                        _ => aggregate_output(output, result),
+                    }
+                })
+        };
+
+        if preprocessor_output.success() {
+            Ok(preprocessor_output)
         } else {
-            Err(ProcessError(preprocessor_outputs).into())
+            Err(ProcessError(preprocessor_output).into())
         }
     }
 
