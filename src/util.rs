@@ -511,106 +511,70 @@ where
 }
 
 pub trait OsStrExt {
+    fn find(&self, s: &str) -> Option<usize>;
+    fn contains(&self, s: &str) -> bool;
+    fn ends_with(&self, s: &str) -> bool;
     fn starts_with(&self, s: &str) -> bool;
     fn split_prefix(&self, s: &str) -> Option<OsString>;
 }
 
-#[cfg(unix)]
-use std::os::unix::ffi::OsStrExt as _OsStrExt;
-
-#[cfg(unix)]
 impl OsStrExt for OsStr {
+    fn contains(&self, s: &str) -> bool {
+        self.find(s).is_some()
+    }
+
+    fn find(&self, s: &str) -> Option<usize> {
+        let p = OsStr::new(s).as_encoded_bytes();
+        let s = self.as_encoded_bytes();
+        let (m, n) = (s.len(), p.len());
+        if m < n {
+            None
+        } else {
+            s.iter()
+                .enumerate()
+                .map(|(i, _)| i)
+                .find(|&i| p == &s[i..(i + n).min(m)])
+        }
+    }
+
+    fn ends_with(&self, s: &str) -> bool {
+        let p = OsStr::new(s).as_encoded_bytes();
+        let s = self.as_encoded_bytes();
+        let (m, n) = (s.len(), p.len());
+        if m < n {
+            false
+        } else {
+            p == &s[m - n..]
+        }
+    }
+
     fn starts_with(&self, s: &str) -> bool {
-        self.as_bytes().starts_with(s.as_bytes())
+        let p = OsStr::new(s).as_encoded_bytes();
+        let s = self.as_encoded_bytes();
+        let (m, n) = (s.len(), p.len());
+        if m < n {
+            false
+        } else {
+            p == &s[0..n]
+        }
     }
 
     fn split_prefix(&self, s: &str) -> Option<OsString> {
-        let bytes = self.as_bytes();
-        if bytes.starts_with(s.as_bytes()) {
-            Some(OsStr::from_bytes(&bytes[s.len()..]).to_owned())
-        } else {
-            None
-        }
+        self.starts_with(s).then(|| {
+            let p = OsStr::new(s).as_encoded_bytes();
+            let s = self.as_encoded_bytes();
+            let b = &s[p.len()..];
+            if b.is_empty() {
+                OsString::new()
+            } else {
+                unsafe { OsStr::from_encoded_bytes_unchecked(b) }.to_owned()
+            }
+        })
     }
 }
 
 #[cfg(windows)]
-use std::os::windows::ffi::{OsStrExt as _OsStrExt, OsStringExt};
-
-#[cfg(windows)]
-impl OsStrExt for OsStr {
-    fn starts_with(&self, s: &str) -> bool {
-        // Attempt to interpret this OsStr as utf-16. This is a pretty "poor
-        // man's" implementation, however, as it only handles a subset of
-        // unicode characters in `s`. Currently that's sufficient, though, as
-        // we're only calling `starts_with` with ascii string literals.
-        let u16s = self.encode_wide();
-        let mut utf8 = s.chars();
-
-        for codepoint in u16s {
-            let to_match = match utf8.next() {
-                Some(ch) => ch,
-                None => return true,
-            };
-
-            let to_match = to_match as u32;
-            let codepoint = codepoint as u32;
-
-            // UTF-16 encodes codepoints < 0xd7ff as just the raw value as a
-            // u16, and that's all we're matching against. If the codepoint in
-            // `s` is *over* this value then just assume it's not in `self`.
-            //
-            // If `to_match` is the same as the `codepoint` coming out of our
-            // u16 iterator we keep going, otherwise we've found a mismatch.
-            if to_match < 0xd7ff {
-                if to_match != codepoint {
-                    return false;
-                }
-            } else {
-                return false;
-            }
-        }
-
-        // If we ran out of characters to match, then the strings should be
-        // equal, otherwise we've got more data to match in `s` so we didn't
-        // start with `s`
-        utf8.next().is_none()
-    }
-
-    fn split_prefix(&self, s: &str) -> Option<OsString> {
-        // See comments in the above implementation for what's going on here
-        let mut u16s = self.encode_wide().peekable();
-        let mut utf8 = s.chars();
-
-        while let Some(&codepoint) = u16s.peek() {
-            let to_match = match utf8.next() {
-                Some(ch) => ch,
-                None => {
-                    let codepoints = u16s.collect::<Vec<_>>();
-                    return Some(OsString::from_wide(&codepoints));
-                }
-            };
-
-            let to_match = to_match as u32;
-            let codepoint = codepoint as u32;
-
-            if to_match < 0xd7ff {
-                if to_match != codepoint {
-                    return None;
-                }
-            } else {
-                return None;
-            }
-            u16s.next();
-        }
-
-        if utf8.next().is_none() {
-            Some(OsString::new())
-        } else {
-            None
-        }
-    }
-}
+use std::os::windows::ffi::OsStringExt;
 
 #[cfg(unix)]
 pub fn encode_path(dst: &mut dyn Write, path: &Path) -> std::io::Result<()> {
