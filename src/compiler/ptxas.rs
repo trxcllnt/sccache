@@ -113,6 +113,7 @@ use cicc::ArgData::*;
 
 counted_array!(pub static ARGS: [ArgInfo<cicc::ArgData>; _] = [
     flag!("--compile-only", PassThroughFlag),
+    flag!("--disable-warnings", PassThroughFlag),
     flag!("--dont-merge-basicblocks", PassThroughFlag),
     flag!("--return-at-end", PassThroughFlag),
     take_arg!("--split-compile", OsString, CanBeSeparated, Unhashed),

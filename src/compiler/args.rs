@@ -677,6 +677,61 @@ macro_rules! take_arg {
     };
 }
 
+pub fn parse_input_output<I, T, S, F>(
+    args: I,
+    info: S,
+    get_output: F,
+) -> (
+    Option<OsString>, // input
+    Option<OsString>, // output
+    Vec<OsString>,    // args
+)
+where
+    I: Iterator<Item = OsString>,
+    T: ArgumentValue,
+    S: SearchableArgInfo<T>,
+    F: Fn(&T) -> Option<&PathBuf>,
+{
+    let (input, output, args) = ArgsIter::new(args.into_iter(), info)
+        .filter_map(|arg| arg.ok())
+        .fold(
+            (None, None, vec![]),
+            |(mut input, mut output, mut args), arg| {
+                args.extend(
+                    arg.get_data()
+                        .map(|data| {
+                            if let Some(p) = get_output(data) {
+                                output = Some(p.as_os_str().to_owned());
+                                let disposition = match arg.flag_str() {
+                                    Some("-Fi") | Some("-Fo") => {
+                                        NormalizedDisposition::Concatenated
+                                    }
+                                    _ => NormalizedDisposition::Separated,
+                                };
+                                Some(arg.clone().normalize(disposition))
+                            } else {
+                                None
+                            }
+                        })
+                        .or_else(|| {
+                            if let Argument::Raw(ref val) = arg {
+                                // Assume the last "raw" argument is the input file
+                                input = Some(val.to_owned());
+                            }
+                            None
+                        })
+                        .and_then(|arg| arg)
+                        .map_or_else(|| arg, |arg| arg)
+                        .iter_os_strings(),
+                );
+
+                (input, output, args)
+            },
+        );
+
+    (input, output, args)
+}
+
 #[cfg(test)]
 #[allow(clippy::char_lit_as_u8)]
 mod tests {

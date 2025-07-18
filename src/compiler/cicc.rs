@@ -24,9 +24,10 @@ use crate::{counted_array, dist, util::OsStrExt};
 use crate::mock_command::{CommandCreatorSync, ProcessOutput};
 
 use async_trait::async_trait;
+use itertools::Itertools;
 
 use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -105,25 +106,6 @@ impl CCompilerImpl for Cicc {
     }
 }
 
-fn should_take_next(arg: &OsStr) -> bool {
-    let arg = match *arg.as_encoded_bytes() {
-        [b'-', b'-', ..] => arg.split_prefix("--").unwrap_or_default(),
-        [b'-', ..] => arg.split_prefix("-").unwrap_or_default(),
-        _ => return false,
-    };
-
-    // return false on single-letter flags: `-` and `-o`
-    !arg.is_empty()
-        // return false on --foo=bar
-        && !arg.contains("=")
-        // return false on -f64.123
-        && arg.to_str().and_then(|s| {
-            None.or_else(|| s.parse::<f64>().ok().map(|_| true))
-                .or_else(|| s.parse::<i128>().ok().map(|_| true))
-                .or_else(|| s.parse::<u128>().ok().map(|_| true))
-        }).is_none()
-}
-
 pub fn parse_arguments<S>(
     arguments: &[OsString],
     cwd: &Path,
@@ -131,102 +113,114 @@ pub fn parse_arguments<S>(
     arg_info: S,
 ) -> CompilerArguments<ParsedArguments>
 where
-    S: SearchableArgInfo<ArgData>,
+    S: Clone + SearchableArgInfo<ArgData>,
 {
-    let args = arguments.to_vec();
-    let mut input = None;
+    // Initial parse just to get the input and output
+    let (input, output, mut args) = parse_input_output(
+        arguments.iter().cloned(),
+        arg_info.clone(),
+        |data| match data {
+            Output(p) => Some(p),
+            _ => None,
+        },
+    );
 
-    let mut take_next = false;
-    let mut outputs = HashMap::new();
-    let mut extra_dist_files = vec![];
-    let mut gen_module_id_file = false;
-    let mut module_id_file_name = Option::<PathBuf>::None;
-
-    let mut common_args = vec![];
-    let mut unhashed_args = vec![];
-
-    for arg in ArgsIter::new(args.iter().cloned(), arg_info) {
-        match arg {
-            Ok(arg) => {
-                let args = match arg.get_data() {
-                    Some(ExtraOutput(path)) => {
-                        take_next = false;
-                        if let Some(flag) = arg.flag_str() {
-                            outputs.insert(
-                                flag,
-                                ArtifactDescriptor {
-                                    path: path.to_owned(),
-                                    optional: false,
-                                    must_be_non_empty: false,
-                                },
-                            );
-                        }
-                        &mut common_args
-                    }
-                    Some(GenModuleIdFileFlag) => {
-                        take_next = false;
-                        gen_module_id_file = true;
-                        &mut common_args
-                    }
-                    Some(ModuleIdFileName(path)) => {
-                        take_next = false;
-                        module_id_file_name = Some(cwd.join(path));
-                        &mut common_args
-                    }
-                    Some(Output(path)) => {
-                        take_next = false;
-                        outputs.insert(
-                            "obj",
-                            ArtifactDescriptor {
-                                path: path.to_owned(),
-                                optional: false,
-                                must_be_non_empty: false,
-                            },
-                        );
-                        continue;
-                    }
-                    Some(PassThroughFlag) | Some(PassThrough(_)) => {
-                        take_next = false;
-                        &mut common_args
-                    }
-                    Some(Unhashed(_)) => {
-                        take_next = false;
-                        &mut unhashed_args
-                    }
-                    None => match arg {
-                        Argument::Raw(ref p) => {
-                            trace!("{language:?} raw (take_next={take_next}): {p:?}");
-                            if take_next {
-                                take_next = should_take_next(p);
-                                &mut common_args
-                            } else {
-                                if input.is_none() {
-                                    trace!("{language:?} input: {p:?}");
-                                    input = Some(p.clone());
-                                }
-                                continue;
-                            }
-                        }
-                        Argument::UnknownFlag(ref p) => {
-                            take_next = should_take_next(p);
-                            trace!("{language:?} unknown (take_next={take_next}): {p:?}");
-                            &mut common_args
-                        }
-                        _ => unreachable!(),
-                    },
-                };
-                let disposition = match arg.flag_str() {
-                    Some(s) if s.len() == 2 => NormalizedDisposition::Concatenated,
-                    _ => NormalizedDisposition::Separated,
-                };
-                args.extend(arg.normalize(disposition).iter_os_strings());
-            }
-            _ => continue,
-        };
+    if let Some(input) = input.as_ref().and_then(|s| s.to_str()) {
+        if let Some(idx) = args.iter().position(|arg| arg.ends_with(input)) {
+            args.splice(idx..idx + 1, []);
+        }
     }
 
+    if let Some(output) = output.as_ref().and_then(|s| s.to_str()) {
+        if let Some((idx, arg)) = args.iter().find_position(|arg| arg.ends_with(output)) {
+            if arg.starts_with(output) {
+                // -o <output>
+                // --module_id_file_name <module_id>
+                args.splice(idx - 1..idx + 1, []);
+            } else {
+                // -Fi<output>
+                // -Fo<output>
+                args.splice(idx..idx + 1, []);
+            }
+        }
+    }
+
+    let mut outputs = HashMap::new();
+    if let Some(path) = output.map(|p| cwd.join(p)) {
+        outputs.insert(
+            "obj",
+            ArtifactDescriptor {
+                path,
+                optional: false,
+                must_be_non_empty: false,
+            },
+        );
+    }
+
+    let (common_args, unhashed_args, gen_module_id_file, module_id_file_name) =
+        ArgsIter::new(args.into_iter(), arg_info)
+            .filter_map(|arg| arg.ok())
+            .fold(
+                (vec![], vec![], false, None),
+                |(
+                    mut common_args,
+                    mut unhashed_args,
+                    mut gen_module_id_file,
+                    mut module_id_file_name,
+                ),
+                 arg| {
+                    let args = if let Some(Unhashed(_)) = arg.get_data() {
+                        &mut unhashed_args
+                    } else {
+                        &mut common_args
+                    };
+
+                    args.extend(
+                        arg.get_data()
+                            .map(|data| match data {
+                                ExtraOutput(path) => {
+                                    if let Some(flag) = arg.flag_str() {
+                                        outputs.insert(
+                                            flag,
+                                            ArtifactDescriptor {
+                                                path: path.to_owned(),
+                                                optional: false,
+                                                must_be_non_empty: false,
+                                            },
+                                        );
+                                    }
+                                    None
+                                }
+                                GenModuleIdFileFlag => {
+                                    gen_module_id_file = true;
+                                    None
+                                }
+                                ModuleIdFileName(path) => {
+                                    module_id_file_name = Some(cwd.join(path));
+                                    None
+                                }
+                                _ => None,
+                            })
+                            .and_then(|arg| arg)
+                            .map_or_else(|| arg, |arg| arg)
+                            .iter_os_strings(),
+                    );
+
+                    (
+                        common_args,
+                        unhashed_args,
+                        gen_module_id_file,
+                        module_id_file_name,
+                    )
+                },
+            );
+
+    let mut extra_dist_files = vec![];
+
     let gen_module_id_file = gen_module_id_file
-        && (outputs.contains_key("--gen_c_file_name") || outputs.contains_key("--stub_file_name"));
+        && ["--gen_c_file_name", "--stub_file_name"]
+            .iter()
+            .any(|k| outputs.contains_key(k));
 
     match (gen_module_id_file, module_id_file_name) {
         (true, Some(path)) => {
@@ -319,11 +313,7 @@ pub fn generate_compile_commands(
         arguments: [
             &parsed_args.common_args[..],
             &parsed_args.unhashed_args[..],
-            &(if output_flag == "-o" {
-                [input.into(), output_flag.into(), output.into()]
-            } else {
-                [output_flag.into(), output.into(), input.into()]
-            }),
+            &[output_flag.into(), output.into(), input.into()],
         ]
         .concat(),
         cwd: cwd.to_owned(),
@@ -350,19 +340,11 @@ pub fn generate_compile_commands(
                     &dist::osstrings_to_strings(&parsed_args.common_args)?[..],
                     // Don't send unhashed args (i.e. `-split-compile`) to the build cluster
                     // &dist::osstrings_to_strings(&parsed_args.unhashed_args)?[..],
-                    &(if output_flag == "-o" {
-                        [
-                            path_transformer.as_dist(input)?,
-                            output_flag.into(),
-                            path_transformer.as_dist(output)?,
-                        ]
-                    } else {
-                        [
-                            output_flag.into(),
-                            path_transformer.as_dist(output)?,
-                            path_transformer.as_dist(input)?,
-                        ]
-                    }),
+                    &[
+                        output_flag.into(),
+                        path_transformer.as_dist(output)?,
+                        path_transformer.as_dist(input)?,
+                    ],
                 ]
                 .concat(),
                 cwd: path_transformer.as_dist_abs(cwd)?,

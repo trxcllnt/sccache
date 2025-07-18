@@ -1230,74 +1230,34 @@ fn is_nvcc_exe(exe: &OsStr) -> bool {
 }
 
 counted_array!(static SIMPLE_ARGS: [ArgInfo<gcc::ArgData>; _] = [
-    flag!("--compile-only", PassThroughFlag),
-    flag!("--dont-merge-basicblocks", PassThroughFlag),
-    flag!("--emit-optix-ir", PassThroughFlag),
-    take_arg!("--gen_c_file_name", OsString, Separated, PassThrough),
-    take_arg!("--gen_device_file_name", OsString, Separated, PassThrough),
-    take_arg!("--gen_module_id_file", OsString, Separated, PassThrough),
-    take_arg!("--include_file_name", OsString, Separated, PassThrough),
-    take_arg!("--m", OsString, Concatenated, PassThrough),
-    take_arg!("--module_id_file_name", OsString, Separated, PassThrough),
-    flag!("--return-at-end", PassThroughFlag),
-    take_arg!("--stub_file_name", OsString, Separated, PassThrough),
     take_arg!("-Fi", PathBuf, Concatenated, Output),
     take_arg!("-Fo", PathBuf, Concatenated, Output),
-    take_arg!("-arch", OsString, CanBeConcatenated('='), PassThrough),
-    flag!("-g", PassThroughFlag),
-    flag!("-lto", PassThroughFlag),
-    take_arg!("-m", OsString, Concatenated, PassThrough),
     take_arg!("-o", PathBuf, Separated, Output),
     take_arg!("-olto", OsString, Separated, PassThrough),
-    take_arg!("-split-compile", OsString, Concatenated, PassThrough),
 ]);
 
 fn parse_args_simple(args: &[String], cwd: &Path) -> ParsedArguments {
-    let (input, outputs, args) = ArgsIter::new(
+    let (input, output, args) = parse_input_output(
         dist::strings_to_osstrings(args).into_iter(),
         &SIMPLE_ARGS[..],
-    )
-    .filter_map(|arg| arg.ok())
-    .fold(
-        (None, HashMap::new(), vec![]),
-        |(mut input, mut outputs, mut args), arg| {
-            args.extend(
-                arg.get_data()
-                    .map(|data| match data {
-                        Output(path) => {
-                            outputs.insert(
-                                "obj",
-                                ArtifactDescriptor {
-                                    path: cwd.join(path),
-                                    optional: false,
-                                    must_be_non_empty: false,
-                                },
-                            );
-                            let disposition = match arg.flag_str() {
-                                Some("-Fi") => NormalizedDisposition::Concatenated,
-                                _ => NormalizedDisposition::Separated,
-                            };
-                            Some(arg.clone().normalize(disposition))
-                        }
-                        _ => None,
-                    })
-                    .or_else(|| {
-                        if let Argument::Raw(ref val) = arg {
-                            // Assume the last "raw" argument is the input file?
-                            input = Some(val.to_owned());
-                        }
-                        None
-                    })
-                    .and_then(|arg| arg)
-                    .map_or_else(|| arg, |arg| arg)
-                    .iter_os_strings(),
-            );
-
-            (input, outputs, args)
+        |data| match data {
+            Output(p) => Some(p),
+            _ => None,
         },
     );
 
     let input = input.map(|p| cwd.join(p)).unwrap_or_default();
+    let mut outputs = HashMap::new();
+    if let Some(path) = output.map(|p| cwd.join(p)) {
+        outputs.insert(
+            "obj",
+            ArtifactDescriptor {
+                path,
+                optional: false,
+                must_be_non_empty: false,
+            },
+        );
+    }
 
     trace!("parse_args_simple: input={input:?}, outputs={outputs:?} args={args:?}");
 
