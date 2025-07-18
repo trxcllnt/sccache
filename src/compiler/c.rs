@@ -323,6 +323,9 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
     fn kind(&self) -> CompilerKind {
         CompilerKind::C(self.compiler.kind())
     }
+    fn version(&self) -> Option<String> {
+        self.compiler.version()
+    }
     #[cfg(feature = "dist-client")]
     fn get_toolchain_packager(&self) -> Box<dyn pkg::ToolchainPackager> {
         Box::new(CToolchainPackager {

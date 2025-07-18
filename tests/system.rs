@@ -30,6 +30,7 @@ use harness::{
     write_json_cfg, write_source,
 };
 use log::Level::Trace;
+use once_cell::sync::Lazy;
 use paste::paste;
 use predicates::prelude::*;
 use regex::Regex;
@@ -54,6 +55,38 @@ struct Compiler {
     pub name: &'static str,
     pub exe: OsString,
     pub env_vars: Vec<(OsString, OsString)>,
+    pub version: OsString,
+}
+
+static COMPILER_VERSION_RE: Lazy<Regex> =
+    regex_static::lazy_regex!(r"^.*?(?P<major>\d+).*?(?P<minor>\d+).*?(?P<patch>\d+).*?$");
+
+impl Compiler {
+    fn version(&self) -> sccache::errors::Result<String> {
+        use sccache::compiler_version;
+        use sccache::errors::*;
+        use sccache::mock_command::CommandCreatorSync;
+
+        let exe = Path::new(&self.exe);
+        let ver = compiler_version(exe)?;
+
+        let (major, minor, patch) = match COMPILER_VERSION_RE.captures(&ver) {
+            Some(ver) => (
+                ver.name("major")
+                    .and_then(|s| s.as_str().parse::<usize>().ok())
+                    .unwrap_or(0),
+                ver.name("minor")
+                    .and_then(|s| s.as_str().parse::<usize>().ok())
+                    .unwrap_or(0),
+                ver.name("patch")
+                    .and_then(|s| s.as_str().parse::<usize>().ok())
+                    .unwrap_or(0),
+            ),
+            None => bail!("Could not determine compiler version (exe={exe:?})"),
+        };
+
+        Ok(format!("{major}.{minor}.{patch}"))
+    }
 }
 
 // Test GCC + clang on non-OS X platforms.
@@ -230,6 +263,7 @@ fn test_basic_compile(client: &SccacheClient, compiler: Compiler, tempdir: &Path
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
     println!("test_basic_compile: {name}");
     // Compile a source file.
@@ -282,6 +316,7 @@ fn test_noncacheable_stats(client: &SccacheClient, compiler: Compiler, tempdir: 
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
     println!("test_noncacheable_stats: {name}");
     copy_to_tempdir(&[INPUT], tempdir);
@@ -309,6 +344,7 @@ fn test_msvc_deps(client: &SccacheClient, compiler: Compiler, tempdir: &Path) {
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
     // Check that -deps works.
     trace!("compile with /sourceDependencies");
@@ -341,6 +377,7 @@ fn test_msvc_responsefile(client: &SccacheClient, compiler: Compiler, tempdir: &
         name: _,
         exe,
         env_vars,
+        ..
     } = compiler;
 
     let out_file = tempdir.join(OUTPUT);
@@ -369,6 +406,7 @@ fn test_gcc_mp_werror(client: &SccacheClient, compiler: Compiler, tempdir: &Path
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
     trace!("test -MP with -Werror");
     let mut args = compile_cmdline(name, exe, INPUT_ERR, OUTPUT, Vec::new());
@@ -399,6 +437,7 @@ fn test_gcc_fprofile_generate_source_changes(
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
     trace!("test -fprofile-generate with different source inputs");
     client.zero_stats();
@@ -493,6 +532,7 @@ fn test_split_dwarf_object_generate_output_dir_changes(
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
     trace!("test -g -gsplit-dwarf with different output");
     client.zero_stats();
@@ -556,6 +596,7 @@ fn test_gcc_clang_no_warnings_from_macro_expansion(
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
     println!("test_gcc_clang_no_warnings_from_macro_expansion: {name}");
     // Compile a source file.
@@ -583,6 +624,7 @@ fn test_compile_with_define(client: &SccacheClient, compiler: Compiler, tempdir:
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
     println!("test_compile_with_define: {name}");
     // Compile a source file.
@@ -610,6 +652,7 @@ fn test_gcc_clang_depfile(client: &SccacheClient, compiler: Compiler, tempdir: &
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
     println!("test_gcc_clang_depfile: {name}");
     copy_to_tempdir(&[INPUT], tempdir);
@@ -761,6 +804,7 @@ fn test_nvcc_cuda_compiles(
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
     println!("test_nvcc_cuda_compiles: {name}/{}", host_compiler.name);
     // Compile multiple source files.
@@ -1620,116 +1664,125 @@ int main(int argc, char** argv) {
         );
     }
 
-    // Test lto (CUDA 12+)
-    // if !with_debug_flags && with_rdc {
-    //     trace!("compile A ltoir");
-    //     run_cuda_test(
-    //         "-ltoir",
-    //         Path::new(INPUT_FOR_CUDA_A),   // relative path for input
-    //         &build_dir.join("test.ltoir"), // relative path for output
-    //         &[
-    //             extra_args.as_slice(),
-    //             // needed to make -ltoir work
-    //             &["-dlto".into()],
-    //         ]
-    //         .concat(),
-    //         AdditionalStats {
-    //             cache_writes: Some(1),
-    //             compilations: Some(1),
-    //             compile_requests: Some(1),
-    //             non_cacheable_compilations: Some(1),
-    //             requests_executed: Some(2),
-    //             cache_misses: Some(vec![(CCompilerKind::Cicc, Language::Ptx, 1)]),
-    //             ..Default::default()
-    //         },
-    //     );
-    //     // Precompile lto_86 so its cache entry potentially has a different .module_id
-    //     // file when hydrated for other multiarch compilations
-    //     trace!("compile A lto_86");
-    //     run_cuda_test(
-    //         "-ltoir",
-    //         &tempdir.join(INPUT_FOR_CUDA_A), // absolute path for input
-    //         &tempdir.join(&build_dir).join("test.ltoir"), // absolute path for output
-    //         &[
-    //             extra_args.as_slice(),
-    //             &[
-    //                 "-arch=compute_86".into(),
-    //                 "-code=lto_86".into(),
-    //                 // needed to make -ltoir work
-    //                 "-dlto".into(),
-    //             ],
-    //         ]
-    //         .concat(),
-    //         AdditionalStats {
-    //             cache_writes: Some(1),
-    //             compilations: Some(1),
-    //             compile_requests: Some(1),
-    //             non_cacheable_compilations: Some(1),
-    //             requests_executed: Some(2),
-    //             cache_misses: Some(vec![(CCompilerKind::Cicc, Language::Ptx, 1)]),
-    //             ..Default::default()
-    //         },
-    //     );
+    // Test lto (CUDA 12.8+)
+    if !with_debug_flags
+        && with_rdc
+        && compiler
+            .version()
+            .and_then(|nvcc_v| {
+                version_compare::compare_to(nvcc_v, "12.8.0", version_compare::Cmp::Ge)
+                    .map_err(|_| sccache::errors::anyhow!("nvcc too old"))
+            })
+            .unwrap_or_default()
+    {
+        trace!("compile A ltoir");
+        run_cuda_test(
+            "-ltoir",
+            Path::new(INPUT_FOR_CUDA_A),   // relative path for input
+            &build_dir.join("test.ltoir"), // relative path for output
+            &[
+                extra_args.as_slice(),
+                // needed to make -ltoir work
+                &["-dlto".into()],
+            ]
+            .concat(),
+            AdditionalStats {
+                cache_writes: Some(1),
+                compilations: Some(1),
+                compile_requests: Some(1),
+                non_cacheable_compilations: Some(1),
+                requests_executed: Some(2),
+                cache_misses: Some(vec![(CCompilerKind::Cicc, Language::Ptx, 1)]),
+                ..Default::default()
+            },
+        );
+        // Precompile lto_86 so its cache entry potentially has a different .module_id
+        // file when hydrated for other multiarch compilations
+        trace!("compile A lto_86");
+        run_cuda_test(
+            "-ltoir",
+            &tempdir.join(INPUT_FOR_CUDA_A), // absolute path for input
+            &tempdir.join(&build_dir).join("test.ltoir"), // absolute path for output
+            &[
+                extra_args.as_slice(),
+                &[
+                    "-arch=compute_86".into(),
+                    "-code=lto_86".into(),
+                    // needed to make -ltoir work
+                    "-dlto".into(),
+                ],
+            ]
+            .concat(),
+            AdditionalStats {
+                cache_writes: Some(1),
+                compilations: Some(1),
+                compile_requests: Some(1),
+                non_cacheable_compilations: Some(1),
+                requests_executed: Some(2),
+                cache_misses: Some(vec![(CCompilerKind::Cicc, Language::Ptx, 1)]),
+                ..Default::default()
+            },
+        );
 
-    //     // Test compiling a multiarch object
-    //     trace!("compile A lto_80,lto_86");
-    //     run_cuda_test(
-    //         "-c",
-    //         Path::new(INPUT_FOR_CUDA_A), // relative path for input
-    //         &build_dir.join(OUTPUT),     // relative path for output
-    //         &[
-    //             extra_args.as_slice(),
-    //             &[
-    //                 "-gencode=arch=compute_80,code=[lto_80]".into(),
-    //                 "-gencode=arch=compute_86,code=[lto_86]".into(),
-    //             ],
-    //         ]
-    //         .concat(),
-    //         AdditionalStats {
-    //             cache_writes: Some(3),
-    //             compilations: Some(4),
-    //             compile_requests: Some(1),
-    //             requests_executed: Some(5),
-    //             cache_hits: Some(vec![(CCompilerKind::CudaFE, Language::CudaFE, 1)]),
-    //             cache_misses: Some(vec![
-    //                 (CCompilerKind::Nvcc, Language::Cuda, 1),
-    //                 (CCompilerKind::Cicc, Language::Ptx, 2),
-    //             ]),
-    //             ..Default::default()
-    //         },
-    //     );
+        // Test compiling a multiarch object
+        trace!("compile A lto_80,lto_86");
+        run_cuda_test(
+            "-c",
+            Path::new(INPUT_FOR_CUDA_A), // relative path for input
+            &build_dir.join(OUTPUT),     // relative path for output
+            &[
+                extra_args.as_slice(),
+                &[
+                    "-gencode=arch=compute_80,code=[lto_80]".into(),
+                    "-gencode=arch=compute_86,code=[lto_86]".into(),
+                ],
+            ]
+            .concat(),
+            AdditionalStats {
+                cache_writes: Some(3),
+                compilations: Some(4),
+                compile_requests: Some(1),
+                requests_executed: Some(5),
+                cache_hits: Some(vec![(CCompilerKind::CudaFE, Language::CudaFE, 1)]),
+                cache_misses: Some(vec![
+                    (CCompilerKind::Nvcc, Language::Cuda, 1),
+                    (CCompilerKind::Cicc, Language::Ptx, 2),
+                ]),
+                ..Default::default()
+            },
+        );
 
-    //     // Test compiling a multiarch object and embedding PTX where the LtoIR for one of the archs is cached
-    //     trace!("compile A [lto_80] [compute_86,lto_86]");
-    //     run_cuda_test(
-    //         "-c",
-    //         Path::new(INPUT_FOR_CUDA_A), // relative path for input
-    //         &build_dir.join(OUTPUT),     // relative path for output
-    //         &[
-    //             extra_args.as_slice(),
-    //             &[
-    //                 "-gencode=arch=compute_80,code=[lto_80]".into(),
-    //                 "-gencode=arch=compute_86,code=[compute_86,lto_86]".into(),
-    //             ],
-    //         ]
-    //         .concat(),
-    //         AdditionalStats {
-    //             cache_writes: Some(2),
-    //             compilations: Some(3),
-    //             compile_requests: Some(1),
-    //             requests_executed: Some(5),
-    //             cache_hits: Some(vec![
-    //                 (CCompilerKind::CudaFE, Language::CudaFE, 1),
-    //                 (CCompilerKind::Cicc, Language::Ptx, 1),
-    //             ]),
-    //             cache_misses: Some(vec![
-    //                 (CCompilerKind::Nvcc, Language::Cuda, 1),
-    //                 (CCompilerKind::Cicc, Language::Ptx, 1),
-    //             ]),
-    //             ..Default::default()
-    //         },
-    //     );
-    // }
+        // Test compiling a multiarch object and embedding PTX where the LtoIR for one of the archs is cached
+        trace!("compile A [lto_80] [compute_86,lto_86]");
+        run_cuda_test(
+            "-c",
+            Path::new(INPUT_FOR_CUDA_A), // relative path for input
+            &build_dir.join(OUTPUT),     // relative path for output
+            &[
+                extra_args.as_slice(),
+                &[
+                    "-gencode=arch=compute_80,code=[lto_80]".into(),
+                    "-gencode=arch=compute_86,code=[compute_86,lto_86]".into(),
+                ],
+            ]
+            .concat(),
+            AdditionalStats {
+                cache_writes: Some(2),
+                compilations: Some(3),
+                compile_requests: Some(1),
+                requests_executed: Some(5),
+                cache_hits: Some(vec![
+                    (CCompilerKind::CudaFE, Language::CudaFE, 1),
+                    (CCompilerKind::Cicc, Language::Ptx, 1),
+                ]),
+                cache_misses: Some(vec![
+                    (CCompilerKind::Nvcc, Language::Cuda, 1),
+                    (CCompilerKind::Cicc, Language::Ptx, 1),
+                ]),
+                ..Default::default()
+            },
+        );
+    }
 }
 
 fn test_nvcc_proper_lang_stat_tracking(
@@ -1758,6 +1811,7 @@ fn test_nvcc_proper_lang_stat_tracking(
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
 
     println!(
@@ -1961,6 +2015,7 @@ fn test_clang_cuda_compiles(
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
     println!("test_clang_cuda_compiles: {name}");
     // Compile multiple source files.
@@ -2096,6 +2151,7 @@ fn test_clang_proper_lang_stat_tracking(
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
 
     println!("test_clang_proper_lang_stat_tracking: {name}");
@@ -2251,6 +2307,7 @@ fn test_hip_compiles(client: &SccacheClient, compiler: &Compiler, tempdir: &Path
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
     println!("test_hip_compiles: {name}");
     // Compile multiple source files.
@@ -2348,6 +2405,7 @@ fn test_hip_compiles_multi_targets(client: &SccacheClient, compiler: &Compiler, 
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
     println!("test_hip_compiles_multi_targets: {name}");
     // Compile multiple source files.
@@ -2455,6 +2513,7 @@ fn test_clang_multicall(client: &SccacheClient, compiler: Compiler, tempdir: &Pa
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
     println!("test_clang_multicall: {name}");
     // Compile a source file.
@@ -2487,6 +2546,7 @@ fn test_clang_cache_whitespace_normalization(
         name,
         exe,
         env_vars,
+        ..
     } = compiler;
     println!("test_clang_cache_whitespace_normalization: {name}");
     debug!("expecting hit: {}", hit);
@@ -2562,8 +2622,9 @@ fn find_compilers() -> Vec<Compiler> {
                 .ok()
                 .map(|full_path| Compiler {
                     name: c,
-                    exe: full_path.into(),
+                    exe: full_path.as_path().into(),
                     env_vars: vec![],
+                    version: full_path.as_path().into(),
                 })
         })
         .collect::<Vec<_>>()
@@ -2579,8 +2640,9 @@ fn find_compilers() -> Vec<Compiler> {
         .get_compiler();
     vec![Compiler {
         name: "cl",
-        exe: tool.path().as_os_str().to_os_string(),
+        exe: tool.path().into(),
         env_vars: tool.env().to_vec(),
+        version: tool.path().into(),
     }]
 }
 
@@ -2596,8 +2658,9 @@ fn find_cuda_compilers() -> Vec<Compiler> {
                     .ok()
                     .map(|full_path| Compiler {
                         name: c,
-                        exe: full_path.into(),
+                        exe: full_path.as_path().into(),
                         env_vars: vec![],
+                        version: full_path.as_path().into(),
                     })
             })
             .collect::<Vec<_>>(),
@@ -2627,8 +2690,9 @@ fn find_hip_compiler() -> Option<Compiler> {
         if let Ok(true) = clang_path.try_exists() {
             return Some(Compiler {
                 name: "clang",
-                exe: clang_path.into_os_string(),
+                exe: clang_path.as_path().into(),
                 env_vars,
+                version: clang_path.as_path().into(),
             });
         }
     }
@@ -2638,8 +2702,9 @@ fn find_hip_compiler() -> Option<Compiler> {
         if let Ok(true) = clang_path.try_exists() {
             return Some(Compiler {
                 name: "hip",
-                exe: clang_path.into_os_string(),
+                exe: clang_path.as_path().into(),
                 env_vars,
+                version: clang_path.as_path().into(),
             });
         }
     }

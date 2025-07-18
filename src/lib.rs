@@ -136,3 +136,25 @@ fn init_logging(is_server: bool) {
         }
     }
 }
+
+pub fn compiler_version(exe: &std::path::Path) -> crate::errors::Result<String> {
+    use crate::compiler::get_compiler_info;
+    use crate::jobserver::Client;
+    use crate::mock_command::{CommandCreatorSync, ProcessCommandCreator};
+    use tokio::runtime::Runtime;
+
+    let cwd = env::current_dir()?;
+    let runtime = Runtime::new()?;
+    let jobserver = Client::new();
+    let creator = ProcessCommandCreator::new(&jobserver);
+    let handle = runtime.handle().clone();
+    runtime.block_on(async move {
+        get_compiler_info(creator, exe, &cwd, &[], &[], &handle, None)
+            .await?
+            .0
+            .version()
+            .ok_or(crate::errors::anyhow!(
+                "Could not determine compiler version (exe={exe:?})"
+            ))
+    })
+}

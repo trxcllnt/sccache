@@ -511,6 +511,9 @@ where
     fn kind(&self) -> CompilerKind {
         CompilerKind::Rust
     }
+    fn version(&self) -> Option<String> {
+        Some(self.version.clone())
+    }
     #[cfg(feature = "dist-client")]
     fn get_toolchain_packager(&self) -> Box<dyn pkg::ToolchainPackager> {
         Box::new(RustToolchainPackager {

@@ -59,6 +59,7 @@ static ARG_HAS_FILE_WITH_EXTENSION_RE: Lazy<Regex> = regex_static::lazy_regex!(r
 /// A unit struct on which to implement `CCompilerImpl`.
 #[derive(Clone, Debug)]
 pub enum NvccHostCompiler {
+    Clang,
     Gcc,
     Msvc,
     Nvhpc,
@@ -80,17 +81,15 @@ impl CCompilerImpl for Nvcc {
         false
     }
     fn version(&self) -> Option<String> {
-        let nvcc_ver = self.version.clone().unwrap_or_default();
-        let host_ver = self.host_compiler_version.clone().unwrap_or_default();
-        let both_ver = [nvcc_ver, host_ver]
-            .iter()
-            .filter(|x| !x.is_empty())
-            .join("-");
-        if both_ver.is_empty() {
-            None
-        } else {
-            Some(both_ver)
-        }
+        let host_ver = self
+            .host_compiler_version
+            .as_ref()
+            .map(|host_ver| format!(" ({:?} {host_ver})", &self.host_compiler))
+            .unwrap_or_else(|| format!(" ({:?} <unknown>)", &self.host_compiler))
+            .to_lowercase();
+        self.version
+            .as_ref()
+            .map(|nvcc_ver| format!("{nvcc_ver}{host_ver}"))
     }
     fn parse_arguments(
         &self,
@@ -320,7 +319,7 @@ impl CCompilerImpl for Nvcc {
                             args.push("-EP".into());
                         }
                     }
-                    NvccHostCompiler::Gcc => {
+                    NvccHostCompiler::Clang | NvccHostCompiler::Gcc => {
                         // Remove -o so output goes to stdout
                         if let Some(idx) = args.iter().position(|x| x == "-o") {
                             args.splice(idx..idx + 2, []);

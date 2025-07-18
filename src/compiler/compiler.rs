@@ -369,6 +369,8 @@ where
 {
     /// Return the kind of compiler.
     fn kind(&self) -> CompilerKind;
+    /// Return the compiler version reported by the compiler executable.
+    fn version(&self) -> Option<String>;
     /// Retrieve a packager
     #[cfg(feature = "dist-client")]
     fn get_toolchain_packager(&self) -> Box<dyn pkg::ToolchainPackager>;
@@ -2102,8 +2104,12 @@ where
 #if defined(__NVCC__) && defined(__NVCOMPILER)
 compiler_id=nvcc-nvhpc
 compiler_version=__CUDACC_VER_MAJOR__.__CUDACC_VER_MINOR__.__CUDACC_VER_BUILD__
+compiler_version=__NVCOMPILER_MAJOR__.__NVCOMPILER_MINOR__.__NVCOMPILER_PATCHLEVEL__
 #elif defined(__NVCC__) && defined(_MSC_VER)
 compiler_id=nvcc-msvc
+compiler_version=__CUDACC_VER_MAJOR__.__CUDACC_VER_MINOR__.__CUDACC_VER_BUILD__
+#elif defined(__NVCC__) && defined(__clang__)
+compiler_id=nvcc-clang
 compiler_version=__CUDACC_VER_MAJOR__.__CUDACC_VER_MINOR__.__CUDACC_VER_BUILD__
 #elif defined(__NVCC__)
 compiler_id=nvcc
@@ -2180,17 +2186,22 @@ compiler_version=__VERSION__
             None
         }
     });
+
     if let Some(kind) = lines.next() {
+        let mut next_version = || {
+            lines
+                .next()
+                // In case the compiler didn't expand the macro.
+                .filter(|&line| line != "__VERSION__")
+                .map(|s| s.trim_matches('"').to_owned())
+                .or(Some(String::from("<unknown>")))
+        };
+
         let executable = executable.to_owned();
-        let version = lines
-            .next()
-            // In case the compiler didn't expand the macro.
-            .filter(|&line| line != "__VERSION__")
-            .map(str::to_owned);
-        let ver_str = |ver: &Option<String>| ver.clone().unwrap_or(String::from("<unknown>"));
+        let version = next_version();
         match kind {
             "clang" | "clang++" | "apple-clang" | "apple-clang++" => {
-                trace!("Found {kind} (version: {})", ver_str(&version));
+                trace!("Found {kind} (version: {})", version.as_ref().unwrap());
                 return CCompiler::new(
                     Clang {
                         clangplusplus: kind.ends_with("++"),
@@ -2204,13 +2215,13 @@ compiler_version=__VERSION__
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "diab" => {
-                trace!("Found {kind} (version: {})", ver_str(&version));
+                trace!("Found {kind} (version: {})", version.as_ref().unwrap());
                 return CCompiler::new(Diab { version }, executable, &pool)
                     .await
                     .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "gcc" | "g++" => {
-                trace!("Found {kind} (version: {})", ver_str(&version));
+                trace!("Found {kind} (version: {})", version.as_ref().unwrap());
                 return CCompiler::new(
                     Gcc {
                         gplusplus: kind == "g++",
@@ -2224,7 +2235,7 @@ compiler_version=__VERSION__
             }
             "msvc" | "msvc-clang" => {
                 let is_clang = kind == "msvc-clang";
-                trace!("Found {kind} (version: {})", ver_str(&version));
+                trace!("Found {kind} (version: {})", version.as_ref().unwrap());
                 let prefix = msvc::detect_showincludes_prefix(
                     &creator,
                     executable.as_ref(),
@@ -2247,23 +2258,21 @@ compiler_version=__VERSION__
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
-            "nvcc" | "nvcc-msvc" | "nvcc-nvhpc" => {
+            "nvcc" | "nvcc-clang" | "nvcc-msvc" | "nvcc-nvhpc" => {
+                let version = version.map(|s| s.replace(' ', ""));
                 let host_compiler = match kind {
+                    "nvcc-clang" => NvccHostCompiler::Clang,
                     "nvcc-nvhpc" => NvccHostCompiler::Nvhpc,
                     "nvcc-msvc" => NvccHostCompiler::Msvc,
                     "nvcc" => NvccHostCompiler::Gcc,
                     &_ => NvccHostCompiler::Gcc,
                 };
-                let host_compiler_version = lines
-                    .next()
-                    // In case the compiler didn't expand the macro.
-                    .filter(|&line| line != "__VERSION__")
-                    .map(str::to_owned);
+                let host_compiler_version = next_version();
 
                 trace!(
                     "Found {kind} (version: {}/{})",
-                    ver_str(&version),
-                    ver_str(&host_compiler_version)
+                    version.as_ref().unwrap(),
+                    host_compiler_version.as_ref().unwrap()
                 );
 
                 return CCompiler::new(
@@ -2279,7 +2288,8 @@ compiler_version=__VERSION__
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "nvhpc" => {
-                trace!("Found {kind} (version: {})", ver_str(&version));
+                let version = version.map(|s| s.replace(' ', ""));
+                trace!("Found {kind} (version: {})", version.as_ref().unwrap());
                 return CCompiler::new(
                     Nvhpc {
                         nvcplusplus: kind == "nvc++",
