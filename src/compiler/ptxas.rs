@@ -59,7 +59,7 @@ impl CCompilerImpl for Ptxas {
         cwd: &Path,
         _env_vars: &[(OsString, OsString)],
     ) -> CompilerArguments<ParsedArguments> {
-        cicc::parse_arguments(arguments, cwd, Language::Cubin, &ARGS[..], 3)
+        cicc::parse_arguments(arguments, cwd, Language::Cubin, &ARGS[..])
     }
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
@@ -95,17 +95,32 @@ impl CCompilerImpl for Ptxas {
     where
         T: CommandCreatorSync,
     {
-        cicc::generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
-            .map(|(command, dist_command, cacheable)| {
-                (CCompileCommand::new(command), dist_command, cacheable)
-            })
+        cicc::generate_compile_commands(
+            path_transformer,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            "-o",
+        )
+        .map(|(command, dist_command, cacheable)| {
+            (CCompileCommand::new(command), dist_command, cacheable)
+        })
     }
 }
 
 use cicc::ArgData::*;
 
 counted_array!(pub static ARGS: [ArgInfo<cicc::ArgData>; _] = [
+    flag!("--compile-only", PassThroughFlag),
+    flag!("--dont-merge-basicblocks", PassThroughFlag),
+    flag!("--return-at-end", PassThroughFlag),
+    take_arg!("--split-compile", OsString, CanBeSeparated, Unhashed),
+    take_arg!("--split-compile=", OsString, Concatenated, Unhashed),
     take_arg!("-arch", OsString, CanBeSeparated('='), PassThrough),
-    take_arg!("-m", OsString, CanBeSeparated('='), PassThrough),
+    flag!("-g", PassThroughFlag),
+    take_arg!("-m", OsString, Concatenated, PassThrough),
     take_arg!("-o", PathBuf, Separated, Output),
+    take_arg!("-split-compile", OsString, CanBeSeparated, Unhashed),
+    take_arg!("-split-compile=", OsString, Concatenated, Unhashed),
 ]);

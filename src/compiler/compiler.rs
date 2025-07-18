@@ -244,8 +244,9 @@ pub enum CompilerKind {
     Rust,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum Language {
+    #[default]
     C,
     Cxx,
     GenericHeader,

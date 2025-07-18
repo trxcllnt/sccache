@@ -1619,6 +1619,117 @@ int main(int argc, char** argv) {
             },
         );
     }
+
+    // Test lto (CUDA 12+)
+    // if !with_debug_flags && with_rdc {
+    //     trace!("compile A ltoir");
+    //     run_cuda_test(
+    //         "-ltoir",
+    //         Path::new(INPUT_FOR_CUDA_A),   // relative path for input
+    //         &build_dir.join("test.ltoir"), // relative path for output
+    //         &[
+    //             extra_args.as_slice(),
+    //             // needed to make -ltoir work
+    //             &["-dlto".into()],
+    //         ]
+    //         .concat(),
+    //         AdditionalStats {
+    //             cache_writes: Some(1),
+    //             compilations: Some(1),
+    //             compile_requests: Some(1),
+    //             non_cacheable_compilations: Some(1),
+    //             requests_executed: Some(2),
+    //             cache_misses: Some(vec![(CCompilerKind::Cicc, Language::Ptx, 1)]),
+    //             ..Default::default()
+    //         },
+    //     );
+    //     // Precompile lto_86 so its cache entry potentially has a different .module_id
+    //     // file when hydrated for other multiarch compilations
+    //     trace!("compile A lto_86");
+    //     run_cuda_test(
+    //         "-ltoir",
+    //         &tempdir.join(INPUT_FOR_CUDA_A), // absolute path for input
+    //         &tempdir.join(&build_dir).join("test.ltoir"), // absolute path for output
+    //         &[
+    //             extra_args.as_slice(),
+    //             &[
+    //                 "-arch=compute_86".into(),
+    //                 "-code=lto_86".into(),
+    //                 // needed to make -ltoir work
+    //                 "-dlto".into(),
+    //             ],
+    //         ]
+    //         .concat(),
+    //         AdditionalStats {
+    //             cache_writes: Some(1),
+    //             compilations: Some(1),
+    //             compile_requests: Some(1),
+    //             non_cacheable_compilations: Some(1),
+    //             requests_executed: Some(2),
+    //             cache_misses: Some(vec![(CCompilerKind::Cicc, Language::Ptx, 1)]),
+    //             ..Default::default()
+    //         },
+    //     );
+
+    //     // Test compiling a multiarch object
+    //     trace!("compile A lto_80,lto_86");
+    //     run_cuda_test(
+    //         "-c",
+    //         Path::new(INPUT_FOR_CUDA_A), // relative path for input
+    //         &build_dir.join(OUTPUT),     // relative path for output
+    //         &[
+    //             extra_args.as_slice(),
+    //             &[
+    //                 "-gencode=arch=compute_80,code=[lto_80]".into(),
+    //                 "-gencode=arch=compute_86,code=[lto_86]".into(),
+    //             ],
+    //         ]
+    //         .concat(),
+    //         AdditionalStats {
+    //             cache_writes: Some(3),
+    //             compilations: Some(4),
+    //             compile_requests: Some(1),
+    //             requests_executed: Some(5),
+    //             cache_hits: Some(vec![(CCompilerKind::CudaFE, Language::CudaFE, 1)]),
+    //             cache_misses: Some(vec![
+    //                 (CCompilerKind::Nvcc, Language::Cuda, 1),
+    //                 (CCompilerKind::Cicc, Language::Ptx, 2),
+    //             ]),
+    //             ..Default::default()
+    //         },
+    //     );
+
+    //     // Test compiling a multiarch object and embedding PTX where the LtoIR for one of the archs is cached
+    //     trace!("compile A [lto_80] [compute_86,lto_86]");
+    //     run_cuda_test(
+    //         "-c",
+    //         Path::new(INPUT_FOR_CUDA_A), // relative path for input
+    //         &build_dir.join(OUTPUT),     // relative path for output
+    //         &[
+    //             extra_args.as_slice(),
+    //             &[
+    //                 "-gencode=arch=compute_80,code=[lto_80]".into(),
+    //                 "-gencode=arch=compute_86,code=[compute_86,lto_86]".into(),
+    //             ],
+    //         ]
+    //         .concat(),
+    //         AdditionalStats {
+    //             cache_writes: Some(2),
+    //             compilations: Some(3),
+    //             compile_requests: Some(1),
+    //             requests_executed: Some(5),
+    //             cache_hits: Some(vec![
+    //                 (CCompilerKind::CudaFE, Language::CudaFE, 1),
+    //                 (CCompilerKind::Cicc, Language::Ptx, 1),
+    //             ]),
+    //             cache_misses: Some(vec![
+    //                 (CCompilerKind::Nvcc, Language::Cuda, 1),
+    //                 (CCompilerKind::Cicc, Language::Ptx, 1),
+    //             ]),
+    //             ..Default::default()
+    //         },
+    //     );
+    // }
 }
 
 fn test_nvcc_proper_lang_stat_tracking(

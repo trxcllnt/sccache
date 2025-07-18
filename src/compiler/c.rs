@@ -82,7 +82,7 @@ pub struct ArtifactDescriptor {
 
 /// The results of parsing a compiler commandline.
 #[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Default, Debug, PartialEq, Eq, Clone)]
 pub struct ParsedArguments {
     /// The input source file.
     pub input: PathBuf,
@@ -127,7 +127,7 @@ impl ParsedArguments {
         self.outputs
             .get("obj")
             .map(|o| o.path.as_os_str())
-            .map(|s| s.to_string_lossy())
+            .and_then(|s| s.to_str().map(Cow::Borrowed))
             .unwrap_or(Cow::Borrowed("Unknown filename"))
     }
 }

@@ -13,23 +13,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_imports, dead_code, unused_variables)]
-
 use crate::compiler::args::*;
 use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
 use crate::compiler::{
     CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language,
     SingleCompileCommand,
 };
-use crate::{counted_array, dist};
+use crate::{counted_array, dist, util::OsStrExt};
 
-use crate::mock_command::{CommandCreator, CommandCreatorSync, ProcessOutput, RunCommand};
+use crate::mock_command::{CommandCreatorSync, ProcessOutput};
 
 use async_trait::async_trait;
 
 use std::collections::HashMap;
-use std::ffi::OsString;
-use std::fs;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -58,7 +55,7 @@ impl CCompilerImpl for Cicc {
         cwd: &Path,
         _env_vars: &[(OsString, OsString)],
     ) -> CompilerArguments<ParsedArguments> {
-        parse_arguments(arguments, cwd, Language::Ptx, &ARGS[..], 3)
+        parse_arguments(arguments, cwd, Language::Ptx, &ARGS[..])
     }
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
@@ -94,12 +91,37 @@ impl CCompilerImpl for Cicc {
     where
         T: CommandCreatorSync,
     {
-        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars).map(
-            |(command, dist_command, cacheable)| {
-                (CCompileCommand::new(command), dist_command, cacheable)
-            },
+        generate_compile_commands(
+            path_transformer,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            "-o",
         )
+        .map(|(command, dist_command, cacheable)| {
+            (CCompileCommand::new(command), dist_command, cacheable)
+        })
     }
+}
+
+fn should_take_next(arg: &OsStr) -> bool {
+    let arg = match *arg.as_encoded_bytes() {
+        [b'-', b'-', ..] => arg.split_prefix("--").unwrap_or_default(),
+        [b'-', ..] => arg.split_prefix("-").unwrap_or_default(),
+        _ => return false,
+    };
+
+    // return false on single-letter flags: `-` and `-o`
+    !arg.is_empty()
+        // return false on --foo=bar
+        && !arg.contains("=")
+        // return false on -f64.123
+        && arg.to_str().and_then(|s| {
+            None.or_else(|| s.parse::<f64>().ok().map(|_| true))
+                .or_else(|| s.parse::<i128>().ok().map(|_| true))
+                .or_else(|| s.parse::<u128>().ok().map(|_| true))
+        }).is_none()
 }
 
 pub fn parse_arguments<S>(
@@ -107,14 +129,12 @@ pub fn parse_arguments<S>(
     cwd: &Path,
     language: Language,
     arg_info: S,
-    input_arg_offset_from_end: usize,
 ) -> CompilerArguments<ParsedArguments>
 where
     S: SearchableArgInfo<ArgData>,
 {
-    let mut args = arguments.to_vec();
-    let input_loc = arguments.len() - input_arg_offset_from_end;
-    let input = args.splice(input_loc..input_loc + 1, []).next().unwrap();
+    let args = arguments.to_vec();
+    let mut input = None;
 
     let mut take_next = false;
     let mut outputs = HashMap::new();
@@ -123,19 +143,19 @@ where
     let mut module_id_file_name = Option::<PathBuf>::None;
 
     let mut common_args = vec![];
+    let mut unhashed_args = vec![];
 
     for arg in ArgsIter::new(args.iter().cloned(), arg_info) {
         match arg {
             Ok(arg) => {
                 let args = match arg.get_data() {
-                    Some(ExtraOutput(o)) => {
+                    Some(ExtraOutput(path)) => {
                         take_next = false;
-                        let path = cwd.join(o);
                         if let Some(flag) = arg.flag_str() {
                             outputs.insert(
                                 flag,
                                 ArtifactDescriptor {
-                                    path,
+                                    path: path.to_owned(),
                                     optional: false,
                                     must_be_non_empty: false,
                                 },
@@ -148,50 +168,65 @@ where
                         gen_module_id_file = true;
                         &mut common_args
                     }
-                    Some(ModuleIdFileName(o)) => {
+                    Some(ModuleIdFileName(path)) => {
                         take_next = false;
-                        module_id_file_name = Some(cwd.join(o));
+                        module_id_file_name = Some(cwd.join(path));
                         &mut common_args
                     }
-                    Some(Output(o)) => {
+                    Some(Output(path)) => {
                         take_next = false;
-                        let path = cwd.join(o);
                         outputs.insert(
                             "obj",
                             ArtifactDescriptor {
-                                path,
+                                path: path.to_owned(),
                                 optional: false,
                                 must_be_non_empty: false,
                             },
                         );
                         continue;
                     }
-                    Some(PassThrough(_)) => {
+                    Some(PassThroughFlag) | Some(PassThrough(_)) => {
                         take_next = false;
                         &mut common_args
                     }
+                    Some(Unhashed(_)) => {
+                        take_next = false;
+                        &mut unhashed_args
+                    }
                     None => match arg {
                         Argument::Raw(ref p) => {
+                            trace!("{language:?} raw (take_next={take_next}): {p:?}");
                             if take_next {
-                                take_next = false;
+                                take_next = should_take_next(p);
                                 &mut common_args
                             } else {
+                                if input.is_none() {
+                                    trace!("{language:?} input: {p:?}");
+                                    input = Some(p.clone());
+                                }
                                 continue;
                             }
                         }
                         Argument::UnknownFlag(ref p) => {
-                            let s = p.to_string_lossy();
-                            take_next = s.starts_with('-');
+                            take_next = should_take_next(p);
+                            trace!("{language:?} unknown (take_next={take_next}): {p:?}");
                             &mut common_args
                         }
                         _ => unreachable!(),
                     },
                 };
-                args.extend(arg.iter_os_strings());
+                let disposition = match arg.flag_str() {
+                    Some(s) if s.len() == 2 => NormalizedDisposition::Concatenated,
+                    _ => NormalizedDisposition::Separated,
+                };
+                args.extend(arg.normalize(disposition).iter_os_strings());
             }
             _ => continue,
         };
     }
+
+    let gen_module_id_file = gen_module_id_file
+        && (outputs.contains_key("--gen_c_file_name") || outputs.contains_key("--stub_file_name"));
 
     match (gen_module_id_file, module_id_file_name) {
         (true, Some(path)) => {
@@ -210,6 +245,12 @@ where
         _ => {}
     }
 
+    let input = match input {
+        Some(i) => i,
+        // We can't cache compilation without an input.
+        None => return CompilerArguments::CannotCache("no input file", None),
+    };
+
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),
         outputs,
@@ -221,7 +262,7 @@ where
         preprocessor_args: vec![],
         common_args,
         arch_args: vec![],
-        unhashed_args: vec![],
+        unhashed_args,
         extra_dist_files: extra_dist_files.clone(),
         extra_hash_files: extra_dist_files,
         msvc_show_includes: false,
@@ -251,6 +292,7 @@ pub fn generate_compile_commands(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
+    output_flag: &str,
 ) -> Result<(
     SingleCompileCommand,
     Option<dist::CompileCommand>,
@@ -262,65 +304,85 @@ pub fn generate_compile_commands(
         let _ = path_transformer;
     }
 
-    let lang_str = &parsed_args.language.as_str();
-    let out_file = match parsed_args.outputs.get("obj") {
+    let input = parsed_args.input.as_path();
+    let output = match parsed_args.outputs.get("obj") {
         Some(obj) => &obj.path,
-        None => return Err(anyhow!("Missing {:?} file output", lang_str)),
+        None => {
+            return Err(anyhow!(
+                "Missing {} file output",
+                parsed_args.language.as_str()
+            ))
+        }
     };
 
-    let mut arguments: Vec<OsString> = vec![];
-
-    arguments.extend_from_slice(&parsed_args.common_args);
-    arguments.extend_from_slice(&parsed_args.unhashed_args);
-    arguments.extend(vec![
-        (&parsed_args.input).into(),
-        "-o".into(),
-        out_file.into(),
-    ]);
+    let command = SingleCompileCommand {
+        arguments: [
+            &parsed_args.common_args[..],
+            &parsed_args.unhashed_args[..],
+            &(if output_flag == "-o" {
+                [input.into(), output_flag.into(), output.into()]
+            } else {
+                [output_flag.into(), output.into(), input.into()]
+            }),
+        ]
+        .concat(),
+        cwd: cwd.to_owned(),
+        env_vars: env_vars.to_owned(),
+        executable: executable.to_owned(),
+    };
 
     if log_enabled!(log::Level::Trace) {
         trace!(
-            "[{}]: {} command: {:?}",
-            out_file.file_name().unwrap().to_string_lossy(),
-            executable.file_name().unwrap().to_string_lossy(),
-            [
-                &[format!("cd {} &&", cwd.to_string_lossy()).to_string()],
-                &[executable.to_str().unwrap_or_default().to_string()][..],
-                &dist::osstrings_to_strings(&arguments).unwrap_or_default()[..]
-            ]
-            .concat()
-            .join(" ")
+            "[{}]: {} command: cd {cwd:?} && {command}",
+            output.display(),
+            parsed_args.language.as_str(),
         );
     }
 
-    let command = SingleCompileCommand {
-        executable: executable.to_owned(),
-        arguments,
-        env_vars: env_vars.to_owned(),
-        cwd: cwd.to_owned(),
-    };
+    Ok((
+        command,
+        #[cfg(not(feature = "dist-client"))]
+        None,
+        #[cfg(feature = "dist-client")]
+        (|| {
+            let command = dist::CompileCommand {
+                arguments: [
+                    &dist::osstrings_to_strings(&parsed_args.common_args)?[..],
+                    // Don't send unhashed args (i.e. `-split-compile`) to the build cluster
+                    // &dist::osstrings_to_strings(&parsed_args.unhashed_args)?[..],
+                    &(if output_flag == "-o" {
+                        [
+                            path_transformer.as_dist(input)?,
+                            output_flag.into(),
+                            path_transformer.as_dist(output)?,
+                        ]
+                    } else {
+                        [
+                            output_flag.into(),
+                            path_transformer.as_dist(output)?,
+                            path_transformer.as_dist(input)?,
+                        ]
+                    }),
+                ]
+                .concat(),
+                cwd: path_transformer.as_dist_abs(cwd)?,
+                env_vars: dist::osstring_tuples_to_strings(env_vars)?,
+                executable: path_transformer
+                    .as_dist(dunce::canonicalize(executable).ok()?.as_path())?,
+            };
 
-    #[cfg(not(feature = "dist-client"))]
-    let dist_command = None;
-    #[cfg(feature = "dist-client")]
-    let dist_command = (|| {
-        let mut arguments: Vec<String> = vec![];
-        arguments.extend(dist::osstrings_to_strings(&parsed_args.common_args)?);
-        arguments.extend(dist::osstrings_to_strings(&parsed_args.unhashed_args)?);
-        arguments.extend(vec![
-            path_transformer.as_dist(&parsed_args.input)?,
-            "-o".into(),
-            path_transformer.as_dist(out_file)?,
-        ]);
-        Some(dist::CompileCommand {
-            executable: path_transformer.as_dist(executable.canonicalize().unwrap().as_path())?,
-            arguments,
-            env_vars: dist::osstring_tuples_to_strings(env_vars)?,
-            cwd: path_transformer.as_dist_abs(cwd)?,
-        })
-    })();
+            if log_enabled!(log::Level::Trace) {
+                trace!(
+                    "[{}]: {} dist_command: cd {cwd:?} && {command}",
+                    output.display(),
+                    parsed_args.language.as_str(),
+                );
+            }
 
-    Ok((command, dist_command, Cacheable::Yes))
+            Some(command)
+        })(),
+        Cacheable::Yes,
+    ))
 }
 
 ArgData! { pub
@@ -328,17 +390,22 @@ ArgData! { pub
     GenModuleIdFileFlag,
     ModuleIdFileName(PathBuf),
     Output(PathBuf),
+    PassThroughFlag,
     PassThrough(OsString),
+    Unhashed(OsString),
 }
 
 use self::ArgData::*;
 
 counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
+    flag!("--emit-optix-ir", PassThroughFlag),
     take_arg!("--gen_c_file_name", PathBuf, Separated, ExtraOutput),
     take_arg!("--gen_device_file_name", PathBuf, Separated, ExtraOutput),
     flag!("--gen_module_id_file", GenModuleIdFileFlag),
     take_arg!("--include_file_name", OsString, Separated, PassThrough),
     take_arg!("--module_id_file_name", PathBuf, Separated, ModuleIdFileName),
     take_arg!("--stub_file_name", PathBuf, Separated, ExtraOutput),
+    flag!("-lto", PassThroughFlag),
     take_arg!("-o", PathBuf, Separated, Output),
+    take_arg!("-olto", PathBuf, Separated, ExtraOutput),
 ]);
