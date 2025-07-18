@@ -626,7 +626,7 @@ mod tests {
         fs::create_dir_all(b.parent().unwrap())?;
         let f = fs::File::create(&b)?;
         fill_contents(f)?;
-        b.canonicalize()
+        dunce::canonicalize(b)
     }
 
     /// Set the last modified time of `path` backwards by `seconds` seconds.

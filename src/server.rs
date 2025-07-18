@@ -1124,7 +1124,7 @@ where
 
         // canonicalize the path to follow symlinks
         // don't canonicalize if the file name differs so it works with clang's multicall
-        let resolved_compiler_path = match resolved_compiler_path.canonicalize() {
+        let resolved_compiler_path = match dunce::canonicalize(&resolved_compiler_path) {
             Ok(path) if matches!(path.file_name(), Some(name) if resolved_compiler_path.file_name() == Some(name)) => {
                 path
             }

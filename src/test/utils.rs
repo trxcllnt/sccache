@@ -137,7 +137,7 @@ where
     fs::create_dir_all(parent)?;
     let f = fs::File::create(&b)?;
     fill_contents(f)?;
-    b.canonicalize()
+    dunce::canonicalize(b)
 }
 
 pub fn touch(dir: &Path, path: &str) -> io::Result<PathBuf> {
@@ -161,7 +161,7 @@ pub fn mk_bin_contents<F: FnOnce(File) -> io::Result<()>>(
         .mode(0o666 | (libc::S_IXUSR as u32))
         .open(&bin)?;
     fill_contents(f)?;
-    bin.canonicalize()
+    dunce::canonicalize(bin)
 }
 
 #[cfg(unix)]

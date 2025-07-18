@@ -1554,7 +1554,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 
                 for path in cfg_paths {
                     if path.exists() && path.is_file() {
-                        if let Ok(path) = path.canonicalize() {
+                        if let Ok(path) = dunce::canonicalize(&path) {
                             let _ = package_builder.add_file(path);
                         }
                     }
@@ -1562,7 +1562,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 
                 for path in dir_paths {
                     if path.exists() && path.is_dir() {
-                        if let Ok(path) = path.canonicalize() {
+                        if let Ok(path) = dunce::canonicalize(&path) {
                             let _ = package_builder.add_dir(path);
                         }
                     }

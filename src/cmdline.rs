@@ -197,7 +197,7 @@ pub fn try_parse() -> Result<Command> {
     let mut args: Vec<_> = env::args_os().collect();
 
     if !internal_start_server {
-        if let Ok(exe) = env::current_exe() {
+        if let Ok(ref exe) = env::current_exe() {
             match exe
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -213,7 +213,7 @@ pub fn try_parse() -> Result<Command> {
                     {
                         match which_in(exe_filename, Some(&path), &cwd) {
                             Ok(ref full_path)
-                                if full_path.canonicalize()? == exe.canonicalize()? =>
+                                if dunce::canonicalize(full_path)? == dunce::canonicalize(exe)? =>
                             {
                                 if let Some(dir) = full_path.parent() {
                                     let path = env::join_paths(
