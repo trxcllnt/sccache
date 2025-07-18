@@ -181,6 +181,21 @@ pub struct SingleCompileCommand {
     pub cwd: PathBuf,
 }
 
+impl fmt::Display for SingleCompileCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            shlex::try_join(
+                std::iter::once(&self.executable.clone().into_os_string())
+                    .chain(self.arguments.iter())
+                    .map(|s| s.to_str().unwrap())
+            )
+            .unwrap_or_else(|e| format!("{e}"))
+        )
+    }
+}
+
 #[async_trait]
 impl CompileCommandImpl for SingleCompileCommand {
     fn get_executable(&self) -> PathBuf {

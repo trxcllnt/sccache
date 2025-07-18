@@ -459,6 +459,21 @@ pub struct CompileCommand {
     pub cwd: String,
 }
 
+impl fmt::Display for CompileCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            shlex::try_join(
+                std::iter::once(&self.executable)
+                    .chain(self.arguments.iter())
+                    .map(|s| s.as_str())
+            )
+            .unwrap_or_else(|e| format!("{e}"))
+        )
+    }
+}
+
 // NewJob
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
