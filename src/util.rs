@@ -402,6 +402,97 @@ pub fn fmt_duration_as_secs(duration: &Duration) -> String {
     format!("{}.{:03} s", duration.as_secs(), duration.subsec_millis())
 }
 
+fn wait_with_input_buffer_stderr<T>(
+    mut child: T,
+    input: Option<Vec<u8>>,
+) -> Result<(
+    impl std::future::Future<Output = Result<process::ExitStatus>>,
+    <T as CommandChild>::O,                             // stdout
+    impl std::future::Future<Output = Result<Vec<u8>>>, // stderr
+)>
+where
+    T: CommandChild + 'static,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let stdin = input.and_then(|i| {
+        child.take_stdin().map(|mut stdin| async move {
+            stdin.write_all(&i).await.context("failed to write stdin")
+        })
+    });
+
+    let stdout = child.take_stdout().unwrap();
+    let stderr = child.take_stderr();
+    let stderr = async move {
+        let mut buf = Vec::new();
+        if let Some(mut stderr) = stderr {
+            stderr
+                .read_to_end(&mut buf)
+                .await
+                .context("failed to read stderr")?;
+        }
+        Ok(buf)
+    };
+
+    Ok((
+        async move {
+            // Finish writing stdin before waiting, because waiting drops stdin.
+            if let Some(stdin) = stdin {
+                let _ = stdin.await;
+            }
+
+            child.wait().await.context("failed to wait for child")
+        },
+        stdout,
+        stderr,
+    ))
+}
+
+fn wait_with_input_buffer_stdout<T>(
+    mut child: T,
+    input: Option<Vec<u8>>,
+) -> Result<(
+    impl std::future::Future<Output = Result<process::ExitStatus>>,
+    impl std::future::Future<Output = Result<Vec<u8>>>, // stdout
+    <T as CommandChild>::E,                             // stderr
+)>
+where
+    T: CommandChild + 'static,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let stdin = input.and_then(|i| {
+        child.take_stdin().map(|mut stdin| async move {
+            stdin.write_all(&i).await.context("failed to write stdin")
+        })
+    });
+
+    let stdout = child.take_stdout();
+    let stdout = async move {
+        let mut buf = Vec::new();
+        if let Some(mut stdout) = stdout {
+            stdout
+                .read_to_end(&mut buf)
+                .await
+                .context("failed to read stdout")?;
+        }
+        Ok(buf)
+    };
+
+    let stderr = child.take_stderr().unwrap();
+
+    Ok((
+        async move {
+            // Finish writing stdin before waiting, because waiting drops stdin.
+            if let Some(stdin) = stdin {
+                let _ = stdin.await;
+            }
+
+            child.wait().await.context("failed to wait for child")
+        },
+        stdout,
+        stderr,
+    ))
+}
+
 /// If `input`, write it to `child`'s stdin while also reading `child`'s stdout and stderr, then wait on `child` and return its status and output.
 ///
 /// This was lifted from `std::process::Child::wait_with_output` and modified
@@ -486,13 +577,57 @@ where
 
     wait_with_input_output(child, input)
         .await
-        .and_then(|output| {
-            if output.success() {
-                Ok(output)
-            } else {
-                Err(ProcessError(output).into())
-            }
+        .and_then(|output| output.into())
+}
+
+pub async fn run_with_input_buffer_stderr<C>(
+    mut command: C,
+    input: Option<Vec<u8>>,
+) -> Result<(
+    impl std::future::Future<Output = Result<process::ExitStatus>>,
+    <C::C as CommandChild>::O,                          // stdout
+    impl std::future::Future<Output = Result<Vec<u8>>>, // stderr
+)>
+where
+    C: RunCommand,
+{
+    let child = command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
         })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .await?;
+
+    wait_with_input_buffer_stderr(child, input)
+}
+
+pub async fn run_with_input_buffer_stdout<C>(
+    mut command: C,
+    input: Option<Vec<u8>>,
+) -> Result<(
+    impl std::future::Future<Output = Result<process::ExitStatus>>,
+    impl std::future::Future<Output = Result<Vec<u8>>>, // stdout
+    <C::C as CommandChild>::E,                          // stderr
+)>
+where
+    C: RunCommand,
+{
+    let child = command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .await?;
+
+    wait_with_input_buffer_stdout(child, input)
 }
 
 /// Write `data` to `writer` with bincode serialization, prefixed by a `u32` length.

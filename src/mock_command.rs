@@ -657,6 +657,16 @@ impl From<std::process::Output> for ProcessOutput {
     }
 }
 
+impl From<ProcessOutput> for Result<ProcessOutput> {
+    fn from(res: ProcessOutput) -> Self {
+        if res.success() {
+            Ok(res)
+        } else {
+            Err(ProcessError(res).into())
+        }
+    }
+}
+
 impl fmt::Debug for ProcessOutput {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         let stdout_utf8 = str::from_utf8(&self.stdout);

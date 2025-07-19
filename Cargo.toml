@@ -153,7 +153,6 @@ nix = { version = "0.28.0", optional = true, features = [
 sysinfo = { version = "0.33", optional = true }
 syslog = { version = "6", optional = true }
 tokio-retry2 = { version = "0.5", optional = true, features = ["jitter"] }
-tokio-stream = { version = "0.1.17", optional = true }
 tower-http = { version = "0.6", features = [
   "request-id",
   "sensitive-headers",
@@ -237,7 +236,6 @@ dist-client = [
   "url",
   "sha2",
   "tokio-retry2",
-  "tokio-stream",
 ]
 # Enables the sccache-dist binary
 dist-server = [
@@ -262,7 +260,6 @@ dist-server = [
   "sysinfo",
   "syslog",
   "tokio-retry2",
-  "tokio-stream",
   "tower-http",
   "tracing-subscriber",
   "tracing",

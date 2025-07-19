@@ -3947,7 +3947,6 @@ dependencies = [
  "tokio",
  "tokio-retry2",
  "tokio-serde",
- "tokio-stream",
  "tokio-util",
  "toml",
  "tower 0.4.13",

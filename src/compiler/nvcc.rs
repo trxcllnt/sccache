@@ -13,38 +13,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_imports, dead_code, unused_variables)]
-
 use crate::compiler::args::*;
 use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
 use crate::compiler::gcc::ArgData::*;
 use crate::compiler::{
-    self, gcc, get_compiler_info, write_temp_file, CCompileCommand, Cacheable, CompileCommand,
-    CompileCommandImpl, CompilerArguments, Language,
+    gcc, CCompileCommand, Cacheable, CompileCommand, CompileCommandImpl, CompilerArguments,
+    Language,
 };
-use crate::mock_command::{
-    exit_status, CommandChild, CommandCreator, CommandCreatorSync, ProcessOutput, ProcessStatus,
-    RunCommand,
-};
+use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist, protocol, server, SCCACHE_TMPDIR};
 use async_trait::async_trait;
-use bytes::Buf;
-use fs::File;
 use fs_err as fs;
-use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt};
+use futures::{AsyncBufReadExt, TryStreamExt};
 use itertools::Itertools;
 use log::Level::Trace;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
-use std::future::{Future, IntoFuture};
-use std::io::{self, BufRead, Read, Write};
-#[cfg(unix)]
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::{env, process};
+use tokio_util::compat::TokioAsyncReadCompatExt;
 use which::which_in;
 
 use crate::errors::*;
@@ -185,8 +174,8 @@ impl CCompilerImpl for Nvcc {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        may_dist: bool,
-        rewrite_includes_only: bool,
+        _may_dist: bool,
+        _rewrite_includes_only: bool,
         _preprocessor_cache_mode: bool,
     ) -> Result<ProcessOutput>
     where
@@ -280,15 +269,13 @@ impl CCompilerImpl for Nvcc {
         // ```
 
         let preprocessor_output = {
-            let runtime = tokio::runtime::Handle::current();
-
             let preprocessor_flag = match self.host_compiler {
                 NvccHostCompiler::Msvc => "-P",
                 _ => "-E",
             }
             .to_owned();
 
-            let preprocessor_commands = select_nvcc_subcommands(
+            let preprocessor_hashes = select_nvcc_subcommands(
                 creator,
                 executable,
                 cwd,
@@ -339,33 +326,22 @@ impl CCompilerImpl for Nvcc {
                     }
                 }
 
-                NvccGeneratedSubcommand {
-                    exe,
-                    args,
-                    cwd: cwd.to_owned(),
-                    env_vars: env_vars.clone(),
-                    cacheable: Cacheable::No,
-                }
+                hash_nvcc_preprocessor_call(
+                    creator,
+                    &output_path,
+                    NvccGeneratedSubcommand {
+                        exe,
+                        args,
+                        cwd: cwd.to_owned(),
+                        env_vars: env_vars.clone(),
+                        cacheable: Cacheable::No,
+                    },
+                )
             })
-            .map(|cmd| run_nvcc_subcommand(cmd, creator, &output_path))
-            .map(|fut| async {
-                let mut res = fut.await.unwrap_or_else(error_to_output);
-                if res.success() {
-                    res.stderr = vec![];
-                    res.stdout = runtime
-                        .spawn_blocking(move || {
-                            crate::util::Digest::reader_sync(res.stdout.reader()).unwrap()
-                        })
-                        .await
-                        .unwrap()
-                        .into_bytes()
-                }
-                res
-            });
+            .map(|fut| async { fut.await.unwrap_or_else(error_to_output) });
 
-            let outputs = futures::future::join_all(preprocessor_commands).await;
-
-            outputs
+            futures::future::join_all(preprocessor_hashes)
+                .await
                 .into_iter()
                 .fold(ProcessOutput::default(), |output, result| {
                     match (output.success(), result.success()) {
@@ -377,21 +353,17 @@ impl CCompilerImpl for Nvcc {
                 })
         };
 
-        if preprocessor_output.success() {
-            Ok(preprocessor_output)
-        } else {
-            Err(ProcessError(preprocessor_output).into())
-        }
+        preprocessor_output.into()
     }
 
     fn generate_compile_commands<T>(
         &self,
-        path_transformer: &mut dist::PathTransformer,
+        _path_transformer: &mut dist::PathTransformer,
         executable: &Path,
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        rewrite_includes_only: bool,
+        _rewrite_includes_only: bool,
         hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
@@ -760,7 +732,7 @@ impl CompileCommandImpl for NvccCompileCommand {
             |mut output: ProcessOutput, chunks: Vec<Vec<Vec<NvccGeneratedSubcommand>>>| async {
                 for chunk in chunks {
                     let results = futures::future::join_all(chunk.into_iter().map(|commands| {
-                        run_nvcc_subcommands_group(service, creator, cwd, commands, output_path)
+                        run_nvcc_subcommands_group(service, creator, commands, output_path)
                     }))
                     .await;
 
@@ -956,12 +928,8 @@ where
         );
     }
 
-    let output_flag = "-o".to_owned();
     let gen_module_id_file_flag = "--gen_module_id_file".to_owned();
-    let gen_c_file_name_flag = "--gen_c_file_name".to_owned();
-    let gen_device_file_name_flag = "--gen_device_file_name".to_owned();
     let module_id_file_name_flag = "--module_id_file_name".to_owned();
-    let stub_file_name_flag = "--stub_file_name".to_owned();
 
     let mut cudafe_has_gen_module_id_file_flag = false;
 
@@ -983,7 +951,7 @@ where
 
     // First pass over commands because in CTK < 12.0, `cudafe++` is at the end of the commands list,
     // but we need to set `cudafe_has_gen_module_id_file_flag` in order to adjust the cicc commands.
-    for (dir, exe, args) in all_commands.iter_mut() {
+    for (_dir, exe, args) in all_commands.iter_mut() {
         if let Some("cudafe++") = exe.file_stem().and_then(|s| s.to_str()) {
             // Fix for CTK < 12.0:
             // Add `--gen_module_id_file` if the cudafe++ args include `--module_id_file_name`
@@ -1221,13 +1189,6 @@ where
     Ok((nvcc_internal_files, command_groups))
 }
 
-fn is_nvcc_exe(exe: &OsStr) -> bool {
-    matches!(
-        exe.to_str(),
-        Some("cicc") | Some("ptxas") | Some("cudafe++") | Some("nvlink") | Some("fatbinary")
-    )
-}
-
 counted_array!(static SIMPLE_ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("-Fi", PathBuf, Concatenated, Output),
     take_arg!("-Fo", PathBuf, Concatenated, Output),
@@ -1414,50 +1375,55 @@ where
         .current_dir(cwd)
         .envs(env_vars.to_vec());
 
-    let nvcc_dryrun_output = run_input_output(nvcc_dryrun_cmd, None).await?;
+    #[cfg(unix)]
+    let (status, errors, output) =
+        crate::util::run_with_input_buffer_stdout(nvcc_dryrun_cmd, None).await?;
+    #[cfg(windows)]
+    let (status, output, errors) =
+        crate::util::run_with_input_buffer_stderr(nvcc_dryrun_cmd, None).await?;
 
     let mut dryrun_env_vars = Vec::<(OsString, OsString)>::new();
     let mut dryrun_env_vars_re_map = HashMap::<String, regex::Regex>::new();
 
-    let mut lines = Vec::<(usize, PathBuf, Vec<String>)>::new();
-
-    #[cfg(unix)]
-    let reader = std::io::BufReader::new(&nvcc_dryrun_output.stderr[..]);
-    #[cfg(windows)]
-    let reader = std::io::BufReader::new(&nvcc_dryrun_output.stdout[..]);
-
-    for pair in reader.lines().enumerate() {
-        let (idx, line) = pair;
-        // Select lines that match the `#$ ` prefix from nvcc --dryrun
-        let line = match select_valid_dryrun_lines(&IS_VALID_LINE_RE, &line?) {
-            Ok(line) => line,
-            // Ignore lines that don't start with `#$ `. For some reason, nvcc
-            // on Windows prints the name of the input file without the prefix
-            Err(err) => continue,
-        };
-
-        let maybe_exe_and_args = fold_env_vars_or_split_into_exe_and_args(
-            &IS_ENVVAR_LINE_RE,
-            &mut dryrun_env_vars,
-            &mut dryrun_env_vars_re_map,
-            cwd,
-            &line,
-            host_compiler,
-        )?;
-
-        let (exe, args) = match maybe_exe_and_args {
-            Some(exe_and_args) => exe_and_args,
-            _ => continue,
-        };
-
-        match exe.file_stem().and_then(|s| s.to_str()) {
-            None => continue,
-            Some(exe_name) => {
-                if select_subcommand(exe_name, &args) {
-                    lines.push((idx, exe, args));
+    let output = futures::io::BufReader::new(output.compat())
+        .lines()
+        .map_err(anyhow::Error::new)
+        .try_filter_map(|line| {
+            // Select lines that match the `#$ ` prefix from nvcc --dryrun
+            futures::future::ok(select_valid_dryrun_lines(&IS_VALID_LINE_RE, &line))
+        })
+        .try_filter_map(|line| {
+            futures::future::ready(fold_env_vars_or_split_into_exe_and_args(
+                &IS_ENVVAR_LINE_RE,
+                &mut dryrun_env_vars,
+                &mut dryrun_env_vars_re_map,
+                cwd,
+                &line,
+                host_compiler,
+            ))
+        })
+        .try_fold((0, vec![]), |(idx, mut lines), (exe, args)| {
+            futures::future::ready({
+                if let Some(exe_name) = exe.file_stem().and_then(|s| s.to_str()) {
+                    if select_subcommand(exe_name, &args) {
+                        lines.push((idx, exe, args));
+                    }
                 }
+                Ok((idx + 1, lines))
+            })
+        });
+
+    let (status, (_, output), errors) = futures::future::try_join3(status, output, errors).await?;
+
+    if !status.success() {
+        bail!(ProcessError(
+            std::process::Output {
+                status,
+                stdout: vec![],
+                stderr: errors,
             }
-        }
+            .into()
+        ))
     }
 
     for pair in dryrun_env_vars {
@@ -1471,17 +1437,16 @@ where
         );
     }
 
-    Ok(lines)
+    Ok(output)
 }
 
-fn select_valid_dryrun_lines(re: &Regex, line: &str) -> Result<String> {
-    match re.captures(line) {
-        Some(caps) => {
-            let (_, [rest]) = caps.extract();
-            Ok(rest.to_string())
-        }
-        _ => Err(anyhow!("nvcc error: {:?}", line)),
-    }
+fn select_valid_dryrun_lines(re: &Regex, line: &str) -> Option<String> {
+    // Ignore lines that don't start with `#$ `. For some reason, nvcc
+    // on Windows prints the name of the input file without the prefix
+    re.captures(line).map(|caps| {
+        let (_, [rest]) = caps.extract();
+        rest.to_string()
+    })
 }
 
 fn fold_env_vars_or_split_into_exe_and_args(
@@ -1831,10 +1796,69 @@ fn remap_generated_filenames(
         .collect::<Vec<_>>()
 }
 
-async fn run_nvcc_subcommand<T>(
-    cmd: NvccGeneratedSubcommand,
+async fn hash_nvcc_preprocessor_call<T>(
     creator: &T,
     output_path: &Path,
+    cmd: NvccGeneratedSubcommand,
+) -> Result<ProcessOutput>
+where
+    T: CommandCreatorSync,
+{
+    let NvccGeneratedSubcommand {
+        exe,
+        args,
+        cwd,
+        env_vars,
+        ..
+    } = cmd;
+
+    if log_enabled!(log::Level::Trace) {
+        trace!(
+            "[{}]: hash_nvcc_preprocessor_call: {}",
+            output_path.display(),
+            format!(
+                "{} && {}",
+                shlex::try_join(["cd", &format!("{}", cwd.display())])?,
+                shlex::try_join(
+                    std::iter::once(&format!("{}", exe.display()))
+                        .chain(args.iter())
+                        .map(|s| s.as_str())
+                )?
+            )
+        );
+    }
+
+    let mut cmd = creator.clone().new_command_sync(exe);
+
+    cmd.args(&args)
+        .current_dir(cwd)
+        .env_clear()
+        .envs(env_vars.to_vec());
+
+    let (status, stdout, stderr) = crate::util::run_with_input_buffer_stderr(cmd, None).await?;
+
+    let stdout = futures::io::BufReader::new(stdout.compat())
+        .lines()
+        .map_err(anyhow::Error::new)
+        .try_fold(crate::util::Digest::new(), |mut digest, line| async move {
+            digest.update(line.as_bytes());
+            Ok(digest)
+        });
+
+    let (status, stdout, stderr) = futures::future::try_join3(status, stdout, stderr).await?;
+
+    ProcessOutput::from(std::process::Output {
+        status,
+        stdout: stdout.finish().into_bytes(),
+        stderr,
+    })
+    .into()
+}
+
+async fn run_nvcc_subcommand<T>(
+    creator: &T,
+    output_path: &Path,
+    cmd: NvccGeneratedSubcommand,
 ) -> Result<ProcessOutput>
 where
     T: CommandCreatorSync,
@@ -1876,7 +1900,6 @@ where
 async fn run_nvcc_subcommands_group<T>(
     service: &server::SccacheService<T>,
     creator: &T,
-    cwd: &Path,
     commands: Vec<NvccGeneratedSubcommand>,
     output_path: &Path,
 ) -> Result<ProcessOutput>
@@ -1887,7 +1910,7 @@ where
 
     for cmd in commands {
         let out = match cmd.cacheable {
-            Cacheable::No => run_nvcc_subcommand(cmd, creator, output_path)
+            Cacheable::No => run_nvcc_subcommand(creator, output_path, cmd)
                 .await
                 .unwrap_or_else(error_to_output),
             Cacheable::Yes => {
@@ -1925,7 +1948,7 @@ where
                     Err(err) => error_to_output(err),
                     Ok(compiler) => match compiler.parse_arguments(&args, cwd, env_vars) {
                         CompilerArguments::NotCompilation => {
-                            run_nvcc_subcommand(cmd, creator, output_path)
+                            run_nvcc_subcommand(creator, output_path, cmd)
                                 .await
                                 .unwrap_or_else(error_to_output)
                         }
@@ -2100,12 +2123,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::compiler::gcc;
     use crate::compiler::*;
-    use crate::mock_command::*;
-    use crate::test::utils::*;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
 
     fn parse_arguments_gcc(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
@@ -2220,6 +2238,7 @@ mod test {
         assert_eq!(ovec!["-c"], a.common_args);
     }
 
+    #[test]
     fn test_parse_arguments_simple_cu_msvc() {
         let a = parses_msvc!("-c", "foo.cu", "-o", "foo.o");
         assert_eq!(Some("foo.cu"), a.input.to_str());
