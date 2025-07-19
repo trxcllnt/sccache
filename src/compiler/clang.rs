@@ -12,26 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_imports, dead_code, unused_variables)]
-
 use crate::compiler::args::*;
-use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
+use crate::compiler::c::{CCompilerImpl, CCompilerKind, ParsedArguments};
 use crate::compiler::gcc::ArgData::*;
 use crate::compiler::{
-    gcc, write_temp_file, CCompileCommand, Cacheable, CompileCommand, CompilerArguments, Language,
+    gcc, CCompileCommand, Cacheable, CompileCommand, CompilerArguments, Language,
 };
-use crate::mock_command::{CommandCreator, CommandCreatorSync, ProcessOutput, RunCommand};
-use crate::util::{run_input_output, OsStrExt};
+use crate::mock_command::{CommandCreatorSync, ProcessOutput};
 use crate::{counted_array, dist};
 use async_trait::async_trait;
-use fs::File;
-use fs_err as fs;
 use semver::{BuildMetadata, Prerelease, Version};
 use std::ffi::OsString;
-use std::future::Future;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process;
 
 use crate::errors::*;
 
@@ -65,7 +57,7 @@ impl Clang {
 
         let parsed_version = match Version::parse(version_str.trim_end_matches('"')) {
             Ok(parsed_version) => parsed_version,
-            Err(e) => return false,
+            Err(_) => return false,
         };
 
         parsed_version
@@ -274,14 +266,13 @@ pub(crate) fn resolve_profile_use_path(arg: &Path, cwd: &Path) -> PathBuf {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::compiler::c::ArtifactDescriptor;
     use crate::compiler::gcc;
     use crate::compiler::*;
     use crate::mock_command::*;
     use crate::server;
     use crate::test::mock_storage::MockStorage;
     use crate::test::utils::*;
-    use std::collections::HashMap;
-    use std::future::Future;
     use std::path::PathBuf;
 
     fn parse_arguments_(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {

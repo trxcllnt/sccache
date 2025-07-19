@@ -13,26 +13,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_imports, dead_code, unused_variables)]
-
 use crate::compiler::args::*;
-use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
+use crate::compiler::c::{CCompilerImpl, CCompilerKind, ParsedArguments};
 use crate::compiler::cicc;
-use crate::compiler::{
-    CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language,
-    SingleCompileCommand,
-};
+use crate::compiler::{CCompileCommand, Cacheable, CompileCommand, CompilerArguments, Language};
 use crate::{counted_array, dist};
 
-use crate::mock_command::{CommandCreator, CommandCreatorSync, ProcessOutput, RunCommand};
+use crate::mock_command::{CommandCreatorSync, ProcessOutput};
 
 use async_trait::async_trait;
 
-use std::collections::HashMap;
 use std::ffi::OsString;
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::process;
 
 use crate::errors::*;
 
