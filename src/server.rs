@@ -662,6 +662,8 @@ impl<A: crate::net::Acceptor, C: CommandCreatorSync> SccacheServer<A, C> {
             wait,
         } = self;
 
+        let sysinfo = Arc::clone(&service.sysinfo);
+
         // Create our "server future" which will simply handle all incoming
         // connections in separate tasks.
         let server = async move {
@@ -709,9 +711,37 @@ impl<A: crate::net::Acceptor, C: CommandCreatorSync> SccacheServer<A, C> {
             info!("shutting down due to being idle or request");
         };
 
+        // Optionally log sysinfo (helpful in CI)
+        let sys_info = async move {
+            use crate::config::{bool_from_env_var, number_from_env_var};
+            if !log_enabled!(log::Level::Info)
+                || !matches!(bool_from_env_var("SCCACHE_LOG_SYSINFO"), Ok(Some(true)))
+            {
+                return futures::future::pending().await;
+            }
+            let interval = number_from_env_var("SCCACHE_LOG_SYSINFO_INTERVAL")
+                .unwrap_or(Ok(1000))
+                .unwrap_or(1000);
+            loop {
+                if let Ok(mut sys) = sysinfo.lock() {
+                    sys.refresh_cpu_specifics(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
+                    sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+                    info!(
+                        "sysinfo: {{ cpu: {}%, mem: {{ total: {}b, available: {}b, used: {}b }} }}",
+                        sys.global_cpu_usage(),
+                        sys.total_memory(),
+                        sys.available_memory(),
+                        sys.used_memory(),
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(interval)).await;
+            }
+        };
+
         runtime.block_on(async {
             futures::select! {
                 server = server.fuse() => server,
+                _res = sys_info.fuse() => Ok(()),
                 _res = shutdown.fuse() => Ok(()),
                 _res = shutdown_idle.fuse() => Ok::<_, io::Error>(()),
             }
@@ -815,6 +845,9 @@ where
 
     #[cfg(feature = "dist-client")]
     num_cpus: u64,
+
+    // System info (CPU/mem usage)
+    sysinfo: Arc<std::sync::Mutex<sysinfo::System>>,
 }
 
 type SccacheRequest = Message<Request, Body<()>>;
@@ -899,6 +932,16 @@ where
     }
 }
 
+fn init_sysinfo() -> sysinfo::System {
+    use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+
+    System::new_with_specifics(
+        RefreshKind::nothing()
+            .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
+            .with_memory(MemoryRefreshKind::nothing().with_ram()),
+    )
+}
+
 use futures::future::Either;
 use futures::TryStreamExt;
 
@@ -926,6 +969,7 @@ where
             info,
             #[cfg(feature = "dist-client")]
             num_cpus: util::num_cpus() as u64,
+            sysinfo: Arc::new(std::sync::Mutex::new(init_sysinfo())),
         }
     }
 
@@ -949,6 +993,7 @@ where
             info,
             #[cfg(feature = "dist-client")]
             num_cpus: util::num_cpus() as u64,
+            sysinfo: Arc::new(std::sync::Mutex::new(init_sysinfo())),
         }
     }
 
@@ -986,6 +1031,7 @@ where
             info,
             #[cfg(feature = "dist-client")]
             num_cpus: util::num_cpus() as u64,
+            sysinfo: Arc::new(std::sync::Mutex::new(init_sysinfo())),
         }
     }
 

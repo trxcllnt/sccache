@@ -823,7 +823,7 @@ fn key_prefix_from_env_var(env_var_name: &str) -> String {
         .to_owned()
 }
 
-fn number_from_env_var<A: std::str::FromStr>(env_var_name: &str) -> Option<Result<A>>
+pub fn number_from_env_var<A: std::str::FromStr>(env_var_name: &str) -> Option<Result<A>>
 where
     <A as FromStr>::Err: std::fmt::Debug,
 {
@@ -835,7 +835,7 @@ where
         .into()
 }
 
-fn bool_from_env_var(env_var_name: &str) -> Result<Option<bool>> {
+pub fn bool_from_env_var(env_var_name: &str) -> Result<Option<bool>> {
     env::var(env_var_name)
         .ok()
         .map(|value| match value.to_lowercase().as_str() {
