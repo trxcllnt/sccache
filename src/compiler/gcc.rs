@@ -943,7 +943,7 @@ pub async fn parse_dependencies(args: &ParsedArguments, deps: &Path) -> Result<V
                 } else {
                     line
                 }
-                .trim_end_matches("\\"),
+                .trim_end_matches('\\'),
             ))
         })
         .map_ok(|lines| futures::stream::iter(lines.into_iter().map(Ok)))

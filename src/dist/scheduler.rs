@@ -42,7 +42,7 @@ use std::{
 
 use crate::dist::{job_inputs_key, job_result_key, server_to_schedulers_queue, to_scheduler_queue};
 
-use super::http::retry_with_jitter;
+use crate::util::retry_with_jitter;
 
 const HAS_JOB_INPUTS_TIME: &str = "sccache::scheduler::has_job_inputs_time";
 const HAS_JOB_RESULT_TIME: &str = "sccache::scheduler::has_job_result_time";

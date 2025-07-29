@@ -31,7 +31,7 @@ use crate::cache::s3::S3Cache;
 use crate::cache::webdav::WebdavCache;
 use crate::compiler::PreprocessorCacheEntry;
 use crate::config::{CacheType, DiskCacheConfig};
-use crate::dist::http::retry_with_jitter;
+use crate::util::retry_with_jitter;
 use async_trait::async_trait;
 use fs_err as fs;
 use serde::{Deserialize, Serialize};

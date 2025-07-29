@@ -29,13 +29,14 @@ use crate::{
     cache::Storage,
     dist::{
         self,
-        http::{retry_with_jitter, AsyncMulticast, AsyncMulticastFn},
+        http::{AsyncMulticast, AsyncMulticastFn},
         job_inputs_key, job_result_key,
         metrics::{CountRecorder, GaugeRecorder, Metrics, TimeRecorder},
         BuildResult, BuilderIncoming, CompileCommand, RunJobError, RunJobResponse, ServerDetails,
         ServerService, Toolchain, ToolchainService,
     },
     errors::*,
+    util::retry_with_jitter,
 };
 
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};

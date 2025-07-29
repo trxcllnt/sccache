@@ -13,9 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "dist-client")]
+use crate::cache::UnexpectedFileSize;
 use crate::cache::{
     Cache, CacheWrite, DecompressionFailure, FileObjectSource, Storage, UnexpectedEmptyFile,
-    UnexpectedFileSize,
 };
 use crate::compiler::args::*;
 use crate::compiler::c::{CCompiler, CCompilerKind};
@@ -808,10 +809,10 @@ where
         Ok(Compile {
             command_creator,
             hash_key,
+            job_slot,
             local: LocalCompile {
                 compile_cmd,
                 cacheable,
-                job_slot,
                 outputs,
             },
             dist: None,

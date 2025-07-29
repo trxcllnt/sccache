@@ -21,7 +21,7 @@ pub use self::{
     server::{ClientAuthCheck, ClientVisibleMsg},
 };
 
-pub use self::common::{bincode_deserialize, bincode_serialize, retry_with_jitter};
+pub use self::common::{bincode_deserialize, bincode_serialize};
 
 mod common {
     use async_trait::async_trait;
@@ -33,9 +33,6 @@ mod common {
     use std::collections::HashMap;
     use std::hash::Hash;
     use std::sync::Arc;
-
-    use tokio_retry2::strategy::FibonacciBackoff;
-    use tokio_retry2::Retry;
 
     use crate::errors::*;
 
@@ -128,23 +125,6 @@ mod common {
         } else {
             Ok(bincode::deserialize(&bytes)?)
         }
-    }
-
-    pub async fn retry_with_jitter<F>(
-        limit: usize,
-        func: F,
-    ) -> std::result::Result<F::Item, F::Error>
-    where
-        F: tokio_retry2::Action,
-    {
-        Retry::spawn(
-            FibonacciBackoff::from_millis(1000) // wait 1s before retrying
-                .max_delay_millis(10000) // set max interval to 10 seconds
-                .map(tokio_retry2::strategy::jitter) // add jitter to the retry interval
-                .take(limit), // limit retries
-            func,
-        )
-        .await
     }
 
     #[async_trait]

@@ -862,8 +862,6 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
 
     #[cfg(feature = "dist-client")]
     fn into_dist_packagers(self: Box<Self>) -> Result<DistPackagers> {
-        use itertools::Itertools;
-
         trace!(
             "Dist inputs: {:?}",
             std::iter::once(&self.parsed_args.input)

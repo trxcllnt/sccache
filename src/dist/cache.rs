@@ -495,10 +495,10 @@ mod server {
 
     use crate::cache::disk::DiskCache;
     use crate::cache::{cache, Storage};
-    use crate::dist::http::retry_with_jitter;
     use crate::dist::metrics::{Metrics, TimeRecorder};
     use crate::dist::{Toolchain, ToolchainService};
     use crate::errors::*;
+    use crate::util::retry_with_jitter;
 
     const TC_LOAD: &str = "sccache::server::toolchain::load_time";
     const TC_LOAD_INFLATED: &str = "sccache::server::toolchain::load_inflated_time";

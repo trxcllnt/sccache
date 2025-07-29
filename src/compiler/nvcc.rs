@@ -306,6 +306,7 @@ impl CCompilerImpl for Nvcc {
                 use crate::compiler::msvc::Msvc;
                 use crate::compiler::nvhpc::Nvhpc;
 
+                #[allow(clippy::redundant_locals)]
                 let exe = exe;
                 let mut args = args;
 
