@@ -13,13 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compiler::args::*;
-use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
-use crate::compiler::gcc::ArgData::*;
-use crate::compiler::{
-    gcc, CCompileCommand, Cacheable, CompileCommand, CompileCommandImpl, CompilerArguments,
-    Language,
-};
 use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist, protocol, server, SCCACHE_TMPDIR};
@@ -27,7 +20,6 @@ use async_trait::async_trait;
 use fs_err as fs;
 use futures::{AsyncBufReadExt, TryStreamExt};
 use itertools::Itertools;
-use log::Level::Trace;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
@@ -230,13 +222,11 @@ impl CCompilerImpl for Nvcc {
                                 .unique()
                                 .collect::<Vec<_>>(),
                         );
-                    if log_enabled!(Trace) {
-                        trace!(
-                            "[{}]: dependencies command: {:?}",
-                            output_path.display(),
-                            dependency_cmd
-                        );
-                    }
+                    debug_if_trace!(
+                        "[{}]: dependencies command: {:?}",
+                        output_path.display(),
+                        dependency_cmd
+                    );
                     dependency_cmd
                 },
                 None,
@@ -793,13 +783,28 @@ impl CompileCommandImpl for NvccCompileCommand {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct NvccGeneratedSubcommand {
     pub exe: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub env_vars: Vec<(OsString, OsString)>,
     pub cacheable: Cacheable,
+}
+
+impl std::fmt::Display for NvccGeneratedSubcommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "cd {:?} && {}",
+            self.cwd,
+            shlex::try_join(
+                std::iter::once(self.exe.as_os_str().to_str().unwrap())
+                    .chain(self.args.iter().map(|s| s.as_str()))
+            )
+            .unwrap_or_else(|e| format!("{e}"))
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1148,34 +1153,21 @@ where
                 }
             }
         {
-            if log_enabled!(log::Level::Trace) {
-                trace!(
-                    "[{}]: transformed nvcc command: {}",
-                    output_path.display(),
-                    format!(
-                        "{} && {}",
-                        shlex::try_join(["cd", &format!("{}", dir.display())])?,
-                        shlex::try_join(
-                            std::iter::once(&exe.clone().into_os_string())
-                                .chain(pa.common_args.iter())
-                                .map(|s| s.to_str().unwrap())
-                        )?
-                    )
-                );
-            }
+            let args = dist::osstrings_to_strings(&parsed_args.common_args).unwrap_or_default();
+            let cmd = NvccGeneratedSubcommand {
+                exe: exe.clone(),
+                args,
+                cwd: dir.to_owned(),
+                env_vars,
+                cacheable,
+            };
 
-            let args = dist::osstrings_to_strings(&pa.common_args).unwrap_or_default();
+            debug_if_trace!(
+                "[{}]: transformed nvcc command: {cmd}",
+                output_path.display(),
+            );
 
-            group.push((
-                pa,
-                NvccGeneratedSubcommand {
-                    exe: exe.clone(),
-                    args,
-                    cwd: dir.to_owned(),
-                    env_vars,
-                    cacheable,
-                },
-            ));
+            group.push((parsed_args, cmd));
         }
     }
 
@@ -1350,23 +1342,6 @@ where
     F: Fn(&str, &[String]) -> bool,
     T: CommandCreatorSync,
 {
-    if log_enabled!(log::Level::Trace) {
-        trace!(
-            "[{}]: nvcc dryrun command: {}",
-            output_path.display(),
-            format!(
-                "{} && {}",
-                shlex::try_join(["cd", &format!("{}", cwd.display())])?,
-                shlex::try_join(
-                    std::iter::once(&format!("{}", executable.display()))
-                        .chain(&dist::osstrings_to_strings(arguments).unwrap_or_default())
-                        .map(|s| s.as_str())
-                        .chain(["--dryrun", "--keep"])
-                )?
-            )
-        );
-    }
-
     let mut nvcc_dryrun_cmd = creator.clone().new_command_sync(executable);
 
     nvcc_dryrun_cmd
@@ -1374,6 +1349,11 @@ where
         .env_clear()
         .current_dir(cwd)
         .envs(env_vars.to_vec());
+
+    debug_if_trace!(
+        "[{}]: nvcc dryrun command: {nvcc_dryrun_cmd}",
+        output_path.display()
+    );
 
     #[cfg(unix)]
     let (status, errors, output) =
@@ -1871,28 +1851,14 @@ where
         ..
     } = cmd;
 
-    if log_enabled!(log::Level::Trace) {
-        trace!(
-            "[{}]: run_nvcc_subcommand: {}",
-            output_path.display(),
-            format!(
-                "{} && {}",
-                shlex::try_join(["cd", &format!("{}", cwd.display())])?,
-                shlex::try_join(
-                    std::iter::once(&format!("{}", exe.display()))
-                        .chain(args.iter())
-                        .map(|s| s.as_str())
-                )?
-            )
-        );
-    }
-
     let mut cmd = creator.clone().new_command_sync(exe);
 
     cmd.args(&args)
         .current_dir(cwd)
         .env_clear()
         .envs(env_vars.to_vec());
+
+    debug_if_trace!("[{}]: run_nvcc_subcommand: {cmd}", output_path.display());
 
     run_input_output(cmd, None).await
 }
@@ -1914,21 +1880,10 @@ where
                 .await
                 .unwrap_or_else(error_to_output),
             Cacheable::Yes => {
-                if log_enabled!(log::Level::Trace) {
-                    trace!(
-                        "[{}]: run_commands_sequential: {}",
-                        output_path.display(),
-                        format!(
-                            "{} && {}",
-                            shlex::try_join(["cd", &format!("{}", cmd.cwd.display())])?,
-                            shlex::try_join(
-                                std::iter::once(&format!("{}", cmd.exe.display()))
-                                    .chain(cmd.args.iter())
-                                    .map(|s| s.as_str())
-                            )?
-                        )
-                    );
-                }
+                debug_if_trace!(
+                    "[{}]: run_commands_sequential: {cmd}",
+                    output_path.display()
+                );
 
                 let NvccGeneratedSubcommand {
                     exe,

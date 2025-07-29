@@ -24,7 +24,6 @@ use crate::{counted_array, dist};
 use async_trait::async_trait;
 use fs::File;
 use fs_err as fs;
-use log::Level::Trace;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -820,8 +819,7 @@ where
         ignorable_whitespace_flags,
         language_to_arg,
     );
-    if log_enabled!(Trace) {
-        trace!("preprocess: {:?}", cmd);
+    debug_if_trace!("[{}]: preprocess: {:?}", parsed_args.output_pretty(), cmd);
     }
     run_input_output(cmd, None).await
 }

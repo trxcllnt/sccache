@@ -33,13 +33,14 @@ use crate::compiler::ptxas::Ptxas;
 use crate::compiler::rust::{Rust, RustupProxy};
 use crate::compiler::tasking_vx::TaskingVX;
 #[cfg(feature = "dist-client")]
-use crate::dist::pkg;
+use crate::dist::pkg::{self, InputsPackager};
 #[cfg(feature = "dist-client")]
 use crate::lru_disk_cache;
 use crate::mock_command::{CommandChild, CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::server;
 use crate::util::{fmt_duration_as_secs, run_input_output};
 use crate::{counted_array, dist};
+use crate::{debug_if_trace, server};
 use async_trait::async_trait;
 use filetime::FileTime;
 use fs::File;
@@ -185,7 +186,8 @@ impl fmt::Display for SingleCompileCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}",
+            "cd {:?} && {}",
+            self.cwd,
             shlex::try_join(
                 std::iter::once(&self.executable.clone().into_os_string())
                     .chain(self.arguments.iter())
@@ -458,18 +460,16 @@ where
         runtime: tokio::runtime::Handle,
     ) -> Result<(CompileResult, ProcessOutput)> {
         let out_pretty = self.output_pretty().into_owned();
-        if log_enabled!(log::Level::Debug) {
-            // [<file>] get_cached_or_compile: "/path/to/exe <args...>"
-            debug!(
-                "[{out_pretty}]: get_cached_or_compile: {:?}",
-                shlex::try_join(
-                    std::iter::empty()
-                        .chain(&[format!("{}", self.get_executable().as_path().display())])
-                        .chain(&dist::osstrings_to_strings(&arguments).unwrap_or_default()[..])
-                        .map(|s| s.as_str())
-                )?
-            );
-        }
+        // [<file>] get_cached_or_compile: "/path/to/exe <args...>"
+        debug!(
+            "[{out_pretty}]: get_cached_or_compile: {}",
+            creator
+                .clone()
+                .new_command_sync(self.get_executable())
+                .env_clear()
+                .current_dir(&cwd)
+                .args(&arguments)
+        );
 
         let start = Instant::now();
 
@@ -499,7 +499,7 @@ where
             )
             .await;
 
-        trace!(
+        debug!(
             "[{out_pretty}]: generate_hash_key took {}",
             fmt_duration_as_secs(&start.elapsed())
         );
@@ -984,8 +984,8 @@ impl<'a> CacheLookup<'a> {
                 Ok(CacheLookupResult::Miss(MissType::Normal))
             }
             Err(err) => {
-                error!(
-                    "[{out_pretty}]: Cache read error in {}: {err:?}",
+                debug!(
+                    "[{out_pretty}]: Cache read error in {}: {err}",
                     fmt_duration_as_secs(&start.elapsed())
                 );
                 Ok(CacheLookupResult::Miss(MissType::CacheReadError))

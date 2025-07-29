@@ -28,11 +28,10 @@ use crate::lru_disk_cache::{LruCache, Meter};
 use crate::mock_command::{CommandCreatorSync, RunCommand};
 use crate::util::{fmt_duration_as_secs, hash_all, hash_all_archives, run_input_output, Digest};
 use crate::util::{HashToDigest, OsStrExt};
-use crate::{counted_array, dist};
+use crate::{counted_array, debug_if_trace, dist};
 use async_trait::async_trait;
 use filetime::FileTime;
 use fs_err as fs;
-use log::Level::Trace;
 use once_cell::sync::Lazy;
 #[cfg(feature = "dist-client")]
 use semver::Version;
@@ -388,15 +387,11 @@ where
         .env_clear()
         .envs(env_vars.to_vec())
         .current_dir(cwd);
-    if log_enabled!(Trace) {
-        trace!("get_compiler_outputs: {:?}", cmd);
-    }
+    debug_if_trace!("get_compiler_outputs: {:?}", cmd);
     let outputs = run_input_output(cmd, None).await?;
 
     let outstr = String::from_utf8(outputs.stdout).context("Error parsing rustc output")?;
-    if log_enabled!(Trace) {
-        trace!("get_compiler_outputs: {:?}", outstr);
-    }
+    debug_if_trace!("get_compiler_outputs: {:?}", outstr);
     Ok(outstr.lines().map(|l| l.to_owned()).collect())
 }
 
@@ -2066,7 +2061,7 @@ impl pkg::InputsPackager for RustInputsPackager {
             tar_inputs.push((input_path, dist_input_path))
         }
 
-        if log_enabled!(Trace) {
+        if log_enabled!(log::Level::Trace) {
             if let Some((_, ref dep_crate_names)) = rlib_dep_reader_and_names {
                 trace!("Identified dependency crate names: {:?}", dep_crate_names)
             }

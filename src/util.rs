@@ -1195,6 +1195,23 @@ pub fn num_cpus() -> usize {
     std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
 
+#[macro_export]
+macro_rules! debug_if_trace {
+    // debug_if_trace!(target: "my_target", key1 = 42, key2 = true; "a {} event", "log")
+    // debug_if_trace!(target: "my_target", "a {} event", "log")
+    (target: $target:expr, $($arg:tt)+) => {{
+        if log_enabled!(log::Level::Trace) {
+            log::log!(target: $target, log::Level::Debug, $($arg)+);
+        }
+    }};
+    // debug_if_trace!("a {} event", "log")
+    ($($arg:tt)+) => {{
+        if log_enabled!(log::Level::Trace) {
+            log::log!(log::Level::Debug, $($arg)+);
+        }
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::{OsStrExt, TimeMacroFinder};

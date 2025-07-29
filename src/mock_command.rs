@@ -132,7 +132,7 @@ pub trait RunCommand: fmt::Debug + Send {
 /// struct with a trivial implementation of this.
 pub trait CommandCreator {
     /// The type returned by `new_command`.
-    type Cmd: RunCommand;
+    type Cmd: RunCommand + fmt::Display;
 
     /// Create a new instance of this type.
     fn new(client: &Client) -> Self;
@@ -143,7 +143,7 @@ pub trait CommandCreator {
 
 /// A trait for simplifying the normal case while still allowing the mock case requiring mutability.
 pub trait CommandCreatorSync: Clone + Send + Sync + 'static {
-    type Cmd: RunCommand;
+    type Cmd: RunCommand + fmt::Display;
 
     fn new(client: &Client) -> Self;
 
@@ -289,9 +289,37 @@ impl RunCommand for AsyncCommand {
     }
 }
 
+impl fmt::Display for AsyncCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(ref cmd) = self.inner {
+            let cwd = cmd
+                .get_current_dir()
+                .map(|p| p.to_owned())
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| Path::new("").to_owned());
+            write!(
+                f,
+                "cd {cwd:?} && {}",
+                shlex::try_join(
+                    std::iter::once(cmd.get_program())
+                        .chain(cmd.get_args())
+                        .map(|s| s.to_str().unwrap())
+                )
+                .unwrap_or_else(|e| format!("{e}"))
+            )
+        } else {
+            fmt::Result::Ok(())
+        }
+    }
+}
+
 impl fmt::Debug for AsyncCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.inner.fmt(f)
+        if let Some(ref cmd) = self.inner {
+            cmd.fmt(f)
+        } else {
+            fmt::Result::Ok(())
+        }
     }
 }
 
@@ -505,6 +533,17 @@ impl RunCommand for MockCommand {
             .wait_with_output()
             .await
             .context("failed to wait for child")
+    }
+}
+
+impl fmt::Display for MockCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            shlex::try_join(self.args.iter().map(|s| s.to_str().unwrap()))
+                .unwrap_or_else(|e| format!("{e}"))
+        )
     }
 }
 

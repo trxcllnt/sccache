@@ -13,17 +13,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compiler::args::*;
-use crate::compiler::c::{CCompilerImpl, CCompilerKind, ParsedArguments};
-use crate::compiler::gcc::ArgData::*;
-use crate::compiler::{
-    gcc, CCompileCommand, Cacheable, CompileCommand, CompilerArguments, Language,
-};
-use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
+use crate::mock_command::{CommandCreatorSync, RunCommand};
 use crate::util::run_input_output;
+use crate::{
+    compiler::{
+        args::*,
+        c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput},
+        gcc::{self, ArgData::*},
+        CCompileCommand, Cacheable, CompileCommand, CompilerArguments, Language,
+    },
+    debug_if_trace,
+};
 use crate::{counted_array, dist};
 use async_trait::async_trait;
-use log::Level::Trace;
+use itertools::Itertools;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -118,9 +121,6 @@ impl CCompilerImpl for Nvhpc {
                 .envs(env_vars.to_vec())
                 .current_dir(cwd);
 
-            if log_enabled!(Trace) {
-                trace!("dep-gen command: {:?}", dep_cmd);
-            }
             dep_cmd
         };
 
@@ -134,6 +134,9 @@ impl CCompilerImpl for Nvhpc {
             .current_dir(cwd);
         if log_enabled!(Trace) {
             trace!("preprocess: {:?}", cmd);
+                    debug_if_trace!(
+                        "[{}]: dependencies command: {dependency_cmd}",
+                        parsed_args.output_pretty()
         }
 
         //Need to chain the dependency generation and the preprocessor

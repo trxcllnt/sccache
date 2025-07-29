@@ -31,7 +31,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use crate::errors::*;
+use crate::{debug_if_trace, errors::*};
 
 /// A unit struct on which to implement `CCompilerImpl`.
 #[derive(Clone, Debug)]
@@ -311,13 +311,11 @@ pub fn generate_compile_commands(
         executable: executable.to_owned(),
     };
 
-    if log_enabled!(log::Level::Trace) {
-        trace!(
-            "[{}]: {} command: cd {cwd:?} && {command}",
-            output.display(),
-            parsed_args.language.as_str(),
-        );
-    }
+    debug_if_trace!(
+        "[{}]: {} command: {command}",
+        parsed_args.output_pretty(),
+        parsed_args.language.as_str(),
+    );
 
     Ok((
         command,
@@ -343,13 +341,11 @@ pub fn generate_compile_commands(
                     .as_dist(dunce::canonicalize(executable).ok()?.as_path())?,
             };
 
-            if log_enabled!(log::Level::Trace) {
-                trace!(
-                    "[{}]: {} dist_command: cd {cwd:?} && {command}",
-                    output.display(),
-                    parsed_args.language.as_str(),
-                );
-            }
+            debug_if_trace!(
+                "[{}]: {} dist_command: {command}",
+                parsed_args.output_pretty(),
+                parsed_args.language.as_str(),
+            );
 
             Some(command)
         })(),

@@ -25,7 +25,6 @@ use crate::util::daemonize;
 use byteorder::{BigEndian, ByteOrder};
 use fs::{File, OpenOptions};
 use fs_err as fs;
-use log::Level::Trace;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal, Write};
@@ -40,7 +39,7 @@ use tokio::runtime::Runtime;
 use walkdir::WalkDir;
 use which::which_in;
 
-use crate::errors::*;
+use crate::{debug_if_trace, errors::*};
 
 /// The default sccache server port.
 pub const DEFAULT_PORT: u16 = 4226;
@@ -566,9 +565,8 @@ where
 
     let mut cmd = creator.new_command_sync(exe);
     cmd.args(&cmdline).current_dir(cwd);
-    if log_enabled!(Trace) {
-        trace!("running command: {:?}", cmd);
-    }
+
+    debug_if_trace!("running command: {cmd}");
 
     let status = runtime.block_on(async move {
         let child = cmd.spawn().await?;

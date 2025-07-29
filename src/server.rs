@@ -669,7 +669,6 @@ impl<A: crate::net::Acceptor, C: CommandCreatorSync> SccacheServer<A, C> {
         let server = async move {
             loop {
                 let socket = listener.accept().await?;
-                trace!("incoming connection");
                 let conn = service.clone().bind(socket).map_err(|res| {
                     error!("Failed to bind socket: {}", res);
                 });
@@ -883,8 +882,6 @@ where
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response>> + Send + 'static>>;
 
     fn call(&mut self, req: SccacheRequest) -> Self::Future {
-        trace!("handle_client");
-
         // Opportunistically let channel know that we've received a request. We
         // ignore failures here as well as backpressure as it's not imperative
         // that every message is received.
@@ -898,27 +895,21 @@ where
                     me.stats.lock().await.compile_requests += 1;
                     me.handle_compile(compile).await
                 }
-                Request::GetStats => {
-                    trace!("handle_client: get_stats");
-                    me.get_info()
-                        .await
-                        .map(|i| Response::Stats(Box::new(i)))
-                        .map(Message::WithoutBody)
-                }
-                Request::DistStatus => {
-                    trace!("handle_client: dist_status");
-                    me.get_dist_status()
-                        .await
-                        .map(Response::DistStatus)
-                        .map(Message::WithoutBody)
-                }
+                Request::GetStats => me
+                    .get_info()
+                    .await
+                    .map(|i| Response::Stats(Box::new(i)))
+                    .map(Message::WithoutBody),
+                Request::DistStatus => me
+                    .get_dist_status()
+                    .await
+                    .map(Response::DistStatus)
+                    .map(Message::WithoutBody),
                 Request::ZeroStats => {
-                    trace!("handle_client: zero_stats");
                     me.zero_stats().await;
                     Ok(Message::WithoutBody(Response::ZeroStats))
                 }
                 Request::Shutdown => {
-                    trace!("handle_client: shutdown");
                     let mut tx = me.tx.clone();
                     future::try_join(
                         async {
@@ -1215,12 +1206,8 @@ where
         };
 
         match opt {
-            Some(info) => {
-                trace!("compiler_info cache hit");
-                Ok(info)
-            }
+            Some(info) => Ok(info),
             None => {
-                trace!("compiler_info cache miss");
                 // Check the compiler type and return the result when
                 // finished. This generally involves invoking the compiler,
                 // so do it asynchronously.
@@ -1306,8 +1293,6 @@ where
                 // the provided commandline.
                 match c.parse_arguments(&cmd, &cwd, &env_vars) {
                     CompilerArguments::Ok(hasher) => {
-                        trace!("parse_arguments: Ok: {:?}", cmd);
-
                         // This loop limits the number of concurrent compile requests that are in
                         // the pre-compilation stage (including the number of concurrent cache
                         // lookups) to `self.num_cpus`.
@@ -1563,7 +1548,6 @@ where
                         // Make sure the write guard has been dropped ASAP.
                         drop(stats);
 
-                        trace!("[{}]: CompileFinished: {}", out_pretty, out.desc());
 
                         res.output = out;
                     }

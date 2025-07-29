@@ -23,7 +23,7 @@ use crate::{
         CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language,
         SingleCompileCommand,
     },
-    counted_array, dist,
+    counted_array, debug_if_trace, dist,
     errors::*,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     util::run_input_output,
@@ -311,9 +311,10 @@ where
         .envs(env_vars.to_vec())
         .current_dir(cwd);
 
-    if log_enabled!(Trace) {
-        trace!("preprocess: {:?}", preprocess);
-    }
+    debug_if_trace!(
+        "[{}]: preprocess: {preprocess}",
+        parsed_args.output_pretty()
+    );
 
     let preprocess = run_input_output(preprocess, None);
 
@@ -341,9 +342,11 @@ where
             .envs(env_vars.to_vec())
             .current_dir(cwd);
 
-        if log_enabled!(Trace) {
-            trace!("dep file generation: {:?}", generate_depfile);
-        }
+        debug_if_trace!(
+            "[{}]: dep file generation: {generate_depfile}",
+            parsed_args.output_pretty()
+        );
+
         let generate_depfile = run_input_output(generate_depfile, None);
         generate_depfile.and_then(|_| preprocess).await
     } else {

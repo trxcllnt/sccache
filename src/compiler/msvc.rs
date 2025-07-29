@@ -20,11 +20,10 @@ use crate::compiler::{
 };
 use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::util::{encode_path, run_input_output, OsStrExt};
-use crate::{counted_array, dist};
+use crate::{counted_array, debug_if_trace, dist};
 use async_trait::async_trait;
 use fs::File;
 use fs_err as fs;
-use log::Level::Debug;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufWriter, Read, Write};
@@ -212,7 +211,7 @@ where
     for (k, v) in env {
         cmd.env(k, v);
     }
-    trace!("detect_showincludes_prefix: {:?}", cmd);
+    debug_if_trace!("detect_showincludes_prefix: {:?}", cmd);
 
     let output = run_input_output(cmd, None).await?;
 
@@ -968,13 +967,11 @@ where
         is_clang,
     );
 
-    if log_enabled!(Debug) {
-        debug!("preprocess: {:?}", cmd);
-    }
 
     let parsed_args = parsed_args.clone();
     let includes_prefix = includes_prefix.to_string();
     let cwd = cwd.to_owned();
+    debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
 
     let mut output = run_input_output(cmd, None).await?;
 
@@ -1046,7 +1043,6 @@ fn generate_compile_commands(
     #[cfg(not(feature = "dist-client"))]
     let _ = path_transformer;
 
-    trace!("compile");
     let out_file = match parsed_args.outputs.get("obj") {
         Some(obj) => &obj.path,
         None => bail!("Missing object file output"),
