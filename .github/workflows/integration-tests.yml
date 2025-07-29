@@ -632,6 +632,8 @@ jobs:
         run: chmod +x ${SCCACHE_PATH}
 
       - name: Test
+        env:
+          SCCACHE_RECACHE: 1
         run: |
           export CXX="${SCCACHE_PATH} clang++"
           $CXX -c `pwd`/tests/test_clang_multicall.c
@@ -664,7 +666,7 @@ jobs:
       image: rocm/dev-ubuntu-24.04:6.3
 
     env:
-      # SCCACHE_GHA_ENABLED: "on"
+      SCCACHE_GHA_ENABLED: "on"
       ROCM_PATH: "/opt/rocm"
       RANDOMIZE_READDIR_LOG: "/tmp/readdir.log"
 
@@ -674,15 +676,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # I don't want to break the cache during testing. Will turn on after I
-      # make sure it's working.
-      #
-      # - name: Configure Cache Env
-      #   uses: actions/github-script@v7
-      #   with:
-      #     script: |
-      #       core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
-      #       core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
+      - name: Configure Cache Env
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
 
       # - name: Configure ROCm Env
       #   uses: actions/github-script@v7
@@ -716,13 +715,15 @@ jobs:
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
-      # Ensure that HIPCC isn't already borken
+      # Ensure that HIPCC isn't already broken
       - name: Sanity Check
         run: |
           export LD_PRELOAD=$PWD/target/debug/librandomize_readdir.so
           hipcc -o vectoradd_hip --offload-arch=gfx900 tests/cmake-hip/vectoradd_hip.cpp
 
       - name: Test
+        env:
+          SCCACHE_RECACHE: 1
         run: |
           export LD_PRELOAD=$PWD/target/debug/librandomize_readdir.so
           rm "$RANDOMIZE_READDIR_LOG".*
@@ -792,6 +793,8 @@ jobs:
         run: chmod +x ${SCCACHE_PATH}
 
       - name: Test
+        env:
+          SCCACHE_RECACHE: 1
         run: |
           export CXX="${SCCACHE_PATH} g++"
           $CXX -c `pwd`/tests/test_clang_multicall.c
@@ -850,6 +853,8 @@ jobs:
           sudo apt-get install autoconf automake libtool
 
       - name: Test
+        env:
+          SCCACHE_RECACHE: 1
         run: |
           cd `pwd`/tests/autotools/
           autoreconf||true
@@ -884,11 +889,6 @@ jobs:
 
     env:
       SCCACHE_GHA_ENABLED: "on"
-      SCCACHE_ERROR_LOG: "/tmp/sccache.log"
-      SCCACHE_SERVER_LOG: "sccache=trace"
-      # Don't colorize logs
-      NO_COLOR: 1
-      RUST_BACKTRACE: 1
 
     steps:
       - name: Clone repository
@@ -919,6 +919,8 @@ jobs:
           sudo apt-get install cmake
 
       - name: Test
+        env:
+          SCCACHE_RECACHE: 1
         run: |
           cd `pwd`/tests/cmake/
           mkdir build
