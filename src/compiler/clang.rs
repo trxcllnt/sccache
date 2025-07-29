@@ -1089,10 +1089,8 @@ mod test {
         let f = TestFixture::new();
         let parsed_args = ParsedArguments {
             input: "foo.cu".into(),
-            double_dash_input: false,
             language: Language::Cuda,
             compilation_flag: "-c".into(),
-            depfile: None,
             outputs: vec![(
                 "obj",
                 ArtifactDescriptor {
@@ -1103,18 +1101,7 @@ mod test {
             )]
             .into_iter()
             .collect(),
-            dependency_args: vec![],
-            preprocessor_args: vec![],
-            common_args: vec![],
-            arch_args: vec![],
-            unhashed_args: vec![],
-            extra_dist_files: vec![],
-            extra_hash_files: vec![],
-            msvc_show_includes: false,
-            profile_generate: false,
-            color_mode: ColorMode::Auto,
-            suppress_rewrite_includes_only: false,
-            too_hard_for_preprocessor_cache_mode: None,
+            ..Default::default()
         };
         let runtime = single_threaded_runtime();
         let storage = MockStorage::new(None, false);
