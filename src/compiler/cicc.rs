@@ -248,22 +248,12 @@ where
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),
         outputs,
-        double_dash_input: false,
         language,
-        compilation_flag: OsString::new(),
-        depfile: None,
-        dependency_args: vec![],
-        preprocessor_args: vec![],
         common_args,
-        arch_args: vec![],
         unhashed_args,
         extra_dist_files: extra_dist_files.clone(),
         extra_hash_files: extra_dist_files,
-        msvc_show_includes: false,
-        profile_generate: false,
-        color_mode: ColorMode::Off,
-        suppress_rewrite_includes_only: false,
-        too_hard_for_preprocessor_cache_mode: None,
+        ..Default::default()
     })
 }
 
