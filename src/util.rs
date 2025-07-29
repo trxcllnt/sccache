@@ -20,6 +20,7 @@ use fs_err as fs;
 use futures::{AsyncRead, AsyncReadExt};
 use object::read::archive::ArchiveFile;
 use object::read::macho::{FatArch, MachOFatFile32, MachOFatFile64};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
@@ -980,6 +981,61 @@ impl Hasher for HashToDigest<'_> {
     fn finish(&self) -> u64 {
         panic!("not supposed to be called");
     }
+}
+
+fn tempdir_path(global: bool) -> PathBuf {
+    if cfg!(target_os = "windows") && global {
+        // There's no global temp dir for Windows, but nvcc needs an absolute path
+        // that's stable in order to get cache hits for internal device compilations.
+        // So make a dir inside of C:\Users\Public because that's guaranteed to be
+        // publicly accessible by all users, even non-admins.
+        PathBuf::from(
+            std::env::var_os("PUBLIC").unwrap_or_else(|| OsString::from(r"C:\Users\Public")),
+        )
+        .join("AppData")
+        .join("Local")
+        .join("Temp")
+    } else {
+        // Assume non-windows already uses OS-wide /tmp
+        std::env::temp_dir()
+    }
+    .join(".sccache_temp")
+}
+
+pub static SCCACHE_GLOBAL_TMPDIR: Lazy<std::result::Result<PathBuf, std::io::Error>> =
+    Lazy::new(|| {
+        let tmpdir = tempdir_path(true);
+        std::fs::create_dir_all(&tmpdir).map(|_| tmpdir)
+    });
+
+pub static SCCACHE_NORMAL_TMPDIR: Lazy<std::result::Result<PathBuf, std::io::Error>> =
+    Lazy::new(|| {
+        let tmpdir = tempdir_path(false);
+        std::fs::create_dir_all(&tmpdir).map(|_| tmpdir)
+    });
+
+pub fn global_tempfile() -> Result<tempfile::NamedTempFile> {
+    SCCACHE_GLOBAL_TMPDIR
+        .as_ref()
+        .map_err(anyhow::Error::new)
+        .and_then(|global_tempdir| {
+            tempfile::Builder::new()
+                .rand_bytes(16)
+                .tempfile_in(global_tempdir)
+                .map_err(anyhow::Error::new)
+        })
+}
+
+pub fn normal_tempfile() -> Result<tempfile::NamedTempFile> {
+    SCCACHE_NORMAL_TMPDIR
+        .as_ref()
+        .map_err(anyhow::Error::new)
+        .and_then(|normal_tempdir| {
+            tempfile::Builder::new()
+                .rand_bytes(16)
+                .tempfile_in(normal_tempdir)
+                .map_err(anyhow::Error::new)
+        })
 }
 
 /// Pipe `cmd`'s stdio to `/dev/null`, unless a specific env var is set.

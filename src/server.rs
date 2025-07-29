@@ -48,7 +48,7 @@ use std::marker::Unpin;
 use std::mem;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::linux::net::SocketAddrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
@@ -57,6 +57,7 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     runtime::Runtime,
@@ -810,6 +811,8 @@ where
     /// Cache storage.
     storage: Arc<dyn Storage>,
 
+    compile_queue: Arc<Semaphore>,
+
     /// A cache of known compiler info.
     compilers: Arc<RwLock<CompilerMap<C>>>,
 
@@ -841,9 +844,6 @@ where
     /// This field causes [WaitUntilZero] to wait until this struct drops.
     #[allow(dead_code)]
     info: ActiveInfo,
-
-    #[cfg(feature = "dist-client")]
-    num_cpus: u64,
 
     // System info (CPU/mem usage)
     sysinfo: Arc<std::sync::Mutex<sysinfo::System>>,
@@ -891,7 +891,6 @@ where
         Box::pin(async move {
             match req.into_inner() {
                 Request::Compile(compile) => {
-                    trace!("handle_client: compile");
                     me.stats.lock().await.compile_requests += 1;
                     me.handle_compile(compile).await
                 }
@@ -961,14 +960,13 @@ where
             stats: Arc::default(),
             dist_client: Arc::new(dist_client),
             storage,
+            compile_queue: Arc::new(Semaphore::new(util::num_cpus())),
             compilers: Arc::default(),
             compiler_proxies: Arc::default(),
             rt,
             creator: C::new(client),
             tx,
             info,
-            #[cfg(feature = "dist-client")]
-            num_cpus: util::num_cpus() as u64,
             sysinfo: Arc::new(std::sync::Mutex::new(init_sysinfo())),
         }
     }
@@ -985,14 +983,13 @@ where
             stats: Arc::default(),
             dist_client: Arc::new(dist_client),
             storage,
+            compile_queue: Arc::new(Semaphore::new(util::num_cpus())),
             compilers: Arc::default(),
             compiler_proxies: Arc::default(),
             rt,
             creator: C::new(&client),
             tx,
             info,
-            #[cfg(feature = "dist-client")]
-            num_cpus: util::num_cpus() as u64,
             sysinfo: Arc::new(std::sync::Mutex::new(init_sysinfo())),
         }
     }
@@ -1023,14 +1020,13 @@ where
                 dist_client,
             ))),
             storage,
+            compile_queue: Arc::new(Semaphore::new(util::num_cpus())),
             compilers: Arc::default(),
             compiler_proxies: Arc::default(),
             rt: rt.clone(),
             creator: C::new(&client),
             tx,
             info,
-            #[cfg(feature = "dist-client")]
-            num_cpus: util::num_cpus() as u64,
             sysinfo: Arc::new(std::sync::Mutex::new(init_sysinfo())),
         }
     }
@@ -1103,6 +1099,42 @@ where
     /// the initial information and an optional body which will eventually
     /// contain the results of the compilation.
     async fn handle_compile(&self, compile: Compile) -> Result<SccacheResponse> {
+        // Limit the number of concurrent compile requests that are in the
+        // pre-compilation stage to `self.num_cpus`.
+        //
+        // `stats.pending_compilations` is the number of compile requests that have
+        // been accepted by the server but have not started compiling yet. In other
+        // words, compile requests that are in the preprocess or `generate_hash_key`
+        // stages (collectively, the pre-compilation stages).
+        //
+        // When the client is configured for local compilation, this has no impact
+        // on job throughput, since subprocess invocation is already guarded by the
+        // jobserver's semaphore.
+        //
+        // If the client is configured for distributed compilation, this gives the
+        // client time to send the `new_job`/`run_job` requests to the build cluster
+        // as soon as they're done with the pre-compilation stages.
+        //
+        // Without this, all the incoming pre-compilation tasks are interleaved,
+        // because tokio's scheduler is fair/breadth-first. The implication is all
+        // the compile requests are preprocessed at roughly the same time, then all
+        // their hash keys are computed, then all cache lookups occur, and finally
+        // all the cache misses are compiled.
+        //
+        // This is a problem in massively parallel (`make -j$(ulimit -n)`)
+        // distributed compilations -- especially with CUDA in the mix, because that
+        // fans out into potentially many parallel subcompilations.
+        //
+        // We don't want to peg the client's CPU at ~100% preprocessing every file,
+        // generating all hash keys, whipping up a cache lookup request storm, etc.
+        // before any jobs are sent to the build cluster.
+        //
+        // Jobs should be sent to the build cluster as soon as we know they're not
+        // in the cache. Then we can handle more compile requests while the build
+        // cluster is busy.
+        self.stats.lock().await.increment_pending_compilations();
+        let job_slot = self.compile_queue.clone().acquire_owned().await.ok();
+
         let exe = compile.exe;
         let cmd = compile.args;
         let cwd: PathBuf = compile.cwd.into();
@@ -1110,28 +1142,23 @@ where
         let me = self.clone();
 
         let info = self
-            .compiler_info(exe.into(), cwd.clone(), &cmd, &env_vars)
+            .compiler_info(Path::new(&exe), &cwd, &cmd, &env_vars)
             .await;
-        Ok(me.check_compiler(info, cmd, cwd, env_vars).await)
+
+        Ok(me.check_compiler(info, cmd, cwd, env_vars, job_slot).await)
     }
 
     /// Look up compiler info from the cache for the compiler `path`.
     /// If not cached, determine the compiler type and cache the result.
     pub async fn compiler_info(
         &self,
-        path: PathBuf,
-        cwd: PathBuf,
+        path: &Path,
+        cwd: &Path,
         args: &[OsString],
         env: &[(OsString, OsString)],
     ) -> Result<Box<dyn Compiler<C>>> {
-        trace!("compiler_info");
-
-        let me = self.clone();
-        let me1 = self.clone();
         // lookup if compiler proxy exists for the current compiler path
 
-        let path2 = path.clone();
-        let path1 = path.clone();
         let env = env.to_vec();
 
         let resolved_with_proxy = {
@@ -1140,11 +1167,11 @@ where
             // really await while borrowing the proxy since rustc is too conservative
             let resolve_proxied_executable =
                 compiler_proxies_borrow
-                    .get(&path)
+                    .get(path)
                     .map(|(compiler_proxy, _filetime)| {
                         compiler_proxy.resolve_proxied_executable(
                             self.creator.clone(),
-                            cwd.clone(),
+                            cwd.to_owned(),
                             env.as_slice(),
                         )
                     });
@@ -1160,10 +1187,10 @@ where
             Some(x) => x, // TODO resolve the path right away
             _ => {
                 // fallback to using the path directly
-                metadata(&path2)
+                metadata(path)
                     .map(|attr| FileTime::from_last_modification_time(&attr))
                     .ok()
-                    .map(move |filetime| (path2, filetime))
+                    .map(move |filetime| (path.to_owned(), filetime))
                     .expect("Must contain sane data, otherwise mtime is not avail")
             }
         };
@@ -1177,7 +1204,7 @@ where
             _ => resolved_compiler_path,
         };
 
-        let dist_info = match me1.dist_client.get_client().await {
+        let dist_info = match self.dist_client.get_client().await {
             Ok(Some(ref client)) => {
                 if let Some(archive) = client.get_custom_toolchain(&resolved_compiler_path).await {
                     match metadata(&archive)
@@ -1193,7 +1220,7 @@ where
             _ => None,
         };
 
-        let opt = match me1.compilers.read().await.get(&resolved_compiler_path) {
+        let opt = match self.compilers.read().await.get(&resolved_compiler_path) {
             // It's a hit only if the mtime and dist archive data matches.
             Some(Some(entry)) => {
                 if entry.mtime == mtime && entry.dist_info == dist_info {
@@ -1215,12 +1242,12 @@ where
                 // the compiler path might be compiler proxy, so it is important to use
                 // `path` (or its clone `path1`) to resolve using that one, not using `resolved_compiler_path`
                 let info = get_compiler_info::<C>(
-                    me.creator.clone(),
-                    &path1,
-                    &cwd,
+                    self.creator.clone(),
+                    path,
+                    cwd,
                     args,
                     env.as_slice(),
-                    &me.rt,
+                    &self.rt,
                     dist_info.clone().map(|(p, _)| p),
                 )
                 .await;
@@ -1229,8 +1256,7 @@ where
                     Ok((c, proxy)) => (c.clone(), proxy.clone()),
                     Err(err) => {
                         trace!("Inserting PLAIN cache map info for {:?}", &path);
-                        me.compilers.write().await.insert(path, None);
-
+                        self.compilers.write().await.insert(path.to_owned(), None);
                         return Err(err);
                     }
                 };
@@ -1245,10 +1271,10 @@ where
                         &cwd,
                         resolved_compiler_path
                     );
-                    me.compiler_proxies
+                    self.compiler_proxies
                         .write()
                         .await
-                        .insert(path, (proxy, mtime));
+                        .insert(path.to_owned(), (proxy, mtime));
                 }
                 // TODO add some safety checks in case a proxy exists, that the initial `path` is not
                 // TODO the same as the resolved compiler binary
@@ -1259,7 +1285,7 @@ where
                     "Inserting POSSIBLY PROXIED cache map info for {:?}",
                     &resolved_compiler_path
                 );
-                me.compilers
+                self.compilers
                     .write()
                     .await
                     .insert(resolved_compiler_path, Some(map_info));
@@ -1278,86 +1304,26 @@ where
         cmd: Vec<OsString>,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
+        job_slot: Option<OwnedSemaphorePermit>,
     ) -> SccacheResponse {
         match compiler {
             Err(e) => {
                 warn!("check_compiler: Unsupported compiler: {}", e.to_string());
-                self.stats.lock().await.requests_unsupported_compiler += 1;
+                let mut stats = self.stats.lock().await;
+                stats.decrement_pending_compilations();
+                stats.requests_unsupported_compiler += 1;
                 return Message::WithoutBody(Response::Compile(
                     CompileResponse::UnsupportedCompiler(OsString::from(e.to_string())),
                 ));
             }
             Ok(c) => {
-                trace!("check_compiler: Supported compiler");
                 // Now check that we can handle this compiler with
                 // the provided commandline.
                 match c.parse_arguments(&cmd, &cwd, &env_vars) {
                     CompilerArguments::Ok(hasher) => {
-                        // This loop limits the number of concurrent compile requests that are in
-                        // the pre-compilation stage (including the number of concurrent cache
-                        // lookups) to `self.num_cpus`.
-                        //
-                        // `stats.pending_compilations` is the number of compile requests that have
-                        // been accepted by the server but have not started compiling yet. In other
-                        // words, compile requests that are in the preprocess, `generate_hash_key`,
-                        // or cache lookup stages (collectively, the pre-compilation stages).
-                        //
-                        // When the client is configured for local compilation, this loop has no
-                        // impact on job throughput, since subprocess invocation is already
-                        // guarded by the jobserver's semaphore.
-                        //
-                        // If the client is configured for distributed compilation, this loop gives
-                        // the client time to send the `new_job`/`run_job` requests to the build
-                        // cluster as soon as they're done with the pre-compilation stages.
-                        //
-                        // Without this, all the incoming pre-compilation tasks are interleaved,
-                        // because tokio's scheduler is fair/breadth-first. The implication is all
-                        // the compile requests are preprocessed at roughly the same time, then all
-                        // their hash keys are computed, then all cache lookups occur, and finally
-                        // all the cache misses are compiled.
-                        //
-                        // This is a problem in massively parallel (`make -j100000`) distributed
-                        // compilations -- especially with CUDA in the mix, because that fans out
-                        // into potentially many parallel subcompilations.
-                        //
-                        // We don't want to peg the client's CPU at ~100% preprocessing every file,
-                        // generating all hash keys, whipping up a cache lookup request storm, etc.
-                        // before any jobs are sent to the build cluster.
-                        //
-                        // Jobs should be sent to the build cluster as soon as we know they're not
-                        // in the cache. Then we can handle more compile requests while the build
-                        // cluster is busy.
-                        //
-                        // So this loop is effectively a semaphore, but not implemented with an
-                        // actual Semaphore because we need to introduce a short a delay before
-                        // "unlocking".
-                        //
-                        // Why is that? Good question.
-                        //
-                        // The "lock" for a compile request is "released" just before the first
-                        // async call of a compilation phase starts. But with a CUDA compilation,
-                        // a re-entrant subcompilation is scheduled, which should take precedence
-                        // over (and continue to block) processing another outer compile request.
-                        //
-                        // Delaying a short amount of time here is an approximation of this logic.
-                        // It's unlikely the CUDA subcompilation will land exactly on a timeout
-                        // boundary and be scheduled after the next outer compile request. But
-                        // even if a few sometimes do, most won't, which is good enough.
-                        #[cfg(feature = "dist-client")]
-                        loop {
-                            if self.stats.lock().await.pending_compilations >= self.num_cpus {
-                                tokio::time::sleep(tokio_retry2::strategy::jitter(
-                                    Duration::from_millis(1000),
-                                ))
-                                .await;
-                            } else {
-                                break;
-                            }
-                        }
-
                         let body = self
                             .clone()
-                            .start_compile_task(c, hasher, cmd, cwd, env_vars)
+                            .start_compile_task(c, hasher, cmd, cwd, env_vars, job_slot)
                             .and_then(|res| async { Ok(Response::CompileFinished(res)) })
                             .boxed();
 
@@ -1376,12 +1342,15 @@ where
                             debug!("parse_arguments: CannotCache({}): {:?}", why, cmd)
                         }
                         let mut stats = self.stats.lock().await;
+                        stats.decrement_pending_compilations();
                         stats.requests_not_cacheable += 1;
                         *stats.not_cached.entry(why.to_string()).or_insert(0) += 1;
                     }
                     CompilerArguments::NotCompilation => {
                         debug!("parse_arguments: NotCompilation: {:?}", cmd);
-                        self.stats.lock().await.requests_not_compile += 1;
+                        let mut stats = self.stats.lock().await;
+                        stats.decrement_pending_compilations();
+                        stats.requests_not_compile += 1;
                     }
                 }
             }
@@ -1401,15 +1370,9 @@ where
         arguments: Vec<OsString>,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
+        job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<CompileFinished> {
-        {
-            let mut stats = self.stats.lock().await;
-            // Increment pending_compilations so we guard handling new
-            // compile requests until after the current compile request
-            // has been (potentially) sent to the build cluster.
-            stats.increment_pending_compilations();
-            stats.requests_executed += 1;
-        }
+        self.stats.lock().await.requests_executed += 1;
 
         let force_recache = env_vars.iter().any(|(k, _v)| k == "SCCACHE_RECACHE");
         let force_no_cache = env_vars.iter().any(|(k, _v)| k == "SCCACHE_NO_CACHE");
@@ -1446,6 +1409,7 @@ where
                                 env_vars,
                                 cache_control,
                                 me.rt.clone(),
+                                job_slot
                             )
                         )
                         .catch_unwind()
@@ -1655,6 +1619,8 @@ impl PerLanguageCount {
 pub struct ServerStats {
     /// The count of currently active compile requests.
     pub active_compilations: u64,
+    /// The count of currently active cache lookups.
+    pub pending_cache_lookups: u64,
     /// The count of currently pending compile requests.
     pub pending_compilations: u64,
     /// The count of client compile requests.
@@ -1731,6 +1697,7 @@ impl Default for ServerStats {
     fn default() -> ServerStats {
         ServerStats {
             active_compilations: u64::default(),
+            pending_cache_lookups: u64::default(),
             pending_compilations: u64::default(),
             compile_requests: u64::default(),
             compile_request_errors: PerLanguageCount::new(),
@@ -1827,8 +1794,13 @@ impl ServerStats {
 
         let mut stats_vec = vec![];
         //TODO: this would be nice to replace with a custom derive implementation.
-        set_stat!(stats_vec, self.pending_compilations, "Pending compilations");
         set_stat!(stats_vec, self.active_compilations, "Active compilations");
+        set_stat!(stats_vec, self.pending_compilations, "Pending compilations");
+        set_stat!(
+            stats_vec,
+            self.pending_cache_lookups,
+            "Pending cache lookups"
+        );
         set_stat!(stats_vec, self.compile_requests, "Compile requests");
         set_stat!(
             stats_vec,
@@ -2011,6 +1983,14 @@ impl ServerStats {
 
     pub fn decrement_active_compilations(&mut self) {
         self.active_compilations = self.active_compilations.saturating_sub(1);
+    }
+
+    pub fn increment_pending_cache_lookups(&mut self) {
+        self.pending_cache_lookups = self.pending_cache_lookups.saturating_add(1);
+    }
+
+    pub fn decrement_pending_cache_lookups(&mut self) {
+        self.pending_cache_lookups = self.pending_cache_lookups.saturating_sub(1);
     }
 
     pub fn increment_pending_compilations(&mut self) {

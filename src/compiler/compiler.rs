@@ -40,7 +40,6 @@ use crate::mock_command::{CommandChild, CommandCreatorSync, ProcessOutput, RunCo
 use crate::server;
 use crate::util::{fmt_duration_as_secs, run_input_output};
 use crate::{counted_array, dist};
-use crate::{debug_if_trace, server};
 use async_trait::async_trait;
 use filetime::FileTime;
 use fs::File;
@@ -58,6 +57,7 @@ use std::str;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::errors::*;
 
@@ -90,6 +90,7 @@ where
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
+        job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<ProcessOutput>;
 
     fn get_executable(&self) -> PathBuf;
@@ -149,8 +150,9 @@ where
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
+        job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<ProcessOutput> {
-        self.cmd.execute(service, creator).await
+        self.cmd.execute(service, creator, job_slot).await
     }
 
     fn box_clone(&self) -> Box<dyn CompileCommand<T>> {
@@ -169,6 +171,7 @@ pub trait CompileCommandImpl: Send + Sync + Clone + 'static {
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
+        job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync;
@@ -217,6 +220,7 @@ impl CompileCommandImpl for SingleCompileCommand {
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
+        _job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
@@ -312,6 +316,43 @@ impl Language {
             Language::Hip => "hip",
         }
     }
+
+    pub fn as_compiler_str(&self, kind: CompilerKind) -> Option<&'static str> {
+        match kind {
+            CompilerKind::C(CCompilerKind::Nvhpc) => {
+                // -x=c|cpp|c++|i|cpp-output|asm|assembler|ASM|assembler-with-cpp|none
+                //     Specify the language for any following input files, instead of
+                //     letting the compiler choose based on suffix. Turn off with -x none
+                match self {
+                    Language::C => Some("c"),
+                    Language::Cxx => Some("c++"),
+                    Language::ObjectiveC => Some("objective-c"),
+                    Language::ObjectiveCxx => Some("objective-c++"),
+                    _ => None, // Let the compiler decide
+                }
+            }
+            _ => match self {
+                Language::C => Some("c"),
+                Language::Cxx => Some("c++"),
+                Language::CHeader => Some("c-header"),
+                Language::CxxHeader => Some("c++-header"),
+                Language::ObjectiveC => Some("objective-c"),
+                Language::ObjectiveCxx => Some("objective-c++"),
+                Language::ObjectiveCxxHeader => Some("objective-c++-header"),
+                Language::Cuda => match kind {
+                    CompilerKind::C(CCompilerKind::Clang) => Some("cuda"),
+                    CompilerKind::C(CCompilerKind::Nvcc) => Some("cu"),
+                    _ => None, // Let the compiler decide
+                },
+                Language::CudaFE => None,
+                Language::Ptx => None,
+                Language::Cubin => None,
+                Language::Rust => None, // Let the compiler decide
+                Language::Hip => Some("hip"),
+                Language::GenericHeader => None, // Let the compiler decide
+            },
+        }
+    }
 }
 
 impl CompilerKind {
@@ -384,6 +425,7 @@ where
         env_vars: &[(OsString, OsString)],
     ) -> CompilerArguments<Box<dyn CompilerHasher<T> + 'static>>;
     fn box_clone(&self) -> Box<dyn Compiler<T>>;
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send + Sync>;
 }
 
 impl<T: CommandCreatorSync> Clone for Box<dyn Compiler<T>> {
@@ -431,10 +473,10 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn generate_hash_key(
         self: Box<Self>,
+        service: &server::SccacheService<T>,
         creator: &T,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
-        may_dist: bool,
         pool: &tokio::runtime::Handle,
         rewrite_includes_only: bool,
         storage: Arc<dyn Storage>,
@@ -458,6 +500,7 @@ where
         env_vars: Vec<(OsString, OsString)>,
         cache_control: CacheControl,
         runtime: tokio::runtime::Handle,
+        job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<(CompileResult, ProcessOutput)> {
         let out_pretty = self.output_pretty().into_owned();
         // [<file>] get_cached_or_compile: "/path/to/exe <args...>"
@@ -488,10 +531,10 @@ where
 
         let hash_result = self
             .generate_hash_key(
+                service,
                 &creator,
                 cwd.clone(),
                 env_vars,
-                dist_client.is_some(),
                 &runtime,
                 rewrite_includes_only,
                 storage.clone(),
@@ -505,10 +548,8 @@ where
         );
 
         if let Err(e) = hash_result {
-            let duration = start.elapsed();
-            service.stats.lock().await.decrement_pending_compilations();
             return match e.downcast::<ProcessError>() {
-                Ok(ProcessError(output)) => Ok((CompileResult::Error(duration), output)),
+                Ok(ProcessError(output)) => Ok((CompileResult::Error(start.elapsed()), output)),
                 Err(e) => Err(e),
             };
         }
@@ -526,25 +567,14 @@ where
             service,
         );
 
-        // When configured for distributed compilation, eagerly write the job
-        // inputs to a tempfile. If we get a hit, the tempfile is deleted, but
-        // if we don't, memory usage stays low.
-        //
-        // The preprocessor outputs are large, and during massively parallel
-        // builds (`make -j10000`), sccache's memory usage can easily grow
-        // to dozens of GB because `compilation.preprocessed_output` stays
-        // resident during the cache lookups.
-        //
-        // This can easily OOM CI instances with 4-8GB of memory, like free-
-        // tier GitHub runners. The compiler cacher shouldn't be the reason
-        // why CI runs fail :^)
         let lookup_and_compile = lookup_and_compile
-            .into_cache_lookup_and_compile_result(
+            .into_cache_lookup_and_compile(
                 storage.as_ref(),
                 // Set a maximum time limit for the cache to respond before we
                 // forge ahead ourselves with a compilation.
                 // TODO: this should be configurable
                 Duration::new(60, 0),
+                job_slot,
             )
             .await;
 
@@ -564,16 +594,14 @@ where
             }
             CacheLookupResult::Miss(miss_type) => {
                 // Cache miss, so compile it.
-                service.stats.lock().await.increment_active_compilations();
-
-                // Do the compilation (either local or distributed)
                 let start = Instant::now();
-                let res = compile.into_result().await;
+                // Do the compilation (either local or distributed)
+                service.stats.lock().await.increment_active_compilations();
+                let compile = compile.into_result().await;
                 let duration = start.elapsed();
-
                 service.stats.lock().await.decrement_active_compilations();
 
-                let (hash_key, outputs, cacheable, dist_type, output) = res?;
+                let (hash_key, outputs, cacheable, dist_type, output) = compile?;
 
                 if !output.success() {
                     trace!(
@@ -714,10 +742,11 @@ where
         }
     }
 
-    async fn into_cache_lookup_and_compile_result(
+    async fn into_cache_lookup_and_compile(
         self,
         storage: &dyn Storage,
         timeout: Duration,
+        job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<(CacheLookupResult, Compile<'a, T>)> {
         let Self {
             cache_control,
@@ -736,7 +765,7 @@ where
                 );
                 Ok((
                     CacheLookupResult::Miss(MissType::ForcedNoCache),
-                    self.into_compile_result().await?,
+                    self.into_compile(job_slot)?,
                 ))
             }
             CacheControl::ForceRecache => {
@@ -746,18 +775,20 @@ where
                 );
                 Ok((
                     CacheLookupResult::Miss(MissType::ForcedRecache),
-                    self.into_compile_result().await?,
+                    self.into_compile(job_slot)?,
                 ))
             }
             _ => {
                 let cache_lookup = CacheLookup::new(&self, start, timeout, storage);
-                futures::try_join!(cache_lookup.into_result(), self.into_compile_result())
+                let cache_lookup = cache_lookup.into_result();
+                let compile = self.into_compile(job_slot);
+                Ok((cache_lookup.await?, compile?))
             }
         }
     }
 
     #[cfg(not(feature = "dist-client"))]
-    async fn into_compile_result(self) -> Result<Compile<'a, T>> {
+    fn into_compile(self, job_slot: Option<OwnedSemaphorePermit>) -> Result<Compile<'a, T>> {
         let Self {
             command_creator,
             compilation,
@@ -780,7 +811,7 @@ where
             local: LocalCompile {
                 compile_cmd,
                 cacheable,
-                path_transformer,
+                job_slot,
                 outputs,
             },
             dist: None,
@@ -790,7 +821,7 @@ where
     }
 
     #[cfg(feature = "dist-client")]
-    async fn into_compile_result(self) -> Result<Compile<'a, T>> {
+    fn into_compile(self, job_slot: Option<OwnedSemaphorePermit>) -> Result<Compile<'a, T>> {
         let Self {
             command_creator,
             compilation,
@@ -799,7 +830,6 @@ where
             out_pretty,
             outputs,
             rewrite_includes_only,
-            runtime,
             sccache_service,
             weak_toolchain_key,
             ..
@@ -811,79 +841,36 @@ where
             .generate_compile_commands(&mut path_transformer, rewrite_includes_only, &hash_key)
             .context("Failed to generate compile commands")?;
 
-        if let Some((dist_client, dist_compile_cmd)) =
+        let dist = if let Some((dist_client, dist_compile_cmd)) =
             dist_client.and_then(|x| dist_compile_cmd.map(|y| (x, y)))
         {
             let (inputs_packager, toolchain_packager, outputs_rewriter) =
                 compilation.into_dist_packagers()?;
 
-            trace!("[{out_pretty}]: Serializing dist inputs");
-
-            // TODO: Make this use asyncio
-            let (job_inputs, path_transformer) = runtime
-                .spawn_blocking(move || -> Result<_> {
-                    // Write the job inputs to a tempfile because they can be huge
-                    // and we don't want to OOM the server during parallel builds.
-                    let mut job_inputs =
-                        tempfile::Builder::new().tempfile_in(crate::SCCACHE_TMPDIR.as_ref()?)?;
-
-                    let mut compressor = flate2::write::ZlibEncoder::new(
-                        &mut job_inputs,
-                        // Optimize for size since bandwidth costs more than client CPU cycles
-                        flate2::Compression::best(),
-                    );
-
-                    inputs_packager
-                        .write_inputs(&mut path_transformer, &mut compressor)
-                        .context("Could not write inputs for compilation")?;
-
-                    compressor.flush().context("failed to flush compressor")?;
-
-                    trace!(
-                        "Compressed inputs from {} -> {}",
-                        compressor.total_in(),
-                        compressor.total_out()
-                    );
-
-                    compressor.finish().context("failed to finish compressor")?;
-
-                    Ok((job_inputs, path_transformer))
-                })
-                .await??;
-
-            return Ok(Compile {
-                command_creator,
-                hash_key,
-                local: LocalCompile {
-                    compile_cmd,
-                    cacheable,
-                    path_transformer,
-                    outputs,
-                },
-                dist: Some(DistCompile {
-                    dist_client,
-                    dist_compile_cmd,
-                    toolchain_packager,
-                    outputs_rewriter,
-                    out_pretty: out_pretty.clone(),
-                    job_inputs,
-                    weak_toolchain_key,
-                }),
-                out_pretty,
-                sccache_service,
-            });
-        }
+            Some(DistCompile {
+                dist_client,
+                dist_compile_cmd,
+                inputs_packager,
+                toolchain_packager,
+                outputs_rewriter,
+                out_pretty: out_pretty.clone(),
+                path_transformer,
+                weak_toolchain_key,
+            })
+        } else {
+            None
+        };
 
         Ok(Compile {
             command_creator,
             hash_key,
+            job_slot,
             local: LocalCompile {
                 compile_cmd,
                 cacheable,
-                path_transformer,
                 outputs,
             },
-            dist: None,
+            dist,
             out_pretty,
             sccache_service,
         })
@@ -999,6 +986,7 @@ struct Compile<'a, T: CommandCreatorSync> {
     command_creator: &'a T,
     dist: Option<DistCompile>,
     hash_key: String,
+    job_slot: Option<OwnedSemaphorePermit>,
     local: LocalCompile<T>,
     out_pretty: String,
     sccache_service: &'a server::SccacheService<T>,
@@ -1021,6 +1009,7 @@ where
         let Self {
             command_creator,
             hash_key,
+            job_slot,
             out_pretty,
             sccache_service,
             ..
@@ -1035,7 +1024,7 @@ where
 
         trace!("[{}]: Compiling locally", out_pretty);
         compile_cmd
-            .execute(sccache_service, command_creator)
+            .execute(sccache_service, command_creator, job_slot)
             .await
             .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o))
     }
@@ -1053,6 +1042,7 @@ where
         let Self {
             command_creator,
             hash_key,
+            mut job_slot,
             out_pretty,
             sccache_service,
             ..
@@ -1061,7 +1051,6 @@ where
         let LocalCompile {
             compile_cmd,
             cacheable,
-            mut path_transformer,
             outputs,
             ..
         } = self.local;
@@ -1070,7 +1059,7 @@ where
             None => {
                 trace!("[{}]: Compiling locally", out_pretty);
                 compile_cmd
-                    .execute(sccache_service, command_creator)
+                    .execute(sccache_service, command_creator, job_slot)
                     .await
                     .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o))
             }
@@ -1079,12 +1068,7 @@ where
                 let fallback_to_local = dist.dist_client.fallback_to_local_compile();
                 // Do the distributed compilation
                 let dist_compile_res = dist
-                    .into_result(
-                        &executable,
-                        &outputs,
-                        &mut path_transformer,
-                        sccache_service,
-                    )
+                    .into_result(&executable, &outputs, sccache_service, &mut job_slot)
                     .await;
 
                 match dist_compile_res {
@@ -1105,7 +1089,7 @@ where
                             // `{:#}` prints the error and the causes in a single line.
                             warn!("[{out_pretty}]: Could not perform distributed compile, falling back to local: {e:#}");
                             compile_cmd
-                                .execute(sccache_service, command_creator)
+                                .execute(sccache_service, command_creator, job_slot)
                                 .await
                                 .map(move |o| (hash_key, outputs, cacheable, DistType::Error, o))
                         }
@@ -1119,7 +1103,6 @@ where
 struct LocalCompile<T: CommandCreatorSync> {
     compile_cmd: Box<dyn CompileCommand<T>>,
     cacheable: Cacheable,
-    path_transformer: dist::PathTransformer,
     outputs: Vec<FileObjectSource>,
 }
 
@@ -1127,11 +1110,14 @@ struct DistCompile {
     dist_client: Arc<dyn dist::Client>,
     dist_compile_cmd: dist::CompileCommand,
     #[cfg(feature = "dist-client")]
+    inputs_packager: Box<dyn InputsPackager>,
+    #[cfg(feature = "dist-client")]
     toolchain_packager: Box<dyn pkg::ToolchainPackager>,
     #[cfg(feature = "dist-client")]
     outputs_rewriter: Box<dyn OutputsRewriter>,
-    job_inputs: tempfile::NamedTempFile,
     out_pretty: String,
+    #[cfg(feature = "dist-client")]
+    path_transformer: dist::PathTransformer,
     weak_toolchain_key: String,
 }
 
@@ -1141,8 +1127,8 @@ impl DistCompile {
         self,
         executable: &Path,
         outputs: &[FileObjectSource],
-        path_transformer: &mut dist::PathTransformer,
-        sccache_service: &server::SccacheService<T>,
+        service: &server::SccacheService<T>,
+        job_slot: &mut Option<OwnedSemaphorePermit>,
     ) -> Result<(DistType, ProcessOutput)> {
         use dist::RunJobResponse;
         use std::io;
@@ -1151,9 +1137,10 @@ impl DistCompile {
         let Self {
             dist_client,
             mut dist_compile_cmd,
-            job_inputs,
+            inputs_packager,
             outputs_rewriter,
             ref out_pretty,
+            mut path_transformer,
             toolchain_packager,
             weak_toolchain_key,
             ..
@@ -1170,6 +1157,28 @@ impl DistCompile {
                 dist_compile_cmd.executable = dist_compile_executable;
                 archive_path
             });
+
+        let job_inputs = {
+            trace!("[{out_pretty}]: Serializing dist inputs");
+
+            // Write the job inputs to a tempfile because they can be huge
+            // and we don't want to OOM the server during parallel builds.
+            let job_inputs = crate::util::normal_tempfile()?;
+
+            inputs_packager
+                .write_inputs(
+                    &mut path_transformer,
+                    crate::dist::pkg::InputsCompressor::new(flate2::write::ZlibEncoder::new(
+                        job_inputs.reopen()?,
+                        // Optimize for size since bandwidth costs more than client CPU cycles
+                        flate2::Compression::best(),
+                    )),
+                )
+                .await
+                .context("Could not write inputs for compilation")?;
+
+            job_inputs
+        };
 
         let dist_output_paths: Vec<String> = outputs
             .iter()
@@ -1207,11 +1216,7 @@ impl DistCompile {
             .max_delay(Duration::from_secs(10))
             .map(tokio_retry2::strategy::jitter);
 
-        sccache_service
-            .stats
-            .lock()
-            .await
-            .decrement_pending_compilations();
+        service.stats.lock().await.decrement_pending_compilations();
 
         let dist_compile_res = loop {
             let job_id: &String;
@@ -1289,16 +1294,18 @@ impl DistCompile {
 
             debug!("[{out_pretty}, {job_id}]: Running job");
 
-            let (build_result, server_id) = match dist_client
-                .run_job(
-                    job_id,
-                    Duration::from_secs(timeout as u64),
-                    dist_toolchain.clone(),
-                    dist_compile_cmd.clone(),
-                    dist_output_paths.clone(),
-                )
-                .await
-            {
+            let run_job = dist_client.run_job(
+                job_id,
+                Duration::from_secs(timeout as u64),
+                dist_toolchain.clone(),
+                dist_compile_cmd.clone(),
+                dist_output_paths.clone(),
+            );
+
+            // Drop the job slot as soon as we've sent run_job at least once
+            drop(job_slot.take());
+
+            let (build_result, server_id) = match run_job.await {
                 // Job completed, regardless of whether compilation succeeded or failed
                 Ok(RunJobResponse::Complete { result, server_id }) => (result, server_id),
                 // Job failed with an unrecoverable fatal error. These should be rare, since
@@ -1458,7 +1465,7 @@ impl DistCompile {
                         .map(|p| vec![p.as_path()])
                         .unwrap_or_default();
                     outputs_rewriter
-                        .handle_outputs(path_transformer, &output_paths, extra_inputs.as_slice())
+                        .handle_outputs(&path_transformer, &output_paths, extra_inputs.as_slice())
                         .with_context(|| "Failed to rewrite outputs from compile")
                         .map_err(|err| (output_paths, err))
                 })
@@ -1854,7 +1861,6 @@ async fn detect_compiler<T>(
 where
     T: CommandCreatorSync,
 {
-    trace!("detect_compiler: {executable:?}");
     // First, see if this looks like rustc.
 
     let maybe_rustc_executable = if is_rustc_like(executable) {
@@ -2085,8 +2091,6 @@ where
     T: CommandCreatorSync,
     P: AsRef<Path>,
 {
-    trace!("detect_c_compiler");
-
     // NVCC needs to be first as msvc, clang, or gcc could
     // be the underlying host compiler for nvcc
     // Both clang and clang-cl define _MSC_VER on Windows, so we first
@@ -2160,7 +2164,6 @@ compiler_version=__VERSION__
     }
 
     cmd.arg("-E").arg(src);
-    trace!("compiler {:?}", cmd);
     let child = cmd.spawn().await?;
     let output = child
         .wait_with_output()
@@ -2345,6 +2348,7 @@ mod test {
 
     #[test]
     fn test_detect_compiler_kind_gcc() {
+        drop(env_logger::try_init());
         let f = TestFixture::new();
         let creator = new_creator();
         let runtime = single_threaded_runtime();
@@ -2370,6 +2374,7 @@ mod test {
 
     #[test]
     fn test_detect_compiler_kind_clang() {
+        drop(env_logger::try_init());
         let f = TestFixture::new();
         let creator = new_creator();
         let runtime = single_threaded_runtime();
@@ -2395,6 +2400,7 @@ mod test {
 
     #[test]
     fn test_detect_compiler_must_be_clang() {
+        drop(env_logger::try_init());
         let f = TestFixture::new();
         let creator = new_creator();
         let runtime = single_threaded_runtime();
@@ -2413,6 +2419,7 @@ mod test {
 
     #[test]
     fn test_detect_compiler_vv_clang() {
+        drop(env_logger::try_init());
         let f = TestFixture::new();
         let creator = new_creator();
         let runtime = single_threaded_runtime();
@@ -2473,6 +2480,7 @@ mod test {
 
     #[test]
     fn test_detect_compiler_kind_nvcc() {
+        drop(env_logger::try_init());
         let f = TestFixture::new();
         let creator = new_creator();
         let runtime = single_threaded_runtime();
@@ -2491,6 +2499,7 @@ mod test {
 
     #[test]
     fn test_detect_compiler_kind_nvhpc() {
+        drop(env_logger::try_init());
         let f = TestFixture::new();
         let creator = new_creator();
         let runtime = single_threaded_runtime();
@@ -2509,6 +2518,7 @@ mod test {
 
     #[test]
     fn test_detect_compiler_kind_rustc() {
+        drop(env_logger::try_init());
         let f = TestFixture::new();
         // Windows uses bin, everything else uses lib. Just create both.
         fs::create_dir(f.tempdir.path().join("lib")).unwrap();
@@ -2527,6 +2537,7 @@ mod test {
 
     #[test]
     fn test_is_rustc_like() {
+        drop(env_logger::try_init());
         assert!(is_rustc_like("rustc"));
         assert!(is_rustc_like("rustc.exe"));
         assert!(is_rustc_like("/path/to/rustc.exe"));
@@ -2570,6 +2581,7 @@ LLVM version: 6.0",
 
     #[test]
     fn test_detect_compiler_kind_rustc_workspace_wrapper() {
+        drop(env_logger::try_init());
         let f = TestFixture::new();
         // Windows uses bin, everything else uses lib. Just create both.
         fs::create_dir(f.tempdir.path().join("lib")).unwrap();
@@ -2628,6 +2640,7 @@ LLVM version: 6.0",
 
     #[test]
     fn test_detect_compiler_kind_diab() {
+        drop(env_logger::try_init());
         let f = TestFixture::new();
         let creator = new_creator();
         let runtime = single_threaded_runtime();
@@ -2646,6 +2659,7 @@ LLVM version: 6.0",
 
     #[test]
     fn test_detect_compiler_kind_unknown() {
+        drop(env_logger::try_init());
         let f = TestFixture::new();
         let creator = new_creator();
         let runtime = single_threaded_runtime();
@@ -2670,6 +2684,7 @@ LLVM version: 6.0",
 
     #[test]
     fn test_detect_compiler_kind_process_fail() {
+        drop(env_logger::try_init());
         let f = TestFixture::new();
         let creator = new_creator();
         let runtime = single_threaded_runtime();
@@ -2692,6 +2707,7 @@ LLVM version: 6.0",
     #[test_case(true ; "with preprocessor cache")]
     #[test_case(false ; "without preprocessor cache")]
     fn test_compiler_version_affects_hash(preprocessor_cache_mode: bool) {
+        drop(env_logger::try_init());
         let f = TestFixture::new();
         let clang = f.mk_bin("clang").unwrap();
         let creator = new_creator();
@@ -2699,6 +2715,8 @@ LLVM version: 6.0",
         let pool = runtime.handle();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
         let cwd = f.tempdir.path();
+        let storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
+        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
 
@@ -2719,6 +2737,7 @@ LLVM version: 6.0",
                 .wait()
                 .unwrap()
                 .0;
+                // The generate_hash_key preprocessor invocation.
                 next_command(
                     &creator,
                     Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
@@ -2729,13 +2748,13 @@ LLVM version: 6.0",
                 };
                 hasher
                     .generate_hash_key(
+                        &service,
                         &creator,
                         cwd.to_path_buf(),
                         vec![],
-                        false,
                         pool,
                         false,
-                        Arc::new(MockStorage::new(None, preprocessor_cache_mode)),
+                        storage.clone(),
                         CacheControl::Default,
                     )
                     .wait()
@@ -2749,6 +2768,7 @@ LLVM version: 6.0",
     #[test_case(true ; "with preprocessor cache")]
     #[test_case(false ; "without preprocessor cache")]
     fn test_common_args_affects_hash(preprocessor_cache_mode: bool) {
+        drop(env_logger::try_init());
         let f = TestFixture::new();
         let creator = new_creator();
         let runtime = single_threaded_runtime();
@@ -2760,6 +2780,9 @@ LLVM version: 6.0",
             ovec!["-c", "foo.c", "-o", "foo.o"],
         ];
         let cwd = f.tempdir.path();
+        let storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
+        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
+
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
 
@@ -2787,6 +2810,7 @@ LLVM version: 6.0",
                 .wait()
                 .unwrap()
                 .0;
+                // The generate_hash_key preprocessor invocation.
                 next_command(
                     &creator,
                     Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
@@ -2797,13 +2821,13 @@ LLVM version: 6.0",
                 };
                 hasher
                     .generate_hash_key(
+                        &service,
                         &creator,
                         cwd.to_path_buf(),
                         vec![],
-                        false,
                         pool,
                         false,
-                        Arc::new(MockStorage::new(None, preprocessor_cache_mode)),
+                        storage.clone(),
                         CacheControl::Default,
                     )
                     .wait()
@@ -2819,6 +2843,7 @@ LLVM version: 6.0",
 
     #[test]
     fn test_get_compiler_info() {
+        drop(env_logger::try_init());
         let creator = new_creator();
         let runtime = single_threaded_runtime();
         let pool = runtime.handle();
@@ -2877,7 +2902,7 @@ LLVM version: 6.0",
         .wait()
         .unwrap()
         .0;
-        // The preprocessor invocation.
+        // The generate_hash_key preprocessor invocation.
         next_command(
             &creator,
             Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
@@ -2917,6 +2942,7 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool.clone(),
+                        None,
                     )
                     .await
             })
@@ -2954,6 +2980,7 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool,
+                        None,
                     )
                     .await
             })
@@ -3005,7 +3032,12 @@ LLVM version: 6.0",
         .wait()
         .unwrap()
         .0;
-        // The preprocessor invocation.
+        // The generate_hash_key preprocessor invocation.
+        next_command(
+            &creator,
+            Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
+        );
+        // The inputs_packager preprocessor invocation.
         next_command(
             &creator,
             Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
@@ -3046,6 +3078,7 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool.clone(),
+                        None,
                     )
                     .await
             })
@@ -3083,6 +3116,7 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool,
+                        None,
                     )
                     .await
             })
@@ -3095,10 +3129,10 @@ LLVM version: 6.0",
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
     /// Test that a cache read that results in an error is treated as a cache
     /// miss.
+    #[test_case(true ; "with preprocessor cache")]
+    #[test_case(false ; "without preprocessor cache")]
     fn test_compiler_get_cached_or_compile_cache_error(preprocessor_cache_mode: bool) {
         drop(env_logger::try_init());
         let creator = new_creator();
@@ -3129,7 +3163,7 @@ LLVM version: 6.0",
         .wait()
         .unwrap()
         .0;
-        // The preprocessor invocation.
+        // The generate_hash_key preprocessor invocation.
         next_command(
             &creator,
             Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
@@ -3168,6 +3202,7 @@ LLVM version: 6.0",
                 vec![],
                 CacheControl::Default,
                 pool,
+                None,
             ))
             .unwrap();
         // Ensure that the object file was created.
@@ -3219,7 +3254,7 @@ LLVM version: 6.0",
         .wait()
         .unwrap()
         .0;
-        // The preprocessor invocation.
+        // The generate_hash_key preprocessor invocation.
         next_command(
             &creator,
             Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
@@ -3260,6 +3295,7 @@ LLVM version: 6.0",
                 vec![],
                 CacheControl::Default,
                 pool,
+                None,
             ))
             .unwrap();
         match cached {
@@ -3315,7 +3351,7 @@ LLVM version: 6.0",
         // recaching.
         let obj = f.tempdir.path().join("foo.o");
         for _ in 0..2 {
-            // The preprocessor invocation.
+            // The generate_hash_key preprocessor invocation.
             next_command(
                 &creator,
                 Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
@@ -3353,6 +3389,7 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool.clone(),
+                        None,
                     )
                     .await
             })
@@ -3382,6 +3419,7 @@ LLVM version: 6.0",
                 vec![],
                 CacheControl::ForceRecache,
                 pool,
+                None,
             )
             .wait()
             .unwrap();
@@ -3474,6 +3512,7 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool,
+                        None,
                     )
                     .await
             })
@@ -3498,10 +3537,10 @@ LLVM version: 6.0",
         let runtime = Runtime::new().unwrap();
         let pool = runtime.handle().clone();
         let dist_clients = vec![
-            test_dist::ErrorPutToolchainClient::new(),
-            test_dist::ErrorAllocJobClient::new(),
-            test_dist::ErrorSubmitToolchainClient::new(),
-            test_dist::ErrorRunJobClient::new(),
+            (false, test_dist::ErrorPutToolchainClient::new()),
+            (true, test_dist::ErrorAllocJobClient::new()),
+            (true, test_dist::ErrorSubmitToolchainClient::new()),
+            (true, test_dist::ErrorRunJobClient::new()),
         ];
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
@@ -3537,12 +3576,19 @@ LLVM version: 6.0",
         // The compiler should be invoked twice, since we're forcing
         // recaching.
         let obj = f.tempdir.path().join("foo.o");
-        for _ in dist_clients.iter() {
-            // The preprocessor invocation.
+        for (attempts_compile, _) in dist_clients.iter() {
+            // The generate_hash_key preprocessor invocation.
             next_command(
                 &creator,
                 Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
             );
+            if *attempts_compile {
+                // The inputs_packager preprocessor invocation.
+                next_command(
+                    &creator,
+                    Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
+                );
+            }
             // The compiler invocation.
             let o = obj.clone();
             next_command_calls(&creator, move |_| {
@@ -3563,7 +3609,7 @@ LLVM version: 6.0",
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
         // All these dist clients will fail, but should still result in successful compiles
-        for dist_client in dist_clients {
+        for (_, dist_client) in dist_clients {
             let service = server::SccacheService::mock_with_dist_client(
                 dist_client.clone(),
                 storage.clone(),
@@ -3585,6 +3631,7 @@ LLVM version: 6.0",
                     vec![],
                     CacheControl::ForceRecache,
                     pool.clone(),
+                    None,
                 )
                 .wait()
                 .expect("Does not error if storage put fails. qed");
@@ -3760,7 +3807,7 @@ mod test_dist {
         async fn new_job(&self, tc: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
             assert!(!self
                 .has_started
-                .swap(true, std::sync::atomic::Ordering::AcqRel));
+                .swap(true, std::sync::atomic::Ordering::SeqCst));
             assert_eq!(self.tc, tc);
 
             Ok(NewJobResponse {
@@ -3836,7 +3883,7 @@ mod test_dist {
         async fn new_job(&self, tc: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
             assert!(!self
                 .has_started
-                .swap(true, std::sync::atomic::Ordering::AcqRel));
+                .swap(true, std::sync::atomic::Ordering::SeqCst));
             assert_eq!(self.tc, tc);
 
             Ok(NewJobResponse {
@@ -3925,7 +3972,7 @@ mod test_dist {
         async fn new_job(&self, tc: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
             assert!(!self
                 .has_started
-                .swap(true, std::sync::atomic::Ordering::AcqRel));
+                .swap(true, std::sync::atomic::Ordering::SeqCst));
             assert_eq!(self.tc, tc);
             Ok(NewJobResponse {
                 has_inputs: true,

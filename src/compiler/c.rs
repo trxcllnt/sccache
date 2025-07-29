@@ -22,18 +22,20 @@ use crate::compiler::{
 use crate::compiler::{DistPackagers, NoopOutputsRewriter};
 use crate::dist;
 #[cfg(feature = "dist-client")]
-use crate::dist::pkg;
+use crate::dist::pkg::{self, InputsWriter};
 use crate::mock_command::{CommandCreatorSync, ProcessOutput};
 use crate::util::{hash_all, Digest, HashToDigest, TimeMacroFinder};
 use async_trait::async_trait;
+use bytes::Buf;
 use fs_err as fs;
+use itertools::Itertools;
 use once_cell::sync::Lazy;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::hash::Hash;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -115,7 +117,7 @@ pub struct ParsedArguments {
     /// arguments are incompatible with rewrite_includes_only
     pub suppress_rewrite_includes_only: bool,
     /// Arguments are incompatible with preprocessor cache mode
-    pub too_hard_for_preprocessor_cache_mode: Option<OsString>,
+    pub too_hard_for_preprocessor_cache_mode: Vec<OsString>,
 }
 
 impl ParsedArguments {
@@ -184,6 +186,28 @@ impl From<&str> for CCompilerKind {
     }
 }
 
+impl From<CCompilerKind> for CompilerKind {
+    fn from(kind: CCompilerKind) -> Self {
+        CompilerKind::C(kind)
+    }
+}
+
+impl From<&CCompilerKind> for CompilerKind {
+    fn from(kind: &CCompilerKind) -> Self {
+        CompilerKind::C(kind.clone())
+    }
+}
+
+#[derive(Debug)]
+pub enum PreprocessorOutput {
+    // cudafe++, cicc, and ptxas return this. Their output is always
+    // saved to an intermediate file, and no preprocessor caching should
+    // be done on them.
+    File(fs::File),
+    Output(ProcessOutput),
+    OutputWithDepedencies(ProcessOutput, Vec<PathBuf>),
+}
+
 /// An interface to a specific C compiler.
 #[async_trait]
 pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
@@ -204,15 +228,16 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
+        service: &crate::server::SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        may_dist: bool,
         rewrite_includes_only: bool,
-        preprocessor_cache_mode: bool,
-    ) -> Result<ProcessOutput>
+        generate_dependencies: bool,
+        include_line_numbers: bool,
+    ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync;
     /// Generate a command that can be used to invoke the C compiler to perform
@@ -310,6 +335,10 @@ where
             })
             .unwrap_or_default()
     }
+
+    pub fn compiler(&self) -> &I {
+        &self.compiler
+    }
 }
 
 impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
@@ -375,6 +404,116 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
     fn box_clone(&self) -> Box<dyn Compiler<T>> {
         Box::new((*self).clone())
     }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send + Sync> {
+        self
+    }
+}
+
+#[derive(PartialEq)]
+enum PreprocessorCacheLookup {
+    Disabled,
+    Hit(String),
+    Miss(String),
+}
+
+impl<I> CCompilerHasher<I>
+where
+    I: CCompilerImpl,
+{
+    async fn preprocessor_cache_lookup(
+        &self,
+        cwd: &Path,
+        env_vars: &[(OsString, OsString)],
+        extra_hashes: &[String],
+        cache_control: &CacheControl,
+        storage: &dyn Storage,
+    ) -> Result<PreprocessorCacheLookup> {
+        let CCompilerHasher {
+            parsed_args,
+            executable_digest,
+            compiler,
+            ..
+        } = self;
+
+        let out_pretty = parsed_args.output_pretty();
+        let preprocessor_cache_mode_config = storage.preprocessor_cache_mode_config();
+
+        if !use_preprocessor_cache_mode(parsed_args, env_vars, &preprocessor_cache_mode_config) {
+            return Ok(PreprocessorCacheLookup::Disabled);
+        }
+
+        // Create an argument vector containing both preprocessor and arch args, to
+        // use in creating a hash key
+        let mut preprocessor_and_arch_args = parsed_args.preprocessor_args.clone();
+        preprocessor_and_arch_args.extend(parsed_args.arch_args.to_vec());
+        // common_args is used in preprocessing too
+        preprocessor_and_arch_args.extend(parsed_args.common_args.to_vec());
+
+        let preprocessor_key = preprocessor_cache_entry_hash_key(
+            executable_digest,
+            parsed_args.language,
+            &preprocessor_and_arch_args,
+            extra_hashes,
+            env_vars,
+            &cwd.join(&parsed_args.input),
+            compiler.plusplus(),
+            &preprocessor_cache_mode_config,
+        )?;
+
+        if let Some(preprocessor_key) = preprocessor_key {
+            if let Some(mut seekable) = storage
+                .get_preprocessor_cache_entry(&preprocessor_key)
+                .await?
+                .filter(|_| matches!(cache_control, CacheControl::Default))
+            {
+                let (hit, updated, preprocessor_cache_entry) = tokio::runtime::Handle::current()
+                    .spawn_blocking(move || {
+                        let mut buf = vec![];
+                        seekable.read_to_end(&mut buf).map_err(anyhow::Error::new)?;
+                        let mut preprocessor_cache_entry =
+                            PreprocessorCacheEntry::read(&buf).map_err(anyhow::Error::new)?;
+                        let mut updated = false;
+                        let hit = preprocessor_cache_entry
+                            .lookup_result_digest(preprocessor_cache_mode_config, &mut updated);
+                        Ok::<(Option<String>, bool, PreprocessorCacheEntry), anyhow::Error>((
+                            hit,
+                            updated,
+                            preprocessor_cache_entry,
+                        ))
+                    })
+                    .await??;
+
+                let mut update_failed = false;
+                if updated {
+                    // Time macros have been found, we need to update
+                    // the preprocessor cache entry. See [`PreprocessorCacheEntry::result_matches`].
+                    debug!("[{out_pretty}]: Preprocessor cache updated because of time macros: {preprocessor_key}");
+
+                    if let Err(e) = storage
+                        .put_preprocessor_cache_entry(&preprocessor_key, preprocessor_cache_entry)
+                        .await
+                    {
+                        debug!("[{out_pretty}]: Failed to update preprocessor cache: {}", e);
+                        update_failed = true;
+                    }
+                }
+
+                if !update_failed {
+                    if let Some(key) = hit {
+                        debug!(
+                            "[{out_pretty}]: Preprocessor cache hit: {preprocessor_key} -> {key}"
+                        );
+                        return Ok(PreprocessorCacheLookup::Hit(key));
+                    }
+                }
+            }
+            debug!("[{out_pretty}]: Preprocessor cache miss: {preprocessor_key}");
+            return Ok(PreprocessorCacheLookup::Miss(preprocessor_key));
+        }
+
+        Ok(PreprocessorCacheLookup::Disabled)
+    }
 }
 
 #[async_trait]
@@ -389,290 +528,242 @@ where
 
     async fn generate_hash_key(
         self: Box<Self>,
+        service: &crate::server::SccacheService<T>,
         creator: &T,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
-        may_dist: bool,
         pool: &tokio::runtime::Handle,
         rewrite_includes_only: bool,
         storage: Arc<dyn Storage>,
         cache_control: CacheControl,
     ) -> Result<HashResult<T>> {
         let start_of_compilation = std::time::SystemTime::now();
+        let CCompilerHasher { parsed_args, .. } = self.as_ref();
+
+        let extra_hashes = if parsed_args.extra_hash_files.is_empty() {
+            vec![]
+        } else {
+            hash_all(&parsed_args.extra_hash_files, pool).await?
+        };
+
+        // Try to look for a cached preprocessing step for this compilation request.
+        let preprocessor_cache_mode_config = storage.preprocessor_cache_mode_config();
+        let mut preprocessor_cache_lookup = self
+            .preprocessor_cache_lookup(
+                &cwd,
+                &env_vars,
+                &extra_hashes,
+                &cache_control,
+                storage.as_ref(),
+            )
+            .await?;
+
         let CCompilerHasher {
             parsed_args,
             executable,
             executable_digest,
             compiler,
+            ..
         } = *self;
 
-        let extra_hashes = hash_all(&parsed_args.extra_hash_files, &pool.clone()).await?;
-        // Create an argument vector containing both preprocessor and arch args, to
-        // use in creating a hash key
-        let mut preprocessor_and_arch_args = parsed_args.preprocessor_args.clone();
-        preprocessor_and_arch_args.extend(parsed_args.arch_args.to_vec());
-        // common_args is used in preprocessing too
-        preprocessor_and_arch_args.extend(parsed_args.common_args.to_vec());
-
-        let absolute_input_path: Cow<'_, _> = if parsed_args.input.is_absolute() {
-            Cow::Borrowed(&parsed_args.input)
+        let key = if let PreprocessorCacheLookup::Hit(key) = preprocessor_cache_lookup {
+            key
         } else {
-            Cow::Owned(cwd.join(&parsed_args.input))
-        };
+            let result = compiler
+                .preprocess(
+                    service,
+                    creator,
+                    &executable,
+                    &parsed_args,
+                    &cwd,
+                    &env_vars,
+                    rewrite_includes_only,
+                    // Generate dependencies if we're going to read them below
+                    preprocessor_cache_lookup != PreprocessorCacheLookup::Disabled,
+                    // include line numbers when `-fprofile-generate` is enabled
+                    // to guarantee the profile data embedded in the cached object
+                    // matches the line numbers in this source file
+                    parsed_args.profile_generate,
+                )
+                .await;
 
-        // Try to look for a cached preprocessing step for this compilation
-        // request.
-        let preprocessor_cache_mode_config = storage.preprocessor_cache_mode_config();
-        let too_hard_for_preprocessor_cache_mode =
-            parsed_args.too_hard_for_preprocessor_cache_mode.is_some();
-        if let Some(arg) = &parsed_args.too_hard_for_preprocessor_cache_mode {
-            trace!(
-                "parse_arguments: Cannot use preprocessor cache because of {:?}",
-                arg
-            );
-        }
+            let out_pretty = parsed_args.output_pretty();
 
-        let use_preprocessor_cache_mode = {
-            // Disable preprocessor cache when doing distributed compilation (+ other conditions)
-            let can_use_preprocessor_cache_mode = !may_dist
-                && preprocessor_cache_mode_config.use_preprocessor_cache_mode
-                && !too_hard_for_preprocessor_cache_mode;
-
-            let mut use_preprocessor_cache_mode = can_use_preprocessor_cache_mode;
-
-            // Allow overrides from the env
-            for (key, val) in env_vars.iter() {
-                if key == "SCCACHE_DIRECT" {
-                    if let Some(val) = val.to_str() {
-                        use_preprocessor_cache_mode = match val.to_lowercase().as_str() {
-                            "false" | "off" | "0" => false,
-                            _ => can_use_preprocessor_cache_mode,
-                        };
-                    }
-                    break;
-                }
-            }
-
-            if can_use_preprocessor_cache_mode && !use_preprocessor_cache_mode {
-                debug!(
-                    "parse_arguments: Disabling preprocessor cache because SCCACHE_DIRECT=false"
-                );
-            }
-
-            use_preprocessor_cache_mode
-        };
-
-        let mut preprocessor_key = if use_preprocessor_cache_mode {
-            preprocessor_cache_entry_hash_key(
-                &executable_digest,
-                parsed_args.language,
-                &preprocessor_and_arch_args,
-                &extra_hashes,
-                &env_vars,
-                &absolute_input_path,
-                compiler.plusplus(),
-                preprocessor_cache_mode_config,
-            )?
-        } else {
-            None
-        };
-        if let Some(preprocessor_key) = &preprocessor_key {
-            if cache_control == CacheControl::Default {
-                if let Some(mut seekable) = storage
-                    .get_preprocessor_cache_entry(preprocessor_key)
-                    .await?
-                {
-                    let mut buf = vec![];
-                    seekable.read_to_end(&mut buf)?;
-                    let mut preprocessor_cache_entry = PreprocessorCacheEntry::read(&buf)?;
-                    let mut updated = false;
-                    let hit = preprocessor_cache_entry
-                        .lookup_result_digest(preprocessor_cache_mode_config, &mut updated);
-
-                    let mut update_failed = false;
-                    if updated {
-                        // Time macros have been found, we need to update
-                        // the preprocessor cache entry. See [`PreprocessorCacheEntry::result_matches`].
-                        debug!(
-                            "Preprocessor cache updated because of time macros: {preprocessor_key}"
-                        );
-
-                        if let Err(e) = storage
-                            .put_preprocessor_cache_entry(
-                                preprocessor_key,
-                                preprocessor_cache_entry,
-                            )
-                            .await
-                        {
-                            debug!("Failed to update preprocessor cache: {}", e);
-                            update_failed = true;
-                        }
-                    }
-
-                    if !update_failed {
-                        if let Some(key) = hit {
-                            debug!("Preprocessor cache hit: {preprocessor_key}");
-                            // A compiler binary may be a symlink to another and
-                            // so has the same digest, but that means
-                            // the toolchain will not contain the correct path
-                            // to invoke the compiler! Add the compiler
-                            // executable path to try and prevent this
-                            let weak_toolchain_key =
-                                format!("{}-{}", executable.to_string_lossy(), executable_digest);
-                            return Ok(HashResult {
-                                key,
-                                compilation: Box::new(CCompilation {
-                                    parsed_args: parsed_args.to_owned(),
-                                    #[cfg(feature = "dist-client")]
-                                    // TODO or is it never relevant since dist?
-                                    preprocessor_output: vec![],
-                                    executable: executable.to_owned(),
-                                    compiler: compiler.to_owned(),
-                                    cwd: cwd.to_owned(),
-                                    env_vars: env_vars.to_owned(),
-                                }),
-                                weak_toolchain_key,
-                            });
-                        } else {
-                            debug!("Preprocessor cache miss: {preprocessor_key}");
-                        }
-                    }
-                }
-            }
-        }
-
-        let result = compiler
-            .preprocess(
-                creator,
-                &executable,
-                &parsed_args,
-                &cwd,
-                &env_vars,
-                may_dist,
-                rewrite_includes_only,
-                use_preprocessor_cache_mode,
-            )
-            .await;
-
-        let out_pretty = parsed_args.output_pretty().into_owned();
-        let outputs = parsed_args.outputs.clone();
-        let args_cwd = cwd.clone();
-
-        let mut preprocessor_result = result.or_else(move |err| {
-            // Errors remove all traces of potential output.
-            trace!("removing files {:?}", &outputs);
-
-            let v: std::result::Result<(), std::io::Error> =
-                outputs.values().try_for_each(|output| {
-                    let mut path = args_cwd.clone();
-                    path.push(&output.path);
-                    match fs::metadata(&path) {
-                        // File exists, remove it.
-                        Ok(_) => fs::remove_file(&path),
-                        _ => Ok(()),
-                    }
-                });
-            if v.is_err() {
-                warn!(
-                    "Could not remove files after preprocessing failed: {:?}",
-                    &outputs
-                );
-            }
-
-            match err.downcast::<ProcessError>() {
-                Ok(ProcessError(mut output)) => {
-                    debug!(
-                        "[{out_pretty}]: preprocessor returned error (code={:?}, desc={:?})",
-                        output.code(),
-                        output.desc()
-                    );
-                    // Drop the stdout since it's the preprocessor output,
-                    // just hand back stderr and the exit status.
-                    output.stdout = vec![];
-                    bail!(ProcessError(output))
-                }
+            let mut preprocessor_output = match result {
+                Ok(out) => out,
                 Err(err) => {
-                    warn!("[{out_pretty}]: preprocessor failed: {err:?}");
-                    Err(err)
+                    let outputs = &parsed_args.outputs;
+                    // Errors remove all traces of potential output.
+                    trace!("[{out_pretty}]: removing files {:?}", &outputs);
+
+                    let v = outputs.values().try_for_each(|output| {
+                        let path = cwd.join(&output.path);
+                        match fs::metadata(&path) {
+                            // File exists, remove it.
+                            Ok(_) => fs::remove_file(&path),
+                            _ => Ok(()),
+                        }
+                    });
+
+                    if v.is_err() {
+                        warn!(
+                            "[{out_pretty}]: Could not remove files after preprocessing failed: {:?}",
+                            &outputs
+                        );
+                    }
+
+                    match err.downcast::<ProcessError>() {
+                        Ok(ProcessError(mut output)) => {
+                            debug!(
+                                "[{out_pretty}]: preprocessor returned error (code={:?}, desc={:?})",
+                                output.code(),
+                                output.desc()
+                            );
+                            // Drop the stdout since it's the preprocessor output,
+                            // just hand back stderr and the exit status.
+                            output.stdout = vec![];
+                            bail!(ProcessError(output));
+                        }
+                        Err(err) => {
+                            warn!("[{out_pretty}]: preprocessor failed: {err:?}");
+                            return Err(err);
+                        }
+                    }
+                }
+            };
+
+            // Create an argument vector containing both common and arch args, to
+            // use in creating a hash key
+            let mut common_and_arch_args = parsed_args.common_args.clone();
+            common_and_arch_args.extend(parsed_args.arch_args.to_vec());
+
+            match preprocessor_output {
+                PreprocessorOutput::File(ref res) => hash_key(
+                    &executable_digest,
+                    parsed_args.language,
+                    &common_and_arch_args,
+                    &extra_hashes,
+                    &env_vars,
+                    &mut fs::File::open(res.path())?,
+                    compiler.plusplus(),
+                ),
+                PreprocessorOutput::Output(ref mut res) => hash_key(
+                    &executable_digest,
+                    parsed_args.language,
+                    &common_and_arch_args,
+                    &extra_hashes,
+                    &env_vars,
+                    &mut res.stdout.reader(),
+                    compiler.plusplus(),
+                ),
+                PreprocessorOutput::OutputWithDepedencies(ref mut res, dependencies) => {
+                    // Remember include files needed in this preprocessing step
+                    let included_files = if let PreprocessorCacheLookup::Miss(_) =
+                        preprocessor_cache_lookup
+                    {
+                        let paths_and_digests = dependencies.into_iter().map(|path| {
+                            tokio::runtime::Handle::current().spawn_blocking(
+                                move || -> Result<Option<(PathBuf, String)>> {
+                                    let file = fs::File::open(&path).map_err(anyhow::Error::new)?;
+                                    let (digest, finder) =
+                                        if preprocessor_cache_mode_config.ignore_time_macros {
+                                            (Digest::reader_sync(file)?, TimeMacroFinder::new())
+                                        } else {
+                                            Digest::reader_sync_time_macros(file)?
+                                        };
+                                    if finder.found_time() {
+                                        Ok(None)
+                                    } else {
+                                        Ok(Some((path, digest)))
+                                    }
+                                },
+                            )
+                        });
+
+                        futures::future::try_join_all(paths_and_digests)
+                            .await?
+                            .into_iter()
+                            .filter_map_ok(|x| x)
+                            .fold_ok(HashMap::new(), |mut deps, (path, digest)| {
+                                deps.insert(path, digest);
+                                deps
+                            })
+                    } else {
+                        Ok(HashMap::new())
+                    };
+
+                    let included_files = match included_files {
+                        Ok(included_files) => included_files,
+                        Err(_) => {
+                            debug!("[{out_pretty}]: Disabling preprocessor cache mode");
+                            preprocessor_cache_lookup = PreprocessorCacheLookup::Disabled;
+                            HashMap::new()
+                        }
+                    };
+
+                    let key = hash_key(
+                        &executable_digest,
+                        parsed_args.language,
+                        &common_and_arch_args,
+                        &extra_hashes,
+                        &env_vars,
+                        &mut res.stdout.reader(),
+                        compiler.plusplus(),
+                    );
+
+                    // Cache the preprocessing step
+                    if let PreprocessorCacheLookup::Miss(ref preprocessor_key) =
+                        preprocessor_cache_lookup
+                    {
+                        if !included_files.is_empty() {
+                            let mut preprocessor_cache_entry = PreprocessorCacheEntry::new();
+                            let mut included_files = included_files
+                                .into_iter()
+                                .map(|(path, digest)| (digest, path))
+                                .collect::<Vec<_>>();
+                            included_files.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+                            preprocessor_cache_entry.add_result(
+                                start_of_compilation,
+                                &key,
+                                included_files,
+                            );
+
+                            if let Err(e) = storage
+                                .put_preprocessor_cache_entry(
+                                    preprocessor_key,
+                                    preprocessor_cache_entry,
+                                )
+                                .await
+                            {
+                                debug!(
+                                    "[{out_pretty}]: Failed to update preprocessor cache: {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+
+                    key
                 }
             }
-        })?;
-
-        // Remember include files needed in this preprocessing step
-        let mut include_files = HashMap::new();
-        if preprocessor_key.is_some() {
-            // TODO how to propagate stats and which stats?
-            if !process_preprocessed_file(
-                &absolute_input_path,
-                &cwd,
-                &mut preprocessor_result.stdout,
-                &mut include_files,
-                preprocessor_cache_mode_config,
-                start_of_compilation,
-                StandardFsAbstraction,
-            )? {
-                debug!("Disabling preprocessor cache mode");
-                preprocessor_key = None;
-            }
-        }
-
-        trace!(
-            "[{}]: Preprocessor output is {} bytes",
-            parsed_args.output_pretty(),
-            preprocessor_result.stdout.len()
-        );
-
-        // Create an argument vector containing both common and arch args, to
-        // use in creating a hash key
-        let mut common_and_arch_args = parsed_args.common_args.clone();
-        common_and_arch_args.extend(parsed_args.arch_args.to_vec());
-
-        let key = {
-            hash_key(
-                &executable_digest,
-                parsed_args.language,
-                &common_and_arch_args,
-                &extra_hashes,
-                &env_vars,
-                &preprocessor_result.stdout,
-                compiler.plusplus(),
-            )
         };
-
-        // Cache the preprocessing step
-        if let Some(preprocessor_key) = preprocessor_key {
-            if !include_files.is_empty() {
-                let mut preprocessor_cache_entry = PreprocessorCacheEntry::new();
-                let mut files: Vec<_> = include_files
-                    .into_iter()
-                    .map(|(path, digest)| (digest, path))
-                    .collect();
-                files.sort_unstable_by(|a, b| a.1.cmp(&b.1));
-                preprocessor_cache_entry.add_result(start_of_compilation, &key, files);
-
-                if let Err(e) = storage
-                    .put_preprocessor_cache_entry(&preprocessor_key, preprocessor_cache_entry)
-                    .await
-                {
-                    debug!("Failed to update preprocessor cache: {}", e);
-                }
-            }
-        }
 
         // A compiler binary may be a symlink to another and so has the same digest, but that means
         // the toolchain will not contain the correct path to invoke the compiler! Add the compiler
         // executable path to try and prevent this
         let weak_toolchain_key = format!("{}-{}", executable.to_string_lossy(), executable_digest);
+
         Ok(HashResult {
             key,
             compilation: Box::new(CCompilation {
-                parsed_args,
-                #[cfg(feature = "dist-client")]
-                preprocessor_output: preprocessor_result.stdout,
-                executable,
+                service: service.to_owned(),
+                creator: creator.to_owned(),
                 compiler,
                 cwd,
                 env_vars,
+                executable,
+                parsed_args,
+                rewrite_includes_only,
             }),
             weak_toolchain_key,
         })
@@ -695,15 +786,47 @@ where
     }
 }
 
+fn use_preprocessor_cache_mode(
+    parsed_args: &ParsedArguments,
+    env_vars: &[(OsString, OsString)],
+    preprocessor_cache_mode_config: &PreprocessorCacheModeConfig,
+) -> bool {
+    let out_pretty = parsed_args.output_pretty();
 
+    // Try to look for a cached preprocessing step for this compilation
+    // request.
 
+    if !parsed_args.too_hard_for_preprocessor_cache_mode.is_empty() {
+        trace!(
+            "[{out_pretty}]: Cannot use preprocessor cache because of {:?}",
+            parsed_args
+                .too_hard_for_preprocessor_cache_mode
+                .join(OsStr::new(" "))
+        );
     }
 
+    let can_use_preprocessor_cache_mode = preprocessor_cache_mode_config
+        .use_preprocessor_cache_mode
+        && parsed_args.too_hard_for_preprocessor_cache_mode.is_empty();
 
+    // Allow overrides from the env
+    let use_preprocessor_cache_mode = env_vars
+        .iter()
+        .find_map(|(k, v)| {
+            if k == "SCCACHE_DIRECT" {
+                v.to_str().map(|s| s.to_lowercase())
+            } else {
+                None
             }
+        })
+        .map(|v| !matches!(v.as_str(), "false" | "off" | "0" | ""))
+        .unwrap_or(can_use_preprocessor_cache_mode);
 
+    if can_use_preprocessor_cache_mode && !use_preprocessor_cache_mode {
+        trace!("[{out_pretty}]: Disabling preprocessor cache because SCCACHE_DIRECT=false");
     }
 
+    use_preprocessor_cache_mode
 }
 
 impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T, I> {
@@ -1170,13 +1293,13 @@ static CACHED_ENV_VARS: Lazy<HashSet<&'static OsStr>> = Lazy::new(|| {
 });
 
 /// Compute the hash key of `compiler` compiling `preprocessor_output` with `args`.
-pub fn hash_key(
+pub fn hash_key<R: io::Read>(
     compiler_digest: &str,
     language: Language,
     arguments: &[OsString],
     extra_hashes: &[String],
     env_vars: &[(OsString, OsString)],
-    preprocessor_output: &[u8],
+    preprocessor_output: &mut R,
     plusplus: bool,
 ) -> String {
     // If you change any of the inputs to the hash, you should change `CACHE_VERSION`.
@@ -1201,14 +1324,12 @@ pub fn hash_key(
             val.hash(&mut HashToDigest { digest: &mut m });
         }
     }
-    m.update(preprocessor_output);
+    let _ = m.update_from_reader_sync(preprocessor_output);
     m.finish()
 }
 
 #[cfg(test)]
 mod test {
-    use std::{collections::VecDeque, sync::Mutex};
-
     use super::*;
 
     #[test]
@@ -1216,8 +1337,24 @@ mod test {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
         assert_eq!(
-            hash_key("abcd", Language::C, &args, &[], &[], PREPROCESSED, false),
-            hash_key("abcd", Language::C, &args, &[], &[], PREPROCESSED, false)
+            hash_key(
+                "abcd",
+                Language::C,
+                &args,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                false
+            ),
+            hash_key(
+                "abcd",
+                Language::C,
+                &args,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                false
+            )
         );
     }
 
@@ -1226,8 +1363,24 @@ mod test {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
         assert_neq!(
-            hash_key("abcd", Language::C, &args, &[], &[], PREPROCESSED, false),
-            hash_key("abcd", Language::C, &args, &[], &[], PREPROCESSED, true)
+            hash_key(
+                "abcd",
+                Language::C,
+                &args,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                false
+            ),
+            hash_key(
+                "abcd",
+                Language::C,
+                &args,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                true
+            )
         );
     }
 
@@ -1236,14 +1389,22 @@ mod test {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
         assert_neq!(
-            hash_key("abcd", Language::C, &args, &[], &[], PREPROCESSED, false),
+            hash_key(
+                "abcd",
+                Language::C,
+                &args,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                false
+            ),
             hash_key(
                 "abcd",
                 Language::CHeader,
                 &args,
                 &[],
                 &[],
-                PREPROCESSED,
+                &mut PREPROCESSED[..].reader(),
                 false
             )
         );
@@ -1254,14 +1415,22 @@ mod test {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
         assert_neq!(
-            hash_key("abcd", Language::Cxx, &args, &[], &[], PREPROCESSED, true),
+            hash_key(
+                "abcd",
+                Language::Cxx,
+                &args,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                true
+            ),
             hash_key(
                 "abcd",
                 Language::CxxHeader,
                 &args,
                 &[],
                 &[],
-                PREPROCESSED,
+                &mut PREPROCESSED[..].reader(),
                 true
             )
         );
@@ -1272,8 +1441,24 @@ mod test {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
         assert_neq!(
-            hash_key("abcd", Language::C, &args, &[], &[], PREPROCESSED, false),
-            hash_key("wxyz", Language::C, &args, &[], &[], PREPROCESSED, false)
+            hash_key(
+                "abcd",
+                Language::C,
+                &args,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                false
+            ),
+            hash_key(
+                "wxyz",
+                Language::C,
+                &args,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                false
+            )
         );
     }
 
@@ -1286,18 +1471,66 @@ mod test {
         let a = ovec!["a"];
         const PREPROCESSED: &[u8] = b"hello world";
         assert_neq!(
-            hash_key(digest, Language::C, &abc, &[], &[], PREPROCESSED, false),
-            hash_key(digest, Language::C, &xyz, &[], &[], PREPROCESSED, false)
+            hash_key(
+                digest,
+                Language::C,
+                &abc,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                false
+            ),
+            hash_key(
+                digest,
+                Language::C,
+                &xyz,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                false
+            )
         );
 
         assert_neq!(
-            hash_key(digest, Language::C, &abc, &[], &[], PREPROCESSED, false),
-            hash_key(digest, Language::C, &ab, &[], &[], PREPROCESSED, false)
+            hash_key(
+                digest,
+                Language::C,
+                &abc,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                false
+            ),
+            hash_key(
+                digest,
+                Language::C,
+                &ab,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                false
+            )
         );
 
         assert_neq!(
-            hash_key(digest, Language::C, &abc, &[], &[], PREPROCESSED, false),
-            hash_key(digest, Language::C, &a, &[], &[], PREPROCESSED, false)
+            hash_key(
+                digest,
+                Language::C,
+                &abc,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                false
+            ),
+            hash_key(
+                digest,
+                Language::C,
+                &a,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                false
+            )
         );
     }
 
@@ -1311,10 +1544,18 @@ mod test {
                 &args,
                 &[],
                 &[],
-                &b"hello world"[..],
+                &mut b"hello world"[..].reader(),
                 false
             ),
-            hash_key("abcd", Language::C, &args, &[], &[], &b"goodbye"[..], false)
+            hash_key(
+                "abcd",
+                Language::C,
+                &args,
+                &[],
+                &[],
+                &mut b"goodbye"[..].reader(),
+                false
+            )
         );
     }
 
@@ -1324,11 +1565,35 @@ mod test {
         let digest = "abcd";
         const PREPROCESSED: &[u8] = b"hello world";
         for var in CACHED_ENV_VARS.iter() {
-            let h1 = hash_key(digest, Language::C, &args, &[], &[], PREPROCESSED, false);
+            let h1 = hash_key(
+                digest,
+                Language::C,
+                &args,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                false,
+            );
             let vars = vec![(OsString::from(var), OsString::from("something"))];
-            let h2 = hash_key(digest, Language::C, &args, &[], &vars, PREPROCESSED, false);
+            let h2 = hash_key(
+                digest,
+                Language::C,
+                &args,
+                &[],
+                &vars,
+                &mut PREPROCESSED[..].reader(),
+                false,
+            );
             let vars = vec![(OsString::from(var), OsString::from("something else"))];
-            let h3 = hash_key(digest, Language::C, &args, &[], &vars, PREPROCESSED, false);
+            let h3 = hash_key(
+                digest,
+                Language::C,
+                &args,
+                &[],
+                &vars,
+                &mut PREPROCESSED[..].reader(),
+                false,
+            );
             assert_neq!(h1, h2);
             assert_neq!(h2, h3);
         }
@@ -1348,10 +1613,18 @@ mod test {
                 &args,
                 &extra_data,
                 &[],
-                PREPROCESSED,
+                &mut PREPROCESSED[..].reader(),
                 false
             ),
-            hash_key(digest, Language::C, &args, &[], &[], PREPROCESSED, false)
+            hash_key(
+                digest,
+                Language::C,
+                &args,
+                &[],
+                &[],
+                &mut PREPROCESSED[..].reader(),
+                false
+            )
         );
     }
 

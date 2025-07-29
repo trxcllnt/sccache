@@ -210,15 +210,16 @@ mod client {
                 return Ok((Toolchain { archive_id }, None));
             }
             debug!("Weak key {} appears to be new", weak_key);
-            let tmpfile = tempfile::Builder::new()
+            let (tmpfile, tmppath) = tempfile::Builder::new()
                 .rand_bytes(16)
-                .tempfile_in(self.cache_dir.join("toolchain_tmp"))?;
+                .tempfile_in(self.cache_dir.join("toolchain_tmp"))?
+                .into_parts();
             let archive_id = toolchain_packager
-                .write_pkg(fs_err::File::from_parts(tmpfile.reopen()?, tmpfile.path()))
+                .write_pkg(fs_err::File::from_parts(tmpfile, &tmppath))
                 .await
                 .context("Could not package toolchain")?;
             let tc = Toolchain { archive_id };
-            cache.insert_file(&tc.archive_id, tmpfile.path())?;
+            cache.insert_file(&tc.archive_id, &tmppath)?;
             self.record_weak(weak_key.to_owned(), tc.archive_id.clone())
                 .await?;
             Ok((tc, None))

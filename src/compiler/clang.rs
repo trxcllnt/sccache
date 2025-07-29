@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compiler::args::*;
-use crate::compiler::c::{CCompilerImpl, CCompilerKind, ParsedArguments};
-use crate::compiler::gcc::ArgData::*;
 use crate::compiler::{
-    gcc, CCompileCommand, Cacheable, CompileCommand, CompilerArguments, Language,
+    args::*,
+    c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput},
+    gcc,
+    gcc::ArgData::*,
+    CCompileCommand, Cacheable, CompileCommand, CompilerArguments,
 };
-use crate::mock_command::{CommandCreatorSync, ProcessOutput};
+use crate::mock_command::CommandCreatorSync;
 use crate::{counted_array, dist};
 use async_trait::async_trait;
 use semver::{BuildMetadata, Prerelease, Version};
@@ -108,19 +109,20 @@ impl CCompilerImpl for Clang {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
+        _service: &crate::server::SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        may_dist: bool,
         rewrite_includes_only: bool,
-        preprocessor_cache_mode: bool,
-    ) -> Result<ProcessOutput>
+        generate_dependencies: bool,
+        include_line_numbers: bool,
+    ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
     {
-        let mut ignorable_whitespace_flags = if preprocessor_cache_mode {
+        let mut ignorable_whitespace_flags = if include_line_numbers {
             vec![]
         } else {
             vec!["-P".to_string()]
@@ -137,11 +139,10 @@ impl CCompilerImpl for Clang {
             parsed_args,
             cwd,
             env_vars,
-            may_dist,
             self.kind(),
             rewrite_includes_only,
+            generate_dependencies,
             ignorable_whitespace_flags,
-            language_to_clang_arg,
         )
         .await
     }
@@ -171,30 +172,10 @@ impl CCompilerImpl for Clang {
             env_vars,
             self.kind(),
             rewrite_includes_only,
-            language_to_clang_arg,
         )
         .map(|(command, dist_command, cacheable)| {
             (CCompileCommand::new(command), dist_command, cacheable)
         })
-    }
-}
-
-pub fn language_to_clang_arg(lang: Language) -> Option<&'static str> {
-    match lang {
-        Language::C => Some("c"),
-        Language::CHeader => Some("c-header"),
-        Language::Cxx => Some("c++"),
-        Language::CxxHeader => Some("c++-header"),
-        Language::ObjectiveC => Some("objective-c"),
-        Language::ObjectiveCxx => Some("objective-c++"),
-        Language::ObjectiveCxxHeader => Some("objective-c++-header"),
-        Language::Cuda => Some("cuda"),
-        Language::CudaFE => None,
-        Language::Ptx => None,
-        Language::Cubin => None,
-        Language::Rust => None, // Let the compiler decide
-        Language::Hip => Some("hip"),
-        Language::GenericHeader => None, // Let the compiler decide
     }
 }
 
@@ -274,9 +255,7 @@ pub(crate) fn resolve_profile_use_path(arg: &Path, cwd: &Path) -> PathBuf {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::compiler::c::ArtifactDescriptor;
-    use crate::compiler::gcc;
-    use crate::compiler::*;
+    use crate::compiler::{c::ArtifactDescriptor, gcc, ColorMode, CompileCommandImpl, Language};
     use crate::mock_command::*;
     use crate::server;
     use crate::test::mock_storage::MockStorage;
@@ -1138,12 +1117,11 @@ mod test {
             &[],
             CCompilerKind::Clang,
             false,
-            language_to_clang_arg,
         )
         .unwrap();
         // ClangCUDA cannot be dist-compiled
         assert!(dist_command.is_none());
-        let _ = command.execute(&service, &creator).wait();
+        let _ = command.execute(&service, &creator, None).wait();
         assert_eq!(Cacheable::Yes, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());

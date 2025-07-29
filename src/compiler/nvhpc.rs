@@ -70,15 +70,16 @@ impl CCompilerImpl for Nvhpc {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
+        _service: &crate::server::SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        _may_dist: bool,
-        _rewrite_includes_only: bool,
-        _preprocessor_cache_mode: bool,
-    ) -> Result<ProcessOutput>
+        rewrite_includes_only: bool,
+        generate_dependencies: bool,
+        include_line_numbers: bool,
+    ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
     {
@@ -91,67 +92,66 @@ impl CCompilerImpl for Nvhpc {
             _ => Err(anyhow!("PCH not supported by nvhpc")),
         }?;
 
-        let initialize_cmd_and_args = || {
-            let mut command = creator.clone().new_command_sync(executable);
-            command.args(&parsed_args.preprocessor_args);
-            command.args(&parsed_args.common_args);
-            command.arg("-x").arg(language).arg(&parsed_args.input);
-
-            command
-        };
-
-        let dep_before_preprocessor = || {
-            //nvhpc doesn't support generating both the dependency information
-            //and the preprocessor output at the same time. So if we have
-            //need for both we need separate compiler invocations
-            let mut dep_cmd = initialize_cmd_and_args();
-            let mut transformed_deps = vec![];
-            for item in parsed_args.dependency_args.iter() {
-                if item == "-MD" {
-                    transformed_deps.push(OsString::from("-M"));
-                } else if item == "-MMD" {
-                    transformed_deps.push(OsString::from("-MM"));
-                } else {
-                    transformed_deps.push(item.clone());
-                }
-            }
-            dep_cmd
-                .args(&transformed_deps)
-                .env_clear()
-                .envs(env_vars.to_vec())
-                .current_dir(cwd);
-
-            dep_cmd
-        };
-
-        trace!("preprocess");
-        let mut cmd = initialize_cmd_and_args();
-
-        //NVHPC doesn't support disabling line info when outputting to console
-        cmd.arg("-E")
-            .env_clear()
-            .envs(env_vars.to_vec())
-            .current_dir(cwd);
-        if log_enabled!(Trace) {
-            trace!("preprocess: {:?}", cmd);
+        // Need to chain the dependency generation and the preprocessor
+        // to emulate a `proper` front end
+        if !parsed_args.dependency_args.is_empty() {
+            run_input_output(
+                {
+                    // NVHPC doesn't support generating both the dependency information
+                    // and the preprocessor output at the same time. So if we have
+                    // need for both, we need separate compiler invocations
+                    let mut dependency_cmd = creator.clone().new_command_sync(executable);
+                    dependency_cmd
+                        .current_dir(cwd)
+                        .env_clear()
+                        .envs(env_vars.to_vec())
+                        .args(&parsed_args.preprocessor_args)
+                        .args(&parsed_args.common_args)
+                        .arg("-x")
+                        .arg(language)
+                        .args(
+                            &parsed_args
+                                .dependency_args
+                                .iter()
+                                .map(|arg| match arg.to_str().unwrap_or_default() {
+                                    "-MD" | "--dependencies_to_file" => "-M",
+                                    "-MMD" | "--dependencies_to_file_quoted_only" => "-MM",
+                                    arg => arg,
+                                })
+                                // protect against duplicate -M and -MM flags after transform
+                                .unique()
+                                .collect::<Vec<_>>(),
+                        )
+                        .arg(&parsed_args.input);
                     debug_if_trace!(
                         "[{}]: dependencies command: {dependency_cmd}",
                         parsed_args.output_pretty()
+                    );
+                    dependency_cmd
+                },
+                None,
+            )
+            .await?;
         }
 
-        //Need to chain the dependency generation and the preprocessor
-        //to emulate a `proper` front end
-        if !parsed_args.dependency_args.is_empty() {
-            let first = run_input_output(dep_before_preprocessor(), None);
-            let second = run_input_output(cmd, None);
-            // TODO: If we need to chain these to emulate a frontend, shouldn't
-            // we explicitly wait on the first one before starting the second one?
-            // (rather than via which drives these concurrently)
-            let (_f, s) = futures::future::try_join(first, second).await?;
-            Ok(s)
+        let ignorable_whitespace_flags = if include_line_numbers {
+            vec![]
         } else {
-            run_input_output(cmd, None).await
-        }
+            vec!["-P".to_string()]
+        };
+
+        gcc::preprocess(
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            self.kind(),
+            rewrite_includes_only,
+            generate_dependencies,
+            ignorable_whitespace_flags,
+        )
+        .await
     }
 
     fn generate_compile_commands<T>(
@@ -179,7 +179,6 @@ impl CCompilerImpl for Nvhpc {
             env_vars,
             self.kind(),
             rewrite_includes_only,
-            gcc::language_to_gcc_arg,
         )
         .map(|(command, dist_command, cacheable)| {
             // Cannot currently dist-compile NVHPC CUDA code.
@@ -364,6 +363,14 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
+                    optional: false,
+                    must_be_non_empty: false,
+                }
+            ),
+            (
+                "-MF",
+                ArtifactDescriptor {
+                    path: PathBuf::from("foo.o.d"),
                     optional: false,
                     must_be_non_empty: false,
                 }

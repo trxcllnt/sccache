@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::compiler::args::*;
-use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
+use crate::compiler::c::{
+    ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
+};
 use crate::compiler::{
     clang, gcc, write_temp_file, CCompileCommand, Cacheable, ColorMode, CompileCommand,
     CompilerArguments, Language, SingleCompileCommand,
@@ -29,6 +31,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use tokio::io::AsyncReadExt;
 
 use crate::errors::*;
 
@@ -66,15 +69,17 @@ impl CCompilerImpl for Msvc {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
+        _service: &crate::server::SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        may_dist: bool,
+        // MSVC can't be dist-compiled
         rewrite_includes_only: bool,
-        _preprocessor_cache_mode: bool,
-    ) -> Result<ProcessOutput>
+        generate_dependencies: bool,
+        include_line_numbers: bool,
+    ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
     {
@@ -84,9 +89,10 @@ impl CCompilerImpl for Msvc {
             parsed_args,
             cwd,
             env_vars,
-            may_dist,
             &self.includes_prefix,
             rewrite_includes_only,
+            generate_dependencies,
+            include_line_numbers,
             self.is_clang,
         )
         .await
@@ -889,19 +895,13 @@ pub fn preprocess_cmd<T>(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-    may_dist: bool,
     rewrite_includes_only: bool,
+    include_line_numbers: bool,
     is_clang: bool,
 ) where
     T: RunCommand,
 {
-    // When performing distributed compilation, line number info is important for error
-    // reporting and to not cause spurious compilation failure (e.g. no exceptions build
-    // fails due to exceptions transitively included in the stdlib).
-    // With -fprofile-generate line number information is important, so use -E.
-    // Otherwise, use -EP to maximize cache hits (because no absolute file paths are
-    // emitted) and improve performance.
-    if may_dist || parsed_args.profile_generate {
+    if include_line_numbers {
         cmd.arg("-E");
     } else {
         cmd.arg("-EP");
@@ -948,11 +948,12 @@ pub async fn preprocess<T>(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-    may_dist: bool,
     includes_prefix: &str,
     rewrite_includes_only: bool,
+    generate_dependencies: bool,
+    include_line_numbers: bool,
     is_clang: bool,
-) -> Result<ProcessOutput>
+) -> Result<PreprocessorOutput>
 where
     T: CommandCreatorSync,
 {
@@ -962,71 +963,149 @@ where
         parsed_args,
         cwd,
         env_vars,
-        may_dist,
         rewrite_includes_only,
+        include_line_numbers,
         is_clang,
     );
 
+    let depfile = if generate_dependencies {
+        if let Some(ref depfile) = parsed_args.depfile {
+            Some((cwd.join(depfile), None))
+        } else {
+            let temp = tempfile::Builder::new()
+                .rand_bytes(16)
+                .tempfile()?
+                .into_temp_path();
+            let path = PathBuf::from(temp.as_os_str());
+            if is_clang {
+                cmd.arg("-showIncludes");
+                cmd.arg("-sourceDependencies");
+                cmd.arg(&path);
+            } else {
+                cmd.arg("/sourceDependencies");
+                cmd.arg(&path);
+            }
+            Some((path, Some(temp)))
+        }
+    } else {
+        None
+    };
 
-    let parsed_args = parsed_args.clone();
-    let includes_prefix = includes_prefix.to_string();
-    let cwd = cwd.to_owned();
     debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
 
     let mut output = run_input_output(cmd, None).await?;
 
-    if !is_clang {
-        return Ok(output);
+    if is_clang {
+        if let (Some(obj), Some((depfile, _))) = (parsed_args.outputs.get("obj"), &depfile) {
+            let objfile = &obj.path;
+            let f = File::create(cwd.join(depfile))?;
+            let mut f = BufWriter::new(f);
+
+            encode_path(&mut f, objfile)
+                .with_context(|| format!("Couldn't encode objfile filename: '{objfile:?}'"))?;
+            write!(f, ": ")?;
+            encode_path(&mut f, &parsed_args.input)
+                .with_context(|| format!("Couldn't encode input filename: '{objfile:?}'"))?;
+            write!(f, " ")?;
+            let stderr = from_local_codepage(&output.stderr)
+                .context("Failed to convert preprocessor stderr")?;
+            let mut deps = HashSet::new();
+            let mut stderr_bytes = vec![];
+            for line in stderr.lines() {
+                if let Some(include_path) = line.strip_prefix(includes_prefix) {
+                    let dep = normpath(include_path.trim());
+                    trace!("included: {}", dep);
+                    if deps.insert(dep.clone()) && !dep.contains(' ') {
+                        write!(f, "{dep} ")?;
+                    }
+                    if !parsed_args.msvc_show_includes {
+                        continue;
+                    }
+                }
+                stderr_bytes.extend_from_slice(line.as_bytes());
+                stderr_bytes.push(b'\n');
+            }
+            writeln!(f)?;
+            // Write extra rules for each dependency to handle
+            // removed files.
+            encode_path(&mut f, &parsed_args.input)
+                .with_context(|| format!("Couldn't encode filename: '{:?}'", parsed_args.input))?;
+            writeln!(f, ":")?;
+            let mut sorted = deps.into_iter().collect::<Vec<_>>();
+            sorted.sort();
+            for dep in sorted {
+                if !dep.contains(' ') {
+                    writeln!(f, "{dep}:")?;
+                }
+            }
+            output.stderr = stderr_bytes;
+        }
     }
 
-    let parsed_args = &parsed_args;
-    if let (Some(obj), Some(depfile)) = (parsed_args.outputs.get("obj"), &parsed_args.depfile) {
-        let objfile = &obj.path;
-        let f = File::create(cwd.join(depfile))?;
-        let mut f = BufWriter::new(f);
-
-        encode_path(&mut f, objfile)
-            .with_context(|| format!("Couldn't encode objfile filename: '{objfile:?}'"))?;
-        write!(f, ": ")?;
-        encode_path(&mut f, &parsed_args.input)
-            .with_context(|| format!("Couldn't encode input filename: '{objfile:?}'"))?;
-        write!(f, " ")?;
-        let stderr =
-            from_local_codepage(&output.stderr).context("Failed to convert preprocessor stderr")?;
-        let mut deps = HashSet::new();
-        let mut stderr_bytes = vec![];
-        for line in stderr.lines() {
-            if line.starts_with(&includes_prefix) {
-                let dep = normpath(line[includes_prefix.len()..].trim());
-                trace!("included: {}", dep);
-                if deps.insert(dep.clone()) && !dep.contains(' ') {
-                    write!(f, "{dep} ")?;
-                }
-                if !parsed_args.msvc_show_includes {
-                    continue;
-                }
-            }
-            stderr_bytes.extend_from_slice(line.as_bytes());
-            stderr_bytes.push(b'\n');
-        }
-        writeln!(f)?;
-        // Write extra rules for each dependency to handle
-        // removed files.
-        encode_path(&mut f, &parsed_args.input)
-            .with_context(|| format!("Couldn't encode filename: '{:?}'", parsed_args.input))?;
-        writeln!(f, ":")?;
-        let mut sorted = deps.into_iter().collect::<Vec<_>>();
-        sorted.sort();
-        for dep in sorted {
-            if !dep.contains(' ') {
-                writeln!(f, "{dep}:")?;
-            }
-        }
-        output.stderr = stderr_bytes;
-        Ok(output)
+    if let Some((depfile, _)) = depfile {
+        Ok(PreprocessorOutput::OutputWithDepedencies(
+            output,
+            parse_dependencies(parsed_args, &depfile).await?,
+        ))
     } else {
-        Ok(output)
+        Ok(PreprocessorOutput::Output(output))
     }
+}
+
+pub async fn parse_dependencies(args: &ParsedArguments, deps: &Path) -> Result<Vec<PathBuf>> {
+    let mut data = String::new();
+    tokio::fs::File::open(deps)
+        .await?
+        .read_to_string(&mut data)
+        .await?;
+
+    let data = tokio::runtime::Handle::current()
+        .spawn_blocking(move || serde_json::from_str::<serde_json::Value>(&data))
+        .await??;
+
+    let data = &data["Data"];
+    let mods = &data["ImportedModules"];
+    let incs = &data["ImportedHeaderUnits"];
+
+    let dependencies = [
+        &(if let Some(mods) = mods.as_array() {
+            mods.iter()
+                .filter_map(|v| {
+                    let x = &v["Name"];
+                    if x.is_string() {
+                        Some(x.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .map(PathBuf::from)
+                .filter(|path| path != &args.input)
+                .collect::<Vec<_>>()
+        } else {
+            vec![]
+        })[..],
+        &(if let Some(incs) = incs.as_array() {
+            incs.iter()
+                .filter_map(|v| {
+                    let x = &v["Header"];
+                    if x.is_string() {
+                        Some(x.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .map(PathBuf::from)
+                .filter(|path| path != &args.input)
+                .collect::<Vec<_>>()
+        } else {
+            vec![]
+        })[..],
+    ]
+    .concat();
+
+    trace!("[{}]: dependencies={dependencies:?}", args.output_pretty());
+
+    Ok(dependencies)
 }
 
 fn generate_compile_commands(
@@ -2492,7 +2571,7 @@ mod test {
         assert!(dist_command.is_some());
         #[cfg(not(feature = "dist-client"))]
         assert!(dist_command.is_none());
-        let _ = command.execute(&service, &creator).wait();
+        let _ = command.execute(&service, &creator, None).wait();
         assert_eq!(Cacheable::Yes, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());
@@ -2571,7 +2650,7 @@ mod test {
         assert!(dist_command.is_some());
         #[cfg(not(feature = "dist-client"))]
         assert!(dist_command.is_none());
-        let _ = command.execute(&service, &creator).wait();
+        let _ = command.execute(&service, &creator, None).wait();
         assert_eq!(Cacheable::No, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());

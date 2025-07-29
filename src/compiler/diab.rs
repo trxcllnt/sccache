@@ -17,18 +17,18 @@ use crate::compiler::args::{
     ArgDisposition, ArgInfo, ArgToStringResult, ArgsIter, Argument, FromArg, IntoArg,
     NormalizedDisposition, PathTransformerFn, SearchableArgInfo,
 };
-use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
+use crate::compiler::c::{
+    ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
+};
 use crate::compiler::{
-    CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language,
+    gcc, CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language,
     SingleCompileCommand,
 };
-use crate::errors::*;
 use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist};
 use crate::{debug_if_trace, errors::*};
 use async_trait::async_trait;
-use fs::File;
 use fs_err as fs;
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -63,19 +63,28 @@ impl CCompilerImpl for Diab {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
+        _service: &crate::server::SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        may_dist: bool,
         _rewrite_includes_only: bool,
-        _preprocessor_cache_mode: bool,
-    ) -> Result<ProcessOutput>
+        generate_dependencies: bool,
+        _include_line_numbers: bool,
+    ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
     {
-        preprocess(creator, executable, parsed_args, cwd, env_vars, may_dist).await
+        preprocess(
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            generate_dependencies,
+        )
+        .await
     }
 
     fn generate_compile_commands<T>(
@@ -299,7 +308,6 @@ where
 
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),
-        double_dash_input: false,
         language,
         compilation_flag,
         depfile: None,
@@ -307,16 +315,9 @@ where
         dependency_args,
         preprocessor_args,
         common_args,
-        arch_args: vec![],
-        unhashed_args: vec![],
-        extra_dist_files: vec![],
-        extra_hash_files: vec![],
-        msvc_show_includes: false,
-        profile_generate: false,
         // FIXME: Implement me.
         color_mode: ColorMode::Auto,
-        suppress_rewrite_includes_only: false,
-        too_hard_for_preprocessor_cache_mode: None,
+        ..Default::default()
     })
 }
 
@@ -326,8 +327,8 @@ pub async fn preprocess<T>(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-    _may_dist: bool,
-) -> Result<ProcessOutput>
+    generate_dependencies: bool,
+) -> Result<PreprocessorOutput>
 where
     T: CommandCreatorSync,
 {
@@ -341,9 +342,102 @@ where
         .envs(env_vars.to_vec())
         .current_dir(cwd);
 
-    if log_enabled!(Trace) {
-        trace!("preprocess: {:?}", cmd);
+    let depfile = if generate_dependencies {
+        match (
+            parsed_args
+                .dependency_args
+                .iter()
+                .position(|arg| arg == "-Xmake-dependency-canonicalize-path-off"),
+            parsed_args
+                .dependency_args
+                .iter()
+                .position(|arg| arg == "-Xmake-dependency"),
+            parsed_args
+                .dependency_args
+                .iter()
+                .position(|arg| arg == "-Xmake-dependency-savefile"),
+        ) {
+            (None, Some(_), Some(mf)) => {
+                // If the user provided `-Xmake-dependency -Xmake-dependency-savefile <file>`, read the file
+                Some((cwd.join(&parsed_args.dependency_args[mf + 1]), None))
+            }
+            (mmd, md, mf) => {
+                let temp = tempfile::Builder::new()
+                    .rand_bytes(16)
+                    .tempfile()?
+                    .into_temp_path();
+                let path = PathBuf::from(temp.as_os_str());
+                if mmd.is_none() {
+                    // If no `-Xmake-dependency` or `-Xmake-dependency-savefile <file>`, add them
+                    if md.is_none() {
+                        cmd.arg("-Xmake-dependency");
+                    }
+                    if mf.is_none() {
+                        cmd.arg("-Xmake-dependency-savefile");
+                        cmd.arg(&path);
+                    }
+                } else {
+                    // If user did `-MMD`, generate all dependencies separately
+                    generate_all_dependencies(
+                        creator,
+                        executable,
+                        parsed_args,
+                        cwd,
+                        env_vars,
+                        &path,
+                    )
+                    .await?;
+                }
+                Some((path, Some(temp)))
+            }
+        }
+    } else {
+        None
+    };
+
+    debug_if_trace!("[{}]: preprocess: {:?}", parsed_args.output_pretty(), cmd);
+
+    let output = run_input_output(cmd, None).await?;
+
+    if let Some((depfile, _)) = depfile {
+        Ok(PreprocessorOutput::OutputWithDepedencies(
+            output,
+            gcc::parse_dependencies(parsed_args, &depfile).await?,
+        ))
+    } else {
+        Ok(PreprocessorOutput::Output(output))
     }
+}
+
+async fn generate_all_dependencies<T>(
+    creator: &T,
+    executable: &Path,
+    parsed_args: &ParsedArguments,
+    cwd: &Path,
+    env_vars: &[(OsString, OsString)],
+    output: &Path,
+) -> Result<ProcessOutput>
+where
+    T: CommandCreatorSync,
+{
+    let mut cmd = creator.clone().new_command_sync(executable);
+    cmd.current_dir(cwd)
+        .env_clear()
+        .envs(env_vars.iter().cloned())
+        .arg("-E")
+        .arg(&parsed_args.input)
+        .arg("-Xmake-dependency")
+        .arg("-Xmake-dependency-savefile")
+        .arg(output)
+        .args(&parsed_args.preprocessor_args)
+        .args(&parsed_args.common_args);
+
+    trace!(
+        "[{}]: generate_all_dependencies cmd: {:?}",
+        parsed_args.output_pretty(),
+        cmd
+    );
+
     run_input_output(cmd, None).await
 }
 
@@ -358,8 +452,6 @@ pub fn generate_compile_commands(
     Option<dist::CompileCommand>,
     Cacheable,
 )> {
-    trace!("compile");
-
     let out_file = match parsed_args.outputs.get("obj") {
         Some(obj) => &obj.path,
         None => return Err(anyhow!("Missing object file output")),
@@ -439,7 +531,7 @@ impl Iterator for ExpandAtArgs<'_> {
 
             let mut contents = String::new();
             let file = self.cwd.join(&value);
-            let res = File::open(file).and_then(|mut f| f.read_to_string(&mut contents));
+            let res = fs::File::open(file).and_then(|mut f| f.read_to_string(&mut contents));
             if res.is_err() {
                 // Failed to read the file, so return the argument as it is.
                 // This will result in a CannotCache.
@@ -802,7 +894,7 @@ mod test {
             &[],
         )
         .unwrap();
-        let _ = command.execute(&service, &creator).wait();
+        let _ = command.execute(&service, &creator, None).wait();
         assert_eq!(Cacheable::Yes, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());

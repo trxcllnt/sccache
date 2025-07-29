@@ -14,14 +14,15 @@
 // limitations under the License.
 
 use crate::compiler::args::*;
-use crate::compiler::c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments};
+use crate::compiler::c::{
+    ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
+};
 use crate::compiler::{
-    CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language,
-    SingleCompileCommand,
+    CCompileCommand, Cacheable, CompileCommand, CompilerArguments, Language, SingleCompileCommand,
 };
 use crate::{counted_array, dist, util::OsStrExt};
 
-use crate::mock_command::{CommandCreatorSync, ProcessOutput};
+use crate::mock_command::CommandCreatorSync;
 
 use async_trait::async_trait;
 use itertools::Itertools;
@@ -29,7 +30,6 @@ use itertools::Itertools;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process;
 
 use crate::{debug_if_trace, errors::*};
 
@@ -61,15 +61,16 @@ impl CCompilerImpl for Cicc {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
+        _service: &crate::server::SccacheService<T>,
         _creator: &T,
         _executable: &Path,
         parsed_args: &ParsedArguments,
         cwd: &Path,
         _env_vars: &[(OsString, OsString)],
-        _may_dist: bool,
         _rewrite_includes_only: bool,
-        _preprocessor_cache_mode: bool,
-    ) -> Result<ProcessOutput>
+        _generate_dependencies: bool,
+        _include_line_numbers: bool,
+    ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
     {
@@ -257,17 +258,12 @@ where
     })
 }
 
-pub async fn preprocess(cwd: &Path, parsed_args: &ParsedArguments) -> Result<ProcessOutput> {
-    std::fs::read(cwd.join(&parsed_args.input))
-        .map_err(anyhow::Error::new)
-        .map(|s| {
-            process::Output {
-                status: process::ExitStatus::default(),
-                stdout: s,
-                stderr: vec![],
-            }
-            .into()
-        })
+pub async fn preprocess(cwd: &Path, parsed_args: &ParsedArguments) -> Result<PreprocessorOutput> {
+    let path = cwd.join(&parsed_args.input);
+    let file = tokio::fs::File::open(&path).await?.into_std().await;
+    Ok(PreprocessorOutput::File(fs_err::File::from_parts(
+        file, path,
+    )))
 }
 
 pub fn generate_compile_commands(

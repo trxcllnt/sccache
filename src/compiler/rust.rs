@@ -553,6 +553,10 @@ where
     fn box_clone(&self) -> Box<dyn Compiler<T>> {
         Box::new((*self).clone())
     }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send + Sync> {
+        self
+    }
 }
 
 impl<T> CompilerProxy<T> for RustupProxy
@@ -1314,10 +1318,10 @@ where
 
     async fn generate_hash_key(
         self: Box<Self>,
+        _service: &crate::server::SccacheService<T>,
         creator: &T,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
-        _may_dist: bool,
         pool: &tokio::runtime::Handle,
         _rewrite_includes_only: bool,
         _storage: Arc<dyn Storage>,
@@ -2661,6 +2665,7 @@ mod test {
 
     use crate::compiler::*;
     use crate::mock_command::*;
+    use crate::server;
     use crate::test::mock_storage::MockStorage;
     use crate::test::utils::*;
     use fs::File;
@@ -3457,8 +3462,11 @@ proc_macro false
         mock_file_names(&creator, &["foo.rlib", "foo.a"]);
         let runtime = single_threaded_runtime();
         let pool = runtime.handle().clone();
+        let storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
+        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
         let res = hasher
             .generate_hash_key(
+                &service,
                 &creator,
                 f.tempdir.path().to_owned(),
                 [
@@ -3471,10 +3479,9 @@ proc_macro false
                     ),
                 ]
                 .to_vec(),
-                false,
                 &pool,
                 false,
-                Arc::new(MockStorage::new(None, preprocessor_cache_mode)),
+                storage.clone(),
                 CacheControl::Default,
             )
             .wait()
@@ -3555,18 +3562,20 @@ proc_macro false
         let creator = new_creator();
         let runtime = single_threaded_runtime();
         let pool = runtime.handle().clone();
+        let storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
+        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
 
         mock_dep_info(&creator, &["foo.rs"]);
         mock_file_names(&creator, &["foo.rlib"]);
         hasher
             .generate_hash_key(
+                &service,
                 &creator,
                 f.tempdir.path().to_owned(),
                 env_vars.to_owned(),
-                false,
                 &pool,
                 false,
-                Arc::new(MockStorage::new(None, preprocessor_cache_mode)),
+                storage.clone(),
                 CacheControl::Default,
             )
             .wait()

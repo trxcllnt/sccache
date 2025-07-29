@@ -19,18 +19,19 @@ use crate::{
             ArgDisposition, ArgInfo, ArgToStringResult, ArgsIter, Argument, FromArg, IntoArg,
             NormalizedDisposition, PathTransformerFn, SearchableArgInfo,
         },
-        c::{ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments},
-        CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language,
+        c::{
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
+        },
+        gcc, CCompileCommand, Cacheable, CompileCommand, CompilerArguments, Language,
         SingleCompileCommand,
     },
     counted_array, debug_if_trace, dist,
     errors::*,
-    mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
+    mock_command::{CommandCreatorSync, RunCommand},
     util::run_input_output,
 };
 use async_trait::async_trait;
 use futures::TryFutureExt;
-use log::Level::Trace;
 use std::{
     collections::HashMap,
     ffi::OsString,
@@ -65,15 +66,16 @@ impl CCompilerImpl for TaskingVX {
 
     async fn preprocess<T>(
         &self,
+        _service: &crate::server::SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        may_dist: bool,
-        rewrite_includes_only: bool,
-        _preprocessor_cache_mode: bool,
-    ) -> Result<ProcessOutput>
+        _rewrite_includes_only: bool,
+        generate_dependencies: bool,
+        _include_line_numbers: bool,
+    ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
     {
@@ -83,8 +85,7 @@ impl CCompilerImpl for TaskingVX {
             parsed_args,
             cwd,
             env_vars,
-            may_dist,
-            rewrite_includes_only,
+            generate_dependencies,
         )
         .await
     }
@@ -295,9 +296,8 @@ async fn preprocess<T>(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-    _may_dist: bool,
-    _rewrite_includes_only: bool,
-) -> Result<ProcessOutput>
+    generate_dependencies: bool,
+) -> Result<PreprocessorOutput>
 where
     T: CommandCreatorSync,
 {
@@ -310,6 +310,21 @@ where
         .env_clear()
         .envs(env_vars.to_vec())
         .current_dir(cwd);
+
+    let depfile = if generate_dependencies {
+        if let Some(ref deps) = parsed_args.depfile {
+            Some((cwd.join(deps), None))
+        } else {
+            let temp = tempfile::Builder::new()
+                .rand_bytes(16)
+                .tempfile()?
+                .into_temp_path();
+            let path = PathBuf::from(temp.as_os_str());
+            Some((path, Some(temp)))
+        }
+    } else {
+        None
+    };
 
     debug_if_trace!(
         "[{}]: preprocess: {preprocess}",
@@ -329,12 +344,12 @@ where
     // of the input file, with the extension .o. With the option --make-target
     // you can specify a target name which overrules the default target name.
 
-    if let Some(ref depfile) = parsed_args.depfile {
+    if let Some((depfile, _)) = depfile {
         let mut generate_depfile = creator.clone().new_command_sync(executable);
         generate_depfile
             .arg("-Em")
             .arg("-o")
-            .arg(depfile)
+            .arg(&depfile)
             .arg(&parsed_args.input)
             .args(&parsed_args.preprocessor_args)
             .args(&parsed_args.common_args)
@@ -348,9 +363,13 @@ where
         );
 
         let generate_depfile = run_input_output(generate_depfile, None);
-        generate_depfile.and_then(|_| preprocess).await
+        let output = generate_depfile.and_then(|_| preprocess).await?;
+        Ok(PreprocessorOutput::OutputWithDepedencies(
+            output,
+            gcc::parse_dependencies(parsed_args, &depfile).await?,
+        ))
     } else {
-        preprocess.await
+        Ok(PreprocessorOutput::Output(preprocess.await?))
     }
 }
 
@@ -365,8 +384,6 @@ fn generate_compile_commands(
     Option<dist::CompileCommand>,
     Cacheable,
 )> {
-    trace!("compile");
-
     let out_file = match parsed_args.outputs.get("obj") {
         Some(obj) => obj,
         None => return Err(anyhow!("Missing object file output")),
@@ -734,7 +751,7 @@ mod test {
             &[],
         )
         .unwrap();
-        let _ = command.execute(&service, &creator).wait();
+        let _ = command.execute(&service, &creator, None).wait();
         assert_eq!(Cacheable::Yes, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());
@@ -781,7 +798,7 @@ mod test {
             ovec!["-c", "foo.cu", "-o", "foo.o", "--threads", "2"],
             command.arguments
         );
-        let _ = command.execute(&service, &creator).wait();
+        let _ = command.execute(&service, &creator, None).wait();
         assert_eq!(Cacheable::Yes, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());

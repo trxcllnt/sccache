@@ -14,12 +14,12 @@
 // limitations under the License.
 
 use crate::compiler::args::*;
-use crate::compiler::c::{CCompilerImpl, CCompilerKind, ParsedArguments};
+use crate::compiler::c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput};
 use crate::compiler::cicc;
 use crate::compiler::{CCompileCommand, Cacheable, CompileCommand, CompilerArguments, Language};
 use crate::{counted_array, dist};
 
-use crate::mock_command::{CommandCreatorSync, ProcessOutput};
+use crate::mock_command::CommandCreatorSync;
 
 use async_trait::async_trait;
 
@@ -56,15 +56,16 @@ impl CCompilerImpl for Ptxas {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
+        _service: &crate::server::SccacheService<T>,
         _creator: &T,
         _executable: &Path,
         parsed_args: &ParsedArguments,
         cwd: &Path,
         _env_vars: &[(OsString, OsString)],
-        _may_dist: bool,
         _rewrite_includes_only: bool,
-        _preprocessor_cache_mode: bool,
-    ) -> Result<ProcessOutput>
+        _generate_dependencies: bool,
+        _include_line_numbers: bool,
+    ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
     {

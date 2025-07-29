@@ -647,12 +647,7 @@ fn test_gcc_clang_depfile(client: &SccacheClient, compiler: Compiler, tempdir: &
     assert_ne!(first, second);
 }
 
-fn run_sccache_command_tests(
-    client: &SccacheClient,
-    compiler: Compiler,
-    tempdir: &Path,
-    preprocessor_cache_mode: bool,
-) {
+fn run_sccache_command_tests(client: &SccacheClient, compiler: Compiler, tempdir: &Path) {
     if compiler.name != "clang++" {
         test_basic_compile(client, compiler.clone(), tempdir);
     }
@@ -701,16 +696,9 @@ fn run_sccache_command_tests(
             compiler,
             tempdir,
             !is_appleclang && major >= 14,
-            preprocessor_cache_mode,
         );
     } else {
-        test_clang_cache_whitespace_normalization(
-            client,
-            compiler,
-            tempdir,
-            false,
-            preprocessor_cache_mode,
-        );
+        test_clang_cache_whitespace_normalization(client, compiler, tempdir, false);
     }
 }
 
@@ -818,7 +806,6 @@ fn test_nvcc_cuda_compiles(
         assert_eq!(
             stats,
             ServerStats {
-                active_compilations: stats.active_compilations,
                 cache_write_duration: stats.cache_write_duration,
                 cache_read_hit_duration: stats.cache_read_hit_duration,
                 compiler_write_duration: stats.compiler_write_duration,
@@ -1805,7 +1792,6 @@ fn test_nvcc_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
-            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -1837,7 +1823,6 @@ fn test_nvcc_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
-            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -1871,7 +1856,6 @@ fn test_nvcc_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
-            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -1903,7 +1887,6 @@ fn test_nvcc_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
-            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -2028,7 +2011,6 @@ fn test_clang_cuda_compiles(
     assert_eq!(
         stats,
         ServerStats {
-            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -2065,7 +2047,6 @@ fn test_clang_cuda_compiles(
     assert_eq!(
         stats,
         ServerStats {
-            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -2132,7 +2113,6 @@ fn test_clang_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
-            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -2164,7 +2144,6 @@ fn test_clang_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
-            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -2197,7 +2176,6 @@ fn test_clang_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
-            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -2228,7 +2206,6 @@ fn test_clang_proper_lang_stat_tracking(
     assert_eq!(
         stats,
         ServerStats {
-            active_compilations: stats.active_compilations,
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
@@ -2487,7 +2464,6 @@ fn test_clang_cache_whitespace_normalization(
     compiler: Compiler,
     tempdir: &Path,
     hit: bool,
-    preprocessor_cache_mode: bool,
 ) {
     let Compiler {
         name,
@@ -2541,15 +2517,8 @@ fn test_clang_cache_whitespace_normalization(
         let stats = client.stats().unwrap();
         assert_eq!(2, stats.compile_requests);
         assert_eq!(2, stats.requests_executed);
-        if preprocessor_cache_mode {
-            // Preprocessor cache mode hashes the input file, so whitespace
-            // normalization does not work.
-            assert_eq!(0, stats.cache_hits.all());
-            assert_eq!(2, stats.cache_misses.all());
-        } else {
-            assert_eq!(1, stats.cache_hits.all());
-            assert_eq!(1, stats.cache_misses.all());
-        }
+        assert_eq!(1, stats.cache_hits.all());
+        assert_eq!(1, stats.cache_misses.all());
     } else {
         let stats = client.stats().unwrap();
         assert_eq!(2, stats.compile_requests);
@@ -2642,7 +2611,7 @@ fn test_sccache_command(preprocessor_cache_mode: bool) {
     let (_tempdir, tempdir_path, client) = make_sccache_client(preprocessor_cache_mode);
 
     for compiler in compilers {
-        run_sccache_command_tests(&client, compiler, &tempdir_path, preprocessor_cache_mode);
+        run_sccache_command_tests(&client, compiler, &tempdir_path);
         client.zero_stats();
     }
 }
