@@ -17,6 +17,7 @@ use blake3::Hasher as blake3_Hasher;
 use byteorder::{BigEndian, ByteOrder};
 use fs::File;
 use fs_err as fs;
+use futures::{AsyncRead, AsyncReadExt};
 use object::read::archive::ArchiveFile;
 use object::read::macho::{FatArch, MachOFatFile32, MachOFatFile64};
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,7 @@ use std::ffi::{OsStr, OsString};
 use std::hash::Hasher;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{self, Stdio};
 use std::str;
 use std::time::Duration;
@@ -50,13 +52,31 @@ impl Digest {
         }
     }
 
-    /// Calculate the BLAKE3 digest of the contents of `path`, running
-    /// the actual hash computation on a background thread in `pool`.
-    pub async fn file<T>(path: T, pool: &tokio::runtime::Handle) -> Result<String>
+    /// Calculate the BLAKE3 digest of the contents of `path`.
+    pub async fn file<T>(path: T) -> Result<String>
     where
         T: AsRef<Path>,
     {
-        Self::reader(path.as_ref().to_owned(), pool).await
+        use tokio_util::compat::TokioAsyncReadCompatExt;
+        Digest::reader(
+            tokio::fs::File::open(path.as_ref())
+                .await
+                .with_context(|| format!("Failed to open file for hashing: {:?}", path.as_ref()))?
+                .compat(),
+        )
+        .await
+    }
+
+    /// Calculate the BLAKE3 digest of the contents of `path`.
+    pub async fn reader<R: AsyncRead + Send + 'static>(reader: R) -> Result<String> {
+        tokio::runtime::Handle::current()
+            .spawn(async move {
+                let mut digest = Digest::new();
+                let reader = std::pin::pin!(reader);
+                digest.update_from_reader(reader).await?;
+                Ok(digest.finish())
+            })
+            .await?
     }
 
     /// Calculate the BLAKE3 digest of the contents read from `reader`.
@@ -94,19 +114,39 @@ impl Digest {
         ))
     }
 
-    /// Calculate the BLAKE3 digest of the contents of `path`, running
-    /// the actual hash computation on a background thread in `pool`.
-    pub async fn reader(path: PathBuf, pool: &tokio::runtime::Handle) -> Result<String> {
-        pool.spawn_blocking(move || {
-            let reader = File::open(&path)
-                .with_context(|| format!("Failed to open file for hashing: {path:?}"))?;
-            Digest::reader_sync(reader)
-        })
-        .await?
-    }
-
     pub fn update(&mut self, bytes: &[u8]) {
         self.inner.update(bytes);
+    }
+
+    pub async fn update_from_reader<R: AsyncRead>(
+        &mut self,
+        mut reader: Pin<&mut R>,
+    ) -> Result<()> {
+        // A buffer of 128KB should give us the best performance.
+        // See https://eklitzke.org/efficient-file-copying-on-linux.
+        let mut buffer = [0; HASH_BUFFER_SIZE];
+        loop {
+            let count = reader.read(&mut buffer[..]).await?;
+            if count == 0 {
+                break;
+            }
+            self.inner.update(&buffer[..count]);
+        }
+        Ok(())
+    }
+
+    pub fn update_from_reader_sync<R: Read>(&mut self, mut reader: R) -> Result<()> {
+        // A buffer of 128KB should give us the best performance.
+        // See https://eklitzke.org/efficient-file-copying-on-linux.
+        let mut buffer = [0; HASH_BUFFER_SIZE];
+        loop {
+            let count = reader.read(&mut buffer[..])?;
+            if count == 0 {
+                break;
+            }
+            self.inner.update(&buffer[..count]);
+        }
+        Ok(())
     }
 
     pub fn delimiter(&mut self, name: &[u8]) {
@@ -322,16 +362,19 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// Calculate the digest of each file in `files` on background threads in
 /// `pool`.
-pub async fn hash_all(files: &[PathBuf], pool: &tokio::runtime::Handle) -> Result<Vec<String>> {
+pub async fn hash_all<T>(files: &[T], _pool: &tokio::runtime::Handle) -> Result<Vec<String>>
+where
+    T: AsRef<Path>,
+{
     let start = time::Instant::now();
-    let count = files.len();
-    let iter = files.iter().map(move |f| Digest::file(f, pool));
-    let hashes = futures::future::try_join_all(iter).await?;
-    trace!(
-        "Hashed {} files in {}",
-        count,
-        fmt_duration_as_secs(&start.elapsed())
-    );
+    let hashes = futures::future::try_join_all(files.iter().map(Digest::file)).await?;
+    if !hashes.is_empty() {
+        trace!(
+            "Hashed {} files in {}",
+            files.len(),
+            fmt_duration_as_secs(&start.elapsed())
+        );
+    }
     Ok(hashes)
 }
 

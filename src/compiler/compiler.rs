@@ -1886,7 +1886,6 @@ where
                 version: Some(String::new()),
             },
             executable.to_owned(),
-            &pool,
         )
         .await
         .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
@@ -1898,7 +1897,6 @@ where
                 version: Some(String::new()),
             },
             executable.to_owned(),
-            &pool,
         )
         .await
         .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
@@ -1910,7 +1908,6 @@ where
                 version: Some(String::new()),
             },
             executable.to_owned(),
-            &pool,
         )
         .await
         .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
@@ -2209,14 +2206,13 @@ compiler_version=__VERSION__
                         version,
                     },
                     executable,
-                    &pool,
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "diab" => {
                 trace!("Found {kind} (version: {})", version.as_ref().unwrap());
-                return CCompiler::new(Diab { version }, executable, &pool)
+                return CCompiler::new(Diab { version }, executable)
                     .await
                     .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
@@ -2228,7 +2224,6 @@ compiler_version=__VERSION__
                         version,
                     },
                     executable,
-                    &pool,
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
@@ -2253,7 +2248,6 @@ compiler_version=__VERSION__
                         version,
                     },
                     executable,
-                    &pool,
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
@@ -2282,7 +2276,6 @@ compiler_version=__VERSION__
                         host_compiler_version,
                     },
                     executable,
-                    &pool,
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
@@ -2296,14 +2289,13 @@ compiler_version=__VERSION__
                         version,
                     },
                     executable,
-                    &pool,
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "tasking_vx" => {
                 trace!("Found Tasking VX");
-                return CCompiler::new(TaskingVX, executable, &pool)
+                return CCompiler::new(TaskingVX, executable)
                     .await
                     .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }

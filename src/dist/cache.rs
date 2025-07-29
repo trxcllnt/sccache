@@ -21,7 +21,7 @@ mod client {
     use crate::util::Digest;
 
     async fn path_key(path: &Path) -> Result<String> {
-        Digest::file(path, &tokio::runtime::Handle::current()).await
+        Digest::file(path.to_owned()).await
     }
 
     #[derive(Clone, Debug)]

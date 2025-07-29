@@ -239,12 +239,8 @@ impl<I> CCompiler<I>
 where
     I: CCompilerImpl,
 {
-    pub async fn new(
-        compiler: I,
-        executable: PathBuf,
-        pool: &tokio::runtime::Handle,
-    ) -> Result<CCompiler<I>> {
-        let digest = Digest::file(executable.clone(), pool).await?;
+    pub async fn new(compiler: I, executable: PathBuf) -> Result<CCompiler<I>> {
+        let digest = Digest::file(&executable).await?;
 
         Ok(CCompiler {
             executable,
