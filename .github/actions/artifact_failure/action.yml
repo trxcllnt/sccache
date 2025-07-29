@@ -17,12 +17,13 @@ runs:
         killall sccache || true
         killall sccache-dist || true
         # possible temp dirs for either linux or windows
-        cp "${TMP:-${TEMP:-${TMPDIR:-/tmp}}}"/sccache_*.txt . 2>/dev/null || true
+        cp "${TMP:-${TEMP:-${TMPDIR:-/tmp}}}"/sccache*.{log,txt} . 2>/dev/null || true
         mkdir -p target
         tar --exclude='target' \
             --exclude='docs' \
             --exclude='bins' \
             --exclude='.git' \
+            --exclude='*.profraw' \
             -czvf target/failure-${{ inputs.name }}.tar.gz .
     - uses: actions/upload-artifact@v4
       with:

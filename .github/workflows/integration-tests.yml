@@ -2,10 +2,14 @@ name: integration-tests
 on: [ push, pull_request ]
 
 env:
+  # Don't colorize logs
+  NO_COLOR: 1
   RUST_BACKTRACE: full
-  RUST_LOG: debug
+  RUST_LOG: "sccache=trace"
   SCCACHE_PATH: /home/runner/.cargo/bin/sccache
   ACTIONS_CACHE_SERVICE_V2: on
+  SCCACHE_ERROR_LOG: "/tmp/sccache.log"
+  SCCACHE_SERVER_LOG: "sccache=trace"
 
 jobs:
   build:
@@ -13,6 +17,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install rust
         uses: ./.github/actions/rust-toolchain
@@ -45,6 +51,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install rust
         uses: ./.github/actions/rust-toolchain
@@ -55,6 +63,7 @@ jobs:
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
+
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
@@ -63,18 +72,22 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
-
-          ${SCCACHE_PATH} --show-stats | grep redis
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep redis
 
       - name: Test Twice for Cache Read
         run: cargo clean && cargo build
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep -e "Cache hits\s*[1-9]"
 
-          ${SCCACHE_PATH} --show-stats | grep -e "Cache hits\s*[1-9]"
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: redis-deprecated
 
   redis:
     runs-on: ubuntu-24.04
@@ -93,6 +106,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install rust
         uses: ./.github/actions/rust-toolchain
@@ -103,6 +118,7 @@ jobs:
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
+
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
@@ -111,18 +127,22 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
-
-          ${SCCACHE_PATH} --show-stats | grep redis
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep redis
 
       - name: Test Twice for Cache Read
         run: cargo clean && cargo build
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep -e "Cache hits\s*[1-9]"
 
-          ${SCCACHE_PATH} --show-stats | grep -e "Cache hits\s*[1-9]"
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: redis
 
   s3_minio:
     runs-on: ubuntu-24.04
@@ -150,6 +170,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup test bucket
         run: aws --endpoint-url http://127.0.0.1:9000/ s3 mb s3://test
@@ -163,6 +185,7 @@ jobs:
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
+
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
@@ -171,18 +194,22 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
-
-          ${SCCACHE_PATH} --show-stats | grep s3
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep s3
 
       - name: Test Twice for Cache Read
         run: cargo clean && cargo build
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep -e "Cache hits\s*[1-9]"
 
-          ${SCCACHE_PATH} --show-stats | grep -e "Cache hits\s*[1-9]"
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: s3_minio
 
   azblob_azurite:
     runs-on: ubuntu-24.04
@@ -203,6 +230,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup test bucket
         run: |
@@ -219,6 +248,7 @@ jobs:
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
+
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
@@ -227,18 +257,22 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
-
-          ${SCCACHE_PATH} --show-stats | grep azblob
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep azblob
 
       - name: Test Twice for Cache Read
         run: cargo clean && cargo build
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep -e "Cache hits\s*[1-9]"
 
-          ${SCCACHE_PATH} --show-stats | grep -e "Cache hits\s*[1-9]"
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: azblob_azurite
 
   gha:
     runs-on: ubuntu-24.04
@@ -251,6 +285,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Configure Cache Env
         uses: actions/github-script@v7
@@ -268,6 +304,7 @@ jobs:
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
+
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
@@ -276,18 +313,22 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
-
-          ${SCCACHE_PATH} --show-stats | grep gha
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep gha
 
       - name: Test Twice for Cache Read
         run: cargo clean && cargo build
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep -e "Cache hits\s*[1-9]"
 
-          ${SCCACHE_PATH} --show-stats | grep -e "Cache hits\s*[1-9]"
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: gha
 
   memcached-deprecated:
     runs-on: ubuntu-24.04
@@ -313,6 +354,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install rust
         uses: ./.github/actions/rust-toolchain
@@ -323,6 +366,7 @@ jobs:
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
+
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
@@ -331,18 +375,22 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
-
-          ${SCCACHE_PATH} --show-stats | grep memcached
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep memcached
 
       - name: Test Twice for Cache Read
         run: cargo clean && cargo build
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep -e "Cache hits\s*[1-9]"
 
-          ${SCCACHE_PATH} --show-stats | grep -e "Cache hits\s*[1-9]"
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: memcached-deprecated
 
   memcached:
     runs-on: ubuntu-24.04
@@ -368,6 +416,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install rust
         uses: ./.github/actions/rust-toolchain
@@ -378,6 +428,7 @@ jobs:
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
+
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
@@ -386,18 +437,22 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
-
-          ${SCCACHE_PATH} --show-stats | grep memcached
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep memcached
 
       - name: Test Twice for Cache Read
         run: cargo clean && cargo build
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep -e "Cache hits\s*[1-9]"
 
-          ${SCCACHE_PATH} --show-stats | grep -e "Cache hits\s*[1-9]"
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: memcached
 
   webdav:
     runs-on: ubuntu-24.04
@@ -410,7 +465,10 @@ jobs:
       RUSTC_WRAPPER: /home/runner/.cargo/bin/sccache
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Clone repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Start nginx
         shell: bash
@@ -430,6 +488,7 @@ jobs:
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
+
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
@@ -438,18 +497,22 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
-
-          ${SCCACHE_PATH} --show-stats | grep webdav
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep webdav
 
       - name: Test Twice for Cache Read
         run: cargo clean && cargo build
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep -e "Cache hits\s*[1-9]"
 
-          ${SCCACHE_PATH} --show-stats | grep -e "Cache hits\s*[1-9]"
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: webdav
 
   test-mock-msvc:
     runs-on: windows-2022
@@ -464,6 +527,8 @@ jobs:
 
       - name: Clone repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install rust
         uses: ./.github/actions/rust-toolchain
@@ -524,6 +589,12 @@ jobs:
         shell: bash
         run: cat "$SCCACHE_ERROR_LOG"
 
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: test-mock-msvc
+
   clang:
     runs-on: ubuntu-24.04
     needs: build
@@ -534,7 +605,10 @@ jobs:
       SCCACHE_SERVER_UDS: "\\x00sccache.socket"
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Clone repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Configure Cache Env
         uses: actions/github-script@v7
@@ -553,6 +627,7 @@ jobs:
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
+
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
@@ -563,8 +638,7 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
-
+          ${SCCACHE_PATH} --show-adv-stats
       - name: Test Twice for Cache Read
         run: |
           export CXX="${SCCACHE_PATH} clang++"
@@ -572,9 +646,14 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep -e "Cache hits\s*[1-9]"
 
-          ${SCCACHE_PATH} --show-stats | grep -e "Cache hits\s*[1-9]"
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: clang
 
   hip:
     # Probably wouldn't matter anyway since we run in a container, but staying
@@ -592,6 +671,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # I don't want to break the cache during testing. Will turn on after I
       # make sure it's working.
@@ -631,6 +712,7 @@ jobs:
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
+
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
@@ -654,7 +736,7 @@ jobs:
       - name: Output
         run: |
           export LD_PRELOAD=$PWD/target/debug/librandomize_readdir.so
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
 
       - name: Test Twice for Cache Read
         run: |
@@ -671,8 +753,14 @@ jobs:
       - name: Output
         run: |
           export LD_PRELOAD=$PWD/target/debug/librandomize_readdir.so
-          ${SCCACHE_PATH} --show-stats
-          ${SCCACHE_PATH} --show-stats | grep -e "Cache hits\s*[1-9]"
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep -e "Cache hits\s*[1-9]"
+
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: hip
 
   gcc:
     runs-on: ubuntu-24.04
@@ -683,7 +771,10 @@ jobs:
       SCCACHE_SERVER_UDS: "/home/runner/sccache.socket"
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Clone repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Configure Cache Env
         uses: actions/github-script@v7
@@ -696,6 +787,7 @@ jobs:
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
+
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
@@ -706,8 +798,7 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
-
+          ${SCCACHE_PATH} --show-adv-stats
       - name: Test Twice for Cache Read
         run: |
           export CXX="${SCCACHE_PATH} g++"
@@ -715,9 +806,14 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep -e "Cache hits\s*[1-9]"
 
-          ${SCCACHE_PATH} --show-stats | grep -e "Cache hits\s*[1-9]"
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: gcc
 
   autotools:
     runs-on: ubuntu-24.04
@@ -727,7 +823,10 @@ jobs:
       SCCACHE_GHA_ENABLED: "on"
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Clone repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Configure Cache Env
         uses: actions/github-script@v7
@@ -760,8 +859,7 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
-
+          ${SCCACHE_PATH} --show-adv-stats
       - name: Test Twice for Cache Read
         run: |
           cd `pwd`/tests/autotools/
@@ -771,9 +869,14 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep -e "Cache hits\s*[1-9]"
 
-          ${SCCACHE_PATH} --show-stats | grep -e "Cache hits\s*[1-9]"
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: autotools
 
   cmake:
     runs-on: ubuntu-24.04
@@ -781,9 +884,17 @@ jobs:
 
     env:
       SCCACHE_GHA_ENABLED: "on"
+      SCCACHE_ERROR_LOG: "/tmp/sccache.log"
+      SCCACHE_SERVER_LOG: "sccache=trace"
+      # Don't colorize logs
+      NO_COLOR: 1
+      RUST_BACKTRACE: 1
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Clone repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Configure Cache Env
         uses: actions/github-script@v7
@@ -796,6 +907,7 @@ jobs:
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
+
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
@@ -816,7 +928,7 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
 
       - name: Test Twice for Cache Read
         run: |
@@ -829,9 +941,14 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep -e "Cache hits\s*[1-9]"
 
-          ${SCCACHE_PATH} --show-stats | grep -e "Cache hits\s*[1-9]"
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: cmake
 
   # The test cargo "cargo build -Zprofile"
   rust-test-Z-profile:
@@ -851,6 +968,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install rust
         uses: ./.github/actions/rust-toolchain
@@ -861,6 +980,7 @@ jobs:
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
+
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
@@ -869,16 +989,21 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
 
       - name: "Coverage test #2"
         run: cargo +${{ env.RUST_TEST_TOOLCHAIN }} clean && cargo +${{ env.RUST_TEST_TOOLCHAIN }} build
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep -e "Cache hits\s*[1-9]"
 
-          ${SCCACHE_PATH} --show-stats | grep -e "Cache hits\s*[1-9]"
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: cmake
 
   zstd-compression-level:
     runs-on: ubuntu-24.04
@@ -899,6 +1024,8 @@ jobs:
 
       - name: Clone repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install rust
         uses: ./.github/actions/rust-toolchain
@@ -909,13 +1036,17 @@ jobs:
         run: |
           export SCCACHE_DIR=${PWD}/temp-test/zstd-level/default
           cargo build
+
       - name: default-stats-save
-        run: ${SCCACHE_PATH} --show-stats
+        run: ${SCCACHE_PATH} --show-adv-stats
+
       - name: default-test-use
         run: |
           cargo clean && cargo build
+
       - name: default-stats-use
-        run: ${SCCACHE_PATH} --show-stats
+        run: ${SCCACHE_PATH} --show-adv-stats
+
       - name: lv10-test-save
         run: |
           export SCCACHE_DIR=${PWD}/temp-test/zstd-level/10
@@ -923,13 +1054,22 @@ jobs:
           ${SCCACHE_PATH} --stop-server > /dev/null
           cargo clean
           cargo build
+
       - name: lv10-stats-save
-        run: ${SCCACHE_PATH} --show-stats
+        run: ${SCCACHE_PATH} --show-adv-stats
+
       - name: lv10-test-use
         run: |
           cargo clean && cargo build
+
       - name: lv10-stats-use
-        run: ${SCCACHE_PATH} --show-stats
+        run: ${SCCACHE_PATH} --show-adv-stats
+
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: zstd-compression-level
 
   xcode:
     runs-on: macos-latest
@@ -938,6 +1078,8 @@ jobs:
     steps:
       - name: Clone repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install rust
         uses: ./.github/actions/rust-toolchain
@@ -959,8 +1101,7 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
-
+          ${SCCACHE_PATH} --show-adv-stats
       - name: Test compile xcode cached
         working-directory: tests/xcode
         run: |
@@ -969,5 +1110,11 @@ jobs:
 
       - name: Output
         run: |
-          ${SCCACHE_PATH} --show-stats
-          ${SCCACHE_PATH} --show-stats | grep -e "Cache hits\s*[1-9]"
+          ${SCCACHE_PATH} --show-adv-stats
+          ${SCCACHE_PATH} --show-adv-stats | grep -e "Cache hits\s*[1-9]"
+
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: xcode
