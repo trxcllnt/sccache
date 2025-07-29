@@ -130,14 +130,15 @@ impl ParsedArguments {
 
 /// A generic implementation of the `Compilation` trait for C/C++ compilers.
 #[derive(Debug)]
-struct CCompilation<I: CCompilerImpl> {
+struct CCompilation<T: CommandCreatorSync, I: CCompilerImpl> {
+    service: crate::server::SccacheService<T>,
+    creator: T,
     parsed_args: ParsedArguments,
-    #[cfg(feature = "dist-client")]
-    preprocessor_output: Vec<u8>,
     executable: PathBuf,
     compiler: I,
     cwd: PathBuf,
     env_vars: Vec<(OsString, OsString)>,
+    rewrite_includes_only: bool,
 }
 
 /// Supported C compilers.
@@ -705,7 +706,7 @@ where
 
 }
 
-impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I> {
+impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T, I> {
     fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
@@ -738,31 +739,26 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
 
     #[cfg(feature = "dist-client")]
     fn into_dist_packagers(self: Box<Self>) -> Result<DistPackagers> {
-        let CCompilation {
-            parsed_args,
-            cwd,
-            preprocessor_output,
-            executable,
-            compiler,
-            env_vars,
-            ..
-        } = *self;
-        trace!("Dist inputs: {:?}", parsed_args.input);
+        use itertools::Itertools;
 
-        let input_path = cwd.join(&parsed_args.input);
-        let inputs_packager = Box::new(CInputsPackager {
-            input_path,
-            preprocessor_output,
-            extra_dist_files: parsed_args.extra_dist_files,
-            extra_hash_files: parsed_args.extra_hash_files,
-        });
+        trace!(
+            "Dist inputs: {:?}",
+            std::iter::once(&self.parsed_args.input)
+                .chain(self.parsed_args.extra_dist_files.iter())
+                .chain(self.parsed_args.extra_hash_files.iter())
+                .unique()
+                .collect::<Vec<_>>()
+        );
+
         let toolchain_packager = Box::new(CToolchainPackager {
-            env_vars,
-            executable,
-            kind: compiler.kind(),
+            kind: self.compiler.kind(),
+            env_vars: self.env_vars.to_owned(),
+            executable: self.executable.to_owned(),
         });
+
         let outputs_rewriter = Box::new(NoopOutputsRewriter);
-        Ok((inputs_packager, toolchain_packager, outputs_rewriter))
+
+        Ok((self, toolchain_packager, outputs_rewriter))
     }
 
     fn outputs<'a>(&'a self) -> Box<dyn Iterator<Item = FileObjectSource> + 'a> {
@@ -781,79 +777,114 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
 }
 
 #[cfg(feature = "dist-client")]
-struct CInputsPackager {
-    input_path: PathBuf,
-    preprocessor_output: Vec<u8>,
-    extra_dist_files: Vec<PathBuf>,
-    extra_hash_files: Vec<PathBuf>,
-}
-
-#[cfg(feature = "dist-client")]
-impl pkg::InputsPackager for CInputsPackager {
-    fn write_inputs(
+#[async_trait]
+impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilation<T, I> {
+    async fn write_inputs(
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
-        wtr: &mut dyn io::Write,
+        compressor: Box<dyn InputsWriter>,
     ) -> Result<()> {
-        let CInputsPackager {
-            input_path,
-            preprocessor_output,
-            extra_dist_files,
-            extra_hash_files,
+        let CCompilation {
+            service,
+            creator,
+            cwd,
+            executable,
+            compiler,
+            env_vars,
+            parsed_args,
+            rewrite_includes_only,
         } = *self;
 
-        let mut builder = tar::Builder::new(wtr);
+        // Preprocess again but this time with line numbers
+        let preprocessor_output = compiler
+            .preprocess(
+                &service,
+                &creator,
+                &executable,
+                &parsed_args,
+                &cwd,
+                &env_vars,
+                rewrite_includes_only,
+                false, // generate_dependencies
+                true,  // include_line_numbers
+            )
+            .await?;
 
-        {
-            let input_path = pkg::simplify_path(&input_path)?;
-            let dist_input_path = path_transformer.as_dist(&input_path).with_context(|| {
-                format!("unable to transform input path {}", input_path.display())
-            })?;
+        let mut builder = tar::Builder::new(compressor);
+        let mut path_transformer = path_transformer.clone();
 
-            let (mut file_header, dist_input_path) =
-                pkg::make_tar_header(&input_path, &dist_input_path)?;
-            file_header.set_size(preprocessor_output.len() as u64); // The metadata is from non-preprocessed
-            file_header.set_cksum();
-            builder.append_data(
-                &mut file_header,
-                dist_input_path,
-                preprocessor_output.as_slice(),
-            )?;
-        }
+        tokio::runtime::Handle::current()
+            .spawn_blocking(move || -> Result<_> {
+                {
+                    let input_path = cwd.join(&parsed_args.input);
+                    let input_path = pkg::simplify_path(&input_path)?;
+                    let dist_input_path =
+                        path_transformer.as_dist(&input_path).with_context(|| {
+                            format!("unable to transform input path {}", input_path.display())
+                        })?;
 
-        for input_path in extra_hash_files.iter().chain(extra_dist_files.iter()) {
-            let input_path = pkg::simplify_path(input_path)?;
+                    match preprocessor_output {
+                        PreprocessorOutput::File(file) => {
+                            use crate::dist::pkg::tar_safe_path;
+                            builder.append_path_with_name(
+                                file.path(),
+                                tar_safe_path(&dist_input_path),
+                            )?;
+                        }
+                        PreprocessorOutput::Output(output)
+                        | PreprocessorOutput::OutputWithDepedencies(output, _) => {
+                            let (mut file_header, dist_input_path) =
+                                pkg::make_tar_header(&input_path, &dist_input_path)?;
+                            file_header.set_size(output.stdout.len() as u64); // The metadata is from non-preprocessed
+                            file_header.set_cksum();
+                            builder.append_data(
+                                &mut file_header,
+                                dist_input_path,
+                                output.stdout.as_slice(),
+                            )?;
+                        }
+                    }
+                }
 
-            if !super::CAN_DIST_DYLIBS
-                && input_path
-                    .extension()
-                    .is_some_and(|ext| ext == std::env::consts::DLL_EXTENSION)
-            {
-                bail!(
-                    "Cannot distribute dylib input {} on this platform",
-                    input_path.display()
-                )
-            }
+                let extra_dist_files = parsed_args.extra_dist_files;
+                let extra_hash_files = parsed_args.extra_hash_files;
 
-            let dist_input_path = path_transformer.as_dist(&input_path).with_context(|| {
-                format!("unable to transform input path {}", input_path.display())
-            })?;
+                for input_path in extra_hash_files.iter().chain(extra_dist_files.iter()) {
+                    let input_path = pkg::simplify_path(input_path)?;
 
-            let mut file = io::BufReader::new(fs::File::open(&input_path)?);
-            let mut output = vec![];
-            io::copy(&mut file, &mut output)?;
+                    if !super::CAN_DIST_DYLIBS
+                        && input_path
+                            .extension()
+                            .is_some_and(|ext| ext == std::env::consts::DLL_EXTENSION)
+                    {
+                        bail!(
+                            "Cannot distribute dylib input {} on this platform",
+                            input_path.display()
+                        )
+                    }
 
-            let (mut file_header, dist_input_path) =
-                pkg::make_tar_header(&input_path, &dist_input_path)?;
-            file_header.set_size(output.len() as u64);
-            file_header.set_cksum();
-            builder.append_data(&mut file_header, dist_input_path, &*output)?;
-        }
+                    let dist_input_path =
+                        path_transformer.as_dist(&input_path).with_context(|| {
+                            format!("unable to transform input path {}", input_path.display())
+                        })?;
 
-        // Finish archive
-        let _ = builder.into_inner();
+                    let mut file = io::BufReader::new(fs::File::open(&input_path)?);
+                    let mut output = vec![];
+                    io::copy(&mut file, &mut output)?;
 
-        Ok(())
+                    let (mut file_header, dist_input_path) =
+                        pkg::make_tar_header(&input_path, &dist_input_path)?;
+                    file_header.set_size(output.len() as u64);
+                    file_header.set_cksum();
+                    builder.append_data(&mut file_header, dist_input_path, &*output)?;
+                }
+
+                // Finish archive
+                let _ = builder.into_inner()?.finish()?;
+
+                Ok(())
+            })
+            .await?
     }
 }
 

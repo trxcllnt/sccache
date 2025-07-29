@@ -850,6 +850,15 @@ where
     sysinfo: Arc<std::sync::Mutex<sysinfo::System>>,
 }
 
+impl<C> std::fmt::Debug for SccacheService<C>
+where
+    C: Send,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.stats.fmt(f)
+    }
+}
+
 type SccacheRequest = Message<Request, Body<()>>;
 type SccacheResponse = Message<Response, Pin<Box<dyn Future<Output = Result<Response>> + Send>>>;
 

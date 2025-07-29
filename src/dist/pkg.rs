@@ -15,7 +15,7 @@
 use crate::dist;
 use async_trait::async_trait;
 use fs_err as fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::str;
 
@@ -32,11 +32,48 @@ pub trait ToolchainPackager: Send {
     async fn write_pkg(self: Box<Self>, f: fs::File) -> Result<String>;
 }
 
+pub trait InputsWriter: Write + Send {
+    fn finish(self: Box<Self>) -> Result<(u64, u64)>;
+}
+
+pub struct InputsCompressor<W: Write + Send> {
+    inner: flate2::write::ZlibEncoder<W>,
+}
+
+impl<W: Write + Send> InputsCompressor<W> {
+    pub fn new(compressor: flate2::write::ZlibEncoder<W>) -> Box<Self> {
+        Box::new(Self { inner: compressor })
+    }
+}
+
+impl<W: Write + Send> Write for InputsCompressor<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl<W: Write + Send> InputsWriter for InputsCompressor<W> {
+    fn finish(self: Box<Self>) -> Result<(u64, u64)> {
+        let mut inner = self.inner;
+        inner.flush().context("failed to flush compressor")?;
+        let total_in = inner.total_in();
+        let total_out = inner.total_out();
+        trace!("Compressed inputs from {total_in} -> {total_out}");
+        inner.finish().context("failed to finish compressor")?;
+        Ok((total_in, total_out))
+    }
+}
+
+#[async_trait]
 pub trait InputsPackager: Send {
-    fn write_inputs(
+    async fn write_inputs(
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
-        wtr: &mut dyn io::Write,
+        inputs_writer: Box<dyn InputsWriter>,
     ) -> Result<()>;
 }
 
