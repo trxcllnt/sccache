@@ -9,6 +9,7 @@ extern crate serde_json;
 mod harness;
 
 use assert_cmd::prelude::*;
+use paste::paste;
 use sccache::config::HTTPUrl;
 use std::path::Path;
 use std::process::Output;
@@ -17,7 +18,7 @@ use test_case::test_case;
 use harness::{
     client::SccacheClient,
     dist::{cargo_command, DistSystem},
-    init_cargo, write_source,
+    find_compilers, find_cuda_compilers, init_cargo, write_source, Compiler,
 };
 
 // In case of panics, this command will destroy any dangling containers:
@@ -39,6 +40,30 @@ fn cpp_compile(client: &SccacheClient, tmpdir: &Path) {
             "-c",
             "-DSCCACHE_TEST_DEFINE",
         ])
+        .arg(tmpdir.join(source_file))
+        .arg("-o")
+        .arg(tmpdir.join(obj_file))
+        .env("RUST_BACKTRACE", "1")
+        .env("SCCACHE_RECACHE", "1")
+        .env("TOKIO_WORKER_THREADS", "2")
+        .assert()
+        .success();
+}
+
+fn nvcc_compile(
+    client: &SccacheClient,
+    cuda_compiler: &Compiler,
+    host_compiler: &Compiler,
+    tmpdir: &Path,
+) {
+    let source_file = "x.cu";
+    let obj_file = "x.cu.o";
+    write_source(tmpdir, source_file, "#if !defined(SCCACHE_TEST_DEFINE)\n#error SCCACHE_TEST_DEFINE is not defined\n#endif\n__global__ void x(int* out) { out[0] = 5; }");
+    client
+        .cmd()
+        .arg(&cuda_compiler.exe)
+        .arg(format!("-ccbin={}", host_compiler.exe.to_string_lossy()))
+        .args(["-c", "-DSCCACHE_TEST_DEFINE"])
         .arg(tmpdir.join(source_file))
         .arg("-o")
         .arg(tmpdir.join(obj_file))
@@ -137,6 +162,7 @@ async fn test_dist_cargo_build(message_broker: &str) {
     // check >= 5 because cargo >=1.82 does additional requests with -vV
     assert!(stats.compile_requests >= 5);
     assert_eq!(1, stats.requests_executed);
+    assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
     assert_eq!(1, stats.forced_recaches);
 }
@@ -166,6 +192,7 @@ async fn test_dist_cpp_disk_storage(message_broker: &str) {
     assert_eq!(0, stats.dist_errors);
     assert_eq!(1, stats.compile_requests);
     assert_eq!(1, stats.requests_executed);
+    assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
     assert_eq!(1, stats.forced_recaches);
 }
@@ -196,6 +223,7 @@ async fn test_dist_cpp_cloud_storage(message_broker: &str) {
     assert_eq!(0, stats.dist_errors);
     assert_eq!(1, stats.compile_requests);
     assert_eq!(1, stats.requests_executed);
+    assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
     assert_eq!(1, stats.forced_recaches);
 }
@@ -230,6 +258,7 @@ async fn test_dist_cpp_server_restart(message_broker: &str) {
     assert_eq!(0, stats.dist_errors);
     assert_eq!(2, stats.compile_requests);
     assert_eq!(2, stats.requests_executed);
+    assert_eq!(2, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
     assert_eq!(2, stats.forced_recaches);
 }
@@ -260,6 +289,7 @@ async fn test_dist_cpp_no_server_times_out(message_broker: &str) {
     assert_eq!(1, stats.dist_errors);
     assert_eq!(1, stats.compile_requests);
     assert_eq!(1, stats.requests_executed);
+    assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
     assert_eq!(1, stats.forced_recaches);
 }
@@ -302,6 +332,7 @@ async fn test_dist_cpp_two_servers(message_broker: &str) {
     assert_eq!(0, stats.dist_errors);
     assert_eq!(4, stats.compile_requests);
     assert_eq!(4, stats.requests_executed);
+    assert_eq!(4, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
     assert_eq!(4, stats.forced_recaches);
 }
@@ -333,6 +364,7 @@ async fn test_dist_cpp_errors_on_job_load_failures(message_broker: &str) {
     assert_eq!(1, stats.dist_errors);
     assert_eq!(1, stats.compile_requests);
     assert_eq!(1, stats.requests_executed);
+    assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
     assert_eq!(1, stats.forced_recaches);
 }
@@ -364,6 +396,80 @@ async fn test_dist_cpp_errors_on_toolchain_load_failures(message_broker: &str) {
     assert_eq!(1, stats.dist_errors);
     assert_eq!(1, stats.compile_requests);
     assert_eq!(1, stats.requests_executed);
+    assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
     assert_eq!(1, stats.forced_recaches);
 }
+
+#[cfg_attr(not(feature = "dist-tests"), ignore)]
+async fn test_dist_cuda_compiles(
+    cuda_compiler: &Compiler,
+    host_compiler: &Compiler,
+    message_broker: &str,
+) {
+    let test_name = format!(
+        "test_dist_cuda_compiles_{}_{}_{message_broker}",
+        cuda_compiler.name,
+        host_compiler.name.trim_end_matches('+')
+    );
+    let system = DistSystem::builder()
+        .with_name(&test_name)
+        .with_scheduler()
+        .with_server()
+        .with_message_broker(message_broker)
+        .build();
+
+    let client = system.new_client(&dist_test_sccache_client_cfg(
+        system.data_dir(),
+        system.scheduler(0).unwrap().url(),
+    ));
+
+    nvcc_compile(&client, cuda_compiler, host_compiler, system.data_dir());
+
+    let stats = client.stats().unwrap();
+    assert_eq!(4, stats.dist_compiles.values().sum::<usize>());
+    assert_eq!(0, stats.dist_errors);
+    assert_eq!(1, stats.compile_requests);
+    assert_eq!(5, stats.requests_executed);
+    assert_eq!(5, stats.compilations);
+    assert_eq!(0, stats.cache_hits.all());
+    assert_eq!(4, stats.forced_recaches);
+}
+
+#[cfg(not(target_os = "macos"))]
+macro_rules! test_dist_cuda_compiles {
+    ($cuda_compiler:ident, $host_compiler:ident, $cuda_compiler_name:expr, $host_compiler_name:expr) => {
+        paste! {
+            #[cfg_attr(not(feature = "dist-tests"), ignore)]
+            #[test_case("rabbitmq" ; "with rabbitmq")]
+            #[test_case("redis" ; "with redis")]
+            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+            async fn [<test_dist_cuda_compiles_ $cuda_compiler _ $host_compiler>] (message_broker: &str) {
+                let _ = env_logger::try_init();
+                let cuda_compilers = find_cuda_compilers();
+                if let Some(cuda_compiler) = cuda_compilers.iter().find(|c| c.name == $cuda_compiler_name) {
+                    let host_compilers = find_compilers();
+                    if let Some(host_compiler) = host_compilers.iter().find(|c| c.name == $host_compiler_name) {
+                        test_dist_cuda_compiles(
+                            &cuda_compiler,
+                            &host_compiler,
+                            message_broker,
+                        ).await
+                    }
+                }
+            }
+        }
+    };
+}
+
+// Linux
+#[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+test_dist_cuda_compiles!(nvcc, gcc, "nvcc", "gcc");
+#[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+test_dist_cuda_compiles!(nvcc, clang, "nvcc", "clang++");
+#[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+test_dist_cuda_compiles!(nvcc, nvc, "nvcc", "nvc++");
+
+// Clang-CUDA cannot dist-compile
+// #[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+// test_dist_cuda_compiles!(clang, clang, "clang++", "clang++");
