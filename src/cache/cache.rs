@@ -31,6 +31,7 @@ use crate::cache::s3::S3Cache;
 use crate::cache::webdav::WebdavCache;
 use crate::compiler::PreprocessorCacheEntry;
 use crate::config::{CacheType, DiskCacheConfig};
+use crate::dist::http::retry_with_jitter;
 use async_trait::async_trait;
 use fs_err as fs;
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::NamedTempFile;
+use tokio_retry2::RetryError;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 #[cfg(any(
@@ -550,17 +552,34 @@ impl PreprocessorCacheModeConfig {
 #[async_trait]
 impl Storage for opendal::Operator {
     async fn get(&self, key: &str) -> Result<Cache> {
-        match self.read(&normalize_key(key)).await {
-            Ok(res) => {
-                let hit = CacheRead::from(io::Cursor::new(res.to_bytes()))?;
-                Ok(Cache::Hit(hit))
+        // TODO: Allow configuring the number of retries
+        retry_with_jitter(3, || async {
+            match self.read(&normalize_key(key)).await {
+                Ok(res) => CacheRead::from(io::Cursor::new(res.to_bytes()))
+                    .map_err(RetryError::permanent)
+                    .map(Cache::Hit),
+                Err(err) => match err.kind() {
+                    opendal::ErrorKind::NotFound => Ok(Cache::Miss),
+                    opendal::ErrorKind::PermissionDenied => Err(RetryError::permanent(err.into())),
+                    opendal::ErrorKind::RateLimited => Err(RetryError::transient(err.into())),
+                    opendal::ErrorKind::Unsupported => Err(RetryError::permanent(err.into())),
+                    opendal::ErrorKind::Unexpected => {
+                        if err.is_temporary() {
+                            debug!("cache lookup error: {err}");
+                            Err(RetryError::transient(err.into()))
+                        } else {
+                            warn!("cache lookup error: {err:?}");
+                            Err(RetryError::permanent(err.into()))
+                        }
+                    }
+                    _ => {
+                        warn!("cache lookup error: {err:?}");
+                        Err(RetryError::permanent(err.into()))
+                    }
+                },
             }
-            Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(Cache::Miss),
-            Err(e) => {
-                warn!("Got unexpected error: {:?}", e);
-                Ok(Cache::Miss)
-            }
-        }
+        })
+        .await
     }
 
     async fn get_stream(&self, key: &str) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>> {
