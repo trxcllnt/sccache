@@ -2200,11 +2200,11 @@ compiler_version=__VERSION__
             "clang" | "clang++" | "apple-clang" | "apple-clang++" => {
                 trace!("Found {kind} (version: {})", version.as_ref().unwrap());
                 return CCompiler::new(
-                    Clang {
-                        clangplusplus: kind.ends_with("++"),
-                        is_appleclang: kind.starts_with("apple-"),
-                        version,
-                    },
+                    Clang::new(
+                        kind.ends_with("++"),       // clangplusplus
+                        kind.starts_with("apple-"), // is_appleclang
+                        version,                    // version
+                    ),
                     executable,
                 )
                 .await

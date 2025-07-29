@@ -32,43 +32,51 @@ use crate::errors::*;
 pub struct Clang {
     /// true iff this is clang++.
     pub clangplusplus: bool,
-    /// true iff this is Apple's clang(++).
-    pub is_appleclang: bool,
     /// String from __VERSION__ macro.
     pub version: Option<String>,
+    // true if clang is >= v14
+    supports_fminimize_whitespace: bool,
 }
 
 impl Clang {
-    fn is_minversion(&self, major: u64) -> bool {
-        // Apple clang follows its own versioning scheme.
-        if self.is_appleclang {
-            return false;
+    pub fn new(clangplusplus: bool, is_appleclang: bool, version: Option<String>) -> Self {
+        Self {
+            supports_fminimize_whitespace: is_minversion(is_appleclang, &version, 14),
+            clangplusplus,
+            version,
         }
-
-        let version_val = match self.version.clone() {
-            Some(version_val) => version_val,
-            None => return false,
-        };
-
-        let version_str = match version_val.split(' ').find(|x| x.contains('.')) {
-            Some(version_str) => version_str,
-            None => return false,
-        };
-
-        let parsed_version = match Version::parse(version_str.trim_end_matches('"')) {
-            Ok(parsed_version) => parsed_version,
-            Err(_) => return false,
-        };
-
-        parsed_version
-            >= (Version {
-                major,
-                minor: 0,
-                patch: 0,
-                pre: Prerelease::default(),
-                build: BuildMetadata::default(),
-            })
     }
+}
+
+fn is_minversion(is_appleclang: bool, version: &Option<String>, major: u64) -> bool {
+    // Apple clang follows its own versioning scheme.
+    if is_appleclang {
+        return false;
+    }
+
+    let version_val = match version.clone() {
+        Some(version_val) => version_val,
+        None => return false,
+    };
+
+    let version_str = match version_val.split(' ').find(|x| x.contains('.')) {
+        Some(version_str) => version_str,
+        None => return false,
+    };
+
+    let parsed_version = match Version::parse(version_str.trim_end_matches('"')) {
+        Ok(parsed_version) => parsed_version,
+        Err(_) => return false,
+    };
+
+    parsed_version
+        >= (Version {
+            major,
+            minor: 0,
+            patch: 0,
+            pre: Prerelease::default(),
+            build: BuildMetadata::default(),
+        })
 }
 
 #[async_trait]
@@ -119,7 +127,7 @@ impl CCompilerImpl for Clang {
         };
 
         // Clang 14 and later support -fminimize-whitespace, which normalizes away non-semantic whitespace which in turn increases cache hit rate.
-        if self.is_minversion(14) {
+        if self.supports_fminimize_whitespace {
             ignorable_whitespace_flags.push("-fminimize-whitespace".to_string())
         }
 
@@ -277,11 +285,11 @@ mod test {
 
     fn parse_arguments_(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
-        Clang {
-            clangplusplus: false,
-            is_appleclang: false,
-            version: None,
-        }
+        Clang::new(
+            false, // clangplusplus
+            false, // is_appleclang
+            None,  // version
+        )
         .parse_arguments(&arguments, &std::env::current_dir().unwrap(), &[])
     }
 
@@ -295,35 +303,46 @@ mod test {
     }
 
     #[test]
-    fn test_is_minversion() {
-        assert!(Clang {
-            clangplusplus: false,
-            is_appleclang: false,
-            version: Some("\"Ubuntu Clang 14.0.0\"".to_string()),
-        }
-        .is_minversion(14));
-        assert!(!Clang {
-            clangplusplus: false,
-            is_appleclang: false,
-            version: Some("\"Ubuntu Clang 13.0.0\"".to_string()),
-        }
-        .is_minversion(14));
-        assert!(Clang {
-            clangplusplus: false,
-            is_appleclang: false,
-            version: Some("\"FreeBSD Clang 14.0.5 (https://github.com/llvm/llvm-project.git llvmorg-14.0.5-0-gc12386ae247c)\"".to_string()),
-        }.is_minversion(14));
-        assert!(!Clang {
-            clangplusplus: false,
-            is_appleclang: false,
-            version: Some("\"FreeBSD Clang 13.0.0 (git@github.com:llvm/llvm-project.git llvmorg-13.0.0-0-gd7b669b3a303)\"".to_string()),
-        }.is_minversion(14));
+    fn test_supports_fminimize_whitespace() {
+        assert!(
+            Clang::new(
+                false,                                       // clangplusplus
+                false,                                       // is_appleclang
+                Some("\"Ubuntu Clang 14.0.0\"".to_string()), // version
+            )
+            .supports_fminimize_whitespace
+        );
 
-        assert!(!Clang {
-            clangplusplus: false,
-            is_appleclang: true,
-            version: Some("\"FreeBSD Clang 14.0.5 (https://github.com/llvm/llvm-project.git llvmorg-14.0.5-0-gc12386ae247c)\"".to_string()),
-        }.is_minversion(14)); // is_appleclang wins
+        assert!(
+            !Clang::new(
+                false,                                       // clangplusplus
+                false,                                       // is_appleclang
+                Some("\"Ubuntu Clang 13.0.0\"".to_string()), // version
+            )
+            .supports_fminimize_whitespace
+        );
+
+        assert!(Clang::new(
+            false, // clangplusplus
+            false, // is_appleclang
+            Some("\"FreeBSD Clang 14.0.5 (https://github.com/llvm/llvm-project.git llvmorg-14.0.5-0-gc12386ae247c)\"".to_string()), // version
+        )
+        .supports_fminimize_whitespace);
+
+        assert!(!Clang::new(
+            false, // clangplusplus
+            false, // is_appleclang
+            Some("\"FreeBSD Clang 13.0.0 (git@github.com:llvm/llvm-project.git llvmorg-13.0.0-0-gd7b669b3a303)\"".to_string()), // version
+        )
+        .supports_fminimize_whitespace);
+
+        // is_appleclang wins
+        assert!(!Clang::new(
+            false, // clangplusplus
+            true, // is_appleclang
+            Some("\"FreeBSD Clang 14.0.5 (https://github.com/llvm/llvm-project.git llvmorg-14.0.5-0-gc12386ae247c)\"".to_string()), // version
+        )
+        .supports_fminimize_whitespace);
     }
 
     #[test]
