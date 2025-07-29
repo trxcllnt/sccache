@@ -464,6 +464,7 @@ impl LruDiskCache {
         self.pending_size += size;
         fs::create_dir_all(&self.root)?;
         tempfile::Builder::new()
+            .rand_bytes(16)
             .prefix(TEMPFILE_PREFIX)
             .tempfile_in(&self.root)
             .map(|file| LruDiskCacheAddEntry { file, key, size })
@@ -484,6 +485,7 @@ impl LruDiskCache {
         self.pending_size += size;
         fs::create_dir_all(&self.root)?;
         tempfile::Builder::new()
+            .rand_bytes(16)
             .prefix(TEMPFILE_PREFIX)
             .tempdir_in(&self.root)
             .map(|file| LruDiskCacheDirEntry { file, key, size })

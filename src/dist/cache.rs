@@ -210,7 +210,9 @@ mod client {
                 return Ok((Toolchain { archive_id }, None));
             }
             debug!("Weak key {} appears to be new", weak_key);
-            let tmpfile = tempfile::NamedTempFile::new_in(self.cache_dir.join("toolchain_tmp"))?;
+            let tmpfile = tempfile::Builder::new()
+                .rand_bytes(16)
+                .tempfile_in(self.cache_dir.join("toolchain_tmp"))?;
             let archive_id = toolchain_packager
                 .write_pkg(fs_err::File::from_parts(tmpfile.reopen()?, tmpfile.path()))
                 .await
