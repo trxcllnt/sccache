@@ -41,6 +41,9 @@
 #include <helper_cuda.h>
 #include <helper_functions.h>  // helper for shared that are common to CUDA Samples
 
+[[maybe_unused]] static auto nonce_h = NONCE;
+__device__ [[maybe_unused]] static auto nonce_d = NONCE;
+
 __global__ void SimpleKernel(float *src, float *dst) {
   // Just a dummy kernel, doing enough for us to verify that everything
   // worked

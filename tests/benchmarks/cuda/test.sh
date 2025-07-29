@@ -77,6 +77,7 @@ time seq 1 "${ITERATIONS}" | xargs -n1 -P"${JOBS}" bash -c "$(cat <<EOF
 CMD=(sccache nvcc
     -arch=all
     -t=$THREADS
+    -DNONCE=\$0
     -I ./include
     -c ./src/simpleP2P.cu
     -o ./build/simpleP2P.\$0.cu.o
