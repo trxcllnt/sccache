@@ -894,7 +894,7 @@ mod test {
             &[],
         )
         .unwrap();
-        let _ = command.execute(&service, &creator, None).wait();
+        let _ = command.execute(&service, &creator).wait();
         assert_eq!(Cacheable::Yes, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());

@@ -2379,7 +2379,7 @@ mod test {
         assert!(dist_command.is_some());
         #[cfg(not(feature = "dist-client"))]
         assert!(dist_command.is_none());
-        let _ = command.execute(&service, &creator, None).wait();
+        let _ = command.execute(&service, &creator).wait();
         assert_eq!(Cacheable::Yes, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());
@@ -2426,7 +2426,7 @@ mod test {
         .unwrap();
         // -v should never generate a dist_command
         assert!(dist_command.is_none());
-        let _ = command.execute(&service, &creator, None).wait();
+        let _ = command.execute(&service, &creator).wait();
         assert_eq!(Cacheable::Yes, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());
@@ -2473,7 +2473,7 @@ mod test {
         .unwrap();
         // --verbose should never generate a dist_command
         assert!(dist_command.is_none());
-        let _ = command.execute(&service, &creator, None).wait();
+        let _ = command.execute(&service, &creator).wait();
         assert_eq!(Cacheable::Yes, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());
