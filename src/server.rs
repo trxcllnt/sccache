@@ -43,6 +43,7 @@ use std::mem;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::linux::net::SocketAddrExt;
 #[cfg(feature = "dist-client")]
+use std::time::Instant;
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
@@ -55,7 +56,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll, Waker},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
