@@ -247,9 +247,8 @@ impl CCompilerImpl for Nvcc {
                                 .collect::<Vec<_>>(),
                         );
                     debug_if_trace!(
-                        "[{}]: dependencies command: {:?}",
-                        output_path.display(),
-                        dependency_cmd
+                        "[{}]: dependencies command: {dependency_cmd}",
+                        output_path.display()
                     );
                     dependency_cmd
                 },

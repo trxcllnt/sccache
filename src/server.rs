@@ -15,8 +15,8 @@
 use crate::cache::readonly::ReadOnlyStorage;
 use crate::cache::{storage_from_config, CacheMode, Storage};
 use crate::compiler::{
-    get_compiler_info, CacheControl, CompileResult, Compiler, CompilerArguments, CompilerHasher,
-    CompilerKind, CompilerProxy, DistType, Language, MissType,
+    compiler_info_args, get_compiler_info, CacheControl, CompileResult, Compiler,
+    CompilerArguments, CompilerHasher, CompilerKind, CompilerProxy, DistType, Language, MissType,
 };
 #[cfg(feature = "dist-client")]
 use crate::config;
@@ -25,42 +25,42 @@ use crate::dist;
 use crate::jobserver::Client;
 use crate::mock_command::{CommandCreatorSync, ProcessCommandCreator, ProcessOutput};
 use crate::protocol::{Compile, CompileFinished, CompileResponse, Request, Response};
-use crate::util;
+use crate::util::{self, AsyncMulticast, AsyncMulticastFn};
 #[cfg(feature = "dist-client")]
 use anyhow::Context as _;
+use async_trait::async_trait;
 use bytes::{buf::BufMut, Bytes, BytesMut};
 use filetime::FileTime;
 use fs::metadata;
 use fs_err as fs;
-use futures::channel::mpsc;
-use futures::future::FutureExt;
-use futures::{future, stream, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
+use futures::{
+    channel::mpsc, future, stream, FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt,
+};
 use number_prefix::NumberPrefix;
 use serde::{Deserialize, Serialize};
-use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
-use std::env;
-use std::ffi::OsString;
-use std::future::Future;
-use std::io::{self, Write};
-use std::marker::Unpin;
 #[cfg(feature = "dist-client")]
 use std::mem;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::linux::net::SocketAddrExt;
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
-use std::time::Duration;
 #[cfg(feature = "dist-client")]
-use std::time::Instant;
-use tokio::sync::Mutex;
-use tokio::sync::RwLock;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use std::{
+    cell::Cell,
+    collections::{HashMap, HashSet},
+    env,
+    ffi::OsString,
+    future::Future,
+    io::{self, Write},
+    marker::Unpin,
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll, Waker},
+    time::{Duration, Instant},
+};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     runtime::Runtime,
+    sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore},
     time::{self, sleep, Sleep},
 };
 use tokio_serde::Framed;
@@ -796,6 +796,44 @@ impl<C> CompilerCacheEntry<C> {
         }
     }
 }
+
+#[derive(Clone)]
+struct CompilerInfoFn<C: Send + Sync> {
+    /// A cache of known compiler info.
+    compilers: Arc<RwLock<CompilerMap<C>>>,
+
+    /// map the cwd with compiler proxy path to a proxy resolver, which
+    /// will dynamically resolve the input compiler for the current context
+    /// (usually file or current working directory)
+    /// the associated `FileTime` is the modification time of
+    /// the compiler proxy, in order to track updates of the proxy itself
+    compiler_proxies: Arc<RwLock<CompilerProxyMap<C>>>,
+
+    // Cloned from SccacheService
+    creator: C,
+    dist_client: Arc<DistClientContainer>,
+    rt: tokio::runtime::Handle,
+}
+
+#[async_trait]
+impl<C> AsyncMulticastFn<'_, Compile, Box<dyn Compiler<C>>> for CompilerInfoFn<C>
+where
+    C: CommandCreatorSync + Clone + Send + Sync,
+{
+    async fn call(&self, compile: Compile) -> (Compile, Result<Box<dyn Compiler<C>>>) {
+        let res = compiler_info(
+            &self.compiler_proxies,
+            &self.compilers,
+            &self.creator,
+            &self.dist_client,
+            self.rt.clone(),
+            &compile,
+        )
+        .await;
+        (compile, res)
+    }
+}
+
 /// Service implementation for sccache
 #[derive(Clone)]
 pub struct SccacheService<C>
@@ -811,17 +849,12 @@ where
     /// Cache storage.
     storage: Arc<dyn Storage>,
 
+    /// Semaphore to rate limit compile requests
     compile_queue: Arc<Semaphore>,
 
-    /// A cache of known compiler info.
-    compilers: Arc<RwLock<CompilerMap<C>>>,
-
-    /// map the cwd with compiler proxy path to a proxy resolver, which
-    /// will dynamically resolve the input compiler for the current context
-    /// (usually file or current working directory)
-    /// the associated `FileTime` is the modification time of
-    /// the compiler proxy, in order to track updates of the proxy itself
-    compiler_proxies: Arc<RwLock<CompilerProxyMap<C>>>,
+    /// Ensures asynchronous compiler_info lookups for the same compiler
+    /// execute once and are cached
+    compiler_info_queue: Arc<AsyncMulticast<Compile, Box<dyn Compiler<C>>>>,
 
     /// Task pool for blocking (used mostly for disk I/O-bound tasks) and
     // non-blocking tasks
@@ -892,7 +925,7 @@ where
             match req.into_inner() {
                 Request::Compile(compile) => {
                     me.stats.lock().await.compile_requests += 1;
-                    me.handle_compile(compile).await
+                    Ok(me.handle_compile(compile).await)
                 }
                 Request::GetStats => me
                     .get_info()
@@ -956,15 +989,23 @@ where
         tx: mpsc::Sender<ServerMessage>,
         info: ActiveInfo,
     ) -> SccacheService<C> {
+        let creator = C::new(client);
+        let dist_client = Arc::new(dist_client);
+        let compiler_info_queue = Arc::new(AsyncMulticast::new(CompilerInfoFn {
+            compiler_proxies: Default::default(),
+            compilers: Default::default(),
+            creator: creator.clone(),
+            dist_client: Arc::clone(&dist_client),
+            rt: rt.clone(),
+        }));
         SccacheService {
             stats: Arc::default(),
-            dist_client: Arc::new(dist_client),
-            storage,
+            dist_client,
+            storage: storage.clone(),
             compile_queue: Arc::new(Semaphore::new(util::num_cpus())),
-            compilers: Arc::default(),
-            compiler_proxies: Arc::default(),
+            compiler_info_queue,
             rt,
-            creator: C::new(client),
+            creator,
             tx,
             info,
             sysinfo: Arc::new(std::sync::Mutex::new(init_sysinfo())),
@@ -978,16 +1019,23 @@ where
         let (tx, _) = mpsc::channel(1);
         let (_, info) = WaitUntilZero::new();
         let client = Client::new_num(1);
-        let dist_client = DistClientContainer::new_disabled();
+        let creator = C::new(&client);
+        let dist_client = Arc::new(DistClientContainer::new_disabled());
+        let compiler_info_queue = Arc::new(AsyncMulticast::new(CompilerInfoFn {
+            compiler_proxies: Default::default(),
+            compilers: Default::default(),
+            creator: creator.clone(),
+            dist_client: Arc::clone(&dist_client),
+            rt: rt.clone(),
+        }));
         SccacheService {
             stats: Arc::default(),
-            dist_client: Arc::new(dist_client),
+            dist_client,
             storage,
             compile_queue: Arc::new(Semaphore::new(util::num_cpus())),
-            compilers: Arc::default(),
-            compiler_proxies: Arc::default(),
+            compiler_info_queue,
             rt,
-            creator: C::new(&client),
+            creator,
             tx,
             info,
             sysinfo: Arc::new(std::sync::Mutex::new(init_sysinfo())),
@@ -1003,28 +1051,36 @@ where
         let (tx, _) = mpsc::channel(1);
         let (_, info) = WaitUntilZero::new();
         let client = Client::new_num(1);
+        let creator = C::new(&client);
+        let dist_client = Arc::new(DistClientContainer::new_with_state(DistClientState::Some(
+            Box::new(DistClientConfig {
+                scheduler_url: None,
+                auth: config::DistAuth::Token { token: "".into() },
+                fallback_to_local_compile: true,
+                max_retries: 0f64,
+                net: Default::default(),
+                cache_dir: "".into(),
+                toolchain_cache_size: 0,
+                toolchains: vec![],
+                rewrite_includes_only: false,
+            }),
+            dist_client,
+        )));
+        let compiler_info_queue = Arc::new(AsyncMulticast::new(CompilerInfoFn {
+            compiler_proxies: Default::default(),
+            compilers: Default::default(),
+            creator: creator.clone(),
+            dist_client: Arc::clone(&dist_client),
+            rt: rt.clone(),
+        }));
         SccacheService {
             stats: Arc::default(),
-            dist_client: Arc::new(DistClientContainer::new_with_state(DistClientState::Some(
-                Box::new(DistClientConfig {
-                    scheduler_url: None,
-                    auth: config::DistAuth::Token { token: "".into() },
-                    fallback_to_local_compile: true,
-                    max_retries: 0f64,
-                    net: Default::default(),
-                    cache_dir: "".into(),
-                    toolchain_cache_size: 0,
-                    toolchains: vec![],
-                    rewrite_includes_only: false,
-                }),
-                dist_client,
-            ))),
+            dist_client,
             storage,
             compile_queue: Arc::new(Semaphore::new(util::num_cpus())),
-            compilers: Arc::default(),
-            compiler_proxies: Arc::default(),
+            compiler_info_queue,
             rt: rt.clone(),
-            creator: C::new(&client),
+            creator,
             tx,
             info,
             sysinfo: Arc::new(std::sync::Mutex::new(init_sysinfo())),
@@ -1098,7 +1154,7 @@ where
     /// This will handle a compile request entirely, generating a response with
     /// the initial information and an optional body which will eventually
     /// contain the results of the compilation.
-    async fn handle_compile(&self, compile: Compile) -> Result<SccacheResponse> {
+    async fn handle_compile(&self, mut compile: Compile) -> SccacheResponse {
         // Limit the number of concurrent compile requests that are in the
         // pre-compilation stage to `self.num_cpus`.
         //
@@ -1135,224 +1191,93 @@ where
         self.stats.lock().await.increment_pending_compilations();
         let job_slot = self.compile_queue.clone().acquire_owned().await.ok();
 
-        let exe = compile.exe;
-        let cmd = compile.args;
-        let cwd: PathBuf = compile.cwd.into();
-        let env_vars = compile.env_vars;
-        let me = self.clone();
+        let args = compile.args;
+        compile.args = compiler_info_args(&args);
 
-        let info = self
-            .compiler_info(Path::new(&exe), &cwd, &cmd, &env_vars)
-            .await;
-
-        Ok(me.check_compiler(info, cmd, cwd, env_vars, job_slot).await)
+        match self.compiler_info_queue.call(compile).await {
+            Ok((compile, compiler)) => {
+                self.check_compile(
+                    compiler,
+                    args,
+                    compile.cwd.into(),
+                    compile.env_vars,
+                    job_slot,
+                )
+                .await
+            }
+            Err(err) => {
+                warn!("handle_compile: Unsupported compiler: {}", err.to_string());
+                let mut stats = self.stats.lock().await;
+                stats.decrement_pending_compilations();
+                stats.requests_unsupported_compiler += 1;
+                Message::WithoutBody(Response::Compile(CompileResponse::UnsupportedCompiler(
+                    err.to_string().into(),
+                )))
+            }
+        }
     }
 
     /// Look up compiler info from the cache for the compiler `path`.
     /// If not cached, determine the compiler type and cache the result.
     pub async fn compiler_info(
         &self,
-        path: &Path,
+        exe: &Path,
         cwd: &Path,
         args: &[OsString],
-        env: &[(OsString, OsString)],
+        env_vars: &[(OsString, OsString)],
     ) -> Result<Box<dyn Compiler<C>>> {
         // lookup if compiler proxy exists for the current compiler path
-
-        let env = env.to_vec();
-
-        let resolved_with_proxy = {
-            let compiler_proxies_borrow = self.compiler_proxies.read().await;
-            // Create an owned future - compiler proxy is not Send so we can't
-            // really await while borrowing the proxy since rustc is too conservative
-            let resolve_proxied_executable =
-                compiler_proxies_borrow
-                    .get(path)
-                    .map(|(compiler_proxy, _filetime)| {
-                        compiler_proxy.resolve_proxied_executable(
-                            self.creator.clone(),
-                            cwd.to_owned(),
-                            env.as_slice(),
-                        )
-                    });
-
-            match resolve_proxied_executable {
-                Some(fut) => fut.await.ok(),
-                None => None,
-            }
-        };
-
-        // use the supplied compiler path as fallback, lookup its modification time too
-        let (resolved_compiler_path, mtime) = match resolved_with_proxy {
-            Some(x) => x, // TODO resolve the path right away
-            _ => {
-                // fallback to using the path directly
-                metadata(path)
-                    .map(|attr| FileTime::from_last_modification_time(&attr))
-                    .ok()
-                    .map(move |filetime| (path.to_owned(), filetime))
-                    .expect("Must contain sane data, otherwise mtime is not avail")
-            }
-        };
-
-        // canonicalize the path to follow symlinks
-        // don't canonicalize if the file name differs so it works with clang's multicall
-        let resolved_compiler_path = match dunce::canonicalize(&resolved_compiler_path) {
-            Ok(path) if matches!(path.file_name(), Some(name) if resolved_compiler_path.file_name() == Some(name)) => {
-                path
-            }
-            _ => resolved_compiler_path,
-        };
-
-        let dist_info = match self.dist_client.get_client().await {
-            Ok(Some(ref client)) => {
-                if let Some(archive) = client.get_custom_toolchain(&resolved_compiler_path).await {
-                    match metadata(&archive)
-                        .map(|attr| FileTime::from_last_modification_time(&attr))
-                    {
-                        Ok(mtime) => Some((archive, mtime)),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-
-        let opt = match self.compilers.read().await.get(&resolved_compiler_path) {
-            // It's a hit only if the mtime and dist archive data matches.
-            Some(Some(entry)) => {
-                if entry.mtime == mtime && entry.dist_info == dist_info {
-                    Some(entry.compiler.box_clone())
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-
-        match opt {
-            Some(info) => Ok(info),
-            None => {
-                // Check the compiler type and return the result when
-                // finished. This generally involves invoking the compiler,
-                // so do it asynchronously.
-
-                // the compiler path might be compiler proxy, so it is important to use
-                // `path` (or its clone `path1`) to resolve using that one, not using `resolved_compiler_path`
-                let info = get_compiler_info::<C>(
-                    self.creator.clone(),
-                    path,
-                    cwd,
-                    args,
-                    env.as_slice(),
-                    &self.rt,
-                    dist_info.clone().map(|(p, _)| p),
-                )
-                .await;
-
-                let (c, proxy) = match info {
-                    Ok((c, proxy)) => (c.clone(), proxy.clone()),
-                    Err(err) => {
-                        trace!("Inserting PLAIN cache map info for {:?}", &path);
-                        self.compilers.write().await.insert(path.to_owned(), None);
-                        return Err(err);
-                    }
-                };
-
-                // register the proxy for this compiler, so it will be used directly from now on
-                // and the true/resolved compiler will create table hits in the hash map
-                // based on the resolved path
-                if let Some(proxy) = proxy {
-                    trace!(
-                        "Inserting new path proxy {:?} @ {:?} -> {:?}",
-                        &path,
-                        &cwd,
-                        resolved_compiler_path
-                    );
-                    self.compiler_proxies
-                        .write()
-                        .await
-                        .insert(path.to_owned(), (proxy, mtime));
-                }
-                // TODO add some safety checks in case a proxy exists, that the initial `path` is not
-                // TODO the same as the resolved compiler binary
-
-                // cache
-                let map_info = CompilerCacheEntry::new(c.clone(), mtime, dist_info);
-                trace!(
-                    "Inserting POSSIBLY PROXIED cache map info for {:?}",
-                    &resolved_compiler_path
-                );
-                self.compilers
-                    .write()
-                    .await
-                    .insert(resolved_compiler_path, Some(map_info));
-
-                // drop the proxy information, response is compiler only
-                Ok(c)
-            }
-        }
+        self.compiler_info_queue
+            .call(Compile {
+                exe: exe.into(),
+                cwd: cwd.into(),
+                args: compiler_info_args(args),
+                env_vars: env_vars.to_vec(),
+            })
+            .await
+            .map(|(_, compiler)| compiler)
     }
 
     /// Check that we can handle and cache `cmd` when run with `compiler`.
     /// If so, run `start_compile_task` to execute it.
-    async fn check_compiler(
+    async fn check_compile(
         &self,
-        compiler: Result<Box<dyn Compiler<C>>>,
+        compiler: Box<dyn Compiler<C>>,
         cmd: Vec<OsString>,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
         job_slot: Option<OwnedSemaphorePermit>,
     ) -> SccacheResponse {
-        match compiler {
-            Err(e) => {
-                warn!("check_compiler: Unsupported compiler: {}", e.to_string());
+        // Check that we can handle this compiler with the provided commandline.
+        match compiler.parse_arguments(&cmd, &cwd, &env_vars) {
+            CompilerArguments::Ok(hasher) => {
+                let body = self
+                    .clone()
+                    .start_compile_task(compiler, hasher, cmd, cwd, env_vars, job_slot)
+                    .and_then(|res| async { Ok(Response::CompileFinished(res)) })
+                    .boxed();
+
+                return Message::WithBody(Response::Compile(CompileResponse::CompileStarted), body);
+            }
+            CompilerArguments::CannotCache(why, extra_info) => {
+                if let Some(extra_info) = extra_info {
+                    debug!(
+                        "parse_arguments: CannotCache({}, {}): {:?}",
+                        why, extra_info, cmd
+                    )
+                } else {
+                    debug!("parse_arguments: CannotCache({}): {:?}", why, cmd)
+                }
                 let mut stats = self.stats.lock().await;
                 stats.decrement_pending_compilations();
-                stats.requests_unsupported_compiler += 1;
-                return Message::WithoutBody(Response::Compile(
-                    CompileResponse::UnsupportedCompiler(OsString::from(e.to_string())),
-                ));
+                stats.requests_not_cacheable += 1;
+                *stats.not_cached.entry(why.to_string()).or_insert(0) += 1;
             }
-            Ok(c) => {
-                // Now check that we can handle this compiler with
-                // the provided commandline.
-                match c.parse_arguments(&cmd, &cwd, &env_vars) {
-                    CompilerArguments::Ok(hasher) => {
-                        let body = self
-                            .clone()
-                            .start_compile_task(c, hasher, cmd, cwd, env_vars, job_slot)
-                            .and_then(|res| async { Ok(Response::CompileFinished(res)) })
-                            .boxed();
-
-                        return Message::WithBody(
-                            Response::Compile(CompileResponse::CompileStarted),
-                            body,
-                        );
-                    }
-                    CompilerArguments::CannotCache(why, extra_info) => {
-                        if let Some(extra_info) = extra_info {
-                            debug!(
-                                "parse_arguments: CannotCache({}, {}): {:?}",
-                                why, extra_info, cmd
-                            )
-                        } else {
-                            debug!("parse_arguments: CannotCache({}): {:?}", why, cmd)
-                        }
-                        let mut stats = self.stats.lock().await;
-                        stats.decrement_pending_compilations();
-                        stats.requests_not_cacheable += 1;
-                        *stats.not_cached.entry(why.to_string()).or_insert(0) += 1;
-                    }
-                    CompilerArguments::NotCompilation => {
-                        debug!("parse_arguments: NotCompilation: {:?}", cmd);
-                        let mut stats = self.stats.lock().await;
-                        stats.decrement_pending_compilations();
-                        stats.requests_not_compile += 1;
-                    }
-                }
+            CompilerArguments::NotCompilation => {
+                debug!("parse_arguments: NotCompilation: {:?}", cmd);
+                let mut stats = self.stats.lock().await;
+                stats.decrement_pending_compilations();
+                stats.requests_not_compile += 1;
             }
         }
 
@@ -1577,6 +1502,161 @@ where
             })
             .map_err(anyhow::Error::new)
             .await?
+    }
+}
+
+/// Look up compiler info from the cache for the compiler `path`.
+/// If not cached, determine the compiler type and cache the result.
+#[allow(clippy::too_many_arguments)]
+async fn compiler_info<C>(
+    compiler_proxies: &RwLock<CompilerProxyMap<C>>,
+    compilers: &RwLock<CompilerMap<C>>,
+    creator: &C,
+    dist_client: &DistClientContainer,
+    rt: tokio::runtime::Handle,
+    compile: &Compile,
+) -> Result<Box<dyn Compiler<C>>>
+where
+    C: CommandCreatorSync + Send + Sync,
+{
+    // lookup if compiler proxy exists for the current compiler path
+    let path = Path::new(&compile.exe);
+    let cwd = Path::new(&compile.cwd);
+    let args = &compile.args;
+    let env = &compile.env_vars;
+
+    let env = env.to_vec();
+
+    let resolved_with_proxy = {
+        let compiler_proxies_borrow = compiler_proxies.read().await;
+        // Create an owned future - compiler proxy is not Send so we can't
+        // really await while borrowing the proxy since rustc is too conservative
+        let resolve_proxied_executable =
+            compiler_proxies_borrow
+                .get(path)
+                .map(|(compiler_proxy, _filetime)| {
+                    compiler_proxy.resolve_proxied_executable(
+                        creator.clone(),
+                        cwd.to_owned(),
+                        env.as_slice(),
+                    )
+                });
+
+        match resolve_proxied_executable {
+            Some(fut) => fut.await.ok(),
+            None => None,
+        }
+    };
+
+    // use the supplied compiler path as fallback, lookup its modification time too
+    let (resolved_compiler_path, mtime) = match resolved_with_proxy {
+        Some(x) => x, // TODO resolve the path right away
+        _ => {
+            // fallback to using the path directly
+            metadata(path)
+                .map(|attr| FileTime::from_last_modification_time(&attr))
+                .ok()
+                .map(move |filetime| (path.to_owned(), filetime))
+                .expect("Must contain sane data, otherwise mtime is not avail")
+        }
+    };
+
+    // canonicalize the path to follow symlinks
+    // don't canonicalize if the file name differs so it works with clang's multicall
+    let resolved_compiler_path = match dunce::canonicalize(&resolved_compiler_path) {
+        Ok(path) if matches!(path.file_name(), Some(name) if resolved_compiler_path.file_name() == Some(name)) => {
+            path
+        }
+        _ => resolved_compiler_path,
+    };
+
+    let dist_info = match dist_client.get_client().await {
+        Ok(Some(ref client)) => {
+            if let Some(archive) = client.get_custom_toolchain(&resolved_compiler_path).await {
+                match metadata(&archive).map(|attr| FileTime::from_last_modification_time(&attr)) {
+                    Ok(mtime) => Some((archive, mtime)),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    let opt = match compilers.read().await.get(&resolved_compiler_path) {
+        // It's a hit only if the mtime and dist archive data matches.
+        Some(Some(entry)) => {
+            if entry.mtime == mtime && entry.dist_info == dist_info {
+                Some(entry.compiler.box_clone())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    match opt {
+        Some(info) => Ok(info),
+        None => {
+            // Check the compiler type and return the result when
+            // finished. This generally involves invoking the compiler,
+            // so do it asynchronously.
+
+            // the compiler path might be compiler proxy, so it is important to use
+            // `path` (or its clone `path1`) to resolve using that one, not using `resolved_compiler_path`
+            let info = get_compiler_info::<C>(
+                creator.clone(),
+                path,
+                cwd,
+                args,
+                env.as_slice(),
+                &rt,
+                dist_info.clone().map(|(p, _)| p),
+            )
+            .await;
+
+            let (c, proxy) = match info {
+                Ok((c, proxy)) => (c.clone(), proxy.clone()),
+                Err(err) => {
+                    trace!("Inserting PLAIN cache map info for {:?}", &path);
+                    compilers.write().await.insert(path.to_owned(), None);
+                    return Err(err);
+                }
+            };
+
+            // register the proxy for this compiler, so it will be used directly from now on
+            // and the true/resolved compiler will create table hits in the hash map
+            // based on the resolved path
+            if let Some(proxy) = proxy {
+                trace!(
+                    "Inserting new path proxy {:?} @ {:?} -> {:?}",
+                    &path,
+                    &cwd,
+                    resolved_compiler_path
+                );
+                compiler_proxies
+                    .write()
+                    .await
+                    .insert(path.to_owned(), (proxy, mtime));
+            }
+            // TODO add some safety checks in case a proxy exists, that the initial `path` is not
+            // TODO the same as the resolved compiler binary
+
+            // cache
+            let map_info = CompilerCacheEntry::new(c.clone(), mtime, dist_info);
+            trace!(
+                "Inserting POSSIBLY PROXIED cache map info for {:?}",
+                &resolved_compiler_path
+            );
+            compilers
+                .write()
+                .await
+                .insert(resolved_compiler_path, Some(map_info));
+
+            // drop the proxy information, response is compiler only
+            Ok(c)
+        }
     }
 }
 

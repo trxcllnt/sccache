@@ -16,7 +16,6 @@
 pub use self::client::Client;
 #[cfg(feature = "dist-server")]
 pub use self::{
-    common::{AsyncMulticast, AsyncMulticastFn},
     scheduler::Scheduler,
     server::{ClientAuthCheck, ClientVisibleMsg},
 };
@@ -24,15 +23,8 @@ pub use self::{
 pub use self::common::{bincode_deserialize, bincode_serialize};
 
 mod common {
-    use async_trait::async_trait;
 
     use reqwest::header;
-
-    use futures::lock::Mutex;
-    use std::cmp::Eq;
-    use std::collections::HashMap;
-    use std::hash::Hash;
-    use std::sync::Arc;
 
     use crate::errors::*;
 
@@ -124,81 +116,6 @@ mod common {
             }
         } else {
             Ok(bincode::deserialize(&bytes)?)
-        }
-    }
-
-    #[async_trait]
-    pub trait AsyncMulticastFn<'a, K: Eq + Hash, V> {
-        async fn call(&self, args: &K) -> Result<V>;
-    }
-
-    #[derive(Clone)]
-    pub struct AsyncMulticast<K: Eq + Hash, V> {
-        run_f: Arc<dyn for<'a> AsyncMulticastFn<'a, K, V> + Send + Sync>,
-        state: Arc<Mutex<HashMap<K, tokio::sync::broadcast::Sender<V>>>>,
-    }
-
-    impl<K, V> AsyncMulticast<K, V>
-    where
-        K: Clone + std::fmt::Debug + Eq + Hash + Send + Sync + 'static,
-        V: Clone + Send + Sync + 'static,
-    {
-        pub fn new<F>(run_f: F) -> Self
-        where
-            F: for<'a> AsyncMulticastFn<'a, K, V> + Send + Sync + 'static,
-        {
-            Self {
-                run_f: Arc::new(run_f),
-                state: Arc::new(Mutex::new(HashMap::new())),
-            }
-        }
-
-        pub async fn call(&self, args: K) -> Result<V> {
-            // Lock state
-            let mut state = self.state.lock().await;
-
-            let mut recv = if let Some(sndr) = state.get(&args) {
-                // Return shared broadcast receiver if pending
-                sndr.subscribe()
-            } else {
-                // Create broadcast sender/receiver on first call
-                let (sndr, recv) = tokio::sync::broadcast::channel(1);
-
-                state.insert(args.clone(), sndr);
-
-                // Run the function on a worker thread
-                tokio::runtime::Handle::current().spawn({
-                    let run_f = self.run_f.clone();
-                    let state = self.state.clone();
-                    async move {
-                        // Call the function
-                        let res = run_f.call(&args).await;
-
-                        // Unwrap the result
-                        let val = match res {
-                            Ok(val) => val,
-                            Err(err) => {
-                                // TODO: Broadcast this error instead of just closing the channel
-                                error!("AsyncMulticast error: {err:?}");
-                                state.lock().await.remove(&args);
-                                return;
-                            }
-                        };
-
-                        // Notify receivers
-                        if let Some(sndr) = state.lock().await.remove(&args) {
-                            let _ = sndr.send(val);
-                        }
-                    }
-                });
-
-                recv
-            };
-
-            // Unlock state while we await the receiver
-            drop(state);
-
-            recv.recv().await.map_err(anyhow::Error::new)
         }
     }
 }
@@ -878,13 +795,15 @@ mod scheduler {
 #[cfg(feature = "dist-client")]
 mod client {
     use super::super::cache;
-    use crate::config;
-    use crate::dist::pkg::ToolchainPackager;
-    use crate::dist::{
-        self, CompileCommand, NewJobResponse, RunJobRequest, RunJobResponse, SchedulerStatus,
-        SubmitToolchainResult, Toolchain,
+    use crate::{
+        config,
+        dist::{
+            self, pkg::ToolchainPackager, CompileCommand, NewJobResponse, RunJobRequest,
+            RunJobResponse, SchedulerStatus, SubmitToolchainResult, Toolchain,
+        },
+        errors::*,
+        util::{new_reqwest_client, AsyncMulticast, AsyncMulticastFn},
     };
-    use crate::util::new_reqwest_client;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::compat::FuturesAsyncReadCompatExt;
@@ -896,11 +815,8 @@ mod client {
     use reqwest::Body;
     use std::path::{Path, PathBuf};
 
-    use super::common::{
-        bincode_req_fut, AsyncMulticast, AsyncMulticastFn, ReqwestRequestBuilderExt,
-    };
+    use super::common::{bincode_req_fut, ReqwestRequestBuilderExt};
     use super::{bincode_serialize, urls};
-    use crate::errors::*;
 
     struct SubmitToolchainFn {
         client: Arc<reqwest::Client>,
@@ -911,7 +827,7 @@ mod client {
 
     #[async_trait]
     impl AsyncMulticastFn<'_, Toolchain, SubmitToolchainResult> for SubmitToolchainFn {
-        async fn call(&self, tc: &Toolchain) -> Result<SubmitToolchainResult> {
+        async fn call(&self, tc: Toolchain) -> (Toolchain, Result<SubmitToolchainResult>) {
             let id = &tc.archive_id;
 
             debug!("Submitting toolchain {id:?}");
@@ -923,7 +839,7 @@ mod client {
                 client_toolchains,
             } = self;
 
-            let res = match client_toolchains.get_toolchain(tc).await {
+            let res = match client_toolchains.get_toolchain(&tc).await {
                 Err(e) => Err(e),
                 Ok(None) => Err(anyhow!("Couldn't find toolchain locally")),
                 Ok(Some(file)) => {
@@ -938,7 +854,7 @@ mod client {
                 }
             };
 
-            match res {
+            let res = match res {
                 Ok(dist::SubmitToolchainResult::Success) => {
                     debug!("Successfully submitted toolchain {id:?}");
                     res
@@ -948,7 +864,9 @@ mod client {
                     res
                 }
                 Err(err) => Err(err.context(format!("Could not submit toolchain {id:?}:"))),
-            }
+            };
+
+            (tc, res)
         }
     }
 
@@ -1095,6 +1013,7 @@ mod client {
             self.submit_toolchain_reqs
                 .call(tc)
                 .await
+                .map(|(_, res)| res)
                 .map_err(|_| anyhow!("Failed to submit toolchain {id:?}"))
         }
 

@@ -13,25 +13,32 @@
 // limitations under the License.
 
 use crate::mock_command::{CommandChild, ProcessOutput, RunCommand};
+use async_trait::async_trait;
 use blake3::Hasher as blake3_Hasher;
 use byteorder::{BigEndian, ByteOrder};
 use fs::File;
 use fs_err as fs;
-use futures::{AsyncRead, AsyncReadExt};
-use object::read::archive::ArchiveFile;
-use object::read::macho::{FatArch, MachOFatFile32, MachOFatFile64};
+use futures::{lock::Mutex, AsyncRead, AsyncReadExt};
+use object::read::{
+    archive::ArchiveFile,
+    macho::{FatArch, MachOFatFile32, MachOFatFile64},
+};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::cell::Cell;
-use std::ffi::{OsStr, OsString};
-use std::hash::Hasher;
-use std::io::prelude::*;
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::process::{self, Stdio};
-use std::str;
-use std::time::Duration;
-use std::time::{self, SystemTime};
+use std::{
+    cell::Cell,
+    cmp::Eq,
+    collections::HashMap,
+    ffi::{OsStr, OsString},
+    hash::{Hash, Hasher},
+    io::prelude::*,
+    path::{Path, PathBuf},
+    pin::Pin,
+    process::{self, Stdio},
+    str,
+    sync::Arc,
+    time::{self, Duration, SystemTime},
+};
 use tokio_retry2::strategy::FibonacciBackoff;
 use tokio_retry2::Retry;
 
@@ -1282,6 +1289,86 @@ where
         func,
     )
     .await
+}
+
+#[async_trait]
+pub trait AsyncMulticastFn<'a, K: Eq + Hash, V> {
+    async fn call(&self, args: K) -> (K, Result<V>);
+}
+
+#[derive(Clone)]
+pub struct AsyncMulticast<K: Eq + Hash, V> {
+    run_f: Arc<dyn for<'a> AsyncMulticastFn<'a, K, V> + Send + Sync>,
+    state: Arc<
+        Mutex<
+            HashMap<
+                K,
+                tokio::sync::broadcast::Sender<std::result::Result<(K, V), Arc<anyhow::Error>>>,
+            >,
+        >,
+    >,
+}
+
+impl<K, V> AsyncMulticast<K, V>
+where
+    K: Clone + std::fmt::Debug + Eq + Hash + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    pub fn new<F>(run_f: F) -> Self
+    where
+        F: for<'a> AsyncMulticastFn<'a, K, V> + Send + Sync + 'static,
+    {
+        Self {
+            run_f: Arc::new(run_f),
+            state: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub async fn call(&self, args: K) -> Result<(K, V)> {
+        // Lock state
+        let mut state = self.state.lock().await;
+
+        let mut recv = if let Some(sndr) = state.get(&args) {
+            // Return shared broadcast receiver if pending
+            sndr.subscribe()
+        } else {
+            // Create broadcast sender/receiver on first call
+            let (sndr, recv) = tokio::sync::broadcast::channel(1);
+
+            state.insert(args.clone(), sndr);
+
+            // Run the function on a worker thread
+            tokio::runtime::Handle::current().spawn({
+                let run_f = self.run_f.clone();
+                let state = self.state.clone();
+                async move {
+                    // Call the function
+                    let (args, res) = run_f.call(args).await;
+                    // Remove the sender
+                    let sndr = state.lock().await.remove(&args);
+                    // Unwrap the result
+                    let res = match res {
+                        Ok(val) => Ok((args, val)),
+                        Err(err) => Err(Arc::new(err)),
+                    };
+                    // Notify receivers
+                    if let Some(sndr) = sndr {
+                        let _ = sndr.send(res);
+                    }
+                }
+            });
+
+            recv
+        };
+
+        // Unlock state while we await the receiver
+        drop(state);
+
+        recv.recv()
+            .await
+            .map_err(anyhow::Error::new)
+            .and_then(|res| res.map_err(|e| anyhow!(e)))
+    }
 }
 
 #[cfg(test)]

@@ -57,12 +57,12 @@ pub struct CompileFinished {
 }
 
 /// The contents of a compile request from a client.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, Hash, Eq, PartialEq)]
 pub struct Compile {
-    /// The full path to the compiler executable.
-    pub exe: OsString,
     /// The current working directory in which to execute the compile.
     pub cwd: OsString,
+    /// The full path to the compiler executable.
+    pub exe: OsString,
     /// The commandline arguments passed to the compiler.
     pub args: Vec<OsString>,
     /// The environment variables present when the compiler was executed, as (var, val).

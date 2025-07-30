@@ -28,15 +28,13 @@ use std::{
 use crate::{
     cache::Storage,
     dist::{
-        self,
-        http::{AsyncMulticast, AsyncMulticastFn},
-        job_inputs_key, job_result_key,
+        self, job_inputs_key, job_result_key,
         metrics::{CountRecorder, GaugeRecorder, Metrics, TimeRecorder},
         BuildResult, BuilderIncoming, CompileCommand, RunJobError, RunJobResponse, ServerDetails,
         ServerService, Toolchain, ToolchainService,
     },
     errors::*,
-    util::retry_with_jitter,
+    util::{retry_with_jitter, AsyncMulticast, AsyncMulticastFn},
 };
 
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
@@ -383,8 +381,9 @@ struct LoadToolchainFn {
 
 #[async_trait]
 impl AsyncMulticastFn<'_, Toolchain, PathBuf> for LoadToolchainFn {
-    async fn call(&self, tc: &Toolchain) -> Result<PathBuf> {
-        self.toolchains.load_toolchain(tc).await
+    async fn call(&self, tc: Toolchain) -> (Toolchain, Result<PathBuf>) {
+        let res = self.toolchains.load_toolchain(&tc).await;
+        (tc, res)
     }
 }
 
@@ -559,14 +558,18 @@ impl Server {
     async fn get_toolchain_dir(&self, job_id: &str, toolchain: Toolchain) -> Result<PathBuf> {
         let _timer = self.state.metrics.get_toolchain_timer();
         // ServerToolchains retries internally, so no need to retry here
-        self.toolchains.call(toolchain).await.map_err(|err| {
-            // Record toolchain errors
-            if self.is_alive() {
-                self.state.metrics.inc_toolchain_error_count();
-                tracing::warn!("[run_job({job_id})]: Error loading toolchain: {err:?}");
-            }
-            err
-        })
+        self.toolchains
+            .call(toolchain)
+            .await
+            .map(|(_, res)| res)
+            .map_err(|err| {
+                // Record toolchain errors
+                if self.is_alive() {
+                    self.state.metrics.inc_toolchain_error_count();
+                    tracing::warn!("[run_job({job_id})]: Error loading toolchain: {err:?}");
+                }
+                err
+            })
     }
 
     async fn get_job_inputs(&self, job_id: &str) -> Result<Vec<u8>> {

@@ -505,15 +505,17 @@ where
     ) -> Result<(CompileResult, ProcessOutput)> {
         let out_pretty = self.output_pretty().into_owned();
         // [<file>] get_cached_or_compile: "/path/to/exe <args...>"
-        debug!(
-            "[{out_pretty}]: get_cached_or_compile: {}",
-            creator
-                .clone()
-                .new_command_sync(self.get_executable())
-                .env_clear()
-                .current_dir(&cwd)
-                .args(&arguments)
-        );
+        if log_enabled!(log::Level::Debug) {
+            debug!(
+                "[{out_pretty}]: get_cached_or_compile: {:?}",
+                shlex::try_join(
+                    std::iter::empty()
+                        .chain(&[format!("{}", self.get_executable().as_path().display())])
+                        .chain(&dist::osstrings_to_strings(&arguments).unwrap_or_default()[..])
+                        .map(|s| s.as_str())
+                )?
+            );
+        }
 
         let start = Instant::now();
 
@@ -543,7 +545,7 @@ where
             )
             .await;
 
-        debug!(
+        trace!(
             "[{out_pretty}]: generate_hash_key took {}",
             fmt_duration_as_secs(&start.elapsed())
         );
@@ -965,7 +967,7 @@ impl<'a> CacheLookup<'a> {
                 }
             }
             Ok(Cache::Miss) => {
-                debug!(
+                trace!(
                     "[{out_pretty}]: Cache miss in {}",
                     fmt_duration_as_secs(&start.elapsed())
                 );
@@ -2081,6 +2083,21 @@ counted_array!(static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("-ccbin", OsString, CanBeSeparated('='), Detect_PassThrough),
 ]);
 
+pub fn compiler_info_args(arguments: &[OsString]) -> Vec<OsString> {
+    let mut args = vec![];
+    // Iterate over all the arguments for compilation and extract
+    // any that are required for any valid execution of the compiler.
+    // Allowing our compiler vendor detection to always properly execute
+    for arg in ArgsIter::new(arguments.iter().cloned(), &ARGS[..]) {
+        let arg = arg.unwrap_or_else(|_| Argument::Raw(OsString::from("")));
+        if let Some(Detect_PassThrough(_)) = arg.get_data() {
+            let required_arg = arg.normalize(NormalizedDisposition::Concatenated);
+            args.extend(required_arg.iter_os_strings());
+        }
+    }
+    args
+}
+
 async fn detect_c_compiler<T, P>(
     creator: T,
     executable: P,
@@ -2151,20 +2168,11 @@ compiler_version=__VERSION__
     let mut cmd = creator.clone().new_command_sync(executable);
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .envs(env.iter().map(|s| (&s.0, &s.1)));
+        .envs(env.iter().map(|s| (&s.0, &s.1)))
+        .args(arguments)
+        .arg("-E")
+        .arg(src);
 
-    // Iterate over all the arguments for compilation and extract
-    // any that are required for any valid execution of the compiler.
-    // Allowing our compiler vendor detection to always properly execute
-    for arg in ArgsIter::new(arguments.iter().cloned(), &ARGS[..]) {
-        let arg = arg.unwrap_or_else(|_| Argument::Raw(OsString::from("")));
-        if let Some(Detect_PassThrough(_)) = arg.get_data() {
-            let required_arg = arg.normalize(NormalizedDisposition::Concatenated);
-            cmd.args(&Vec::from_iter(required_arg.iter_os_strings()));
-        }
-    }
-
-    cmd.arg("-E").arg(src);
     let child = cmd.spawn().await?;
     let output = child
         .wait_with_output()

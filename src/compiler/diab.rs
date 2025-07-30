@@ -395,7 +395,7 @@ where
         None
     };
 
-    debug_if_trace!("[{}]: preprocess: {:?}", parsed_args.output_pretty(), cmd);
+    debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
 
     let output = run_input_output(cmd, None).await?;
 
