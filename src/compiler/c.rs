@@ -459,13 +459,13 @@ where
             &cwd.join(&parsed_args.input),
             compiler.plusplus(),
             &preprocessor_cache_mode_config,
-        )?;
+        )?
+        .filter(|_| matches!(cache_control, CacheControl::Default));
 
         if let Some(preprocessor_key) = preprocessor_key {
             if let Some(mut seekable) = storage
                 .get_preprocessor_cache_entry(&preprocessor_key)
                 .await?
-                .filter(|_| matches!(cache_control, CacheControl::Default))
             {
                 let (hit, updated, preprocessor_cache_entry) = tokio::runtime::Handle::current()
                     .spawn_blocking(move || {
@@ -558,6 +558,9 @@ where
             )
             .await?;
 
+        let kind = CompilerKind::C(self.compiler.kind());
+        let lang = <CCompilerHasher<I> as CompilerHasher<T>>::language(&*self);
+
         let CCompilerHasher {
             parsed_args,
             executable,
@@ -565,6 +568,26 @@ where
             compiler,
             ..
         } = *self;
+
+        match preprocessor_cache_lookup {
+            PreprocessorCacheLookup::Hit(_) => {
+                service
+                    .stats
+                    .lock()
+                    .await
+                    .preprocessor_cache_hits
+                    .increment(&kind, &lang);
+            }
+            PreprocessorCacheLookup::Miss(_) => {
+                service
+                    .stats
+                    .lock()
+                    .await
+                    .preprocessor_cache_misses
+                    .increment(&kind, &lang);
+            }
+            _ => {}
+        };
 
         let key = if let PreprocessorCacheLookup::Hit(key) = preprocessor_cache_lookup {
             key
@@ -712,7 +735,7 @@ where
                     );
 
                     // Cache the preprocessing step
-                    if let PreprocessorCacheLookup::Miss(ref preprocessor_key) =
+                    if let PreprocessorCacheLookup::Miss(preprocessor_key) =
                         preprocessor_cache_lookup
                     {
                         if !included_files.is_empty() {
@@ -724,13 +747,14 @@ where
                             included_files.sort_unstable_by(|a, b| a.1.cmp(&b.1));
                             preprocessor_cache_entry.add_result(
                                 start_of_compilation,
+                                &preprocessor_key,
                                 &key,
                                 included_files,
                             );
 
                             if let Err(e) = storage
                                 .put_preprocessor_cache_entry(
-                                    preprocessor_key,
+                                    &preprocessor_key,
                                     preprocessor_cache_entry,
                                 )
                                 .await

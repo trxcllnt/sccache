@@ -710,7 +710,9 @@ struct AdditionalStats {
     non_cacheable_compilations: Option<u64>,
     requests_executed: Option<u64>,
     cache_hits: Option<Vec<(CCompilerKind, Language, u64)>>,
+    preprocessor_cache_hits: Option<Vec<(CCompilerKind, Language, u64)>>,
     cache_misses: Option<Vec<(CCompilerKind, Language, u64)>>,
+    preprocessor_cache_misses: Option<Vec<(CCompilerKind, Language, u64)>>,
 }
 
 fn test_nvcc_cuda_compiles(
@@ -718,6 +720,7 @@ fn test_nvcc_cuda_compiles(
     compiler: &Compiler,
     host_compiler: &Compiler,
     tempdir: &Path,
+    preprocessor_cache_mode: bool,
     with_debug_flags: bool,
     with_rdc: bool,
 ) {
@@ -796,10 +799,32 @@ fn test_nvcc_cuda_compiles(
             }
         }
 
+        for (kind, lang, count) in additional_stats
+            .preprocessor_cache_hits
+            .filter(|_| preprocessor_cache_mode)
+            .unwrap_or_default()
+        {
+            let kind = CompilerKind::C(kind);
+            for _ in 0..count {
+                stats.preprocessor_cache_hits.increment(&kind, &lang);
+            }
+        }
+
         for (kind, lang, count) in additional_stats.cache_misses.unwrap_or_default() {
             let kind = CompilerKind::C(kind);
             for _ in 0..count {
                 stats.cache_misses.increment(&kind, &lang);
+            }
+        }
+
+        for (kind, lang, count) in additional_stats
+            .preprocessor_cache_misses
+            .filter(|_| preprocessor_cache_mode)
+            .unwrap_or_default()
+        {
+            let kind = CompilerKind::C(kind);
+            for _ in 0..count {
+                stats.preprocessor_cache_misses.increment(&kind, &lang);
             }
         }
 
@@ -827,6 +852,7 @@ fn test_nvcc_cuda_compiles(
             non_cacheable_compilations: Some(1),
             requests_executed: Some(2),
             cache_misses: Some(vec![(CCompilerKind::Cicc, Language::Ptx, 1)]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -845,6 +871,8 @@ fn test_nvcc_cuda_compiles(
             requests_executed: Some(3),
             cache_hits: Some(vec![(CCompilerKind::Cicc, Language::Ptx, 1)]),
             cache_misses: Some(vec![(CCompilerKind::Ptxas, Language::Cubin, 1)]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
+            ..Default::default()
         },
     );
 
@@ -874,6 +902,7 @@ fn test_nvcc_cuda_compiles(
                     with_debug_flags as u64,
                 ),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -888,6 +917,7 @@ fn test_nvcc_cuda_compiles(
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
+            preprocessor_cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -921,6 +951,7 @@ fn test_nvcc_cuda_compiles(
                     with_debug_flags as u64,
                 ),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -935,6 +966,7 @@ fn test_nvcc_cuda_compiles(
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
+            preprocessor_cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -956,6 +988,7 @@ fn test_nvcc_cuda_compiles(
                 (CCompilerKind::CudaFE, Language::CudaFE, 1),
                 (CCompilerKind::Ptxas, Language::Cubin, 1),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -970,6 +1003,7 @@ fn test_nvcc_cuda_compiles(
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
+            preprocessor_cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -993,6 +1027,7 @@ fn test_nvcc_cuda_compiles(
                 (CCompilerKind::Cicc, Language::Ptx, 1),
                 (CCompilerKind::Ptxas, Language::Cubin, 1),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -1007,6 +1042,7 @@ fn test_nvcc_cuda_compiles(
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
+            preprocessor_cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -1048,6 +1084,7 @@ int main(int argc, char** argv) {
                 (CCompilerKind::Cicc, Language::Ptx, 1),
                 (CCompilerKind::Ptxas, Language::Cubin, 1),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -1072,6 +1109,7 @@ int main(int argc, char** argv) {
                 (CCompilerKind::Nvcc, Language::Cuda, 1),
                 (CCompilerKind::CudaFE, Language::CudaFE, 1),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -1088,6 +1126,7 @@ int main(int argc, char** argv) {
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
+            preprocessor_cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -1113,6 +1152,7 @@ int main(int argc, char** argv) {
                 (CCompilerKind::Cicc, Language::Ptx, 1),
                 (CCompilerKind::Ptxas, Language::Cubin, 1),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -1138,6 +1178,7 @@ int main(int argc, char** argv) {
                 (CCompilerKind::Cicc, Language::Ptx, 1),
                 (CCompilerKind::Ptxas, Language::Cubin, 1),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -1172,6 +1213,8 @@ int main(int argc, char** argv) {
                     with_debug_flags as u64,
                 ),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
+            ..Default::default()
         },
     );
 
@@ -1209,6 +1252,7 @@ int main(int argc, char** argv) {
                     1 + with_debug_flags as u64,
                 ),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -1248,6 +1292,7 @@ int main(int argc, char** argv) {
                     2 * with_debug_flags as u64,
                 ),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -1286,6 +1331,7 @@ int main(int argc, char** argv) {
                     1 + with_debug_flags as u64,
                 ),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -1323,6 +1369,7 @@ int main(int argc, char** argv) {
                     1 + with_debug_flags as u64,
                 ),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -1353,6 +1400,7 @@ int main(int argc, char** argv) {
                 (CCompilerKind::Nvcc, Language::Cuda, 1),
                 (CCompilerKind::CudaFE, Language::CudaFE, 1),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -1380,6 +1428,7 @@ int main(int argc, char** argv) {
                 (CCompilerKind::Nvcc, Language::Cuda, 1),
                 (CCompilerKind::CudaFE, Language::CudaFE, 1),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -1416,6 +1465,8 @@ int main(int argc, char** argv) {
                     with_debug_flags as u64,
                 ),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
+            ..Default::default()
         },
     );
 
@@ -1448,6 +1499,8 @@ int main(int argc, char** argv) {
                     with_debug_flags as u64,
                 ),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
+            ..Default::default()
         },
     );
 
@@ -1476,6 +1529,7 @@ int main(int argc, char** argv) {
                 (CCompilerKind::Nvcc, Language::Cuda, 1),
                 (CCompilerKind::Ptxas, Language::Cubin, 1),
             ]),
+            preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
             ..Default::default()
         },
     );
@@ -1507,6 +1561,11 @@ int main(int argc, char** argv) {
                     (CCompilerKind::Ptxas, Language::Cubin, 2),
                 ]),
                 cache_misses: Some(vec![(host_compiler.name.into(), Language::Cxx, 2)]),
+                preprocessor_cache_misses: Some(vec![
+                    (CCompilerKind::Nvcc, Language::Cuda, 1),
+                    (host_compiler.name.into(), Language::Cxx, 2),
+                ]),
+                ..Default::default()
             },
         );
 
@@ -1536,6 +1595,11 @@ int main(int argc, char** argv) {
                     (CCompilerKind::Ptxas, Language::Cubin, 2),
                 ]),
                 cache_misses: Some(vec![(host_compiler.name.into(), Language::Cxx, 2)]),
+                preprocessor_cache_misses: Some(vec![
+                    (CCompilerKind::Nvcc, Language::Cuda, 1),
+                    (host_compiler.name.into(), Language::Cxx, 2),
+                ]),
+                ..Default::default()
             },
         );
 
@@ -1565,6 +1629,11 @@ int main(int argc, char** argv) {
                     (CCompilerKind::Ptxas, Language::Cubin, 2),
                 ]),
                 cache_misses: Some(vec![(host_compiler.name.into(), Language::Cxx, 2)]),
+                preprocessor_cache_misses: Some(vec![
+                    (CCompilerKind::Nvcc, Language::Cuda, 1),
+                    (host_compiler.name.into(), Language::Cxx, 2),
+                ]),
+                ..Default::default()
             },
         );
 
@@ -1594,6 +1663,11 @@ int main(int argc, char** argv) {
                     (CCompilerKind::Ptxas, Language::Cubin, 2),
                 ]),
                 cache_misses: Some(vec![(host_compiler.name.into(), Language::Cxx, 2)]),
+                preprocessor_cache_misses: Some(vec![
+                    (CCompilerKind::Nvcc, Language::Cuda, 1),
+                    (host_compiler.name.into(), Language::Cxx, 2),
+                ]),
+                ..Default::default()
             },
         );
     }
@@ -1627,6 +1701,7 @@ int main(int argc, char** argv) {
                 non_cacheable_compilations: Some(1),
                 requests_executed: Some(2),
                 cache_misses: Some(vec![(CCompilerKind::Cicc, Language::Ptx, 1)]),
+                preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
                 ..Default::default()
             },
         );
@@ -1654,6 +1729,7 @@ int main(int argc, char** argv) {
                 non_cacheable_compilations: Some(1),
                 requests_executed: Some(2),
                 cache_misses: Some(vec![(CCompilerKind::Cicc, Language::Ptx, 1)]),
+                preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
                 ..Default::default()
             },
         );
@@ -1682,6 +1758,7 @@ int main(int argc, char** argv) {
                     (CCompilerKind::Nvcc, Language::Cuda, 1),
                     (CCompilerKind::Cicc, Language::Ptx, 2),
                 ]),
+                preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
                 ..Default::default()
             },
         );
@@ -1713,6 +1790,7 @@ int main(int argc, char** argv) {
                     (CCompilerKind::Nvcc, Language::Cuda, 1),
                     (CCompilerKind::Cicc, Language::Ptx, 1),
                 ]),
+                preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
                 ..Default::default()
             },
         );
@@ -1724,6 +1802,7 @@ fn test_nvcc_proper_lang_stat_tracking(
     compiler: &Compiler,
     host_compiler: &Compiler,
     tempdir: &Path,
+    preprocessor_cache_mode: bool,
     with_debug_flags: bool,
     with_rdc: bool,
 ) {
@@ -1789,6 +1868,11 @@ fn test_nvcc_proper_lang_stat_tracking(
     stats
         .cache_misses
         .increment(&CompilerKind::C(CCompilerKind::Ptxas), &Language::Cubin);
+    if preprocessor_cache_mode {
+        stats
+            .preprocessor_cache_misses
+            .increment(&CompilerKind::C(CCompilerKind::Nvcc), &Language::Cuda);
+    }
     assert_eq!(
         stats,
         ServerStats {
@@ -1820,6 +1904,11 @@ fn test_nvcc_proper_lang_stat_tracking(
     stats
         .cache_hits
         .increment(&CompilerKind::C(CCompilerKind::Nvcc), &Language::Cuda);
+    if preprocessor_cache_mode {
+        stats
+            .preprocessor_cache_hits
+            .increment(&CompilerKind::C(CCompilerKind::Nvcc), &Language::Cuda);
+    }
     assert_eq!(
         stats,
         ServerStats {
@@ -1853,6 +1942,11 @@ fn test_nvcc_proper_lang_stat_tracking(
     stats
         .cache_misses
         .increment(&CompilerKind::C(CCompilerKind::Nvcc), &Language::C);
+    if preprocessor_cache_mode {
+        stats
+            .preprocessor_cache_misses
+            .increment(&CompilerKind::C(CCompilerKind::Nvcc), &Language::C);
+    }
     assert_eq!(
         stats,
         ServerStats {
@@ -1884,6 +1978,11 @@ fn test_nvcc_proper_lang_stat_tracking(
     stats
         .cache_hits
         .increment(&CompilerKind::C(CCompilerKind::Nvcc), &Language::C);
+    if preprocessor_cache_mode {
+        stats
+            .preprocessor_cache_hits
+            .increment(&CompilerKind::C(CCompilerKind::Nvcc), &Language::C);
+    }
     assert_eq!(
         stats,
         ServerStats {
@@ -1900,6 +1999,7 @@ fn run_sccache_nvcc_cuda_command_tests(
     compiler: &Compiler,
     host_compiler: &Compiler,
     tempdir: &Path,
+    preprocessor_cache_mode: bool,
     with_debug_flags: bool,
     with_rdc: bool,
 ) {
@@ -1908,6 +2008,7 @@ fn run_sccache_nvcc_cuda_command_tests(
         compiler,
         host_compiler,
         tempdir,
+        preprocessor_cache_mode,
         with_debug_flags,
         with_rdc,
     );
@@ -1916,6 +2017,7 @@ fn run_sccache_nvcc_cuda_command_tests(
         compiler,
         host_compiler,
         tempdir,
+        preprocessor_cache_mode,
         with_debug_flags,
         with_rdc,
     );
@@ -1925,6 +2027,7 @@ fn test_clang_cuda_compiles(
     client: &SccacheClient,
     compiler: &Compiler,
     tempdir: &Path,
+    preprocessor_cache_mode: bool,
     with_debug_flags: bool,
     with_rdc: bool,
 ) {
@@ -1976,6 +2079,11 @@ fn test_clang_cuda_compiles(
     stats
         .cache_misses
         .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cuda);
+    if preprocessor_cache_mode {
+        stats
+            .preprocessor_cache_misses
+            .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cuda);
+    }
     assert_eq!(
         stats,
         ServerStats {
@@ -2008,6 +2116,11 @@ fn test_clang_cuda_compiles(
     stats
         .cache_hits
         .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cuda);
+    if preprocessor_cache_mode {
+        stats
+            .preprocessor_cache_hits
+            .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cuda);
+    }
     assert_eq!(
         stats,
         ServerStats {
@@ -2044,6 +2157,48 @@ fn test_clang_cuda_compiles(
     stats
         .cache_misses
         .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cuda);
+    if preprocessor_cache_mode {
+        stats
+            .preprocessor_cache_misses
+            .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cuda);
+    }
+    assert_eq!(
+        stats,
+        ServerStats {
+            cache_write_duration: stats.cache_write_duration,
+            cache_read_hit_duration: stats.cache_read_hit_duration,
+            compiler_write_duration: stats.compiler_write_duration,
+            ..client.stats().unwrap()
+        }
+    );
+
+    trace!("compile B");
+    client
+        .cmd()
+        .args(compile_cuda_cmdline(
+            name,
+            exe,
+            "-c",
+            INPUT_FOR_CUDA_B,
+            OUTPUT,
+            &extra_args,
+        ))
+        .current_dir(tempdir)
+        .envs(env_vars.clone())
+        .assert()
+        .success();
+    assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
+    fs::remove_file(&out_file).unwrap();
+    stats.compile_requests += 1;
+    stats.requests_executed += 1;
+    stats
+        .cache_hits
+        .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cuda);
+    if preprocessor_cache_mode {
+        stats
+            .preprocessor_cache_hits
+            .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cuda);
+    }
     assert_eq!(
         stats,
         ServerStats {
@@ -2059,6 +2214,7 @@ fn test_clang_proper_lang_stat_tracking(
     client: &SccacheClient,
     compiler: &Compiler,
     tempdir: &Path,
+    preprocessor_cache_mode: bool,
     with_debug_flags: bool,
     with_rdc: bool,
 ) {
@@ -2110,6 +2266,11 @@ fn test_clang_proper_lang_stat_tracking(
     stats
         .cache_misses
         .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cuda);
+    if preprocessor_cache_mode {
+        stats
+            .preprocessor_cache_misses
+            .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cuda);
+    }
     assert_eq!(
         stats,
         ServerStats {
@@ -2141,6 +2302,11 @@ fn test_clang_proper_lang_stat_tracking(
     stats
         .cache_hits
         .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cuda);
+    if preprocessor_cache_mode {
+        stats
+            .preprocessor_cache_hits
+            .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cuda);
+    }
     assert_eq!(
         stats,
         ServerStats {
@@ -2173,6 +2339,11 @@ fn test_clang_proper_lang_stat_tracking(
     stats
         .cache_misses
         .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cxx);
+    if preprocessor_cache_mode {
+        stats
+            .preprocessor_cache_misses
+            .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cxx);
+    }
     assert_eq!(
         stats,
         ServerStats {
@@ -2203,6 +2374,11 @@ fn test_clang_proper_lang_stat_tracking(
     stats
         .cache_hits
         .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cxx);
+    if preprocessor_cache_mode {
+        stats
+            .preprocessor_cache_hits
+            .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cxx);
+    }
     assert_eq!(
         stats,
         ServerStats {
@@ -2219,11 +2395,26 @@ fn run_sccache_clang_cuda_command_tests(
     compiler: &Compiler,
     _host_compiler: &Compiler,
     tempdir: &Path,
+    preprocessor_cache_mode: bool,
     with_debug_flags: bool,
     with_rdc: bool,
 ) {
-    test_clang_cuda_compiles(client, compiler, tempdir, with_debug_flags, with_rdc);
-    test_clang_proper_lang_stat_tracking(client, compiler, tempdir, with_debug_flags, with_rdc);
+    test_clang_cuda_compiles(
+        client,
+        compiler,
+        tempdir,
+        preprocessor_cache_mode,
+        with_debug_flags,
+        with_rdc,
+    );
+    test_clang_proper_lang_stat_tracking(
+        client,
+        compiler,
+        tempdir,
+        preprocessor_cache_mode,
+        with_debug_flags,
+        with_rdc,
+    );
 }
 
 fn test_hip_compiles(client: &SccacheClient, compiler: &Compiler, tempdir: &Path) {
@@ -2655,6 +2846,7 @@ macro_rules! test_cuda_sccache_command {
                             &cuda_compiler,
                             &host_compiler,
                             &tempdir_path,
+                            preprocessor_cache_mode,
                             with_debug_flags,
                             with_rdc,
                         )

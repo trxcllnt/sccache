@@ -1718,8 +1718,12 @@ pub struct ServerStats {
     pub requests_executed: u64,
     /// The count of cache hits for handled compile requests (per language).
     pub cache_hits: PerLanguageCount,
+    /// The count of preprocessor cache hits for handled compile requests (per language).
+    pub preprocessor_cache_hits: PerLanguageCount,
     /// The count of cache misses for handled compile requests (per language).
     pub cache_misses: PerLanguageCount,
+    /// The count of preprocessor cache misses for handled compile requests (per language).
+    pub preprocessor_cache_misses: PerLanguageCount,
     /// The count of cache misses because the cache took too long to respond.
     pub cache_timeouts: u64,
     /// The count of errors reading cache entries.
@@ -1787,7 +1791,9 @@ impl Default for ServerStats {
             requests_not_cacheable: u64::default(),
             requests_executed: u64::default(),
             cache_hits: PerLanguageCount::new(),
+            preprocessor_cache_hits: PerLanguageCount::new(),
             cache_misses: PerLanguageCount::new(),
+            preprocessor_cache_misses: PerLanguageCount::new(),
             cache_timeouts: u64::default(),
             cache_read_errors: u64::default(),
             non_cacheable_compilations: u64::default(),
@@ -1823,7 +1829,12 @@ impl ServerStats {
     /// Print stats in a human-readable format.
     ///
     /// Return the formatted width of each of the (name, value) columns.
-    fn print<T: ServerStatsWriter>(&self, writer: &mut T, advanced: bool) -> (usize, usize) {
+    fn print<T: ServerStatsWriter>(
+        &self,
+        writer: &mut T,
+        advanced: bool,
+        use_preprocessor_cache_mode: bool,
+    ) -> (usize, usize) {
         macro_rules! set_stat {
             ($vec:ident, $var:expr, $name:expr) => {{
                 // name, value, suffix length
@@ -1894,7 +1905,21 @@ impl ServerStats {
             "Compile request errors"
         );
         set_counted_stat!(stats_vec, self.cache_hits, "Cache hits");
+        if use_preprocessor_cache_mode {
+            set_counted_stat!(
+                stats_vec,
+                self.preprocessor_cache_hits,
+                "Preprocessor cache hits"
+            );
+        }
         set_counted_stat!(stats_vec, self.cache_misses, "Cache misses");
+        if use_preprocessor_cache_mode {
+            set_counted_stat!(
+                stats_vec,
+                self.preprocessor_cache_misses,
+                "Preprocessor cache misses"
+            );
+        }
 
         self.set_percentage_stats(&mut stats_vec, advanced);
 
@@ -2129,7 +2154,11 @@ impl ServerInfo {
 
     /// Print info to stdout in a human-readable format.
     pub fn print(&self, advanced: bool) {
-        let (name_width, stat_width) = self.stats.print(&mut StdoutServerStatsWriter, advanced);
+        let (name_width, stat_width) = self.stats.print(
+            &mut StdoutServerStatsWriter,
+            advanced,
+            self.use_preprocessor_cache_mode,
+        );
         println!(
             "{:<name_width$} {}",
             "Cache location",
@@ -2427,7 +2456,7 @@ mod tests {
         let stats = ServerStats::default();
 
         let mut writer = StringWriter::new();
-        stats.print(&mut writer, false);
+        stats.print(&mut writer, false, true);
 
         let output = writer.get_output();
 
@@ -2457,7 +2486,7 @@ mod tests {
         };
 
         let mut writer = StringWriter::new();
-        stats.print(&mut writer, false);
+        stats.print(&mut writer, false, true);
 
         let output = writer.get_output();
 
@@ -2490,7 +2519,7 @@ mod tests {
         };
 
         let mut writer = StringWriter::new();
-        stats.print(&mut writer, true);
+        stats.print(&mut writer, true, true);
 
         let output = writer.get_output();
 

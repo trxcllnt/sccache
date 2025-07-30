@@ -97,6 +97,7 @@ impl PreprocessorCacheEntry {
     pub fn add_result(
         &mut self,
         compilation_time_start: SystemTime,
+        preprocessor_key: &str,
         result_key: &str,
         included_files: impl IntoIterator<Item = (String, PathBuf)>,
     ) {
@@ -169,10 +170,10 @@ impl PreprocessorCacheEntry {
                         vacant.insert(includes);
                     }
                 };
-                debug!("Added result key {result_key} to preprocessor cache entry");
+                debug!("Added result key {result_key:?} to preprocessor cache entry {preprocessor_key:?}");
             }
             Err(e) => {
-                debug!("Could not add result key {result_key} to preprocessor cache entry: {e}");
+                debug!("Could not add result key {result_key:?} to preprocessor cache entry {preprocessor_key:?}: {e}");
             }
         }
     }

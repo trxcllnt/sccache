@@ -282,6 +282,10 @@ impl CCompilerImpl for Nvcc {
 
         let (output, deps) = {
             let preprocessor_flag = self.host_compiler.preprocessor_flag();
+            let is_nvcc_lang = matches!(
+                parsed_args.language,
+                Language::Cuda | Language::CudaFE | Language::Ptx | Language::Cubin
+            );
 
             let preprocessor_hashes = select_nvcc_subcommands(
                 creator,
@@ -289,7 +293,7 @@ impl CCompilerImpl for Nvcc {
                 cwd,
                 &mut env_vars,
                 &arguments,
-                |_, args| args.contains(&preprocessor_flag),
+                |_, args| !is_nvcc_lang || args.contains(&preprocessor_flag),
                 &self.host_compiler,
                 &output_path,
             )
@@ -1225,6 +1229,7 @@ where
                 }
             }
         {
+            let sccache_no_cache = env_vars.iter().any(|(k, _)| k == "SCCACHE_NO_CACHE");
             let args = dist::osstrings_to_strings(&parsed_args.common_args).unwrap_or_default();
             let cmd = NvccGeneratedSubcommand {
                 exe: exe.clone(),
@@ -1235,7 +1240,7 @@ where
             };
 
             debug_if_trace!(
-                "[{}]: transformed nvcc command: {cmd}",
+                "[{}]: transformed nvcc command: {cmd} (SCCACHE_NO_CACHE={sccache_no_cache})",
                 output_path.display(),
             );
 
