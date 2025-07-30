@@ -445,22 +445,21 @@ const HASH_32_COMMAND_LINE_2_NEWLINE: &[u8] = b"# 32 \"<command-line>\" 2\n";
 const INCBIN_DIRECTIVE: &[u8] = b".incbin";
 
 /// Remember the include files in the preprocessor output if it can be cached.
-/// Returns `false` if preprocessor cache mode should be disabled.
+/// Returns `Ok(None)` if preprocessor cache mode should be disabled.
 #[allow(dead_code)]
 pub fn process_preprocessed_file(
     input_file: &Path,
     cwd: &Path,
     bytes: &mut [u8],
-    included_files: &mut HashMap<PathBuf, String>,
     config: PreprocessorCacheModeConfig,
     time_of_compilation: std::time::SystemTime,
     fs_impl: impl PreprocessorFSAbstraction,
-) -> Result<bool> {
+) -> Result<Option<Vec<PathBuf>>> {
     let mut start = 0;
     let mut hash_start = 0;
     let total_len = bytes.len();
-    let mut digest = Digest::new();
-    let mut normalized_include_paths: HashMap<Vec<u8>, Option<Vec<u8>>> = HashMap::new();
+    let mut included_files = HashMap::new();
+    let mut normalized_include_paths = HashMap::new();
     // There must be at least 7 characters (# 1 "x") left to potentially find an
     // include file path.
     while start < total_len.saturating_sub(7) {
@@ -491,19 +490,18 @@ pub fn process_preprocessed_file(
             // GCC precompiled header:
             || slice[1..].starts_with(PRAGMA_GCC_PCH_PREPROCESS)
             // HP/AIX:
-            || (&slice[1..5] == b"line "))
+            || &slice[1..6] == b"line ")
         && (start == 0 || bytes[start - 1] == b'\n')
         {
             match process_preprocessor_line(
                 input_file,
                 cwd,
-                included_files,
+                &mut included_files,
                 config,
                 time_of_compilation,
                 bytes,
                 start,
                 hash_start,
-                &mut digest,
                 total_len,
                 &mut normalized_include_paths,
                 &fs_impl,
@@ -514,7 +512,7 @@ pub fn process_preprocessed_file(
                 }
                 ControlFlow::Break((s, h, continue_preprocessor_cache_mode)) => {
                     if !continue_preprocessor_cache_mode {
-                        return Ok(false);
+                        return Ok(None);
                     }
                     start = s;
                     hash_start = h;
@@ -533,17 +531,12 @@ pub fn process_preprocessed_file(
             // changes, the hash should change as well, but finding out what file to
             // hash is too hard for sccache, so just bail out.
             debug!("Found potential unsupported .inc bin directive in source code");
-            return Ok(false);
+            return Ok(None);
         } else if slice.starts_with(b"___________") && (start == 0 || bytes[start - 1] == b'\n') {
             // Unfortunately the distcc-pump wrapper outputs standard output lines:
             // __________Using distcc-pump from /usr/bin
             // __________Using # distcc servers in pump mode
             // __________Shutting down distcc-pump include server
-            digest.update(&bytes[hash_start..start]);
-            trace!(
-                "digest update: {:?}",
-                String::from_utf8_lossy(&bytes[hash_start..start])
-            );
             while start < total_len && slice[0] != b'\n' {
                 start += 1;
                 if start < total_len {
@@ -560,13 +553,9 @@ pub fn process_preprocessed_file(
             start += 1;
         }
     }
-    digest.update(&bytes[hash_start..]);
-    trace!(
-        "digest update: {:?}",
-        String::from_utf8_lossy(&bytes[hash_start..])
-    );
-
-    Ok(true)
+    Ok(Some(
+        included_files.drain().map(|(k, _)| k).collect::<Vec<_>>(),
+    ))
 }
 
 /// What to do after handling a preprocessor number line.
@@ -584,7 +573,6 @@ fn process_preprocessor_line(
     bytes: &mut [u8],
     mut start: usize,
     mut hash_start: usize,
-    digest: &mut Digest,
     total_len: usize,
     normalized_include_paths: &mut HashMap<Vec<u8>, Option<Vec<u8>>>,
     fs_impl: &impl PreprocessorFSAbstraction,
@@ -595,11 +583,6 @@ fn process_preprocessor_line(
         if slice.starts_with(HASH_31_COMMAND_LINE_NEWLINE) {
             // Bogus extra line with #31, after the regular #1:
             // Ignore the whole line, and continue parsing.
-            digest.update(&bytes[hash_start..start]);
-            trace!(
-                "digest update: {:?}",
-                String::from_utf8_lossy(&bytes[hash_start..start])
-            );
             while start < hash_start && slice[0] != b'\n' {
                 start += 1;
             }
@@ -609,11 +592,6 @@ fn process_preprocessor_line(
         } else if slice.starts_with(HASH_32_COMMAND_LINE_2_NEWLINE) {
             // Bogus wrong line with #32, instead of regular #1:
             // Replace the line number with the usual one.
-            digest.update(&bytes[hash_start..start]);
-            trace!(
-                "digest update: {:?}",
-                String::from_utf8_lossy(&bytes[hash_start..start])
-            );
             start += 1;
             bytes[start..=start + 2].copy_from_slice(b"# 1");
             hash_start = start;
@@ -636,11 +614,6 @@ fn process_preprocessor_line(
         bail!("Failed to parse included file path");
     }
     // `start` points to the beginning of an include file path
-    digest.update(&bytes[hash_start..start]);
-    trace!(
-        "digest update: {:?}",
-        String::from_utf8_lossy(&bytes[hash_start..start])
-    );
     hash_start = start;
     slice = &bytes[start..];
     while start < total_len && slice[0] != b'"' {
@@ -697,7 +670,6 @@ fn process_preprocessor_line(
         input_file,
         cwd,
         included_files,
-        digest,
         system,
         config,
         time_of_compilation,
@@ -794,7 +766,6 @@ fn remember_include_file(
     input_file: &Path,
     cwd: &Path,
     included_files: &mut HashMap<PathBuf, String>,
-    digest: &mut Digest,
     system: bool,
     config: PreprocessorCacheModeConfig,
     time_of_compilation: std::time::SystemTime,
@@ -803,8 +774,6 @@ fn remember_include_file(
     // TODO if precompiled header.
     if path.len() >= 2 && path[0] == b'<' && path[path.len() - 1] == b'>' {
         // Typically <built-in> or <command-line>.
-        digest.update(path);
-        trace!("digest update: {:?}", String::from_utf8_lossy(path));
         return Ok(true);
     }
 
@@ -813,12 +782,10 @@ fn remember_include_file(
         // Always remember them in prod.
         && cfg!(test)
     {
-        // Don't remember this system header, only hash its path.
-        digest.update(path);
+        // Don't remember this system header.
         return Ok(true);
     }
 
-    let original_path = path;
     // Canonicalize path for comparison; Clang uses ./header.h.
     #[cfg(windows)]
     {
@@ -832,17 +799,8 @@ fn remember_include_file(
             path = &path[2..];
         }
     }
-    let mut path = decode_path(path).context("failed to decode path")?;
-    if path.is_relative() {
-        path = cwd.join(path);
-    }
-    if path != cwd || config.hash_working_directory {
-        digest.update(original_path);
-        trace!(
-            "digest update: {:?}",
-            String::from_utf8_lossy(original_path)
-        );
-    }
+
+    let path = cwd.join(decode_path(path).context("failed to decode path")?);
 
     if included_files.contains_key(&path) {
         // Already known include file
@@ -853,6 +811,7 @@ fn remember_include_file(
         // Don't remember the input file.
         return Ok(true);
     }
+
     let meta = match fs_impl.metadata(&path) {
         Ok(meta) => meta,
         Err(e) => {
@@ -860,10 +819,12 @@ fn remember_include_file(
             return Ok(false);
         }
     };
+
     if meta.is_dir {
         // Ignore directory, typically $PWD.
         return Ok(true);
     }
+
     if !meta.is_file {
         // Device, pipe, socket or other strange creature.
         debug!("Non-regular include file {}", path.display());
@@ -1170,27 +1131,95 @@ mod test {
         let path = path.join("tests/test.c.gcc-13.2.0-preproc");
         let mut bytes = std::fs::read(path).unwrap();
         let original_bytes = bytes.clone();
-        let mut include_files = HashMap::new();
 
-        let config = PreprocessorCacheModeConfig {
-            use_preprocessor_cache_mode: true,
-            skip_system_headers: true,
-            ..Default::default()
-        };
-        let success = process_preprocessed_file(
+        let result = process_preprocessed_file(
             input_file,
             Path::new(""),
             &mut bytes,
-            &mut include_files,
-            config,
+            PreprocessorCacheModeConfig {
+                use_preprocessor_cache_mode: true,
+                skip_system_headers: true,
+                ..Default::default()
+            },
             std::time::SystemTime::now(),
             StandardFsAbstraction,
         )
-        .unwrap();
+        .unwrap_or(None);
+
         assert_eq!(&bytes, &original_bytes);
-        assert!(success);
+
+        assert!(result.is_some());
+
+        let include_files = result.unwrap();
         assert_eq!(include_files.len(), 0);
     }
+
+    // struct YesFs {
+    //     yes: &'static str,
+    // }
+
+    // impl PreprocessorFSAbstraction for YesFs {
+    //     fn metadata(&self, _path: impl AsRef<Path>) -> io::Result<PreprocessorFileMetadata> {
+    //         Ok(PreprocessorFileMetadata {
+    //             is_dir: false,
+    //             is_file: true,
+    //             modified: Some(Timestamp::new(0, 0)),
+    //             ctime_or_creation: None,
+    //         })
+    //     }
+
+    //     fn open(&self, _path: impl AsRef<Path>) -> io::Result<Box<dyn std::io::Read>> {
+    //         use bytes::Buf;
+    //         Ok(Box::new(self.yes.as_bytes().reader()))
+    //     }
+    // }
+
+    // #[test]
+    // fn test_process_preprocessed_file_msvc() {
+    //     env_logger::builder()
+    //         .is_test(true)
+    //         .filter_level(log::LevelFilter::Trace)
+    //         .try_init()
+    //         .ok();
+    //     let input_file = Path::new("tests/test.c");
+    //     let path = Path::new(file!())
+    //         .parent()
+    //         .unwrap()
+    //         .parent()
+    //         .unwrap()
+    //         .parent()
+    //         .unwrap();
+    //     // This should be portable since the only headers present in this
+    //     // output are system headers, which aren't interacted with
+    //     // on the filesystem if configured.
+    //     let path = path.join("tests/msvc.ii");
+    //     let mut bytes = std::fs::read(path).unwrap();
+    //     let original_bytes = bytes.clone();
+
+    //     let result = process_preprocessed_file(
+    //         input_file,
+    //         Path::new(""),
+    //         &mut bytes,
+    //         PreprocessorCacheModeConfig {
+    //             use_preprocessor_cache_mode: true,
+    //             skip_system_headers: true,
+    //             ..Default::default()
+    //         },
+    //         std::time::SystemTime::now(),
+    //         YesFs { yes: "yes" },
+    //     )
+    //     .unwrap_or(None);
+
+    //     assert_eq!(&bytes, &original_bytes);
+
+    //     assert!(result.is_some());
+
+    //     let include_files = result.unwrap();
+
+    //     debug!("include_files: {include_files:?}");
+
+    //     assert_ne!(include_files.len(), 0);
+    // }
 
     /// A filesystem interface that only panics to test that we don't access it.
     struct PanicFs;
@@ -1261,7 +1290,6 @@ mod test {
             &mut bytes,
             0,
             0,
-            &mut Digest::new(),
             total_len,
             &mut HashMap::new(),
             fs_impl,

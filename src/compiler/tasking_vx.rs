@@ -180,6 +180,7 @@ where
     let mut input_arg = None;
     let mut multiple_input = false;
     let mut output_arg = None;
+    let mut dependency_args = vec![];
     let mut preprocessor_args = vec![];
     let mut depfile = None;
 
@@ -212,7 +213,7 @@ where
         }
         let args = match arg.get_data() {
             Some(PassThrough(_)) => &mut common_args,
-            Some(DepFile(_)) => continue,
+            Some(DepFile(_)) => &mut dependency_args,
             Some(PreprocessorArgument(_)) | Some(PreprocessorArgumentPath(_)) => {
                 &mut preprocessor_args
             }
@@ -283,7 +284,7 @@ where
         compilation_flag: "-c".into(),
         depfile,
         outputs,
-        dependency_args: vec![],
+        dependency_args,
         preprocessor_args,
         common_args,
         ..Default::default()

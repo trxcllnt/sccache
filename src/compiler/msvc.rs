@@ -17,8 +17,10 @@ use crate::compiler::c::{
     ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
 };
 use crate::compiler::{
-    clang, gcc, write_temp_file, CCompileCommand, Cacheable, ColorMode, CompileCommand,
-    CompilerArguments, Language, SingleCompileCommand,
+    clang, gcc,
+    preprocessor_cache::{process_preprocessed_file, StandardFsAbstraction},
+    write_temp_file, CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments,
+    Language, SingleCompileCommand,
 };
 use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::util::{encode_path, run_input_output, OsStrExt};
@@ -31,7 +33,6 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::io::AsyncReadExt;
 
 use crate::errors::*;
 
@@ -563,7 +564,10 @@ pub fn parse_arguments(
                     cannot_cache!("output to nul")
                 }
             }
-            Some(DepFile(p)) => depfile = Some(p.clone()),
+            Some(DepFile(p)) => {
+                depfile = Some(p.clone());
+                dependency_args.extend(arg.iter_os_strings());
+            }
             Some(ProgramDatabase(p)) => pdb = Some(p.clone()),
             Some(DebugInfo) => debug_info = true,
             Some(PreprocessorArgument(_))
@@ -728,6 +732,7 @@ pub fn parse_arguments(
     if !compilation {
         return CompilerArguments::NotCompilation;
     }
+
     // Can't cache compilations with multiple inputs.
     if multiple_input {
         cannot_cache!(
@@ -735,6 +740,7 @@ pub fn parse_arguments(
             format!("{:?}", multiple_input_files)
         );
     }
+
     let (input, language) = match input_arg {
         Some(i) => match Language::from_file_name(Path::new(&i)) {
             Some(l) => (i.to_owned(), l),
@@ -743,6 +749,7 @@ pub fn parse_arguments(
         // We can't cache compilation without an input.
         None => cannot_cache!("no input file"),
     };
+
     let mut outputs = HashMap::new();
     match output_arg {
         // If output file name is not given, use default naming rule
@@ -778,6 +785,7 @@ pub fn parse_arguments(
             }
         }
     }
+
     if language == Language::Cxx {
         if let Some(obj) = outputs.get("obj") {
             // MSVC can produce "type library headers"[1], with the extensions "tlh" and "tli".
@@ -813,6 +821,7 @@ pub fn parse_arguments(
             );
         }
     }
+
     // -Fd is not taken into account unless -Zi or -ZI are given
     // Clang is currently unable to generate PDB files
     if debug_info && !is_clang {
@@ -896,12 +905,14 @@ pub fn preprocess_cmd<T>(
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     rewrite_includes_only: bool,
+    generate_dependencies: bool,
     include_line_numbers: bool,
     is_clang: bool,
 ) where
     T: RunCommand,
 {
-    if include_line_numbers {
+    if include_line_numbers || generate_dependencies {
+        // If we should generate dependencies, include line numbers so we can parse out the include paths
         cmd.arg("-E");
     } else {
         cmd.arg("-EP");
@@ -911,6 +922,7 @@ pub fn preprocess_cmd<T>(
         .args(&parsed_args.preprocessor_args)
         .args(&parsed_args.dependency_args)
         .args(&parsed_args.common_args)
+        .args(&parsed_args.arch_args)
         .env_clear()
         .envs(env_vars.to_vec())
         .current_dir(cwd);
@@ -920,11 +932,6 @@ pub fn preprocess_cmd<T>(
             cmd.arg("-showIncludes");
         }
     } else {
-        // cl.exe can product the dep list itself, in a JSON format that some tools will be expecting.
-        if let Some(ref depfile) = parsed_args.depfile {
-            cmd.arg("/sourceDependencies");
-            cmd.arg(depfile);
-        }
         // Windows SDK generates C4668 during preprocessing, but compiles fine.
         // Read for more info: https://github.com/mozilla/sccache/issues/1725
         // And here: https://github.com/mozilla/sccache/issues/2250
@@ -957,6 +964,8 @@ pub async fn preprocess<T>(
 where
     T: CommandCreatorSync,
 {
+    let start_time = std::time::SystemTime::now();
+
     let mut cmd = creator.clone().new_command_sync(executable);
     preprocess_cmd(
         &mut cmd,
@@ -964,39 +973,17 @@ where
         cwd,
         env_vars,
         rewrite_includes_only,
+        generate_dependencies,
         include_line_numbers,
         is_clang,
     );
-
-    let depfile = if generate_dependencies {
-        if let Some(ref depfile) = parsed_args.depfile {
-            Some((cwd.join(depfile), None))
-        } else {
-            let temp = tempfile::Builder::new()
-                .rand_bytes(16)
-                .tempfile()?
-                .into_temp_path();
-            let path = PathBuf::from(temp.as_os_str());
-            if is_clang {
-                cmd.arg("-showIncludes");
-                cmd.arg("-sourceDependencies");
-                cmd.arg(&path);
-            } else {
-                cmd.arg("/sourceDependencies");
-                cmd.arg(&path);
-            }
-            Some((path, Some(temp)))
-        }
-    } else {
-        None
-    };
 
     debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
 
     let mut output = run_input_output(cmd, None).await?;
 
     if is_clang {
-        if let (Some(obj), Some((depfile, _))) = (parsed_args.outputs.get("obj"), &depfile) {
+        if let (Some(obj), Some(depfile)) = (parsed_args.outputs.get("obj"), &parsed_args.depfile) {
             let objfile = &obj.path;
             let f = File::create(cwd.join(depfile))?;
             let mut f = BufWriter::new(f);
@@ -1042,70 +1029,60 @@ where
         }
     }
 
-    if let Some((depfile, _)) = depfile {
-        Ok(PreprocessorOutput::OutputWithDepedencies(
-            output,
-            parse_dependencies(parsed_args, &depfile).await?,
-        ))
+    if generate_dependencies {
+        match parse_dependencies(start_time, parsed_args, cwd, output).await? {
+            (output, Err(err)) => {
+                debug!(
+                    "[{}]: Failed to parse dependencies from preprocessor result: {err:?}",
+                    parsed_args.output_pretty()
+                );
+                Ok(PreprocessorOutput::Output(output))
+            }
+            (output, Ok(dependencies)) => {
+                trace!(
+                    "[{}]: dependencies: [{}]",
+                    parsed_args.output_pretty(),
+                    dependencies
+                        .iter()
+                        .filter_map(|p| p.as_os_str().to_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                Ok(PreprocessorOutput::OutputWithDepedencies(
+                    output,
+                    dependencies,
+                ))
+            }
+        }
     } else {
         Ok(PreprocessorOutput::Output(output))
     }
 }
 
-pub async fn parse_dependencies(args: &ParsedArguments, deps: &Path) -> Result<Vec<PathBuf>> {
-    let mut data = String::new();
-    tokio::fs::File::open(deps)
-        .await?
-        .read_to_string(&mut data)
-        .await?;
-
-    let data = tokio::runtime::Handle::current()
-        .spawn_blocking(move || serde_json::from_str::<serde_json::Value>(&data))
-        .await??;
-
-    let data = &data["Data"];
-    let mods = &data["ImportedModules"];
-    let incs = &data["ImportedHeaderUnits"];
-
-    let dependencies = [
-        &(if let Some(mods) = mods.as_array() {
-            mods.iter()
-                .filter_map(|v| {
-                    let x = &v["Name"];
-                    if x.is_string() {
-                        Some(x.to_string())
-                    } else {
-                        None
-                    }
-                })
-                .map(PathBuf::from)
-                .filter(|path| path != &args.input)
-                .collect::<Vec<_>>()
-        } else {
-            vec![]
-        })[..],
-        &(if let Some(incs) = incs.as_array() {
-            incs.iter()
-                .filter_map(|v| {
-                    let x = &v["Header"];
-                    if x.is_string() {
-                        Some(x.to_string())
-                    } else {
-                        None
-                    }
-                })
-                .map(PathBuf::from)
-                .filter(|path| path != &args.input)
-                .collect::<Vec<_>>()
-        } else {
-            vec![]
-        })[..],
-    ]
-    .concat();
-
-    trace!("[{}]: dependencies={dependencies:?}", args.output_pretty());
-
-    Ok(dependencies)
+pub async fn parse_dependencies(
+    start: std::time::SystemTime,
+    parsed_args: &ParsedArguments,
+    cwd: &Path,
+    mut output: ProcessOutput,
+) -> Result<(ProcessOutput, Result<Vec<PathBuf>>)> {
+    let cwd = cwd.to_owned();
+    let input = cwd.join(&parsed_args.input);
+    Ok(tokio::runtime::Handle::current()
+        .spawn_blocking(move || {
+            match process_preprocessed_file(
+                input.as_path(),
+                cwd.as_path(),
+                &mut output.stdout,
+                Default::default(),
+                start,
+                StandardFsAbstraction,
+            ) {
+                Err(err) => (output, Err(err)),
+                Ok(None) => (output, Ok(vec![])),
+                Ok(Some(deps)) => (output, Ok(deps)),
+            }
+        })
+        .await?)
 }
 
 fn generate_compile_commands(
@@ -2526,7 +2503,16 @@ mod test {
             child: None,
             args: vec![],
         };
-        preprocess_cmd(&mut cmd, &parsed_args, Path::new(""), &[], true, true, true);
+        preprocess_cmd(
+            &mut cmd,
+            &parsed_args,
+            Path::new(""),
+            &[],
+            true,
+            true,
+            true,
+            true,
+        );
         let expected_args = ovec!["-E", "-nologo", "-clang:-frewrite-includes", "--", "foo.c"];
         assert_eq!(cmd.args, expected_args);
     }

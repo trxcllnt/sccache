@@ -2445,20 +2445,13 @@ mod test {
         assert_eq!(Some("foo.c"), a.input.to_str());
         assert_eq!(Language::Cuda, a.language);
         assert_eq!(Some("-c"), a.compilation_flag.to_str());
+        assert_eq!(Some("foo.o.d"), a.depfile.unwrap().to_str());
         assert_map_contains!(
             a.outputs,
             (
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false,
-                    must_be_non_empty: false,
-                }
-            ),
-            (
-                "-MF",
-                ArtifactDescriptor {
-                    path: PathBuf::from("foo.o.d"),
                     optional: false,
                     must_be_non_empty: false,
                 }
@@ -2704,20 +2697,13 @@ mod test {
         assert_eq!(Some("foo.c"), a.input.to_str());
         assert_eq!(Language::Cuda, a.language);
         assert_eq!(Some("-c"), a.compilation_flag.to_str());
+        assert_eq!(Some("foo.o.d"), a.depfile.unwrap().to_str());
         assert_map_contains!(
             a.outputs,
             (
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false,
-                    must_be_non_empty: false,
-                }
-            ),
-            (
-                "-MF",
-                ArtifactDescriptor {
-                    path: PathBuf::from("foo.o.d"),
                     optional: false,
                     must_be_non_empty: false,
                 }
@@ -2749,20 +2735,13 @@ mod test {
         assert_eq!(Some("foo.c"), a.input.to_str());
         assert_eq!(Language::Cuda, a.language);
         assert_eq!(Some("-c"), a.compilation_flag.to_str());
+        assert_eq!(Some("foo.o.d"), a.depfile.unwrap().to_str());
         assert_map_contains!(
             a.outputs,
             (
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false,
-                    must_be_non_empty: false,
-                }
-            ),
-            (
-                "-MF",
-                ArtifactDescriptor {
-                    path: PathBuf::from("foo.o.d"),
                     optional: false,
                     must_be_non_empty: false,
                 }

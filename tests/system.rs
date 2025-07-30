@@ -205,7 +205,12 @@ fn copy_to_tempdir(inputs: &[&str], tempdir: &Path) {
     }
 }
 
-fn test_basic_compile(client: &SccacheClient, compiler: Compiler, tempdir: &Path) {
+fn test_basic_compile(
+    client: &SccacheClient,
+    compiler: Compiler,
+    tempdir: &Path,
+    preprocessor_cache_mode: bool,
+) {
     let Compiler {
         name,
         exe,
@@ -232,6 +237,9 @@ fn test_basic_compile(client: &SccacheClient, compiler: Compiler, tempdir: &Path
     assert_eq!(1, stats.requests_executed);
     assert_eq!(0, stats.cache_hits.all());
     assert_eq!(1, stats.cache_misses.all());
+    if preprocessor_cache_mode {
+        assert_eq!(1, stats.preprocessor_cache_misses.all());
+    }
     assert_eq!(&1, stats.cache_misses.get("C/C++").unwrap());
     let adv_key = adv_key_kind("c", compiler.name);
     assert_eq!(&1, stats.cache_misses.get_adv(&adv_key).unwrap());
@@ -250,6 +258,9 @@ fn test_basic_compile(client: &SccacheClient, compiler: Compiler, tempdir: &Path
     assert_eq!(2, stats.compile_requests);
     assert_eq!(2, stats.requests_executed);
     assert_eq!(1, stats.cache_hits.all());
+    if preprocessor_cache_mode {
+        assert_eq!(1, stats.preprocessor_cache_hits.all());
+    }
     assert_eq!(1, stats.cache_misses.all());
     assert_eq!(&1, stats.cache_hits.get("C/C++").unwrap());
     assert_eq!(&1, stats.cache_misses.get("C/C++").unwrap());
@@ -647,9 +658,14 @@ fn test_gcc_clang_depfile(client: &SccacheClient, compiler: Compiler, tempdir: &
     assert_ne!(first, second);
 }
 
-fn run_sccache_command_tests(client: &SccacheClient, compiler: Compiler, tempdir: &Path) {
+fn run_sccache_command_tests(
+    client: &SccacheClient,
+    compiler: Compiler,
+    tempdir: &Path,
+    preprocessor_cache_mode: bool,
+) {
     if compiler.name != "clang++" {
-        test_basic_compile(client, compiler.clone(), tempdir);
+        test_basic_compile(client, compiler.clone(), tempdir, preprocessor_cache_mode);
     }
     test_compile_with_define(client, compiler.clone(), tempdir);
     if compiler.name == "cl" {
@@ -2802,7 +2818,7 @@ fn test_sccache_command(preprocessor_cache_mode: bool) {
     let (_tempdir, tempdir_path, client) = make_sccache_client(preprocessor_cache_mode);
 
     for compiler in compilers {
-        run_sccache_command_tests(&client, compiler, &tempdir_path);
+        run_sccache_command_tests(&client, compiler, &tempdir_path, preprocessor_cache_mode);
         client.zero_stats();
     }
 }

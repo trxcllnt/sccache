@@ -281,7 +281,7 @@ where
     let mut output_arg = None;
     let mut input_arg = None;
     let mut double_dash_input = false;
-    let mut dep_argument_path = None;
+    let mut depfile = None;
     let mut dep_target = None;
     let mut dep_flag = OsString::from("-MT");
     let mut common_args = vec![];
@@ -379,7 +379,6 @@ where
             }
             Some(Output(p)) => output_arg = Some(p.clone()),
             Some(NeedDepTarget) => {
-                // too_hard_for_preprocessor_cache_mode.push(arg.to_os_string());
                 need_explicit_dep_target = true;
                 if let DepArgumentRequirePath::NotNeeded = need_explicit_dep_argument_path {
                     need_explicit_dep_argument_path = DepArgumentRequirePath::Missing;
@@ -390,7 +389,7 @@ where
                 dep_target = Some(s.clone());
             }
             Some(DepArgumentPath(p)) => {
-                dep_argument_path = Some(p.clone());
+                depfile = Some(p.clone());
                 need_explicit_dep_argument_path = DepArgumentRequirePath::Provided;
             }
             Some(SerializeDiagnostics(path)) => {
@@ -649,7 +648,7 @@ where
     }
     if let DepArgumentRequirePath::Missing = need_explicit_dep_argument_path {
         let dep_path = Path::new(&output).with_extension("d");
-        dep_argument_path = Some(dep_path.clone());
+        depfile = Some(dep_path.clone());
         dependency_args.push(OsString::from("-MF"));
         dependency_args.push(dep_path.into_os_string());
     }
@@ -659,17 +658,6 @@ where
             "dia",
             ArtifactDescriptor {
                 path: path.clone(),
-                optional: false,
-                must_be_non_empty: false,
-            },
-        );
-    }
-
-    if let Some(path) = dep_argument_path {
-        outputs.insert(
-            "-MF",
-            ArtifactDescriptor {
-                path,
                 optional: false,
                 must_be_non_empty: false,
             },
@@ -691,6 +679,7 @@ where
         language,
         compilation_flag,
         outputs,
+        depfile,
         dependency_args,
         preprocessor_args,
         common_args,
@@ -1610,6 +1599,7 @@ mod test {
             preprocessor_args,
             msvc_show_includes,
             common_args,
+            depfile,
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
@@ -1617,20 +1607,13 @@ mod test {
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
+        assert_eq!(Some("foo.o.d"), depfile.unwrap().to_str());
         assert_map_contains!(
             outputs,
             (
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false,
-                    must_be_non_empty: false,
-                }
-            ),
-            (
-                "-MF",
-                ArtifactDescriptor {
-                    path: PathBuf::from("foo.o.d"),
                     optional: false,
                     must_be_non_empty: false,
                 }
@@ -1712,6 +1695,7 @@ mod test {
             dependency_args,
             msvc_show_includes,
             common_args,
+            depfile,
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
@@ -1719,20 +1703,13 @@ mod test {
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
+        assert_eq!(Some("foo.o.d"), depfile.unwrap().to_str());
         assert_map_contains!(
             outputs,
             (
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false,
-                    must_be_non_empty: false,
-                }
-            ),
-            (
-                "-MF",
-                ArtifactDescriptor {
-                    path: PathBuf::from("foo.o.d"),
                     optional: false,
                     must_be_non_empty: false,
                 }
@@ -1756,6 +1733,7 @@ mod test {
             preprocessor_args,
             msvc_show_includes,
             common_args,
+            depfile,
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
@@ -1763,20 +1741,13 @@ mod test {
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
+        assert_eq!(Some("foo.o.d"), depfile.unwrap().to_str());
         assert_map_contains!(
             outputs,
             (
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false,
-                    must_be_non_empty: false,
-                }
-            ),
-            (
-                "-MF",
-                ArtifactDescriptor {
-                    path: PathBuf::from("foo.o.d"),
                     optional: false,
                     must_be_non_empty: false,
                 }
@@ -1804,6 +1775,7 @@ mod test {
             preprocessor_args,
             msvc_show_includes,
             common_args,
+            depfile,
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
@@ -1811,20 +1783,13 @@ mod test {
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
+        assert_eq!(Some("foo.o.d"), depfile.unwrap().to_str());
         assert_map_contains!(
             outputs,
             (
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false,
-                    must_be_non_empty: false,
-                }
-            ),
-            (
-                "-MF",
-                ArtifactDescriptor {
-                    path: PathBuf::from("foo.o.d"),
                     optional: false,
                     must_be_non_empty: false,
                 }
@@ -2041,6 +2006,7 @@ mod test {
             dependency_args,
             msvc_show_includes,
             common_args,
+            depfile,
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
@@ -2048,20 +2014,13 @@ mod test {
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
+        assert_eq!(Some("foo.o.d"), depfile.unwrap().to_str());
         assert_map_contains!(
             outputs,
             (
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
-                    optional: false,
-                    must_be_non_empty: false,
-                }
-            ),
-            (
-                "-MF",
-                ArtifactDescriptor {
-                    path: PathBuf::from("foo.o.d"),
                     optional: false,
                     must_be_non_empty: false,
                 }
@@ -2085,6 +2044,7 @@ mod test {
             dependency_args,
             msvc_show_includes,
             common_args,
+            depfile,
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
@@ -2092,20 +2052,13 @@ mod test {
         };
         assert_eq!(Some("foo/bar.c"), input.to_str());
         assert_eq!(Language::C, language);
+        assert_eq!(Some("foo/bar.d"), depfile.unwrap().to_str());
         assert_map_contains!(
             outputs,
             (
                 "obj",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo/bar.o"),
-                    optional: false,
-                    must_be_non_empty: false,
-                }
-            ),
-            (
-                "-MF",
-                ArtifactDescriptor {
-                    path: PathBuf::from("foo/bar.d"),
                     optional: false,
                     must_be_non_empty: false,
                 }

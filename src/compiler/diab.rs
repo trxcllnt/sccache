@@ -196,6 +196,7 @@ where
     let mut output_arg = None;
     let mut preprocessor_args = vec![];
     let mut dependency_args = vec![];
+    let mut depfile = None;
 
     // Custom iterator to expand `@` arguments which stand for reading a file
     // and interpreting it as a list of more arguments.
@@ -228,7 +229,8 @@ where
                 cannot_cache!(arg.flag_str().expect("Can't be Argument::Raw/UnknownFlag",))
             }
 
-            Some(DepArgument(_)) | Some(DepArgumentFlag) | Some(DepArgumentPath(_)) => {}
+            Some(DepArgument(_)) | Some(DepArgumentFlag) => {}
+            Some(DepArgumentPath(p)) => depfile = Some(p.clone()),
 
             Some(DoCompilation) => {
                 compilation = true;
@@ -310,7 +312,7 @@ where
         input: input.into(),
         language,
         compilation_flag,
-        depfile: None,
+        depfile,
         outputs,
         dependency_args,
         preprocessor_args,
@@ -720,6 +722,7 @@ mod test {
             dependency_args,
             msvc_show_includes,
             common_args,
+            depfile,
             ..
         } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
@@ -727,6 +730,7 @@ mod test {
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
+        assert_eq!(Some("bar"), depfile.unwrap().to_str());
         assert_map_contains!(
             outputs,
             (

@@ -510,9 +510,6 @@ pub struct PreprocessorCacheModeConfig {
     /// If true, preprocessor cache mode will not cache system headers, only
     /// add them to the hash.
     pub skip_system_headers: bool,
-    /// If true (default), will add the current working directory in the hash to
-    /// distinguish two compilations from different directories.
-    pub hash_working_directory: bool,
 }
 
 impl Default for PreprocessorCacheModeConfig {
@@ -523,7 +520,6 @@ impl Default for PreprocessorCacheModeConfig {
             use_ctime_for_stat: true,
             ignore_time_macros: false,
             skip_system_headers: false,
-            hash_working_directory: true,
         }
     }
 }

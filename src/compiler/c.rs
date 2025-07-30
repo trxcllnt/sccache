@@ -443,17 +443,18 @@ where
             return Ok(PreprocessorCacheLookup::Disabled);
         }
 
-        // Create an argument vector containing both preprocessor and arch args, to
-        // use in creating a hash key
-        let mut preprocessor_and_arch_args = parsed_args.preprocessor_args.clone();
-        preprocessor_and_arch_args.extend(parsed_args.arch_args.to_vec());
+        // Create an argument vector containing all the preprocessor args to use in creating a hash key
+        let mut preprocessor_args = parsed_args.preprocessor_args.clone();
+        // If the dependency args change, we need to re-run the preprocessor to generate them
+        preprocessor_args.extend(parsed_args.dependency_args.to_vec());
         // common_args is used in preprocessing too
-        preprocessor_and_arch_args.extend(parsed_args.common_args.to_vec());
+        preprocessor_args.extend(parsed_args.common_args.to_vec());
+        preprocessor_args.extend(parsed_args.arch_args.to_vec());
 
         let preprocessor_key = preprocessor_cache_entry_hash_key(
             executable_digest,
             parsed_args.language,
-            &preprocessor_and_arch_args,
+            &preprocessor_args,
             extra_hashes,
             env_vars,
             &cwd.join(&parsed_args.input),
@@ -717,8 +718,8 @@ where
 
                     let included_files = match included_files {
                         Ok(included_files) => included_files,
-                        Err(_) => {
-                            debug!("[{out_pretty}]: Disabling preprocessor cache mode");
+                        Err(err) => {
+                            debug!("[{out_pretty}]: Disabling preprocessor cache mode: {err}");
                             preprocessor_cache_lookup = PreprocessorCacheLookup::Disabled;
                             HashMap::new()
                         }
