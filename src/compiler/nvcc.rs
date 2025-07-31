@@ -211,7 +211,7 @@ impl CCompilerImpl for Nvcc {
             _ => Err(anyhow!("PCH not supported by nvcc")),
         }?;
 
-        let (arguments, output_path, _, _) = parsed_to_nvcc_args(cwd, parsed_args);
+        let (arguments, output_path, _, num_parallel) = parsed_to_nvcc_args(cwd, parsed_args);
 
         // Chain dependency generation and the preprocessor command to emulate a `proper` front end
         if !parsed_args.dependency_args.is_empty() {
@@ -287,7 +287,7 @@ impl CCompilerImpl for Nvcc {
                 Language::Cuda | Language::CudaFE | Language::Ptx | Language::Cubin
             );
 
-            let preprocessor_hashes = select_nvcc_subcommands(
+            let command_groups = select_nvcc_subcommands(
                 creator,
                 executable,
                 cwd,
@@ -300,150 +300,151 @@ impl CCompilerImpl for Nvcc {
             .await?
             .into_iter()
             .map(|(_, exe, args)| (exe, dist::strings_to_osstrings(&args)))
-            .map(|(exe, args)| async {
-
-                use crate::compiler::c::CCompiler;
-                use crate::compiler::clang::Clang;
-                use crate::compiler::gcc::Gcc;
-                use crate::compiler::msvc::Msvc;
-                use crate::compiler::nvhpc::Nvhpc;
-
-                #[allow(clippy::redundant_locals)]
-                let exe = exe;
-                let mut args = args;
-
-                let compiler = service.compiler_info(&exe, cwd, &args, &env_vars).await?;
-                // Insane hack, see below
-                let compiler = compiler.into_any();
-
-                // Fix the args so they look like a compilation to `compiler.parse_args`
-
-                // Rename -Fi to -Fo (MSVC)
-                if let Some(idx) = args.iter().position(|x| x.starts_with("-Fi")) {
-                    args[idx] = "-Fo".into();
-                }
-                if let Some(idx) = args.iter().position(|x| x == "-P") {
-                    // Replace -P -> -c (MSVC)
-                    args[idx] = "-c".into();
-                } else if let Some(idx) = args.iter().position(|x| x == "-E") {
-                    // Replace -E -> -c (GCC/Clang/NVHPC)
-                    args[idx] = "-c".into();
-                } else if !args.contains(&OsString::from("-c")) {
-                    // Else add -c
-                    args.push("-c".into());
-                }
-
-                macro_rules! parse_args_and_preprocess {
-                    ($( $klass:ident ),* ) => {{
-                        futures::future::err(anyhow!(""))
-                        $(
-                            .or_else(|_| async {
-                                if let Some(c) = compiler.downcast_ref::<CCompiler<$klass>>().map(|c| c.compiler()) {
-                                    let parsed_arguments = match c.parse_arguments(&args, cwd, &env_vars) {
-                                        CompilerArguments::Ok(args) => args,
-                                        err => bail!("Failed to parse arguments for host compiler {exe:?}: {err:?}"),
-                                    };
-                                    c.preprocess(
-                                        service,
-                                        creator,
-                                        &exe,
-                                        &parsed_arguments,
-                                        cwd,
-                                        &env_vars,
-                                        rewrite_includes_only,
-                                        generate_dependencies,
-                                        include_line_numbers,
-                                    )
-                                    .await
-                                } else {
-                                    Err(anyhow!("Failed to preprocess for host compiler {exe:?}"))
-                                }
-                            })
-                        )*
-                    }}
-                }
-
-                // This is a super wild hack, but it works.
-                //
-                // Downcast the detected Box<Compiler<_>> into one of its concrete implementations
-                // so we can call its `parse_arguments()` and `preprocess()` functions directly.
-                //
-                // The Compiler<_> trait is implemented for both C and Rust. It doesn't provide
-                // a function to preprocess the source code, because that isn't how Rust works.
-                // Instead, it parses valid arguments into a CompilerHasher<_>, which provides
-                // a function to generate a hash key *somehow*.
-                //
-                // Both CCompiler and CCompilerHasher are generic over a concrete CCompilerImpl
-                // type, because CCompilerImpl has async functions with generic parameters and
-                // can't be safely made into a trait object (i.e. `CCompiler<dyn CCompilerImpl>`
-                // doens't work).
-                //
-                // To get around this, we attempt to downcast Box<Compiler<_>> to each of the
-                // known concrete host compiler implementations and use the one that succeeds,
-                // `Box<CCompiler<Gcc>> || Box<CCompiler<Clang>> || Box<CCompiler<Msvc>` etc.
-                let output = parse_args_and_preprocess!(Gcc, Clang, Nvhpc, Msvc).await?;
-
-                // Hash the output
-                let (hash, deps) = match output {
-                    PreprocessorOutput::File(file) => {
-                        (Digest::file(file.path()).await?, None)
-                    }
-                    PreprocessorOutput::Output(res) => {
-                        (Digest::reader(futures::stream::iter([Ok(res.stdout)]).into_async_read()).await?, None)
-                    }
-                    PreprocessorOutput::OutputWithDepedencies(res, deps) => {
-                        (Digest::reader(futures::stream::iter([Ok(res.stdout)]).into_async_read()).await?, Some(deps))
-                    }
-                };
-
-                Ok((
-                    ProcessOutput::new(0, hash.into_bytes(), vec![]),
-                    deps
-                ))
-            })
-            .map(|fut| async { fut.await.unwrap_or_else(|e| (error_to_output(e), None)) });
-
-            let parallel = env_vars
-                .iter()
-                .any(|(k, _)| k == "SCCACHE_NVCC_PREPROCESS_PARALLEL");
-
-            let (result, deps) = if parallel {
-                futures::future::join_all(preprocessor_hashes).await
-            } else {
-                futures::stream::iter(preprocessor_hashes)
-                    .then(|cmd| cmd)
-                    .collect::<Vec<_>>()
-                    .await
-            }
+            .chunks(num_parallel)
             .into_iter()
-            .fold(
-                (ProcessOutput::default(), None),
-                |(lhs_output, lhs_deps), (rhs_output, rhs_deps)| {
-                    match (lhs_output.success(), rhs_output.success()) {
-                        // Propagate errors
-                        (false, true) => (lhs_output, lhs_deps),
-                        (true, false) => (rhs_output, rhs_deps),
-                        _ => {
-                            let output = aggregate_output(lhs_output, rhs_output);
-                            let dependencies =
-                                [lhs_deps.unwrap_or_default(), rhs_deps.unwrap_or_default()]
-                                    .concat();
-                            (
-                                output,
-                                if dependencies.is_empty() {
-                                    None
-                                } else {
-                                    Some(dependencies)
-                                },
-                            )
+            .map(|chunk| chunk.collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+
+            let (preprocessor_outputs, dependencies) = futures::stream::iter(command_groups)
+                .then(|chunk| {
+                    futures::future::join_all(chunk.into_iter().map(|(exe, args)| async {
+
+                        use crate::compiler::c::CCompiler;
+                        use crate::compiler::clang::Clang;
+                        use crate::compiler::gcc::Gcc;
+                        use crate::compiler::msvc::Msvc;
+                        use crate::compiler::nvhpc::Nvhpc;
+
+                        #[allow(clippy::redundant_locals)]
+                        let exe = exe;
+                        let mut args = args;
+
+                        let compiler = service.compiler_info(&exe, cwd, &args, &env_vars).await?;
+                        // Insane hack, see below
+                        let compiler = compiler.into_any();
+
+                        // Fix the args so they look like a compilation to `compiler.parse_args`
+
+                        // Rename -Fi to -Fo (MSVC)
+                        if let Some(idx) = args.iter().position(|x| x.starts_with("-Fi")) {
+                            args[idx] = "-Fo".into();
                         }
-                    }
-                },
-            );
+                        if let Some(idx) = args.iter().position(|x| x == "-P") {
+                            // Replace -P -> -c (MSVC)
+                            args[idx] = "-c".into();
+                        } else if let Some(idx) = args.iter().position(|x| x == "-E") {
+                            // Replace -E -> -c (GCC/Clang/NVHPC)
+                            args[idx] = "-c".into();
+                        } else if !args.contains(&OsString::from("-c")) {
+                            // Else add -c
+                            args.push("-c".into());
+                        }
 
-            let result: Result<ProcessOutput> = result.into();
+                        macro_rules! parse_args_and_preprocess {
+                            ($( $klass:ident ),* ) => {{
+                                futures::future::err(anyhow!("Failed to preprocess for host compiler {exe:?}"))
+                                $(
+                                    .or_else(|err| async {
+                                        if let Some(c) = compiler.downcast_ref::<CCompiler<$klass>>().map(|c| c.compiler()) {
+                                            let parsed_arguments = match c.parse_arguments(&args, cwd, &env_vars) {
+                                                CompilerArguments::Ok(args) => args,
+                                                err => bail!("Failed to parse arguments: {exe:?} {args:?}\n{err:?}"),
+                                            };
+                                            c.preprocess(
+                                                &service,
+                                                creator,
+                                                &exe,
+                                                &parsed_arguments,
+                                                cwd,
+                                                &env_vars,
+                                                rewrite_includes_only,
+                                                generate_dependencies,
+                                                include_line_numbers,
+                                            )
+                                            .await
+                                        } else {
+                                            Err(err)
+                                        }
+                                    })
+                                )*
+                            }}
+                        }
 
-            result.map(|output| (output, deps))?
+                        // This is a super wild hack, but it works.
+                        //
+                        // Downcast the detected Box<Compiler<_>> into one of its concrete implementations
+                        // so we can call its `parse_arguments()` and `preprocess()` functions directly.
+                        //
+                        // The Compiler<_> trait is implemented for both C and Rust. It doesn't provide
+                        // a function to preprocess the source code, because that isn't how Rust works.
+                        // Instead, it parses valid arguments into a CompilerHasher<_>, which provides
+                        // a function to generate a hash key *somehow*.
+                        //
+                        // Both CCompiler and CCompilerHasher are generic over a concrete CCompilerImpl
+                        // type, because CCompilerImpl has async functions with generic parameters and
+                        // can't be safely made into a trait object (i.e. `CCompiler<dyn CCompilerImpl>`
+                        // doens't work).
+                        //
+                        // To get around this, we attempt to downcast Box<Compiler<_>> to each of the
+                        // known concrete host compiler implementations and use the one that succeeds,
+                        // `Box<CCompiler<Gcc>> || Box<CCompiler<Clang>> || Box<CCompiler<Msvc>` etc.
+                        let output = parse_args_and_preprocess!(Gcc, Clang, Nvhpc, Msvc)
+                            .await
+                            .map_err(|err| {
+                                debug!("[{}]: {err:?}", output_path.display());
+                                err
+                            })?;
+
+                        // Hash the output
+                        let (hash, deps) = match output {
+                            PreprocessorOutput::File(file) => {
+                                (Digest::file(file.path()).await?, None)
+                            }
+                            PreprocessorOutput::Output(res) => {
+                                (Digest::reader(futures::stream::iter([Ok(res.stdout)]).into_async_read()).await?, None)
+                            }
+                            PreprocessorOutput::OutputWithDepedencies(res, deps) => {
+                                (Digest::reader(futures::stream::iter([Ok(res.stdout)]).into_async_read()).await?, Some(deps))
+                            }
+                        };
+
+                        Ok((
+                            ProcessOutput::new(0, hash.into_bytes(), vec![]),
+                            deps
+                        ))
+                    })
+                    .map(|fut| async { fut.await.unwrap_or_else(|e| (error_to_output(e), None)) }))
+                })
+                .flat_map(futures::stream::iter)
+                .fold(
+                    (ProcessOutput::default(), None),
+                    |(lhs_output, lhs_dependencies), (rhs_output, rhs_dependencies)| async {
+                        match (lhs_output.success(), rhs_output.success()) {
+                            // Propagate errors
+                            (false, true) => (lhs_output, lhs_dependencies),
+                            (true, false) => (rhs_output, rhs_dependencies),
+                            _ => {
+                                let output = aggregate_output(lhs_output, rhs_output);
+                                let dependencies =
+                                    [lhs_dependencies.unwrap_or_default(), rhs_dependencies.unwrap_or_default()]
+                                        .concat();
+                                (
+                                    output,
+                                    if dependencies.is_empty() {
+                                        None
+                                    } else {
+                                        Some(dependencies)
+                                    },
+                                )
+                            }
+                        }
+                    },
+                )
+                .await;
+
+            let preprocessor_results: Result<ProcessOutput> = preprocessor_outputs.into();
+
+            preprocessor_results.map(|output| (output, dependencies))?
         };
 
         if let Some(dependencies) = dependencies {
