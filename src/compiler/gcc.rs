@@ -411,19 +411,12 @@ where
             | Some(UnhashedFlag)
             | Some(Unhashed(_)) => {}
             Some(Language(lang)) => {
-                language = match lang.to_string_lossy().as_ref() {
-                    "c" => Some(Language::C),
-                    "c-header" => Some(Language::CHeader),
-                    "c++" => Some(Language::Cxx),
-                    "c++-header" => Some(Language::CxxHeader),
-                    "objective-c" => Some(Language::ObjectiveC),
-                    "objective-c++" => Some(Language::ObjectiveCxx),
-                    "objective-c++-header" => Some(Language::ObjectiveCxxHeader),
-                    "cu" => Some(Language::Cuda),
-                    "rs" => Some(Language::Rust),
-                    "cuda" => Some(Language::Cuda),
-                    "hip" => Some(Language::Hip),
-                    _ => cannot_cache!("-x"),
+                language = match lang
+                    .to_str()
+                    .and_then(|lang| Language::from_compiler_str(kind.clone().into(), lang))
+                {
+                    Some(language) => Some(language),
+                    None => cannot_cache!("-x", lang.to_string_lossy().to_string()),
                 };
             }
             Some(Arch(arch)) => {

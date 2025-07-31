@@ -313,6 +313,46 @@ impl Language {
         }
     }
 
+    pub fn from_compiler_str(kind: CompilerKind, lang: &str) -> Option<Self> {
+        if lang == "rs" {
+            return Some(Language::Rust);
+        }
+        match kind {
+            CompilerKind::C(CCompilerKind::Nvhpc) => {
+                // -x=c|cpp|c++|i|cpp-output|asm|assembler|ASM|assembler-with-cpp|none
+                //     Specify the language for any following input files, instead of
+                //     letting the compiler choose based on suffix. Turn off with -x none
+                match lang {
+                    "c" => Some(Language::C),
+                    "c++" | "cpp" => Some(Language::Cxx),
+                    "objective-c" => Some(Language::ObjectiveC),
+                    "objective-c++" => Some(Language::ObjectiveCxx),
+                    _ => None, // Let the compiler decide
+                }
+            }
+            _ => match lang {
+                "c" => Some(Language::C),
+                "c++" => Some(Language::Cxx),
+                "c-header" => Some(Language::CHeader),
+                "c++-header" => Some(Language::CxxHeader),
+                "objective-c" => Some(Language::ObjectiveC),
+                "objective-c++" => Some(Language::ObjectiveCxx),
+                "objective-c++-header" => Some(Language::ObjectiveCxxHeader),
+                "cuda" => match kind {
+                    CompilerKind::C(CCompilerKind::Clang) => Some(Language::Cuda),
+                    _ => None, // Let the compiler decide
+                },
+                "cu" => match kind {
+                    CompilerKind::C(CCompilerKind::Clang)
+                    | CompilerKind::C(CCompilerKind::Nvcc) => Some(Language::Cuda),
+                    _ => None, // Let the compiler decide
+                },
+                "hip" => Some(Language::Hip),
+                _ => None, // Let the compiler decide
+            },
+        }
+    }
+
     pub fn as_compiler_str(&self, kind: CompilerKind) -> Option<&'static str> {
         match kind {
             CompilerKind::C(CCompilerKind::Nvhpc) => {
