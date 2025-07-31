@@ -778,10 +778,13 @@ where
                 ))
             }
             _ => {
+                let service = self.sccache_service;
                 let cache_lookup = CacheLookup::new(&self, start, timeout, storage);
-                let cache_lookup = cache_lookup.into_result();
+                service.stats.lock().await.increment_pending_cache_lookups();
+                let cache_lookup = cache_lookup.into_result().await;
+                service.stats.lock().await.decrement_pending_cache_lookups();
                 let compile = self.into_compile();
-                Ok((cache_lookup.await?, compile?))
+                Ok((cache_lookup?, compile?))
             }
         }
     }
