@@ -13,20 +13,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::mock_command::{CommandCreatorSync, RunCommand};
-use crate::util::run_input_output;
-use crate::{
-    compiler::{
-        args::*,
-        c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput},
-        gcc::{self, ArgData::*},
-        CCompileCommand, Cacheable, CompileCommand, CompilerArguments, Language,
-    },
-    debug_if_trace,
+use crate::compiler::{
+    args::*,
+    c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput},
+    gcc::{self, ArgData::*},
+    CCompileCommand, Cacheable, CompileCommand, CompilerArguments,
 };
+use crate::mock_command::CommandCreatorSync;
 use crate::{counted_array, dist};
 use async_trait::async_trait;
-use itertools::Itertools;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -82,75 +77,65 @@ impl CCompilerImpl for Nvhpc {
     where
         T: CommandCreatorSync,
     {
-        let language = match parsed_args.language {
-            Language::C => Ok("c"),
-            Language::Cxx => Ok("c++"),
-            Language::ObjectiveC => Ok("objective-c"),
-            Language::ObjectiveCxx => Ok("objective-c++"),
-            Language::Cuda => Err(anyhow!("CUDA compilation not supported by nvhpc")),
-            _ => Err(anyhow!("PCH not supported by nvhpc")),
-        }?;
-
-        // Need to chain the dependency generation and the preprocessor
-        // to emulate a `proper` front end
-        if !parsed_args.dependency_args.is_empty() {
-            run_input_output(
-                {
-                    // NVHPC doesn't support generating both the dependency information
-                    // and the preprocessor output at the same time. So if we have
-                    // need for both, we need separate compiler invocations
-                    let mut dependency_cmd = creator.clone().new_command_sync(executable);
-                    dependency_cmd
-                        .current_dir(cwd)
-                        .env_clear()
-                        .envs(env_vars.to_vec())
-                        .args(&parsed_args.preprocessor_args)
-                        .args(&parsed_args.common_args)
-                        .arg("-x")
-                        .arg(language)
-                        .args(
-                            &parsed_args
-                                .dependency_args
-                                .iter()
-                                .map(|arg| match arg.to_str().unwrap_or_default() {
-                                    "-MD" | "--dependencies_to_file" => "-M",
-                                    "-MMD" | "--dependencies_to_file_quoted_only" => "-MM",
-                                    arg => arg,
-                                })
-                                // protect against duplicate -M and -MM flags after transform
-                                .unique()
-                                .collect::<Vec<_>>(),
-                        )
-                        .arg(&parsed_args.input);
-                    debug_if_trace!(
-                        "[{}]: dependencies command: {dependency_cmd}",
-                        parsed_args.output_pretty()
-                    );
-                    dependency_cmd
-                },
-                None,
-            )
-            .await?;
-        }
-
         let ignorable_whitespace_flags = if include_line_numbers {
             vec![]
         } else {
             vec!["-P".to_string()]
         };
 
+        // Need to chain the dependency generation and the preprocessor to emulate a `proper` front end
+        let dependencies = if generate_dependencies || !parsed_args.dependency_args.is_empty() {
+            match gcc::preprocess(
+                creator,
+                executable,
+                parsed_args,
+                cwd,
+                env_vars,
+                self.kind(),
+                rewrite_includes_only,
+                generate_dependencies,
+                &ignorable_whitespace_flags,
+            )
+            .await?
+            {
+                PreprocessorOutput::OutputWithDepedencies(_, dependencies) => Some(dependencies),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         gcc::preprocess(
             creator,
             executable,
-            parsed_args,
+            // nvc++ only preprocesses when there's no dependency flags
+            &ParsedArguments {
+                dependency_args: vec![],
+                ..parsed_args.clone()
+            },
             cwd,
             env_vars,
             self.kind(),
             rewrite_includes_only,
-            generate_dependencies,
-            ignorable_whitespace_flags,
+            false,
+            &ignorable_whitespace_flags,
         )
         .await
+        .map(|res| {
+            if let PreprocessorOutput::File(_) = res {
+                return res;
+            }
+            let out = match res {
+                PreprocessorOutput::Output(out)
+                | PreprocessorOutput::OutputWithDepedencies(out, _) => out,
+                _ => unreachable!(),
+            };
+            if let Some(deps) = dependencies {
+                PreprocessorOutput::OutputWithDepedencies(out, deps)
+            } else {
+                PreprocessorOutput::Output(out)
+            }
+        })
     }
 
     fn generate_compile_commands<T>(
@@ -190,6 +175,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("--gcc-toolchain", OsString, CanBeSeparated('='), PassThrough),
     take_arg!("--include-path", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
     take_arg!("--linker-options", OsString, CanBeSeparated, PassThrough),
+    take_arg!("--preinclude", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
     take_arg!("--system-include-path", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
 
     take_arg!("-Mconcur", OsString, CanBeSeparated('='), PassThrough),
@@ -223,7 +209,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
 mod test {
     use super::*;
     use crate::compiler::c::ArtifactDescriptor;
-    use crate::compiler::*;
+    use crate::compiler::{Language, *};
 
     fn parse_arguments_(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();

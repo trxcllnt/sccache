@@ -142,7 +142,7 @@ impl CCompilerImpl for Clang {
             self.kind(),
             rewrite_includes_only,
             generate_dependencies,
-            ignorable_whitespace_flags,
+            &ignorable_whitespace_flags,
         )
         .await
     }

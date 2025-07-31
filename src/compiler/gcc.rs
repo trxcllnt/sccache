@@ -87,6 +87,7 @@ impl CCompilerImpl for Gcc {
         } else {
             vec!["-P".to_string()]
         };
+
         preprocess(
             creator,
             executable,
@@ -96,7 +97,7 @@ impl CCompilerImpl for Gcc {
             self.kind(),
             rewrite_includes_only,
             generate_dependencies,
-            ignorable_whitespace_flags,
+            &ignorable_whitespace_flags,
         )
         .await
     }
@@ -296,6 +297,7 @@ where
     let mut pedantic_flag = false;
     let mut language_extensions = true; // by default, GCC allows extensions
     let mut split_dwarf = false;
+    let mut depfile_is_system_only = false;
     let mut need_explicit_dep_target = false;
     enum DepArgumentRequirePath {
         NotNeeded,
@@ -382,6 +384,10 @@ where
                 need_explicit_dep_target = true;
                 if let DepArgumentRequirePath::NotNeeded = need_explicit_dep_argument_path {
                     need_explicit_dep_argument_path = DepArgumentRequirePath::Missing;
+                }
+                if matches!(arg.flag_str(), Some("-MMD")) {
+                    depfile_is_system_only = true;
+                    too_hard_for_preprocessor_cache_mode.extend(arg.iter_os_strings());
                 }
             }
             Some(DepTarget(s)) => {
@@ -653,7 +659,7 @@ where
         dependency_args.push(dep_path.into_os_string());
     }
 
-    if let Some(ref p) = depfile {
+    if let Some(p) = depfile.as_ref().filter(|_| !depfile_is_system_only) {
         outputs.insert(
             "dep",
             ArtifactDescriptor {
@@ -713,7 +719,7 @@ fn preprocess_cmd<T>(
     env_vars: &[(OsString, OsString)],
     kind: &CCompilerKind,
     rewrite_includes_only: bool,
-    ignorable_whitespace_flags: Vec<String>,
+    ignorable_whitespace_flags: &[String],
 ) where
     T: RunCommand,
 {
@@ -722,7 +728,7 @@ fn preprocess_cmd<T>(
     if let Some(lang) = parsed_args.language.as_compiler_str(kind.into()) {
         cmd.arg("-x").arg(lang);
     }
-    cmd.arg("-E").args(&ignorable_whitespace_flags);
+    cmd.arg("-E").args(ignorable_whitespace_flags);
     if rewrite_includes_only {
         if parsed_args.suppress_rewrite_includes_only {
             trace!(
@@ -794,7 +800,7 @@ pub async fn preprocess<T>(
     kind: CCompilerKind,
     rewrite_includes_only: bool,
     generate_dependencies: bool,
-    ignorable_whitespace_flags: Vec<String>,
+    ignorable_whitespace_flags: &[String],
 ) -> Result<PreprocessorOutput>
 where
     T: CommandCreatorSync,
@@ -1900,7 +1906,7 @@ mod test {
                 &[],
                 &CCompilerKind::Gcc,
                 true,
-                vec![],
+                &[],
             );
             // make sure the architectures were rewritten to prepocessor defines
             let expected_args = ovec![
@@ -1934,7 +1940,7 @@ mod test {
             &[],
             &CCompilerKind::Gcc,
             true,
-            vec![],
+            &[],
         );
         // make sure the architectures were rewritten to prepocessor defines
         let expected_args = ovec![
@@ -1967,7 +1973,7 @@ mod test {
             &[],
             &CCompilerKind::Clang,
             true,
-            vec![],
+            &[],
         );
         let expected_args = ovec!["-x", "c", "-E", "-frewrite-includes", "--", "foo.c"];
         assert_eq!(cmd.args, expected_args);
@@ -1991,7 +1997,7 @@ mod test {
             &[],
             &CCompilerKind::Gcc,
             true,
-            vec![],
+            &[],
         );
         // disable with extensions enabled
         assert!(!cmd.args.contains(&"-fdirectives-only".into()));
@@ -2015,7 +2021,7 @@ mod test {
             &[],
             &CCompilerKind::Gcc,
             true,
-            vec![],
+            &[],
         );
         // no reason to disable it with no extensions enabled
         assert!(cmd.args.contains(&"-fdirectives-only".into()));
@@ -2039,7 +2045,7 @@ mod test {
             &[],
             &CCompilerKind::Gcc,
             true,
-            vec![],
+            &[],
         );
         // disable with extensions enabled
         assert!(!cmd.args.contains(&"-fdirectives-only".into()));
@@ -2116,14 +2122,6 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo/bar.o"),
-                    optional: false,
-                    must_be_non_empty: false,
-                }
-            ),
-            (
-                "dep",
-                ArtifactDescriptor {
-                    path: "foo/bar.d".into(),
                     optional: false,
                     must_be_non_empty: false,
                 }
@@ -2586,7 +2584,7 @@ mod test {
             &[],
             &CCompilerKind::Gcc,
             true,
-            vec![],
+            &[],
         );
         assert!(cmd.args.contains(&"-x".into()) && cmd.args.contains(&"c++-header".into()));
     }
@@ -2609,7 +2607,7 @@ mod test {
             &[],
             &CCompilerKind::Gcc,
             true,
-            vec![],
+            &[],
         );
         assert!(cmd.args.contains(&"-x".into()) && cmd.args.contains(&"c++-header".into()));
     }
@@ -2632,7 +2630,7 @@ mod test {
             &[],
             &CCompilerKind::Gcc,
             true,
-            vec![],
+            &[],
         );
         assert!(!cmd.args.contains(&"-x".into()));
     }
