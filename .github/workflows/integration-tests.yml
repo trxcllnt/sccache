@@ -641,6 +641,7 @@ jobs:
       - name: Output
         run: |
           ${SCCACHE_PATH} --show-adv-stats
+
       - name: Test Twice for Cache Read
         run: |
           export CXX="${SCCACHE_PATH} clang++"
@@ -802,6 +803,7 @@ jobs:
       - name: Output
         run: |
           ${SCCACHE_PATH} --show-adv-stats
+
       - name: Test Twice for Cache Read
         run: |
           export CXX="${SCCACHE_PATH} g++"
@@ -865,6 +867,7 @@ jobs:
       - name: Output
         run: |
           ${SCCACHE_PATH} --show-adv-stats
+
       - name: Test Twice for Cache Read
         run: |
           cd `pwd`/tests/autotools/
@@ -1097,6 +1100,8 @@ jobs:
 
       - name: Test compile xcode
         working-directory: tests/xcode
+        env:
+          SCCACHE_RECACHE: 1
         run: |
           xcodebuild -version
           xcodebuild -xcconfig sccache.xcconfig
@@ -1104,7 +1109,8 @@ jobs:
       - name: Output
         run: |
           ${SCCACHE_PATH} --show-adv-stats
-      - name: Test compile xcode cached
+
+      - name: Test Twice for Cache Read
         working-directory: tests/xcode
         run: |
           xcodebuild clean
