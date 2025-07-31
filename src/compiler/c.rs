@@ -35,7 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::hash::Hash;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -446,10 +446,10 @@ where
         // Create an argument vector containing all the preprocessor args to use in creating a hash key
         let mut preprocessor_args = parsed_args.preprocessor_args.clone();
         // If the dependency args change, we need to re-run the preprocessor to generate them
-        preprocessor_args.extend(parsed_args.dependency_args.to_vec());
+        preprocessor_args.extend_from_slice(&parsed_args.dependency_args[..]);
         // common_args is used in preprocessing too
-        preprocessor_args.extend(parsed_args.common_args.to_vec());
-        preprocessor_args.extend(parsed_args.arch_args.to_vec());
+        preprocessor_args.extend_from_slice(&parsed_args.common_args[..]);
+        preprocessor_args.extend_from_slice(&parsed_args.arch_args[..]);
 
         let preprocessor_key = preprocessor_cache_entry_hash_key(
             executable_digest,
@@ -464,16 +464,12 @@ where
         .filter(|_| matches!(cache_control, CacheControl::Default));
 
         if let Some(preprocessor_key) = preprocessor_key {
-            if let Some(mut seekable) = storage
+            if let Some(mut preprocessor_cache_entry) = storage
                 .get_preprocessor_cache_entry(&preprocessor_key)
-                .await?
+                .await
             {
                 let (hit, updated, preprocessor_cache_entry) = tokio::runtime::Handle::current()
                     .spawn_blocking(move || {
-                        let mut buf = vec![];
-                        seekable.read_to_end(&mut buf).map_err(anyhow::Error::new)?;
-                        let mut preprocessor_cache_entry =
-                            PreprocessorCacheEntry::read(&buf).map_err(anyhow::Error::new)?;
                         let mut updated = false;
                         let hit = preprocessor_cache_entry
                             .lookup_result_digest(preprocessor_cache_mode_config, &mut updated);
@@ -659,7 +655,7 @@ where
             // Create an argument vector containing both common and arch args, to
             // use in creating a hash key
             let mut common_and_arch_args = parsed_args.common_args.clone();
-            common_and_arch_args.extend(parsed_args.arch_args.to_vec());
+            common_and_arch_args.extend_from_slice(&parsed_args.arch_args[..]);
 
             match preprocessor_output {
                 PreprocessorOutput::File(ref res) => hash_key(

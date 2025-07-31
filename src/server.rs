@@ -439,44 +439,61 @@ pub fn start_server(config: &Config, addr: &crate::net::SocketAddr) -> Result<()
 
     let notify = env::var_os("SCCACHE_STARTUP_NOTIFY");
 
-    let raw_storage = match storage_from_config(&config.cache, &config.fallback_cache) {
-        Ok(storage) => storage,
-        Err(err) => {
-            error!("storage init failed for: {err:?}");
+    let init_storage = || -> Result<(Arc<dyn Storage>, Arc<dyn Storage>)> {
+        let (storage, preprocessor_storage) =
+            storage_from_config(&config.cache, &config.fallback_cache).map_err(|err| {
+                error!("storage init failed for: {err:?}");
+                err
+            })?;
 
+        let storage = runtime.block_on(async {
+            match storage.check().await {
+                Ok(ref mode) if mode == &CacheMode::ReadOnly => {
+                    info!("server has setup with cache={mode:?}");
+                    Ok(Arc::new(ReadOnlyStorage(storage)) as Arc<dyn Storage>)
+                }
+                Ok(ref mode) => {
+                    info!("server has setup with cache={mode:?}");
+                    Ok(storage)
+                }
+                Err(err) => {
+                    error!("storage check failed for: {err:?}");
+                    Err(err)
+                }
+            }
+        })?;
+
+        let preprocessor_storage = runtime.block_on(async {
+            match preprocessor_storage.check().await {
+                Ok(ref mode) if mode == &CacheMode::ReadOnly => {
+                    info!("server has setup with preprocessor_cache={mode:?}");
+                    Ok(Arc::new(ReadOnlyStorage(preprocessor_storage)) as Arc<dyn Storage>)
+                }
+                Ok(ref mode) => {
+                    info!("server has setup with preprocessor_cache={mode:?}");
+                    Ok(preprocessor_storage)
+                }
+                Err(err) => {
+                    error!("storage check failed for: {err:?}");
+                    Err(err)
+                }
+            }
+        })?;
+
+        Ok((storage, preprocessor_storage))
+    };
+
+    let (storage, preprocessor_storage) = match init_storage() {
+        Ok((storage, preprocessor_storage)) => (storage, preprocessor_storage),
+        Err(err) => {
             notify_server_startup(
                 &notify,
                 ServerStartup::Err {
                     reason: err.to_string(),
                 },
             )?;
-
             return Err(err);
         }
-    };
-
-    let cache_mode = runtime.block_on(async {
-        match raw_storage.check().await {
-            Ok(mode) => Ok(mode),
-            Err(err) => {
-                error!("storage check failed for: {err:?}");
-
-                notify_server_startup(
-                    &notify,
-                    ServerStartup::Err {
-                        reason: err.to_string(),
-                    },
-                )?;
-
-                Err(err)
-            }
-        }
-    })?;
-    info!("server has setup with {cache_mode:?}");
-
-    let storage = match cache_mode {
-        CacheMode::ReadOnly => Arc::new(ReadOnlyStorage(raw_storage)),
-        _ => raw_storage,
     };
 
     let res = (|| -> io::Result<_> {
@@ -484,8 +501,14 @@ pub fn start_server(config: &Config, addr: &crate::net::SocketAddr) -> Result<()
             crate::net::SocketAddr::Net(addr) => {
                 trace!("binding TCP {addr}");
                 let l = runtime.block_on(tokio::net::TcpListener::bind(addr))?;
-                let srv =
-                    SccacheServer::<_>::with_listener(l, runtime, client, dist_client, storage);
+                let srv = SccacheServer::<_>::with_listener(
+                    l,
+                    runtime,
+                    client,
+                    dist_client,
+                    storage,
+                    preprocessor_storage,
+                );
                 Ok((
                     srv.local_addr().unwrap(),
                     Box::new(move |f| srv.run(f)) as Box<dyn FnOnce(_) -> _>,
@@ -500,8 +523,14 @@ pub fn start_server(config: &Config, addr: &crate::net::SocketAddr) -> Result<()
                     let _guard = runtime.enter();
                     tokio::net::UnixListener::bind(path)?
                 };
-                let srv =
-                    SccacheServer::<_>::with_listener(l, runtime, client, dist_client, storage);
+                let srv = SccacheServer::<_>::with_listener(
+                    l,
+                    runtime,
+                    client,
+                    dist_client,
+                    storage,
+                    preprocessor_storage,
+                );
                 Ok((
                     srv.local_addr().unwrap(),
                     Box::new(move |f| srv.run(f)) as Box<dyn FnOnce(_) -> _>,
@@ -517,8 +546,14 @@ pub fn start_server(config: &Config, addr: &crate::net::SocketAddr) -> Result<()
                     let _guard = runtime.enter();
                     tokio::net::UnixListener::from_std(l)?
                 };
-                let srv =
-                    SccacheServer::<_>::with_listener(l, runtime, client, dist_client, storage);
+                let srv = SccacheServer::<_>::with_listener(
+                    l,
+                    runtime,
+                    client,
+                    dist_client,
+                    storage,
+                    preprocessor_storage,
+                );
                 Ok((
                     srv.local_addr()
                         .unwrap_or_else(|| crate::net::SocketAddr::UnixAbstract(p.to_vec())),
@@ -575,6 +610,7 @@ impl<C: CommandCreatorSync> SccacheServer<tokio::net::TcpListener, C> {
         client: Client,
         dist_client: DistClientContainer,
         storage: Arc<dyn Storage>,
+        preprocessor_storage: Arc<dyn Storage>,
     ) -> Result<Self> {
         let addr = crate::net::SocketAddr::with_port(port);
         let listener = runtime.block_on(tokio::net::TcpListener::bind(addr.as_net().unwrap()))?;
@@ -585,6 +621,7 @@ impl<C: CommandCreatorSync> SccacheServer<tokio::net::TcpListener, C> {
             client,
             dist_client,
             storage,
+            preprocessor_storage,
         ))
     }
 }
@@ -596,13 +633,22 @@ impl<A: crate::net::Acceptor, C: CommandCreatorSync> SccacheServer<A, C> {
         client: Client,
         dist_client: DistClientContainer,
         storage: Arc<dyn Storage>,
+        preprocessor_storage: Arc<dyn Storage>,
     ) -> Self {
         // Prepare the service which we'll use to service all incoming TCP
         // connections.
         let (tx, rx) = mpsc::channel(1);
         let (wait, info) = WaitUntilZero::new();
         let pool = runtime.handle().clone();
-        let service = SccacheService::new(dist_client, storage, &client, pool, tx, info);
+        let service = SccacheService::new(
+            dist_client,
+            storage,
+            preprocessor_storage,
+            &client,
+            pool,
+            tx,
+            info,
+        );
 
         SccacheServer {
             runtime,
@@ -850,6 +896,9 @@ where
     /// Cache storage.
     storage: Arc<dyn Storage>,
 
+    /// Preprocessor cache storage.
+    preprocessor_storage: Arc<dyn Storage>,
+
     /// Semaphore to rate limit compile requests
     compile_queue: Arc<Semaphore>,
 
@@ -985,6 +1034,7 @@ where
     pub fn new(
         dist_client: DistClientContainer,
         storage: Arc<dyn Storage>,
+        preprocessor_storage: Arc<dyn Storage>,
         client: &Client,
         rt: tokio::runtime::Handle,
         tx: mpsc::Sender<ServerMessage>,
@@ -1002,7 +1052,8 @@ where
         SccacheService {
             stats: Arc::default(),
             dist_client,
-            storage: storage.clone(),
+            storage,
+            preprocessor_storage,
             compile_queue: Arc::new(Semaphore::new(util::num_cpus())),
             compiler_info_queue,
             rt,
@@ -1015,6 +1066,7 @@ where
 
     pub fn mock_with_storage(
         storage: Arc<dyn Storage>,
+        preprocessor_storage: Arc<dyn Storage>,
         rt: tokio::runtime::Handle,
     ) -> SccacheService<C> {
         let (tx, _) = mpsc::channel(1);
@@ -1033,6 +1085,7 @@ where
             stats: Arc::default(),
             dist_client,
             storage,
+            preprocessor_storage,
             compile_queue: Arc::new(Semaphore::new(util::num_cpus())),
             compiler_info_queue,
             rt,
@@ -1047,6 +1100,7 @@ where
     pub fn mock_with_dist_client(
         dist_client: Arc<dyn dist::Client>,
         storage: Arc<dyn Storage>,
+        preprocessor_storage: Arc<dyn Storage>,
         rt: tokio::runtime::Handle,
     ) -> SccacheService<C> {
         let (tx, _) = mpsc::channel(1);
@@ -1078,6 +1132,7 @@ where
             stats: Arc::default(),
             dist_client,
             storage,
+            preprocessor_storage,
             compile_queue: Arc::new(Semaphore::new(util::num_cpus())),
             compiler_info_queue,
             rt: rt.clone(),
@@ -1142,7 +1197,12 @@ where
     /// Get info and stats about the cache.
     async fn get_info(&self) -> Result<ServerInfo> {
         let stats = self.stats.lock().await.clone();
-        ServerInfo::new(stats, Some(&*self.storage)).await
+        ServerInfo::new(
+            stats,
+            Some(&*self.storage),
+            Some(&*self.preprocessor_storage),
+        )
+        .await
     }
 
     /// Zero stats about the cache.
@@ -1330,6 +1390,7 @@ where
                                 client,
                                 me.creator.clone(),
                                 me.storage.clone(),
+                                me.preprocessor_storage.clone(),
                                 arguments,
                                 cwd,
                                 env_vars,
@@ -1764,6 +1825,9 @@ pub struct ServerInfo {
     pub cache_location: String,
     pub cache_size: Option<u64>,
     pub max_cache_size: Option<u64>,
+    pub preprocessor_cache_location: String,
+    pub preprocessor_cache_size: Option<u64>,
+    pub preprocessor_max_cache_size: Option<u64>,
     pub use_preprocessor_cache_mode: bool,
     pub version: String,
 }
@@ -2123,30 +2187,44 @@ fn set_percentage_stat(
 }
 
 impl ServerInfo {
-    pub async fn new(stats: ServerStats, storage: Option<&dyn Storage>) -> Result<Self> {
-        let cache_location;
-        let use_preprocessor_cache_mode;
-        let cache_size;
-        let max_cache_size;
-        if let Some(storage) = storage {
-            cache_location = storage.location().await;
-            use_preprocessor_cache_mode = storage
-                .preprocessor_cache_mode_config()
-                .use_preprocessor_cache_mode;
-            (cache_size, max_cache_size) =
-                futures::try_join!(storage.current_size(), storage.max_size())?;
-        } else {
-            cache_location = String::new();
-            use_preprocessor_cache_mode = false;
-            cache_size = None;
-            max_cache_size = None;
+    pub async fn new(
+        stats: ServerStats,
+        storage: Option<&dyn Storage>,
+        preprocessor_storage: Option<&dyn Storage>,
+    ) -> Result<Self> {
+        async fn storage_info(storage: Option<&dyn Storage>) -> (Option<u64>, Option<u64>, String) {
+            storage
+                .map(|s| {
+                    futures::future::try_join3(s.current_size(), s.max_size(), async {
+                        Ok(s.location().await)
+                    })
+                    .boxed()
+                })
+                .unwrap_or_else(|| async { Ok((None, None, String::new())) }.boxed())
+                .await
+                .unwrap_or_else(|_| (None, None, String::new()))
         }
+
+        let (cache_size, max_cache_size, cache_location) = storage_info(storage).await;
+        let (preprocessor_cache_size, preprocessor_max_cache_size, preprocessor_cache_location) =
+            storage_info(preprocessor_storage).await;
+
+        let use_preprocessor_cache_mode = preprocessor_storage
+            .map(|s| {
+                s.preprocessor_cache_mode_config()
+                    .use_preprocessor_cache_mode
+            })
+            .unwrap_or_default();
+
         let version = env!("CARGO_PKG_VERSION").to_string();
         Ok(ServerInfo {
             stats,
             cache_location,
             cache_size,
             max_cache_size,
+            preprocessor_cache_location,
+            preprocessor_cache_size,
+            preprocessor_max_cache_size,
             use_preprocessor_cache_mode,
             version,
         })

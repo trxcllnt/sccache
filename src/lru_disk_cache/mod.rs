@@ -18,6 +18,7 @@ pub use lru_cache::{LruCache, Meter};
 use tempfile::{NamedTempFile, TempDir};
 use walkdir::WalkDir;
 
+use crate::cache::ReadSeek;
 use crate::util::OsStrExt;
 
 const TEMPFILE_PREFIX: &str = ".sccachetmp";
@@ -160,11 +161,6 @@ impl From<io::Error> for Error {
 
 /// A convenience `Result` type
 pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-/// Trait objects can't be bounded by more than one non-builtin trait.
-pub trait ReadSeek: Read + Seek + Send {}
-
-impl<T: Read + Seek + Send> ReadSeek for T {}
 
 enum AddFile<'a> {
     AbsPath(PathBuf),

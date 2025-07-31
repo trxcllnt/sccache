@@ -13,22 +13,18 @@
 // limitations under the License.
 
 use crate::cache::{Cache, CacheMode, CacheRead, CacheWrite, Storage};
-use crate::compiler::PreprocessorCacheEntry;
+use crate::lru_disk_cache::Error as LruError;
 use crate::lru_disk_cache::LruDiskCache;
-use crate::lru_disk_cache::{Error as LruError, ReadSeek};
 use async_trait::async_trait;
 use bytes::Buf;
 use futures::lock::Mutex;
 use std::ffi::{OsStr, OsString};
-use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::errors::*;
-
-use super::PreprocessorCacheModeConfig;
 
 enum LazyDiskCache {
     Uninit { root: OsString, max_size: u64 },
@@ -72,24 +68,17 @@ impl LazyDiskCache {
 pub struct DiskCache {
     /// `LruDiskCache` does all the real work here.
     lru: Arc<Mutex<LazyDiskCache>>,
-    preprocessor_cache_mode_config: PreprocessorCacheModeConfig,
     rw_mode: CacheMode,
 }
 
 impl DiskCache {
     /// Create a new `DiskCache` rooted at `root`, with `max_size` as the maximum cache size on-disk, in bytes.
-    pub fn new<T: AsRef<OsStr>>(
-        root: T,
-        max_size: u64,
-        preprocessor_cache_mode_config: PreprocessorCacheModeConfig,
-        rw_mode: CacheMode,
-    ) -> DiskCache {
+    pub fn new<T: AsRef<OsStr>>(root: T, max_size: u64, rw_mode: CacheMode) -> DiskCache {
         DiskCache {
             lru: Arc::new(Mutex::new(LazyDiskCache::Uninit {
                 root: root.as_ref().to_os_string(),
                 max_size,
             })),
-            preprocessor_cache_mode_config,
             rw_mode,
         }
     }
@@ -280,29 +269,5 @@ impl Storage for DiskCache {
 
     async fn max_size(&self) -> Result<Option<u64>> {
         Ok(Some(self.lru.lock().await.capacity()))
-    }
-
-    fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
-        self.preprocessor_cache_mode_config
-    }
-
-    async fn get_preprocessor_cache_entry(&self, key: &str) -> Result<Option<Box<dyn ReadSeek>>> {
-        Ok(self.lru.lock().await.get_or_init()?.get(key).ok())
-    }
-
-    async fn put_preprocessor_cache_entry(
-        &self,
-        key: &str,
-        preprocessor_cache_entry: PreprocessorCacheEntry,
-    ) -> Result<()> {
-        if self.rw_mode == CacheMode::ReadOnly {
-            return Err(anyhow!("Cannot write to a read-only cache"));
-        }
-
-        let mut f = self.lru.lock().await.get_or_init()?.prepare_add(key, 0)?;
-
-        preprocessor_cache_entry.serialize_to(BufWriter::new(f.as_file_mut()))?;
-
-        Ok(self.lru.lock().await.get().unwrap().commit(f)?)
     }
 }

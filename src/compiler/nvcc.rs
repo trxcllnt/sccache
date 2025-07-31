@@ -280,7 +280,7 @@ impl CCompilerImpl for Nvcc {
         // }
         // ```
 
-        let (output, deps) = {
+        let (output, dependencies) = {
             let preprocessor_flag = self.host_compiler.preprocessor_flag();
             let is_nvcc_lang = matches!(
                 parsed_args.language,
@@ -446,10 +446,14 @@ impl CCompilerImpl for Nvcc {
             result.map(|output| (output, deps))?
         };
 
-        if let Some(deps) = deps {
+        if let Some(dependencies) = dependencies {
             Ok(PreprocessorOutput::OutputWithDepedencies(
                 output,
-                deps.into_iter().sorted().unique().collect::<Vec<_>>(),
+                dependencies
+                    .into_iter()
+                    .sorted()
+                    .unique()
+                    .collect::<Vec<_>>(),
             ))
         } else {
             Ok(PreprocessorOutput::Output(output))

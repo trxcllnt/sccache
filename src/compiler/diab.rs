@@ -404,7 +404,7 @@ where
     if let Some((depfile, _)) = depfile {
         Ok(PreprocessorOutput::OutputWithDepedencies(
             output,
-            gcc::parse_dependencies(parsed_args, &depfile).await?,
+            gcc::parse_dependencies(parsed_args, cwd, &depfile).await?,
         ))
     } else {
         Ok(PreprocessorOutput::Output(output))
@@ -885,7 +885,11 @@ mod test {
         let runtime = single_threaded_runtime();
         let storage = MockStorage::new(None, false);
         let storage: std::sync::Arc<MockStorage> = std::sync::Arc::new(storage);
-        let service = server::SccacheService::mock_with_storage(storage, runtime.handle().clone());
+        let service = server::SccacheService::mock_with_storage(
+            storage.clone(),
+            storage,
+            runtime.handle().clone(),
+        );
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));

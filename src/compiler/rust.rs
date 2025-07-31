@@ -3463,7 +3463,11 @@ proc_macro false
         let runtime = single_threaded_runtime();
         let pool = runtime.handle().clone();
         let storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
-        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
+        let service = server::SccacheService::mock_with_storage(
+            storage.clone(),
+            storage.clone(),
+            pool.clone(),
+        );
         let res = hasher
             .generate_hash_key(
                 &service,
@@ -3563,7 +3567,11 @@ proc_macro false
         let runtime = single_threaded_runtime();
         let pool = runtime.handle().clone();
         let storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
-        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
+        let service = server::SccacheService::mock_with_storage(
+            storage.clone(),
+            storage.clone(),
+            pool.clone(),
+        );
 
         mock_dep_info(&creator, &["foo.rs"]);
         mock_file_names(&creator, &["foo.rlib"]);

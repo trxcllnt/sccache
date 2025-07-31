@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::cache::disk::DiskCache;
-use crate::cache::{CacheMode, PreprocessorCacheModeConfig};
+use crate::cache::{CacheMode, PreprocessorCache, PreprocessorCacheModeConfig};
 use crate::client::connect_to_server;
 use crate::commands::{do_compile, request_shutdown, request_stats};
 use crate::jobserver::Client;
@@ -79,15 +79,14 @@ where
     let handle = thread::spawn(move || {
         let runtime = Runtime::new().unwrap();
         let dist_client = DistClientContainer::new_disabled();
-        let storage = Arc::new(DiskCache::new(
-            &cache_dir,
-            cache_size,
+        let storage = Arc::new(PreprocessorCache(
+            Arc::new(DiskCache::new(&cache_dir, cache_size, CacheMode::ReadWrite)),
             PreprocessorCacheModeConfig::default(),
-            CacheMode::ReadWrite,
         ));
 
         let client = Client::new();
-        let srv = SccacheServer::new(0, runtime, client, dist_client, storage).unwrap();
+        let srv =
+            SccacheServer::new(0, runtime, client, dist_client, storage.clone(), storage).unwrap();
         let mut srv: SccacheServer<_, Arc<Mutex<MockCommandCreator>>> = srv;
         let addr = srv.local_addr().unwrap();
         assert!(matches!(addr, crate::net::SocketAddr::Net(a) if a.port() > 0));

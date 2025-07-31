@@ -93,10 +93,7 @@ impl Storage for ReadOnlyStorage {
     /// Return the preprocessor cache entry for a given preprocessor key,
     /// if it exists.
     /// Only applicable when using preprocessor cache mode.
-    async fn get_preprocessor_cache_entry(
-        &self,
-        key: &str,
-    ) -> Result<Option<Box<dyn crate::lru_disk_cache::ReadSeek>>> {
+    async fn get_preprocessor_cache_entry(&self, key: &str) -> Option<PreprocessorCacheEntry> {
         self.0.get_preprocessor_cache_entry(key).await
     }
 

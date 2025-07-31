@@ -861,7 +861,7 @@ where
     if let Some((depfile, _)) = depfile {
         Ok(PreprocessorOutput::OutputWithDepedencies(
             output,
-            parse_dependencies(parsed_args, &depfile).await?,
+            parse_dependencies(parsed_args, cwd, &depfile).await?,
         ))
     } else {
         Ok(PreprocessorOutput::Output(output))
@@ -912,8 +912,14 @@ where
     run_input_output(cmd, None).await
 }
 
-pub async fn parse_dependencies(args: &ParsedArguments, deps: &Path) -> Result<Vec<PathBuf>> {
-    let dependencies = tokio::fs::File::open(deps).await?;
+pub async fn parse_dependencies(
+    parsed_args: &ParsedArguments,
+    cwd: &Path,
+    depfile: &Path,
+) -> Result<Vec<PathBuf>> {
+    let cwd = cwd.to_owned();
+    let input_path = cwd.join(&parsed_args.input);
+    let dependencies = tokio::fs::File::open(depfile).await?;
 
     let dependencies = futures::io::BufReader::new(dependencies.compat())
         .lines()
@@ -946,14 +952,14 @@ pub async fn parse_dependencies(args: &ParsedArguments, deps: &Path) -> Result<V
                     .map(Some::<PathBuf>)
             }
         })
-        .try_filter(|path| futures::future::ready(path != &args.input))
-        .try_fold(Vec::<PathBuf>::new(), |mut paths, path| async move {
-            paths.push(path);
+        .try_fold(Vec::<PathBuf>::new(), |mut paths, path| async {
+            let path = cwd.join(path);
+            if path != input_path {
+                paths.push(path);
+            }
             Ok(paths)
         })
         .await?;
-
-    trace!("[{}]: dependencies={dependencies:?}", args.output_pretty());
 
     Ok(dependencies)
 }
@@ -2313,7 +2319,11 @@ mod test {
         let runtime = single_threaded_runtime();
         let storage = MockStorage::new(None, false);
         let storage: std::sync::Arc<MockStorage> = std::sync::Arc::new(storage);
-        let service = server::SccacheService::mock_with_storage(storage, runtime.handle().clone());
+        let service = server::SccacheService::mock_with_storage(
+            storage.clone(),
+            storage,
+            runtime.handle().clone(),
+        );
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
@@ -2362,7 +2372,11 @@ mod test {
         let runtime = single_threaded_runtime();
         let storage = MockStorage::new(None, false);
         let storage: std::sync::Arc<MockStorage> = std::sync::Arc::new(storage);
-        let service = server::SccacheService::mock_with_storage(storage, runtime.handle().clone());
+        let service = server::SccacheService::mock_with_storage(
+            storage.clone(),
+            storage,
+            runtime.handle().clone(),
+        );
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
@@ -2409,7 +2423,11 @@ mod test {
         let runtime = single_threaded_runtime();
         let storage = MockStorage::new(None, false);
         let storage: std::sync::Arc<MockStorage> = std::sync::Arc::new(storage);
-        let service = server::SccacheService::mock_with_storage(storage, runtime.handle().clone());
+        let service = server::SccacheService::mock_with_storage(
+            storage.clone(),
+            storage,
+            runtime.handle().clone(),
+        );
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));

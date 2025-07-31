@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::cache::{Cache, CacheWrite, PreprocessorCacheModeConfig, Storage};
+use crate::compiler::PreprocessorCacheEntry;
 use crate::errors::*;
 use async_trait::async_trait;
 use futures::channel::mpsc;
@@ -127,5 +128,17 @@ impl Storage for MockStorage {
             use_preprocessor_cache_mode: self.preprocessor_cache_mode,
             ..Default::default()
         }
+    }
+
+    async fn get_preprocessor_cache_entry(&self, _key: &str) -> Option<PreprocessorCacheEntry> {
+        None
+    }
+
+    async fn put_preprocessor_cache_entry(
+        &self,
+        _key: &str,
+        _preprocessor_cache_entry: PreprocessorCacheEntry,
+    ) -> Result<()> {
+        Ok(())
     }
 }

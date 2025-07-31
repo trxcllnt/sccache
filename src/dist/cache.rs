@@ -597,7 +597,6 @@ mod server {
                 cache: Arc::new(DiskCache::new(
                     root,
                     max_size,
-                    Default::default(),
                     crate::cache::CacheMode::ReadWrite,
                 )),
                 store,

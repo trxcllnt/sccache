@@ -630,8 +630,13 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 // anyways, so we can just return (mostly) empty stats directly.
                 Err(_) => {
                     let runtime = Runtime::new()?;
-                    let storage = storage_from_config(&config.cache, &config.fallback_cache).ok();
-                    runtime.block_on(ServerInfo::new(ServerStats::default(), storage.as_deref()))?
+                    let (storage, preprocessor_storage) =
+                        storage_from_config(&config.cache, &config.fallback_cache)?;
+                    runtime.block_on(ServerInfo::new(
+                        ServerStats::default(),
+                        Some(storage).as_deref(),
+                        Some(preprocessor_storage).as_deref(),
+                    ))?
                 }
             };
             match fmt {

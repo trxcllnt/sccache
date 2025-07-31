@@ -139,12 +139,13 @@ impl HTTPUrl {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AzureCacheConfig {
     pub connection_string: String,
     pub container: String,
     pub key_prefix: String,
+    pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,11 +170,12 @@ impl Default for DiskCacheConfig {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum CacheModeConfig {
     #[serde(rename = "READ_ONLY")]
     ReadOnly,
+    #[default]
     #[serde(rename = "READ_WRITE")]
     ReadWrite,
 }
@@ -187,7 +189,7 @@ impl From<CacheModeConfig> for CacheMode {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GCSCacheConfig {
     pub bucket: String,
@@ -196,15 +198,17 @@ pub struct GCSCacheConfig {
     pub service_account: Option<String>,
     pub rw_mode: CacheModeConfig,
     pub credential_url: Option<String>,
+    pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GHACacheConfig {
     pub enabled: bool,
     /// Version for gha cache is a namespace. By setting different versions,
     /// we can avoid mixed caches.
     pub version: String,
+    pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
 }
 
 /// Memcached's default value of expiration is 10800s (3 hours), which is too
@@ -220,7 +224,7 @@ fn default_memcached_cache_expiration() -> u32 {
     DEFAULT_MEMCACHED_CACHE_EXPIRATION
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemcachedCacheConfig {
     #[serde(alias = "endpoint")]
@@ -241,6 +245,8 @@ pub struct MemcachedCacheConfig {
 
     #[serde(default)]
     pub key_prefix: String,
+
+    pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
 }
 
 /// redis has no default TTL - all caches live forever
@@ -250,7 +256,7 @@ pub struct MemcachedCacheConfig {
 /// Please change this value freely if we have a better choice.
 const DEFAULT_REDIS_CACHE_TTL: u64 = 0;
 pub const DEFAULT_REDIS_DB: u32 = 0;
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RedisCacheConfig {
     /// The single-node redis endpoint.
@@ -285,9 +291,11 @@ pub struct RedisCacheConfig {
 
     #[serde(default)]
     pub key_prefix: String,
+
+    pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebdavCacheConfig {
     pub endpoint: String,
@@ -296,9 +304,10 @@ pub struct WebdavCacheConfig {
     pub username: Option<String>,
     pub password: Option<String>,
     pub token: Option<String>,
+    pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct S3CacheConfig {
     pub bucket: String,
@@ -310,9 +319,10 @@ pub struct S3CacheConfig {
     pub use_ssl: Option<bool>,
     pub server_side_encryption: Option<bool>,
     pub enable_virtual_host_style: Option<bool>,
+    pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OSSCacheConfig {
     pub bucket: String,
@@ -320,6 +330,7 @@ pub struct OSSCacheConfig {
     pub key_prefix: String,
     pub endpoint: Option<String>,
     pub no_credentials: bool,
+    pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -767,7 +778,7 @@ impl Default for DistConfig {
 }
 
 // TODO: fields only pub for tests
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
@@ -852,6 +863,7 @@ pub fn bool_from_env_var(env_var_name: &str) -> Result<Option<bool>> {
 fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvConfig> {
     let envvar_prefix = envvar_prefix.into().unwrap_or("SCCACHE_").to_owned();
     let envvar = |key: &str| envvar_prefix.clone() + key;
+
     // ======= AWS =======
     let s3 = if let Some(bucket) = env::var(envvar("BUCKET"))
         .ok()
@@ -874,6 +886,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             use_ssl,
             server_side_encryption,
             enable_virtual_host_style,
+            preprocessor_cache_mode: None,
         })
     } else {
         None
@@ -920,6 +933,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                 db,
                 ttl,
                 key_prefix,
+                preprocessor_cache_mode: None,
             })
         }
     };
@@ -953,6 +967,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             password,
             expiration,
             key_prefix,
+            preprocessor_cache_mode: None,
         })
     } else {
         None
@@ -1017,6 +1032,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             service_account,
             rw_mode,
             credential_url,
+            preprocessor_cache_mode: None,
         }
     });
 
@@ -1027,6 +1043,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         Some(GHACacheConfig {
             enabled: true,
             version,
+            preprocessor_cache_mode: None,
         })
     } else if bool_from_env_var(&envvar("GHA_ENABLED"))?.unwrap_or(false) {
         // If only SCCACHE_GHA_ENABLED has been set to the true value, enable with
@@ -1034,6 +1051,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         Some(GHACacheConfig {
             enabled: true,
             version: "".to_string(),
+            preprocessor_cache_mode: None,
         })
     } else {
         None
@@ -1049,6 +1067,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             connection_string,
             container,
             key_prefix,
+            preprocessor_cache_mode: None,
         })
     } else {
         None
@@ -1067,6 +1086,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             username,
             password,
             token,
+            preprocessor_cache_mode: None,
         })
     } else {
         None
@@ -1084,6 +1104,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             endpoint,
             key_prefix,
             no_credentials,
+            preprocessor_cache_mode: None,
         })
     } else {
         None
@@ -1108,9 +1129,9 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         .ok()
         .and_then(|v| parse_size(&v));
 
-    let mut preprocessor_mode_config = PreprocessorCacheModeConfig::activated();
+    let mut preprocessor_cache_mode = PreprocessorCacheModeConfig::activated();
     let preprocessor_mode_overridden = if let Some(value) = bool_from_env_var(&envvar("DIRECT"))? {
-        preprocessor_mode_config.use_preprocessor_cache_mode = value;
+        preprocessor_cache_mode.use_preprocessor_cache_mode = value;
         true
     } else {
         false
@@ -1140,7 +1161,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         Some(DiskCacheConfig {
             dir: disk_dir.unwrap_or_else(default_disk_cache_dir),
             size: disk_sz.unwrap_or_else(default_disk_cache_size),
-            preprocessor_cache_mode: preprocessor_mode_config,
+            preprocessor_cache_mode,
             rw_mode: disk_rw_mode,
         })
     } else {
@@ -1210,24 +1231,23 @@ impl Config {
     }
 
     fn from_env_and_file_configs(env_conf: EnvConfig, file_conf: FileConfig) -> Self {
-        let mut conf_caches: CacheConfigs = Default::default();
-
         let FileConfig {
-            cache,
             dist,
             server_startup_timeout_ms,
+            ..
         } = file_conf;
-
-        conf_caches.merge(cache);
 
         let server_startup_timeout = server_startup_timeout_ms.map(Duration::from_millis);
 
-        let EnvConfig { cache } = env_conf;
-        conf_caches.merge(cache);
+        let (cache, fallback_cache) = {
+            let mut conf_caches: CacheConfigs = Default::default();
+            conf_caches.merge(file_conf.cache);
+            conf_caches.merge(env_conf.cache);
+            conf_caches.into_fallback()
+        };
 
-        let (caches, fallback_cache) = conf_caches.into_fallback();
         Self {
-            cache: caches,
+            cache,
             fallback_cache,
             dist,
             server_startup_timeout,
@@ -1481,9 +1501,9 @@ pub mod scheduler {
                 jobs: CacheConfigs {
                     disk: Some(DiskCacheConfig {
                         dir: default_disk_cache_dir().join("jobs"),
-                        preprocessor_cache_mode: Default::default(),
                         rw_mode: CacheModeConfig::ReadWrite,
                         size: default_disk_cache_size(),
+                        ..Default::default()
                     }),
                     ..Default::default()
                 },
@@ -1495,9 +1515,9 @@ pub mod scheduler {
                 toolchains: CacheConfigs {
                     disk: Some(DiskCacheConfig {
                         dir: default_disk_cache_dir().join("toolchains"),
-                        preprocessor_cache_mode: Default::default(),
                         rw_mode: CacheModeConfig::ReadWrite,
                         size: default_disk_cache_size(),
+                        ..Default::default()
                     }),
                     ..Default::default()
                 },
@@ -1697,9 +1717,9 @@ pub mod server {
                 jobs: CacheConfigs {
                     disk: Some(DiskCacheConfig {
                         dir: default_disk_cache_dir().join("jobs"),
-                        preprocessor_cache_mode: Default::default(),
                         rw_mode: CacheModeConfig::ReadWrite,
                         size: default_disk_cache_size(),
+                        ..Default::default()
                     }),
                     ..Default::default()
                 },
@@ -1712,9 +1732,9 @@ pub mod server {
                 toolchains: CacheConfigs {
                     disk: Some(DiskCacheConfig {
                         dir: default_disk_cache_dir().join("toolchains"),
-                        preprocessor_cache_mode: Default::default(),
                         rw_mode: CacheModeConfig::ReadWrite,
                         size: default_disk_cache_size(),
+                        ..Default::default()
                     }),
                     ..Default::default()
                 },
@@ -1919,12 +1939,13 @@ fn config_overrides() {
                 connection_string: String::new(),
                 container: String::new(),
                 key_prefix: String::new(),
+                ..Default::default()
             }),
             disk: Some(DiskCacheConfig {
                 dir: "/env-cache".into(),
                 size: 5,
-                preprocessor_cache_mode: Default::default(),
                 rw_mode: CacheModeConfig::ReadWrite,
+                ..Default::default()
             }),
             redis: Some(RedisCacheConfig {
                 endpoint: Some("myotherredisurl".to_owned()),
@@ -1944,8 +1965,8 @@ fn config_overrides() {
             disk: Some(DiskCacheConfig {
                 dir: "/file-cache".into(),
                 size: 15,
-                preprocessor_cache_mode: Default::default(),
                 rw_mode: CacheModeConfig::ReadWrite,
+                ..Default::default()
             }),
             memcached: Some(MemcachedCacheConfig {
                 url: "memurl".to_owned(),
@@ -1961,8 +1982,7 @@ fn config_overrides() {
             }),
             ..Default::default()
         },
-        dist: Default::default(),
-        server_startup_timeout_ms: None,
+        ..Default::default()
     };
 
     assert_eq!(
@@ -1980,11 +2000,10 @@ fn config_overrides() {
             fallback_cache: DiskCacheConfig {
                 dir: "/env-cache".into(),
                 size: 5,
-                preprocessor_cache_mode: Default::default(),
                 rw_mode: CacheModeConfig::ReadWrite,
+                ..Default::default()
             },
-            dist: Default::default(),
-            server_startup_timeout: None,
+            ..Default::default()
         }
     );
 }
@@ -2201,8 +2220,8 @@ no_credentials = true
                 disk: Some(DiskCacheConfig {
                     dir: PathBuf::from("/tmp/.cache/sccache"),
                     size: 7 * 1024 * 1024 * 1024,
-                    preprocessor_cache_mode: PreprocessorCacheModeConfig::activated(),
                     rw_mode: CacheModeConfig::ReadWrite,
+                    ..Default::default()
                 }),
                 gcs: Some(GCSCacheConfig {
                     bucket: "bucket".to_owned(),
@@ -2211,10 +2230,12 @@ no_credentials = true
                     rw_mode: CacheModeConfig::ReadOnly,
                     key_prefix: "prefix".into(),
                     credential_url: None,
+                    ..Default::default()
                 }),
                 gha: Some(GHACacheConfig {
                     enabled: true,
-                    version: "sccache".to_string()
+                    version: "sccache".to_string(),
+                    ..Default::default()
                 }),
                 redis: Some(RedisCacheConfig {
                     url: Some("redis://user:passwd@1.2.3.4:6379/?db=1".to_owned()),
@@ -2225,6 +2246,7 @@ no_credentials = true
                     db: 12,
                     ttl: 24 * 3600,
                     key_prefix: "/my/redis/cache".into(),
+                    ..Default::default()
                 }),
                 memcached: Some(MemcachedCacheConfig {
                     url: "tcp://127.0.0.1:11211".to_owned(),
@@ -2232,6 +2254,7 @@ no_credentials = true
                     password: Some("passwd".to_owned()),
                     expiration: 25 * 3600,
                     key_prefix: "/custom/prefix/if/need".into(),
+                    ..Default::default()
                 }),
                 s3: Some(S3CacheConfig {
                     bucket: "name".to_owned(),
@@ -2242,6 +2265,7 @@ no_credentials = true
                     no_credentials: true,
                     server_side_encryption: Some(false),
                     enable_virtual_host_style: None,
+                    ..Default::default()
                 }),
                 webdav: Some(WebdavCacheConfig {
                     endpoint: "http://127.0.0.1:8080".to_string(),
@@ -2249,12 +2273,14 @@ no_credentials = true
                     username: Some("webdavusername".to_string()),
                     password: Some("webdavpassword".to_string()),
                     token: Some("webdavtoken".to_string()),
+                    ..Default::default()
                 }),
                 oss: Some(OSSCacheConfig {
                     bucket: "name".to_owned(),
                     endpoint: Some("oss-us-east-1.aliyuncs.com".to_owned()),
                     key_prefix: "ossprefix".into(),
                     no_credentials: true,
+                    ..Default::default()
                 }),
             },
             dist: DistConfig {
