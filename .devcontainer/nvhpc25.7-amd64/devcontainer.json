@@ -18,7 +18,7 @@
   "runArgs": [
     "--rm",
     "--name",
-    "${localEnv:USER:anon}-${localWorkspaceFolderBasename}-nvhpc25.5-amd64",
+    "${localEnv:USER:anon}-${localWorkspaceFolderBasename}-nvhpc25.7-amd64",
     "--network",
     "host",
     "--platform",
@@ -81,7 +81,7 @@
       "version": "19"
     },
     "ghcr.io/rapidsai/devcontainers/features/nvhpc:25.8": {
-      "version": "25.5"
+      "version": "25.7"
     },
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
       "moby": "false"
