@@ -29,7 +29,6 @@ use async_trait::async_trait;
 use itertools::Itertools;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use crate::errors::*;
 
@@ -181,23 +180,6 @@ impl CCompilerImpl for Nvhpc {
             rewrite_includes_only,
         )
         .map(|(command, dist_command, cacheable)| {
-            // Cannot currently dist-compile NVHPC CUDA code.
-            // We'll have to do the same `nvc++ --dryrun` trick as we do with nvcc.
-            if parsed_args
-                .common_args
-                .contains(&OsString::from_str("-gpu").unwrap())
-            {
-                return (CCompileCommand::new(command), None, cacheable);
-            }
-            for arg in ["-acc", "-mp", "-stdpar", "-target"] {
-                if let Some(idx) = parsed_args.common_args.iter().position(|x| x == arg) {
-                    if let Some(val) = parsed_args.common_args.get(idx + 1) {
-                        if val == "gpu" {
-                            return (CCompileCommand::new(command), None, cacheable);
-                        }
-                    }
-                }
-            }
             (CCompileCommand::new(command), dist_command, cacheable)
         })
     }
@@ -227,7 +209,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("-cudalib", OsString, CanBeSeparated('='), PassThrough),
     flag!("-fortranlibs", PassThroughFlag),
     flag!("-gopt", PassThroughFlag),
-    take_arg!("-gpu", OsString, CanBeSeparated('='), PassThrough),
+    take_arg!("-gpu", OsString, Concatenated('='), PassThrough),
     take_arg!("-mcmodel", OsString, CanBeSeparated('='), PassThrough),
     take_arg!("-mcpu", OsString, CanBeSeparated('='), PassThrough),
     flag!("-noswitcherror", PassThroughFlag),
@@ -345,7 +327,7 @@ mod test {
             a.preprocessor_args
         );
         assert!(a.dependency_args.is_empty());
-        assert_eq!(ovec!["-fabc", "-gpu", "ccnative"], a.common_args);
+        assert_eq!(ovec!["-fabc", "-gpu=ccnative"], a.common_args);
     }
 
     #[test]
@@ -402,7 +384,36 @@ mod test {
             )
         );
         assert_eq!(ovec!["-cuda"], a.preprocessor_args);
-        assert_eq!(ovec!["-gpu", "cc60,cc70"], a.common_args);
+        assert_eq!(ovec!["-gpu=cc60,cc70"], a.common_args);
+    }
+
+    #[test]
+    fn test_parse_generate_code_mem_flags() {
+        let a = parses!(
+            "-x",
+            "c++",
+            "-cuda",
+            "-gpu=mem:separate",
+            "-c",
+            "foo.c",
+            "-o",
+            "foo.o"
+        );
+        assert_eq!(Some("foo.c"), a.input.to_str());
+        assert_eq!(Language::Cxx, a.language);
+        assert_map_contains!(
+            a.outputs,
+            (
+                "obj",
+                ArtifactDescriptor {
+                    path: "foo.o".into(),
+                    optional: false,
+                    must_be_non_empty: false,
+                }
+            )
+        );
+        assert_eq!(ovec!["-cuda"], a.preprocessor_args);
+        assert_eq!(ovec!["-gpu=mem:separate"], a.common_args);
     }
 
     #[test]
