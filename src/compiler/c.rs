@@ -1055,7 +1055,6 @@ impl pkg::ToolchainPackager for CToolchainPackager {
         debug!("Generating toolchain {}", self.executable.display());
         let mut package_builder = pkg::ToolchainPackageBuilder::new();
         package_builder.add_common()?;
-        package_builder.add_executable_and_deps(&self.env_vars, self.executable.clone())?;
 
         // Helper to use -print-file-name and -print-prog-name to look up
         // files by path.
@@ -1124,6 +1123,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
         match self.kind {
             CCompilerKind::Clang => {
                 add_default_files()?;
+                package_builder.add_executable_and_deps(&self.env_vars, self.executable.clone())?;
                 // Clang uses internal header files, so add them.
                 if let Some(limits_h) = named_file("file", "include/limits.h") {
                     info!("limits_h = {}", limits_h.display());
@@ -1134,20 +1134,40 @@ impl pkg::ToolchainPackager for CToolchainPackager {
             CCompilerKind::Gcc => {
                 // Various external programs / files which may be needed by gcc
                 add_default_files()?;
+                package_builder.add_executable_and_deps(&self.env_vars, self.executable.clone())?;
                 add_named_prog(&mut package_builder, "cc1")?;
                 add_named_prog(&mut package_builder, "cc1plus")?;
                 add_named_file(&mut package_builder, "specs")?;
                 add_named_file(&mut package_builder, "liblto_plugin.so")?;
             }
 
-            CCompilerKind::Cicc
-            | CCompilerKind::CudaFE
-            | CCompilerKind::Ptxas
-            | CCompilerKind::Nvcc => {}
-
             CCompilerKind::Nvhpc => {
                 // Various programs called by the nvc/nvc++ front end.
                 let _ = add_default_files();
+
+                // Handle NVHPC's symlinks of `mpic++ -> bin/env.sh` where `env.sh` is
+                // a wrapper to the real `mpic++` executable (or symlink) in `bin/.bin/mpic++`
+                if let Err(orig_err) =
+                    package_builder.add_executable_and_deps(&self.env_vars, self.executable.clone())
+                {
+                    let exe_dir = self.executable.parent().expect("exe should have a parent");
+
+                    let dot_bin_dir = if let Ok(path) = self.executable.read_link() {
+                        exe_dir.join(path).parent().map(|p| p.join(".bin"))
+                    } else {
+                        Some(exe_dir).map(|p| p.join(".bin"))
+                    };
+
+                    if let Some(real_exe) = dot_bin_dir
+                        .and_then(|p| self.executable.file_name().map(|name| p.join(name)))
+                    {
+                        if !real_exe.exists() {
+                            return Err(orig_err);
+                        }
+                        package_builder.add_link(&real_exe, &self.executable)?;
+                        package_builder.add_executable_and_deps(&self.env_vars, real_exe)?;
+                    }
+                }
 
                 let mut cfg_paths = vec![];
                 let mut dir_paths = vec![];
@@ -1280,7 +1300,9 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                 }
             }
 
-            _ => unreachable!(),
+            _ => {
+                package_builder.add_executable_and_deps(&self.env_vars, self.executable.clone())?;
+            }
         }
 
         // Bundle into a compressed tarfile.

@@ -3,6 +3,7 @@ use fs_err as fs;
 use itertools::Itertools;
 use std::{
     collections::HashMap,
+    env,
     io::{BufRead, Write},
     net::{self, SocketAddr},
     path::{Path, PathBuf},
@@ -683,7 +684,9 @@ impl DistSystemBuilder {
 pub struct DistSystem {
     name: String,
     handles: Vec<DistHandle>,
-    data_dir: tempfile::TempDir,
+    #[allow(dead_code)]
+    data_temp_dir: Option<tempfile::TempDir>,
+    data_dir: PathBuf,
     dist_dir: PathBuf,
     sccache_dist: PathBuf,
 }
@@ -694,18 +697,26 @@ impl DistSystem {
     }
 
     fn new(name: &str) -> Self {
-        let data_dir = tempfile::Builder::new()
+        let tempdir = tempfile::Builder::new()
             .prefix(&format!("sccache_dist_{name}"))
             .tempdir()
             .unwrap();
 
-        let dist_dir = data_dir.path().join("distsystem");
+        // Persist the tempdir if SCCACHE_DEBUG is defined
+        let (data_dir, data_temp_dir) = if env::var("SCCACHE_DEBUG").is_ok() {
+            (tempdir.into_path(), None)
+        } else {
+            (tempdir.path().to_path_buf(), Some(tempdir))
+        };
+
+        let dist_dir = data_dir.join("distsystem");
         fs::create_dir_all(&dist_dir).unwrap();
 
         Self {
             name: name.to_owned(),
             handles: vec![],
             data_dir,
+            data_temp_dir,
             dist_dir,
             // globals,
             sccache_dist: sccache_dist_path(),
@@ -713,7 +724,7 @@ impl DistSystem {
     }
 
     pub fn data_dir(&self) -> &Path {
-        self.data_dir.path()
+        self.data_dir.as_path()
     }
 
     pub fn dist_dir(&self) -> &Path {
@@ -870,7 +881,16 @@ impl DistSystem {
                 "-e",
                 "SCCACHE_NO_DAEMON=1",
                 "-e",
-                "SCCACHE_LOG=sccache=debug",
+                &format!(
+                    "SCCACHE_LOG={}",
+                    (
+                        // Prefer sccache=trace if SCCACHE_DEBUG=1
+                        env::var("SCCACHE_DEBUG").and(Ok("sccache=trace"))
+                    )
+                    .or(env::var("SCCACHE_SERVER_LOG").as_deref())
+                    .or(env::var("SCCACHE_LOG").as_deref())
+                    .unwrap_or("sccache=debug") // default to debug
+                ),
                 "-e",
                 &format!("SCCACHE_DIST_DEPLOYMENT_NAME={}", &self.name),
                 "-e",

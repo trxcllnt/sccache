@@ -2879,7 +2879,7 @@ test_cuda_sccache_command!(nvcc, gcc, "nvcc", "gcc");
 #[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
 test_cuda_sccache_command!(nvcc, clang, "nvcc", "clang++");
 #[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
-test_cuda_sccache_command!(nvcc, nvc, "nvcc", "nvc++");
+test_cuda_sccache_command!(nvcc, nvcxx, "nvcc", "nvc++");
 #[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
 test_cuda_sccache_command!(clang, clang, "clang++", "clang++");
 

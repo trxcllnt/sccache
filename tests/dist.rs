@@ -27,7 +27,7 @@ use harness::{
 // TODO:
 // * Test each builder (docker and overlay for Linux, pot for freebsd)
 
-fn cpp_compile(client: &SccacheClient, tmpdir: &Path) {
+fn cc_compile(client: &SccacheClient, tmpdir: &Path) {
     let source_file = "x.c";
     let obj_file = "x.o";
     write_source(tmpdir, source_file, "#if !defined(SCCACHE_TEST_DEFINE)\n#error SCCACHE_TEST_DEFINE is not defined\n#endif\nint x() { return 5; }");
@@ -73,6 +73,55 @@ fn nvcc_compile(
         .assert()
         .success();
 }
+
+/*
+fn stdpar_compile(client: &SccacheClient, compiler: &Compiler, tmpdir: &Path) {
+    let source_file = "x.cpp";
+    let obj_file = "x.cpp.o";
+    write_source(
+        tmpdir,
+        source_file,
+        r#"
+        #if !defined(SCCACHE_TEST_DEFINE)
+        #error SCCACHE_TEST_DEFINE is not defined
+        #endif
+
+        #include <algorithm>
+        #include <cassert>
+        #include <execution>
+        #include <numeric>
+        #include <vector>
+
+        constexpr int N = 1000;
+
+        int main()
+        {
+          std::vector<int> v(N);
+          std::fill(std::execution::par_unseq, v.begin(), v.end(), 42);
+
+          int sum = std::reduce(std::execution::par_unseq, v.begin(), v.end(), 100, [](int a, int b) {
+            return a + b;
+          });
+          assert(sum == (42 * N) + 100);
+
+          sum = std::reduce(std::execution::par_unseq, v.begin(), v.end(), 100);
+          assert(sum == (42 * N) + 100);
+        }"#,
+    );
+    client
+        .cmd()
+        .arg(&compiler.exe)
+        .args(["-c", "-x", "cpp", "-DSCCACHE_TEST_DEFINE", "-stdpar=gpu"])
+        .arg(tmpdir.join(source_file))
+        .arg("-o")
+        .arg(tmpdir.join(obj_file))
+        .env("RUST_BACKTRACE", "1")
+        .env("SCCACHE_RECACHE", "1")
+        .env("TOKIO_WORKER_THREADS", "2")
+        .assert()
+        .success();
+}
+*/
 
 fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Output {
     let cargo_name = "sccache-dist-test";
@@ -185,7 +234,7 @@ async fn test_dist_cpp_disk_storage(message_broker: &str) {
         system.scheduler(0).unwrap().url(),
     ));
 
-    cpp_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir());
 
     let stats = client.stats().unwrap();
     assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
@@ -216,7 +265,7 @@ async fn test_dist_cpp_cloud_storage(message_broker: &str) {
         system.scheduler(0).unwrap().url(),
     ));
 
-    cpp_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir());
 
     let stats = client.stats().unwrap();
     assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
@@ -247,11 +296,11 @@ async fn test_dist_cpp_server_restart(message_broker: &str) {
         system.scheduler(0).unwrap().url(),
     ));
 
-    cpp_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir());
 
     system.restart_server(system.server(0).unwrap());
 
-    cpp_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir());
 
     let stats = client.stats().unwrap();
     assert_eq!(2, stats.dist_compiles.values().sum::<usize>());
@@ -282,7 +331,7 @@ async fn test_dist_cpp_no_server_times_out(message_broker: &str) {
         system.scheduler(0).unwrap().url(),
     ));
 
-    cpp_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir());
 
     let stats = client.stats().unwrap();
     assert_eq!(0, stats.dist_compiles.values().sum::<usize>());
@@ -317,7 +366,7 @@ async fn test_dist_cpp_two_servers(message_broker: &str) {
     let compile_cpp = || {
         let client = client.clone();
         let tmpdir = system.data_dir().to_owned();
-        move || cpp_compile(&client, &tmpdir)
+        move || cc_compile(&client, &tmpdir)
     };
 
     let _ = tokio::try_join!(
@@ -357,7 +406,7 @@ async fn test_dist_cpp_errors_on_job_load_failures(message_broker: &str) {
         system.scheduler(0).unwrap().url(),
     ));
 
-    cpp_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir());
 
     let stats = client.stats().unwrap();
     assert_eq!(0, stats.dist_compiles.values().sum::<usize>());
@@ -389,7 +438,7 @@ async fn test_dist_cpp_errors_on_toolchain_load_failures(message_broker: &str) {
         system.scheduler(0).unwrap().url(),
     ));
 
-    cpp_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir());
 
     let stats = client.stats().unwrap();
     assert_eq!(0, stats.dist_compiles.values().sum::<usize>());
@@ -409,7 +458,7 @@ async fn test_dist_cuda_compiles(
 ) {
     let test_name = format!(
         "test_dist_cuda_compiles_{}_{}_{message_broker}",
-        cuda_compiler.name,
+        cuda_compiler.name.trim_end_matches('+'),
         host_compiler.name.trim_end_matches('+')
     );
     let system = DistSystem::builder()
@@ -435,6 +484,64 @@ async fn test_dist_cuda_compiles(
     assert_eq!(0, stats.cache_hits.all());
     assert_eq!(4, stats.forced_recaches);
 }
+
+/*
+#[cfg_attr(not(feature = "dist-tests"), ignore)]
+async fn test_dist_stdpar_compiles(compiler: &Compiler, message_broker: &str) {
+    let test_name = format!(
+        "test_dist_stdpar_compiles_{}_{message_broker}",
+        compiler.name.trim_end_matches('+')
+    );
+    let system = DistSystem::builder()
+        .with_name(&test_name)
+        .with_scheduler()
+        .with_server()
+        .with_message_broker(message_broker)
+        .build();
+
+    let client = system.new_client(&dist_test_sccache_client_cfg(
+        system.data_dir(),
+        system.scheduler(0).unwrap().url(),
+    ));
+
+    stdpar_compile(&client, compiler, system.data_dir());
+
+    let stats = client.stats().unwrap();
+    assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
+    assert_eq!(0, stats.dist_errors);
+    assert_eq!(1, stats.compile_requests);
+    assert_eq!(1, stats.requests_executed);
+    assert_eq!(1, stats.compilations);
+    assert_eq!(0, stats.cache_hits.all());
+    assert_eq!(1, stats.forced_recaches);
+}
+
+#[cfg(not(target_os = "macos"))]
+macro_rules! test_dist_if_compiler_available {
+    ($name:ident, $compiler:ident, $compiler_name:expr) => {
+        paste! {
+            #[cfg_attr(not(feature = "dist-tests"), ignore)]
+            #[test_case("rabbitmq" ; "with rabbitmq")]
+            #[test_case("redis" ; "with redis")]
+            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+            async fn [<test_dist_ $name _compiles_ $compiler>] (message_broker: &str) {
+                let _ = env_logger::try_init();
+                let compilers = find_compilers();
+                if let Some(compiler) = compilers.iter().find(|c| c.name == $compiler_name) {
+                    [<test_dist_ $name _compiles>](
+                        &compiler,
+                        message_broker,
+                    ).await
+                }
+            }
+        }
+    };
+}
+
+// Linux
+#[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+test_dist_if_compiler_available!(stdpar, nvcxx, "nvc++");
+*/
 
 #[cfg(not(target_os = "macos"))]
 macro_rules! test_dist_cuda_compiles {
@@ -468,7 +575,7 @@ test_dist_cuda_compiles!(nvcc, gcc, "nvcc", "gcc");
 #[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
 test_dist_cuda_compiles!(nvcc, clang, "nvcc", "clang++");
 #[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
-test_dist_cuda_compiles!(nvcc, nvc, "nvcc", "nvc++");
+test_dist_cuda_compiles!(nvcc, nvcxx, "nvcc", "nvc++");
 
 // Clang-CUDA cannot dist-compile
 // #[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]

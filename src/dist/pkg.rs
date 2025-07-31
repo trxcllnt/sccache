@@ -202,6 +202,12 @@ mod toolchain_imp {
             Ok(())
         }
 
+        pub fn add_link(&mut self, file_path: &Path, link_name: &Path) -> Result<()> {
+            self.symlinks
+                .insert(link_name.to_path_buf(), file_path.to_path_buf());
+            Ok(())
+        }
+
         pub fn add_dir_contents(&mut self, dir_path: &Path) -> Result<()> {
             // Although by not following symlinks we could break a custom
             // constructed toolchain with links everywhere, this is just a
