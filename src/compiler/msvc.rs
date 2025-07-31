@@ -843,6 +843,17 @@ pub fn parse_arguments(
         };
     }
 
+    if let Some(ref p) = depfile {
+        outputs.insert(
+            "dep",
+            ArtifactDescriptor {
+                path: p.clone(),
+                optional: false,
+                must_be_non_empty: false,
+            },
+        );
+    }
+
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),
         double_dash_input,
@@ -1408,8 +1419,6 @@ impl Iterator for SplitMsvcResponseFileArgs<'_> {
 
 #[cfg(test)]
 mod test {
-    use std::str::FromStr;
-
     use super::*;
     use crate::compiler::*;
     use crate::mock_command::*;
@@ -1748,13 +1757,21 @@ mod test {
             };
             assert_eq!(Some("foo.c"), input.to_str());
             assert_eq!(Language::C, language);
-            assert_eq!(Some(PathBuf::from_str("foo.obj.json").unwrap()), depfile);
+            assert_eq!(Some("foo.obj.json"), depfile.unwrap().to_str());
             assert_map_contains!(
                 outputs,
                 (
                     "obj",
                     ArtifactDescriptor {
                         path: PathBuf::from("foo.obj"),
+                        optional: false,
+                        must_be_non_empty: false,
+                    }
+                ),
+                (
+                    "dep",
+                    ArtifactDescriptor {
+                        path: "foo.obj.json".into(),
                         optional: false,
                         must_be_non_empty: false,
                     }

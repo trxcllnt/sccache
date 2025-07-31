@@ -349,6 +349,14 @@ mod test {
                     optional: false,
                     must_be_non_empty: false,
                 }
+            ),
+            (
+                "dep",
+                ArtifactDescriptor {
+                    path: "foo.o.d".into(),
+                    optional: false,
+                    must_be_non_empty: false,
+                }
             )
         );
         assert_eq!(

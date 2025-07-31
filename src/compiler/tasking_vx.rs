@@ -278,6 +278,17 @@ where
         },
     );
 
+    if let Some(ref p) = depfile {
+        outputs.insert(
+            "dep",
+            ArtifactDescriptor {
+                path: p.clone(),
+                optional: false,
+                must_be_non_empty: false,
+            },
+        );
+    }
+
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),
         language,
@@ -632,6 +643,14 @@ mod test {
                     optional: false,
                     must_be_non_empty: false,
                 }
+            ),
+            (
+                "dep",
+                ArtifactDescriptor {
+                    path: "depfile".into(),
+                    optional: false,
+                    must_be_non_empty: false,
+                }
             )
         );
         assert!(preprocessor_args.is_empty());
@@ -664,6 +683,14 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.o"),
+                    optional: false,
+                    must_be_non_empty: false,
+                }
+            ),
+            (
+                "dep",
+                ArtifactDescriptor {
+                    path: "foo.d".into(),
                     optional: false,
                     must_be_non_empty: false,
                 }

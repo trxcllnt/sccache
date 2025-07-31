@@ -653,6 +653,17 @@ where
         dependency_args.push(dep_path.into_os_string());
     }
 
+    if let Some(ref p) = depfile {
+        outputs.insert(
+            "dep",
+            ArtifactDescriptor {
+                path: p.clone(),
+                optional: false,
+                must_be_non_empty: false,
+            },
+        );
+    }
+
     if let Some(path) = serialize_diagnostics {
         outputs.insert(
             "dia",
@@ -1623,6 +1634,14 @@ mod test {
                     optional: false,
                     must_be_non_empty: false,
                 }
+            ),
+            (
+                "dep",
+                ArtifactDescriptor {
+                    path: "foo.o.d".into(),
+                    optional: false,
+                    must_be_non_empty: false,
+                }
             )
         );
         assert_eq!(ovec!["-MF", "foo.o.d"], dependency_args);
@@ -1719,6 +1738,14 @@ mod test {
                     optional: false,
                     must_be_non_empty: false,
                 }
+            ),
+            (
+                "dep",
+                ArtifactDescriptor {
+                    path: "foo.o.d".into(),
+                    optional: false,
+                    must_be_non_empty: false,
+                }
             )
         );
         assert_eq!(ovec!["-MF", "foo.o.d"], dependency_args);
@@ -1754,6 +1781,14 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
+                    optional: false,
+                    must_be_non_empty: false,
+                }
+            ),
+            (
+                "dep",
+                ArtifactDescriptor {
+                    path: "foo.o.d".into(),
                     optional: false,
                     must_be_non_empty: false,
                 }
@@ -1796,6 +1831,14 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
+                    optional: false,
+                    must_be_non_empty: false,
+                }
+            ),
+            (
+                "dep",
+                ArtifactDescriptor {
+                    path: "foo.o.d".into(),
                     optional: false,
                     must_be_non_empty: false,
                 }
@@ -2030,6 +2073,14 @@ mod test {
                     optional: false,
                     must_be_non_empty: false,
                 }
+            ),
+            (
+                "dep",
+                ArtifactDescriptor {
+                    path: "foo.o.d".into(),
+                    optional: false,
+                    must_be_non_empty: false,
+                }
             )
         );
         assert_eq!(
@@ -2065,6 +2116,14 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: PathBuf::from("foo/bar.o"),
+                    optional: false,
+                    must_be_non_empty: false,
+                }
+            ),
+            (
+                "dep",
+                ArtifactDescriptor {
+                    path: "foo/bar.d".into(),
                     optional: false,
                     must_be_non_empty: false,
                 }

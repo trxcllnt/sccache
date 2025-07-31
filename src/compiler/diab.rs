@@ -308,6 +308,17 @@ where
         },
     );
 
+    if let Some(ref p) = depfile {
+        outputs.insert(
+            "dep",
+            ArtifactDescriptor {
+                path: p.clone(),
+                optional: false,
+                must_be_non_empty: false,
+            },
+        );
+    }
+
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),
         language,
@@ -737,6 +748,14 @@ mod test {
                 "obj",
                 ArtifactDescriptor {
                     path: "foo.o".into(),
+                    optional: false,
+                    must_be_non_empty: false,
+                }
+            ),
+            (
+                "dep",
+                ArtifactDescriptor {
+                    path: "bar".into(),
                     optional: false,
                     must_be_non_empty: false,
                 }
