@@ -1138,7 +1138,6 @@ struct LocalCompile<T: CommandCreatorSync> {
 }
 
 struct DistCompile<T: CommandCreatorSync> {
-    #[cfg(feature = "dist-client")]
     compilation: Box<dyn Compilation<T>>,
     dist_client: Arc<dyn dist::Client>,
     dist_compile_cmd: dist::CompileCommand,

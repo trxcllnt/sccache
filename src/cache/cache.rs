@@ -31,7 +31,6 @@ use crate::cache::s3::S3Cache;
 use crate::cache::webdav::WebdavCache;
 use crate::compiler::PreprocessorCacheEntry;
 use crate::config::{CacheType, DiskCacheConfig};
-use crate::util::retry_with_jitter;
 use async_trait::async_trait;
 use fs_err as fs;
 use futures::AsyncReadExt;
@@ -43,7 +42,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::NamedTempFile;
-use tokio_retry2::RetryError;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 #[cfg(any(
@@ -56,7 +54,11 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
     feature = "webdav",
     feature = "oss"
 ))]
-use {crate::config, futures::AsyncWriteExt};
+use {
+    crate::{config, util::retry_with_jitter},
+    futures::AsyncWriteExt,
+    tokio_retry2::RetryError,
+};
 
 use crate::errors::*;
 
