@@ -926,25 +926,34 @@ fn normpath(path: &str) -> String {
     path.to_owned()
 }
 
-fn msvc_cmd<T>(
+#[allow(clippy::too_many_arguments)]
+pub fn preprocess_cmd<T>(
     mut cmd: T,
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     rewrite_includes_only: bool,
+    generate_dependencies: bool,
+    include_line_numbers: bool,
     is_clang: bool,
 ) -> T
 where
     T: RunCommand,
 {
-    cmd.arg("-nologo")
+    cmd.current_dir(cwd)
+        .env_clear()
+        .envs(env_vars.to_vec())
+        // If we should generate dependencies, include line numbers so we can parse out the include paths
+        .arg(if include_line_numbers || generate_dependencies {
+            "-E"
+        } else {
+            "-EP"
+        })
+        .arg("-nologo")
         .args(&parsed_args.preprocessor_args)
         .args(&parsed_args.dependency_args)
         .args(&parsed_args.common_args)
-        .args(&parsed_args.arch_args)
-        .env_clear()
-        .envs(env_vars.to_vec())
-        .current_dir(cwd);
+        .args(&parsed_args.arch_args);
 
     if is_clang {
         if parsed_args.depfile.is_some() && !parsed_args.msvc_show_includes {
@@ -959,39 +968,6 @@ where
 
     if rewrite_includes_only && is_clang {
         cmd.arg("-clang:-frewrite-includes");
-    }
-
-    cmd
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn preprocess_cmd<T>(
-    cmd: T,
-    parsed_args: &ParsedArguments,
-    cwd: &Path,
-    env_vars: &[(OsString, OsString)],
-    rewrite_includes_only: bool,
-    generate_dependencies: bool,
-    include_line_numbers: bool,
-    is_clang: bool,
-) -> T
-where
-    T: RunCommand,
-{
-    let mut cmd = msvc_cmd(
-        cmd,
-        parsed_args,
-        cwd,
-        env_vars,
-        rewrite_includes_only,
-        is_clang,
-    );
-
-    if include_line_numbers || generate_dependencies {
-        // If we should generate dependencies, include line numbers so we can parse out the include paths
-        cmd.arg("-E");
-    } else {
-        cmd.arg("-EP");
     }
 
     if parsed_args.double_dash_input {
@@ -1114,7 +1090,11 @@ where
 {
     let (cmd, dependencies) =
         generate_dependencies_cmd(creator, executable, parsed_args, cwd, env_vars, is_clang)?;
+
+    debug_if_trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
+
     run_input_output(cmd, None).await?;
+
     Ok(dependencies)
 }
 
@@ -1136,7 +1116,7 @@ where
         (temp.to_path_buf(), Some(temp))
     };
 
-    let mut cmd = msvc_cmd(
+    let cmd = preprocess_cmd(
         creator.clone().new_command_sync(executable),
         &ParsedArguments {
             // Replace dependency args with our own
@@ -1146,16 +1126,10 @@ where
         cwd,
         env_vars,
         false,
+        true,
+        false,
         is_clang,
     );
-
-    if parsed_args.double_dash_input {
-        cmd.arg("--");
-    }
-
-    cmd.arg(&parsed_args.input);
-
-    debug_if_trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
     Ok((cmd, (path, temp)))
 }
@@ -2628,7 +2602,7 @@ mod test {
             true,
             true,
         );
-        let expected_args = ovec!["-nologo", "-clang:-frewrite-includes", "-E", "--", "foo.c"];
+        let expected_args = ovec!["-E", "-nologo", "-clang:-frewrite-includes", "--", "foo.c"];
         assert_eq!(cmd.args, expected_args);
     }
 
