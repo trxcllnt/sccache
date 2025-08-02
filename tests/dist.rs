@@ -74,7 +74,6 @@ fn nvcc_compile(
         .success();
 }
 
-/*
 fn stdpar_compile(client: &SccacheClient, compiler: &Compiler, tmpdir: &Path) {
     let source_file = "x.cpp";
     let obj_file = "x.cpp.o";
@@ -121,7 +120,6 @@ fn stdpar_compile(client: &SccacheClient, compiler: &Compiler, tmpdir: &Path) {
         .assert()
         .success();
 }
-*/
 
 fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Output {
     let cargo_name = "sccache-dist-test";
@@ -485,7 +483,6 @@ async fn test_dist_cuda_compiles(
     assert_eq!(4, stats.forced_recaches);
 }
 
-/*
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 async fn test_dist_stdpar_compiles(compiler: &Compiler, message_broker: &str) {
     let test_name = format!(
@@ -541,10 +538,9 @@ macro_rules! test_dist_if_compiler_available {
 // Linux
 #[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
 test_dist_if_compiler_available!(stdpar, nvcxx, "nvc++");
-*/
 
 #[cfg(not(target_os = "macos"))]
-macro_rules! test_dist_cuda_compiles {
+macro_rules! test_dist_if_cuda_compiler_available {
     ($cuda_compiler:ident, $host_compiler:ident, $cuda_compiler_name:expr, $host_compiler_name:expr) => {
         paste! {
             #[cfg_attr(not(feature = "dist-tests"), ignore)]
@@ -571,12 +567,12 @@ macro_rules! test_dist_cuda_compiles {
 
 // Linux
 #[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
-test_dist_cuda_compiles!(nvcc, gcc, "nvcc", "gcc");
+test_dist_if_cuda_compiler_available!(nvcc, gcc, "nvcc", "gcc");
 #[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
-test_dist_cuda_compiles!(nvcc, clang, "nvcc", "clang++");
+test_dist_if_cuda_compiler_available!(nvcc, clang, "nvcc", "clang++");
 #[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
-test_dist_cuda_compiles!(nvcc, nvcxx, "nvcc", "nvc++");
+test_dist_if_cuda_compiler_available!(nvcc, nvcxx, "nvcc", "nvc++");
 
 // Clang-CUDA cannot dist-compile
 // #[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
-// test_dist_cuda_compiles!(clang, clang, "clang++", "clang++");
+// test_dist_if_cuda_compiler_available!(clang, clang, "clang++", "clang++");

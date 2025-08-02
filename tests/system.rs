@@ -1851,6 +1851,13 @@ fn test_nvcc_proper_lang_stat_tracking(
     copy_to_tempdir(&[INPUT_FOR_CUDA_C, INPUT], tempdir);
 
     let out_file = tempdir.join(OUTPUT);
+    let dep_file = tempdir.join(OUTPUT).with_extension("d");
+
+    extra_args.push("-MD".into());
+    extra_args.push("-MF".into());
+    extra_args.push(dep_file.clone().into());
+    extra_args.push("-MT".into());
+    extra_args.push(OUTPUT.into());
 
     trace!("compile CUDA C");
     client
@@ -1866,7 +1873,12 @@ fn test_nvcc_proper_lang_stat_tracking(
         .envs(env_vars.clone())
         .assert()
         .success();
+
+    assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
+    assert!(fs::metadata(&dep_file).map(|m| m.len() > 0).unwrap());
+
     fs::remove_file(&out_file).unwrap();
+    fs::remove_file(&dep_file).unwrap();
 
     stats.cache_writes += 4;
     stats.compilations += 5;
@@ -1913,7 +1925,12 @@ fn test_nvcc_proper_lang_stat_tracking(
         .envs(env_vars.clone())
         .assert()
         .success();
+
+    assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
+    assert!(fs::metadata(&dep_file).map(|m| m.len() > 0).unwrap());
+
     fs::remove_file(&out_file).unwrap();
+    fs::remove_file(&dep_file).unwrap();
 
     stats.compile_requests += 1;
     stats.requests_executed += 1;
@@ -1949,7 +1966,12 @@ fn test_nvcc_proper_lang_stat_tracking(
         .envs(env_vars.clone())
         .assert()
         .success();
+
+    assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
+    assert!(fs::metadata(&dep_file).map(|m| m.len() > 0).unwrap());
+
     fs::remove_file(&out_file).unwrap();
+    fs::remove_file(&dep_file).unwrap();
 
     stats.cache_writes += 1;
     stats.compilations += 2;
@@ -1987,7 +2009,12 @@ fn test_nvcc_proper_lang_stat_tracking(
         .envs(env_vars.clone())
         .assert()
         .success();
+
+    assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
+    assert!(fs::metadata(&dep_file).map(|m| m.len() > 0).unwrap());
+
     fs::remove_file(&out_file).unwrap();
+    fs::remove_file(&dep_file).unwrap();
 
     stats.compile_requests += 1;
     stats.requests_executed += 1;

@@ -1084,7 +1084,6 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
 
                     match preprocessor_output {
                         PreprocessorOutput::File(file) => {
-                            use crate::dist::pkg::tar_safe_path;
                             builder.append_path_with_name(
                                 file.path(),
                                 tar_safe_path(&dist_input_path),
@@ -1286,133 +1285,231 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                     }
                 }
 
-                let mut cfg_paths = vec![];
-                let mut dir_paths = vec![];
-                let mut dir_contents = vec![];
-                let mut exe_paths = vec![];
+                let (contents, dirs, mut exes, files) = {
+                    use futures::{
+                        future::{ok, ready},
+                        AsyncBufReadExt, TryStreamExt,
+                    };
+                    use std::process::Stdio;
+                    use tokio_util::compat::TokioAsyncReadCompatExt;
+
+                    let mut child = tokio::process::Command::new(&self.executable)
+                        .arg("-show")
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()?;
+
+                    let info = child.stdout.take().unwrap();
+                    let info = futures::io::BufReader::new(info.compat());
+
+                    // DEFCPPINC      These dirs just need to exist
+                    // DEFSTDINC      These dirs just need to exist
+                    // GCCINC         These dirs just need to exist
+                    // GPPDIR         These dirs just need to exist
+                    // STDINC         These dirs just need to exist
+                    // SYSTEMINC      These dirs just need to exist
+                    // NVCOMPILER                                         =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7
+                    // COMPBIN        Compiler binary directory           =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/bin
+                    // COMPLIB        Compiler library directory          =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/lib
+                    // CCOMPDIR       Directory containing the C compiler =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/bin/tools
+                    // CPPCOMPDIR     Directory containing the C compiler =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/bin/tools
+                    // COMPINCDIRFULL                                     =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/include /opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/include-stdexec
+                    // CUDAROOT                                           =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/cuda/12.9
+                    // CUDADIR                                            =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/cuda/12.9/bin
+                    // CUDALIBDIR                                         =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/cuda/12.9/lib64
+                    // LLVMBINDIR     Directory containing LLVM tools     =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/share/llvm/bin
+
+                    info.lines()
+                        .try_filter(|line| ready(line.len() >= 14 && line.contains('=')))
+                        .try_filter_map(|mut line| {
+                            ok(match &line[0..14] {
+                                "CCOMPDIR      " | // .
+                                "COMPBIN       " | // .
+                                "COMPINCDIRFULL" | // .
+                                "COMPLIB       " | // .
+                                "CPPCOMPDIR    " | // .
+                                "CUDADIR       " | // .
+                                "CUDALIBDIR    " | // .
+                                "CUDAROOT      " | // .
+                                "DEFCPPINC     " | // .
+                                "DEFSTDINC     " | // .
+                                "GCCINC        " | // .
+                                "GPPDIR        " | // .
+                                "LLVMBINDIR    " | // .
+                                "NVCOMPILER    " | // .
+                                "STDINC        " | // .
+                                "SYSTEMINC     " => {
+                                    line.find('=')
+                                        .map(|idx| {
+                                            line.split_off(idx + 1)
+                                                .trim()
+                                                .split(' ')
+                                                .map(PathBuf::from)
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .map(|dirs| (line, dirs))
+                                }
+                                _ => None,
+                            })
+                        })
+                        .try_filter_map(|(line, dirs)| async move {
+                            let mut contents = vec![];
+                            let mut exes = vec![];
+                            let mut files = vec![];
+
+                            match &line[0..14] {
+                                "NVCOMPILER    " => {
+                                    files.extend(dirs.iter().flat_map(|root| {
+                                        use crate::util::OsStrExt;
+                                        walkdir::WalkDir::new(root)
+                                            .follow_links(true)
+                                            .same_file_system(true)
+                                            .into_iter()
+                                            .filter_map_ok(|e| {
+                                                if e.file_type().is_file()
+                                                {
+                                                    if e.file_name().ends_with("rc") || e.file_name().ends_with(".bc") {
+                                                        Some(e.into_path())
+                                                    } else {
+                                                        None
+                                                    }
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .filter_map(|r| r.ok())
+                                    }));
+                                }
+                                "COMPBIN       " => {
+                                    contents.extend(dirs.iter().map(|root| root.join("rcfiles")));
+                                }
+                                "COMPLIB       " => {
+                                    files.extend(dirs.iter().flat_map(|root| {
+                                        [
+                                            "acc_init_link_cuda.o",
+                                            "cuda_init_register_end.o",
+                                            "init_pgpf.o",
+                                            "libmem.il",
+                                            "nvhpc.ld",
+                                            "nvhpc.syms",
+                                        ]
+                                        .iter()
+                                        .map(|name| root.join(name))
+                                    }));
+                                }
+                                "CCOMPDIR      " | // .
+                                "CPPCOMPDIR    " => {
+                                    contents.extend_from_slice(dirs.as_slice());
+                                    exes.extend(dirs.iter().flat_map(|root| {
+                                        walkdir::WalkDir::new(root).into_iter().filter_map_ok(|e| {
+                                            if e.file_type().is_file() {
+                                                match e.file_name().to_str() {
+                                                    Some("llc")
+                                                    | Some("opt")
+                                                    | Some("llvm-as")
+                                                    | Some("llvm-link")
+                                                    | Some("llvm-mc") => {
+                                                        Some(e.into_path())
+                                                    }
+                                                    _ => None
+                                                }
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .filter_map(|r| r.ok())
+                                    }));
+                                }
+                                "COMPINCDIRFULL" => {
+                                    contents.extend_from_slice(dirs.as_slice());
+                                }
+                                "CUDAROOT      " => {
+                                    exes.extend(dirs.iter().map(|root| root.join("nvvm/bin/cicc")));
+                                    files.extend(
+                                        dirs.iter().flat_map(|root| {
+                                            [
+                                                "include/cuda.h",
+                                                "nvvm/lib64/libnvvm.so"
+                                            ]
+                                            .iter()
+                                            .map(|name| root.join(name))
+                                        })
+                                    );
+                                }
+                                "CUDADIR       " => {
+                                    exes.extend(dirs.iter().flat_map(|root| {
+                                        [
+                                            "bin2c",
+                                            "cudafe++",
+                                            "fatbinary",
+                                            "nvlink",
+                                            "nvprune",
+                                            "ptxas",
+                                        ]
+                                        .iter()
+                                        .map(|name| root.join(name))
+                                    }));
+                                    files.extend(dirs.iter().map(|root| root.join("nvcc.profile")));
+                                }
+                                "CUDALIBDIR    " => {}
+                                "LLVMBINDIR    " => {
+                                    exes.extend(dirs.iter().flat_map(|root| {
+                                        ["llc", "opt", "llvm-as", "llvm-link", "llvm-mc"]
+                                            .iter()
+                                            .map(|name| root.join(name))
+                                    }));
+                                }
+                                _ => {}
+                            }
+
+                            Ok(Some((contents, dirs, exes, files)))
+                        })
+                        .try_fold((vec![], vec![], vec![], vec![]), |mut acc, res| {
+                            ok({
+                                acc.0.extend(res.0);
+                                acc.1.extend(res.1);
+                                acc.2.extend(res.2);
+                                acc.3.extend(res.3);
+                                acc
+                            })
+                        })
+                        .await?
+                };
 
                 if let Ok(as_path) = which::which("as") {
-                    exe_paths.push(as_path);
+                    exes.push(as_path);
                 }
 
-                if let Some(bin_dir) = self.executable.parent() {
-                    cfg_paths.push(bin_dir.join("nvcrc"));
-                    cfg_paths.push(bin_dir.join(".nvcrc"));
-                    cfg_paths.push(bin_dir.join("nvc++rc"));
-                    cfg_paths.push(bin_dir.join(".nvc++rc"));
-                    cfg_paths.push(bin_dir.join("localrc"));
-                    cfg_paths.push(bin_dir.join("makelocalrc"));
-                    dir_contents.push(bin_dir.join("rcfiles"));
-
-                    let path = bin_dir.join("tools");
-                    if path.exists() && path.is_dir() {
-                        exe_paths.push(path.join("acclnk"));
-                        exe_paths.push(path.join("append"));
-                        exe_paths.push(path.join("cpp1"));
-                        exe_paths.push(path.join("cpp2"));
-                        exe_paths.push(path.join("nvcpfe"));
-                        exe_paths.push(path.join("nvdd"));
-                    }
-
-                    if let Some(comp_dir) = bin_dir.parent() {
-                        let path = comp_dir.join("share").join("llvm").join("bin");
-                        if path.exists() && path.is_dir() {
-                            exe_paths.push(path.join("llc"));
-                            exe_paths.push(path.join("opt"));
-                            exe_paths.push(path.join("llvm-as"));
-                            exe_paths.push(path.join("llvm-link"));
-                            exe_paths.push(path.join("llvm-mc"));
-                        }
+                for path in files.into_iter().filter(|p| p.exists()) {
+                    if path.is_file() || path.is_symlink() {
+                        let _ = package_builder
+                            .add_file(path.clone())
+                            .map_err(|e| trace!("add_file error {path:?}: {e:?}"));
                     }
                 }
 
-                let _ = std::process::Command::new(&self.executable)
-                    .arg("-show")
-                    .output()
-                    .and_then(|output| {
-                        use bytes::Buf;
-                        use std::io::BufRead;
-                        output.stdout.reader().lines().try_for_each(|line| {
-                            let mut line = line?;
-                            if line.starts_with("CUDAROOT")
-                                || line.starts_with("DEFCPPINC")
-                                || line.starts_with("DEFSTDINC")
-                                || line.starts_with("GCCINC")
-                                || line.starts_with("GPPDIR")
-                                || line.starts_with("STDINC")
-                                || line.starts_with("SYSTEMINC")
-                            {
-                                dir_paths.extend_from_slice(
-                                    line.find('=')
-                                        .map(|idx| {
-                                            line.split_off(idx + 1)
-                                                .trim_start()
-                                                .trim_end()
-                                                .split(' ')
-                                                .map(PathBuf::from)
-                                                .collect::<Vec<_>>()
-                                        })
-                                        .unwrap_or(vec![])
-                                        .as_slice(),
-                                );
-                                return Ok(());
-                            }
-                            if line.starts_with("HOMELOCALRC") || line.starts_with("MYLOCALRC") {
-                                line.find('=').and_then(|idx| {
-                                    let str = line.split_off(idx + 1);
-                                    let str = str.trim_start().trim_end();
-                                    if !str.is_empty() {
-                                        cfg_paths.push(PathBuf::from(str));
-                                    }
-                                    Option::<()>::None
-                                });
-                                return Ok(());
-                            }
-                            if line.starts_with("COMPINCDIRFULL") {
-                                dir_contents.extend_from_slice(
-                                    line.find('=')
-                                        .map(|idx| {
-                                            line.split_off(idx + 1)
-                                                .trim_start()
-                                                .trim_end()
-                                                .split(' ')
-                                                .map(PathBuf::from)
-                                                .collect::<Vec<_>>()
-                                        })
-                                        .unwrap_or(vec![])
-                                        .as_slice(),
-                                );
-                                return Ok(());
-                            }
-                            Ok(())
-                        })
-                    });
-
-                for path in cfg_paths {
-                    if path.exists() && path.is_file() {
-                        if let Ok(path) = dunce::canonicalize(&path) {
-                            let _ = package_builder.add_file(path);
-                        }
+                for path in dirs.into_iter().filter(|p| p.exists()) {
+                    if path.is_dir() {
+                        let _ = package_builder
+                            .add_dir(path.clone())
+                            .map_err(|e| trace!("add_dir error {path:?}: {e:?}"));
                     }
                 }
 
-                for path in dir_paths {
-                    if path.exists() && path.is_dir() {
-                        if let Ok(path) = dunce::canonicalize(&path) {
-                            let _ = package_builder.add_dir(path);
-                        }
+                for path in contents.into_iter().filter(|p| p.exists()) {
+                    if path.is_dir() {
+                        let _ = package_builder
+                            .add_dir_contents(&path)
+                            .map_err(|e| trace!("add_dir_contents error {path:?}: {e:?}"));
                     }
                 }
 
-                for path in dir_contents {
-                    if path.exists() && path.is_dir() {
-                        let _ = package_builder.add_dir_contents(&path);
-                    }
-                }
-
-                for path in exe_paths {
-                    if path.exists() && path.is_file() {
-                        let _ = package_builder.add_executable_and_deps(&self.env_vars, path);
+                for path in exes.into_iter().filter(|p| p.exists()) {
+                    if path.is_file() || path.is_symlink() {
+                        let _ = package_builder
+                            .add_executable_and_deps(&self.env_vars, path.clone())
+                            .map_err(|e| trace!("add_executable_and_deps error {path:?}: {e:?}"));
                     }
                 }
             }
