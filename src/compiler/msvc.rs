@@ -1136,7 +1136,7 @@ where
         (temp.to_path_buf(), Some(temp))
     };
 
-    let cmd = msvc_cmd(
+    let mut cmd = msvc_cmd(
         creator.clone().new_command_sync(executable),
         &ParsedArguments {
             // Replace dependency args with our own
@@ -1148,6 +1148,12 @@ where
         false,
         is_clang,
     );
+
+    if parsed_args.double_dash_input {
+        cmd.arg("--");
+    }
+
+    cmd.arg(&parsed_args.input);
 
     debug_if_trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
