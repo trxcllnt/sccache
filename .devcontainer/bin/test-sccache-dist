@@ -10,6 +10,8 @@ sudo rm -rf /tmp/{,.}sccache_*
 
 if test $# -eq 0; then
     set -- test_dist_
+elif test "$1" = --; then
+    set -- test_dist_ "$@"
 fi
 
 RUST_BACKTRACE=${RUST_BACKTRACE:-1} \
