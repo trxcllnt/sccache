@@ -12,18 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compiler::args::*;
 use crate::compiler::c::{
     ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
 };
+use crate::compiler::{args::*, CompileCommandImpl};
 use crate::compiler::{
     clang, gcc,
     preprocessor_cache::{process_preprocessed_file, StandardFsAbstraction},
-    write_temp_file, CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments,
-    Language, SingleCompileCommand,
+    write_temp_file, Cacheable, ColorMode, CompilerArguments, Language, SingleCompileCommand,
 };
 use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
-use crate::util::{encode_path, run_input_output, OsStrExt};
+use crate::util::{encode_path, run_input_output, temp_path, OsStrExt};
 use crate::{counted_array, debug_if_trace, dist};
 use async_trait::async_trait;
 use fs::File;
@@ -33,6 +32,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use tempfile::TempPath;
 
 use crate::errors::*;
 
@@ -99,7 +99,31 @@ impl CCompilerImpl for Msvc {
         .await
     }
 
-    fn generate_compile_commands<T>(
+    /// Run the C preprocessor to generate the dependencies file.
+    async fn generate_dependencies<T>(
+        &self,
+        creator: &T,
+        executable: &Path,
+        parsed_args: &ParsedArguments,
+        cwd: &Path,
+        env_vars: &[(OsString, OsString)],
+    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    where
+        T: CommandCreatorSync,
+    {
+        generate_dependencies(
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            self.is_clang,
+        )
+        .await
+        .map(Some)
+    }
+
+    fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
         executable: &Path,
@@ -109,18 +133,11 @@ impl CCompilerImpl for Msvc {
         _rewrite_includes_only: bool,
         _hash_key: &str,
     ) -> Result<(
-        Box<dyn CompileCommand<T>>,
+        impl CompileCommandImpl,
         Option<dist::CompileCommand>,
         Cacheable,
-    )>
-    where
-        T: CommandCreatorSync,
-    {
-        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars).map(
-            |(command, dist_command, cacheable)| {
-                (CCompileCommand::new(command), dist_command, cacheable)
-            },
-        )
+    )> {
+        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
     }
 }
 
@@ -909,26 +926,17 @@ fn normpath(path: &str) -> String {
     path.to_owned()
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn preprocess_cmd<T>(
-    cmd: &mut T,
+fn msvc_cmd<T>(
+    mut cmd: T,
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     rewrite_includes_only: bool,
-    generate_dependencies: bool,
-    include_line_numbers: bool,
     is_clang: bool,
-) where
+) -> T
+where
     T: RunCommand,
 {
-    if include_line_numbers || generate_dependencies {
-        // If we should generate dependencies, include line numbers so we can parse out the include paths
-        cmd.arg("-E");
-    } else {
-        cmd.arg("-EP");
-    }
-
     cmd.arg("-nologo")
         .args(&parsed_args.preprocessor_args)
         .args(&parsed_args.dependency_args)
@@ -953,10 +961,46 @@ pub fn preprocess_cmd<T>(
         cmd.arg("-clang:-frewrite-includes");
     }
 
+    cmd
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn preprocess_cmd<T>(
+    cmd: T,
+    parsed_args: &ParsedArguments,
+    cwd: &Path,
+    env_vars: &[(OsString, OsString)],
+    rewrite_includes_only: bool,
+    generate_dependencies: bool,
+    include_line_numbers: bool,
+    is_clang: bool,
+) -> T
+where
+    T: RunCommand,
+{
+    let mut cmd = msvc_cmd(
+        cmd,
+        parsed_args,
+        cwd,
+        env_vars,
+        rewrite_includes_only,
+        is_clang,
+    );
+
+    if include_line_numbers || generate_dependencies {
+        // If we should generate dependencies, include line numbers so we can parse out the include paths
+        cmd.arg("-E");
+    } else {
+        cmd.arg("-EP");
+    }
+
     if parsed_args.double_dash_input {
         cmd.arg("--");
     }
+
     cmd.arg(&parsed_args.input);
+
+    cmd
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -977,9 +1021,8 @@ where
 {
     let start_time = std::time::SystemTime::now();
 
-    let mut cmd = creator.clone().new_command_sync(executable);
-    preprocess_cmd(
-        &mut cmd,
+    let cmd = preprocess_cmd(
+        creator.clone().new_command_sync(executable),
         parsed_args,
         cwd,
         env_vars,
@@ -1058,6 +1101,58 @@ where
         Ok(PreprocessorOutput::Output(output))
     }
 }
+async fn generate_dependencies<T>(
+    creator: &T,
+    executable: &Path,
+    parsed_args: &ParsedArguments,
+    cwd: &Path,
+    env_vars: &[(OsString, OsString)],
+    is_clang: bool,
+) -> Result<(PathBuf, Option<TempPath>)>
+where
+    T: CommandCreatorSync,
+{
+    let (cmd, dependencies) =
+        generate_dependencies_cmd(creator, executable, parsed_args, cwd, env_vars, is_clang)?;
+    run_input_output(cmd, None).await?;
+    Ok(dependencies)
+}
+
+fn generate_dependencies_cmd<T>(
+    creator: &T,
+    executable: &Path,
+    parsed_args: &ParsedArguments,
+    cwd: &Path,
+    env_vars: &[(OsString, OsString)],
+    is_clang: bool,
+) -> Result<(T::Cmd, (PathBuf, Option<TempPath>))>
+where
+    T: CommandCreatorSync,
+{
+    let (path, temp) = if let Some(depfile) = parsed_args.depfile.as_deref() {
+        (cwd.join(depfile), None)
+    } else {
+        let temp = temp_path()?;
+        (temp.to_path_buf(), Some(temp))
+    };
+
+    let cmd = msvc_cmd(
+        creator.clone().new_command_sync(executable),
+        &ParsedArguments {
+            // Replace dependency args with our own
+            dependency_args: vec!["/sourceDependencies".into(), path.as_path().into()],
+            ..parsed_args.clone()
+        },
+        cwd,
+        env_vars,
+        false,
+        is_clang,
+    );
+
+    debug_if_trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
+
+    Ok((cmd, (path, temp)))
+}
 
 pub async fn parse_dependencies(
     start: std::time::SystemTime,
@@ -1099,6 +1194,7 @@ fn generate_compile_commands(
     #[cfg(not(feature = "dist-client"))]
     let _ = path_transformer;
 
+    let out_pretty = parsed_args.output_pretty();
     let out_file = match parsed_args.outputs.get("obj") {
         Some(obj) => &obj.path,
         None => bail!("Missing object file output"),
@@ -1131,40 +1227,48 @@ fn generate_compile_commands(
     }
     arguments.push(parsed_args.input.clone().into());
     let command = SingleCompileCommand {
-        executable: executable.to_owned(),
         arguments,
-        env_vars: env_vars.to_owned(),
         cwd: cwd.to_owned(),
+        env_vars: env_vars.to_owned(),
+        executable: executable.to_owned(),
+        out_pretty: out_pretty.to_string(),
     };
+
+    debug_if_trace!("[{out_pretty}]: command: {command}");
 
     #[cfg(not(feature = "dist-client"))]
     let dist_command = None;
     #[cfg(feature = "dist-client")]
     let dist_command = (|| {
-        // http://releases.llvm.org/6.0.0/tools/clang/docs/UsersManual.html#clang-cl
-        // TODO: Use /T... for language?
-        let mut fo = String::from("-Fo");
-        fo.push_str(&path_transformer.as_dist(out_file)?);
-
-        let mut arguments: Vec<String> =
-            vec![parsed_args.compilation_flag.clone().into_string().ok()?, fo];
-        // It's important to avoid preprocessor_args because of things like /FI which
-        // forcibly includes another file. This does mean we're potentially vulnerable
-        // to misidentification of flags like -DYNAMICBASE (though in that specific
-        // case we're safe as it only applies to link time, which sccache avoids).
-        arguments.extend(dist::osstrings_to_strings(&parsed_args.common_args)?);
-
-        if parsed_args.double_dash_input {
-            arguments.push("--".into());
-        }
-        arguments.push(path_transformer.as_dist(&parsed_args.input)?);
-
-        Some(dist::CompileCommand {
-            executable: path_transformer.as_dist(executable)?,
-            arguments,
-            env_vars: dist::osstring_tuples_to_strings(env_vars)?,
+        let command = dist::CompileCommand {
             cwd: path_transformer.as_dist(cwd)?,
-        })
+            env_vars: dist::osstring_tuples_to_strings(env_vars)?,
+            executable: path_transformer.as_dist(executable)?,
+            arguments: {
+                // http://releases.llvm.org/6.0.0/tools/clang/docs/UsersManual.html#clang-cl
+                // TODO: Use /T... for language?
+                let mut fo = String::from("-Fo");
+                fo.push_str(&path_transformer.as_dist(out_file)?);
+
+                let mut arguments: Vec<String> =
+                    vec![parsed_args.compilation_flag.clone().into_string().ok()?, fo];
+                // It's important to avoid preprocessor_args because of things like /FI which
+                // forcibly includes another file. This does mean we're potentially vulnerable
+                // to misidentification of flags like -DYNAMICBASE (though in that specific
+                // case we're safe as it only applies to link time, which sccache avoids).
+                arguments.extend(dist::osstrings_to_strings(&parsed_args.common_args)?);
+
+                if parsed_args.double_dash_input {
+                    arguments.push("--".into());
+                }
+                arguments.push(path_transformer.as_dist(&parsed_args.input)?);
+                arguments
+            },
+        };
+
+        debug_if_trace!("[{out_pretty}]: dist_command: {command}");
+
+        Some(command)
     })();
 
     Ok((command, dist_command, cacheable))
@@ -2505,12 +2609,11 @@ mod test {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {o:?}"),
         };
-        let mut cmd = MockCommand {
-            child: None,
-            args: vec![],
-        };
-        preprocess_cmd(
-            &mut cmd,
+        let cmd = preprocess_cmd(
+            MockCommand {
+                child: None,
+                args: vec![],
+            },
             &parsed_args,
             Path::new(""),
             &[],
@@ -2519,7 +2622,7 @@ mod test {
             true,
             true,
         );
-        let expected_args = ovec!["-E", "-nologo", "-clang:-frewrite-includes", "--", "foo.c"];
+        let expected_args = ovec!["-nologo", "-clang:-frewrite-includes", "-E", "--", "foo.c"];
         assert_eq!(cmd.args, expected_args);
     }
 

@@ -17,13 +17,14 @@ use crate::compiler::{
     args::*,
     c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput},
     gcc::{self, ArgData::*},
-    CCompileCommand, Cacheable, CompileCommand, CompilerArguments,
+    Cacheable, CompileCommandImpl, CompilerArguments,
 };
 use crate::mock_command::CommandCreatorSync;
 use crate::{counted_array, dist};
 use async_trait::async_trait;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use tempfile::TempPath;
 
 use crate::errors::*;
 
@@ -77,33 +78,30 @@ impl CCompilerImpl for Nvhpc {
     where
         T: CommandCreatorSync,
     {
-        let ignorable_whitespace_flags = if include_line_numbers {
-            vec![]
-        } else {
-            vec!["-P".to_string()]
-        };
-
-        // Need to chain the dependency generation and the preprocessor to emulate a `proper` front end
+        // Chain the dependency generation and preprocessor commands to emulate a `proper` front end
         let dependencies = if generate_dependencies || !parsed_args.dependency_args.is_empty() {
-            match gcc::preprocess(
-                creator,
-                executable,
-                parsed_args,
-                cwd,
-                env_vars,
-                self.kind(),
-                rewrite_includes_only,
-                generate_dependencies,
-                &ignorable_whitespace_flags,
-            )
-            .await?
+            if let Some((depfile, _)) = self
+                .generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
+                .await?
             {
-                PreprocessorOutput::OutputWithDepedencies(_, dependencies) => Some(dependencies),
-                _ => None,
+                Some(gcc::parse_dependencies(parsed_args, cwd, &depfile).await?)
+            } else {
+                None
             }
         } else {
             None
         };
+
+        let extra_preprocessor_flags = [
+            // nvc++ must be directed to output to stdout
+            vec!["-o".into(), "-".into()],
+            if include_line_numbers {
+                vec![]
+            } else {
+                vec!["-P".into()]
+            },
+        ]
+        .concat();
 
         gcc::preprocess(
             creator,
@@ -118,7 +116,7 @@ impl CCompilerImpl for Nvhpc {
             self.kind(),
             rewrite_includes_only,
             false,
-            &ignorable_whitespace_flags,
+            &extra_preprocessor_flags,
         )
         .await
         .map(|res| {
@@ -138,7 +136,23 @@ impl CCompilerImpl for Nvhpc {
         })
     }
 
-    fn generate_compile_commands<T>(
+    async fn generate_dependencies<T>(
+        &self,
+        creator: &T,
+        executable: &Path,
+        parsed_args: &ParsedArguments,
+        cwd: &Path,
+        env_vars: &[(OsString, OsString)],
+    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    where
+        T: CommandCreatorSync,
+    {
+        gcc::generate_dependencies(creator, executable, parsed_args, cwd, env_vars, self.kind())
+            .await
+            .map(Some)
+    }
+
+    fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
         executable: &Path,
@@ -148,13 +162,10 @@ impl CCompilerImpl for Nvhpc {
         rewrite_includes_only: bool,
         _hash_key: &str,
     ) -> Result<(
-        Box<dyn CompileCommand<T>>,
+        impl CompileCommandImpl,
         Option<dist::CompileCommand>,
         Cacheable,
-    )>
-    where
-        T: CommandCreatorSync,
-    {
+    )> {
         gcc::generate_compile_commands(
             path_transformer,
             executable,
@@ -164,9 +175,6 @@ impl CCompilerImpl for Nvhpc {
             self.kind(),
             rewrite_includes_only,
         )
-        .map(|(command, dist_command, cacheable)| {
-            (CCompileCommand::new(command), dist_command, cacheable)
-        })
     }
 }
 
@@ -175,6 +183,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("--gcc-toolchain", OsString, CanBeSeparated('='), PassThrough),
     take_arg!("--include-path", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
     take_arg!("--linker-options", OsString, CanBeSeparated, PassThrough),
+    flag!("--nvcchost", PassThroughFlag),
     take_arg!("--preinclude", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
     take_arg!("--system-include-path", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
 

@@ -22,8 +22,7 @@ use crate::{
             ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
         },
         gcc::{self, ArgData::*},
-        CCompileCommand, Cacheable, CompileCommand, CompileCommandImpl, CompilerArguments,
-        Language,
+        Cacheable, CompileCommandImpl, CompilerArguments, Language,
     },
     util::SCCACHE_GLOBAL_TMPDIR,
 };
@@ -37,6 +36,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use tempfile::TempPath;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use which::which_in;
 
@@ -202,59 +202,24 @@ impl CCompilerImpl for Nvcc {
             .cloned()
             .collect::<Vec<_>>();
 
-        let language = match parsed_args.language {
-            Language::C => Ok("c"),
-            Language::Cxx => Ok("c++"),
-            Language::ObjectiveC => Ok("objective-c"),
-            Language::ObjectiveCxx => Ok("objective-c++"),
-            Language::Cuda => Ok("cu"),
-            _ => Err(anyhow!("PCH not supported by nvcc")),
-        }?;
-
         let (arguments, output_path, _, num_parallel) = parsed_to_nvcc_args(cwd, parsed_args);
 
-        // Chain dependency generation and the preprocessor command to emulate a `proper` front end
-        if !parsed_args.dependency_args.is_empty() {
-            run_input_output(
+        // Only generate dependencies for compilations that produce object files
+        let outer_dependencies = match parsed_args.compilation_flag.as_os_str().into() {
+            NvccCompileFlag::Device
+                if generate_dependencies || !parsed_args.dependency_args.is_empty() =>
+            {
+                if let Some((depfile, _)) = self
+                    .generate_dependencies(creator, executable, parsed_args, cwd, &env_vars)
+                    .await?
                 {
-                    // NVCC doesn't support generating both the dependency information
-                    // and the preprocessor output at the same time. So if we have
-                    // need for both, we need separate compiler invocations
-                    let mut dependency_cmd = creator.clone().new_command_sync(executable);
-                    dependency_cmd
-                        .current_dir(cwd)
-                        .env_clear()
-                        .envs(env_vars.clone())
-                        .args(&parsed_args.preprocessor_args)
-                        .args(&parsed_args.common_args)
-                        .arg("-x")
-                        .arg(language)
-                        .arg(&parsed_args.input)
-                        .args(
-                            &parsed_args
-                                .dependency_args
-                                .iter()
-                                .map(|arg| match arg.to_str().unwrap_or_default() {
-                                    "-MD" | "--generate-dependencies-with-compile" => "-M",
-                                    "-MMD" | "--generate-nonsystem-dependencies-with-compile" => {
-                                        "-MM"
-                                    }
-                                    arg => arg,
-                                })
-                                // protect against duplicate -M and -MM flags after transform
-                                .unique()
-                                .collect::<Vec<_>>(),
-                        );
-                    debug_if_trace!(
-                        "[{}]: dependencies command: {dependency_cmd}",
-                        output_path.display()
-                    );
-                    dependency_cmd
-                },
-                None,
-            )
-            .await?;
-        }
+                    Some(gcc::parse_dependencies(parsed_args, cwd, &depfile).await?)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
 
         // Use `nvcc --dryrun` to extract all the host and device preprocessor commands.
         // Run each preprocessor command, hash the output, then concatenate all the hashes.
@@ -280,7 +245,7 @@ impl CCompilerImpl for Nvcc {
         // }
         // ```
 
-        let (output, dependencies) = {
+        let (output, inner_dependencies) = {
             let preprocessor_flag = self.host_compiler.preprocessor_flag();
             let is_nvcc_lang = matches!(
                 parsed_args.language,
@@ -447,6 +412,13 @@ impl CCompilerImpl for Nvcc {
             preprocessor_results.map(|output| (output, dependencies))?
         };
 
+        let dependencies = match (outer_dependencies, inner_dependencies) {
+            (Some(lhs), Some(rhs)) => Some([lhs, rhs].concat()),
+            (Some(lhs), None) => Some(lhs),
+            (None, Some(rhs)) => Some(rhs),
+            _ => None,
+        };
+
         if let Some(dependencies) = dependencies {
             Ok(PreprocessorOutput::OutputWithDepedencies(
                 output,
@@ -461,7 +433,45 @@ impl CCompilerImpl for Nvcc {
         }
     }
 
-    fn generate_compile_commands<T>(
+    async fn generate_dependencies<T>(
+        &self,
+        creator: &T,
+        executable: &Path,
+        parsed_args: &ParsedArguments,
+        cwd: &Path,
+        env_vars: &[(OsString, OsString)],
+    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    where
+        T: CommandCreatorSync,
+    {
+        gcc::generate_dependencies(
+            creator,
+            executable,
+            &ParsedArguments {
+                dependency_args: parsed_args
+                    .dependency_args
+                    .iter()
+                    // Translate nvcc-specific dependency flags
+                    .map(|arg| match arg.to_str() {
+                        Some("--dependency-output") => "-MF".into(),
+                        Some("--generate-dependencies") => "M".into(),
+                        Some("--generate-nonsystem-dependencies") => "-MM".into(),
+                        Some("--generate-dependencies-with-compile") => "-MD".into(),
+                        Some("--generate-nonsystem-dependencies-with-compile") => "-MMD".into(),
+                        _ => arg.to_owned(),
+                    })
+                    .collect::<Vec<_>>(),
+                ..parsed_args.clone()
+            },
+            cwd,
+            env_vars,
+            self.kind(),
+        )
+        .await
+        .map(Some)
+    }
+
+    fn generate_compile_commands(
         &self,
         _path_transformer: &mut dist::PathTransformer,
         executable: &Path,
@@ -471,13 +481,10 @@ impl CCompilerImpl for Nvcc {
         _rewrite_includes_only: bool,
         hash_key: &str,
     ) -> Result<(
-        Box<dyn CompileCommand<T>>,
+        impl CompileCommandImpl,
         Option<dist::CompileCommand>,
         Cacheable,
-    )>
-    where
-        T: CommandCreatorSync,
-    {
+    )> {
         generate_compile_commands(
             parsed_args,
             executable,
@@ -486,9 +493,6 @@ impl CCompilerImpl for Nvcc {
             &self.host_compiler,
             hash_key,
         )
-        .map(|(command, dist_command, cacheable)| {
-            (CCompileCommand::new(command), dist_command, cacheable)
-        })
     }
 }
 
@@ -645,7 +649,11 @@ fn parsed_to_nvcc_args(
         .unwrap()
         .path;
 
-    args.extend(vec![
+    if !parsed_args.compilation_flag.is_empty() {
+        args.push(parsed_args.compilation_flag.clone());
+    }
+
+    args.extend_from_slice(&[
         "-o".into(),
         // Canonicalize the output path if the compile flag indicates we won't
         // produce an object file. Since we run cicc and ptxas in a temp dir,

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::compiler::CompileCommandImpl;
 use crate::mock_command::{CommandCreatorSync, RunCommand};
 use crate::util::{decode_path, run_input_output, OsStrExt};
 use crate::{
@@ -20,10 +21,9 @@ use crate::{
         c::{
             ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
         },
-        clang, CCompileCommand, Cacheable, ColorMode, CompileCommand, CompilerArguments, Language,
-        SingleCompileCommand,
+        clang, Cacheable, ColorMode, CompilerArguments, Language, SingleCompileCommand,
     },
-    mock_command::ProcessOutput,
+    util::temp_path,
 };
 use crate::{counted_array, debug_if_trace, dist};
 use async_trait::async_trait;
@@ -32,9 +32,10 @@ use fs_err as fs;
 use futures::{AsyncBufReadExt, StreamExt, TryStreamExt};
 use std::collections::HashMap;
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use tempfile::TempPath;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::errors::*;
@@ -82,7 +83,7 @@ impl CCompilerImpl for Gcc {
     where
         T: CommandCreatorSync,
     {
-        let ignorable_whitespace_flags = if include_line_numbers {
+        let extra_preprocessor_flags = if include_line_numbers {
             vec![]
         } else {
             vec!["-P".to_string()]
@@ -97,12 +98,28 @@ impl CCompilerImpl for Gcc {
             self.kind(),
             rewrite_includes_only,
             generate_dependencies,
-            &ignorable_whitespace_flags,
+            &extra_preprocessor_flags,
         )
         .await
     }
 
-    fn generate_compile_commands<T>(
+    async fn generate_dependencies<T>(
+        &self,
+        creator: &T,
+        executable: &Path,
+        parsed_args: &ParsedArguments,
+        cwd: &Path,
+        env_vars: &[(OsString, OsString)],
+    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    where
+        T: CommandCreatorSync,
+    {
+        generate_dependencies(creator, executable, parsed_args, cwd, env_vars, self.kind())
+            .await
+            .map(Some)
+    }
+
+    fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
         executable: &Path,
@@ -112,13 +129,10 @@ impl CCompilerImpl for Gcc {
         rewrite_includes_only: bool,
         _hash_key: &str,
     ) -> Result<(
-        Box<dyn CompileCommand<T>>,
+        impl CompileCommandImpl,
         Option<dist::CompileCommand>,
         Cacheable,
-    )>
-    where
-        T: CommandCreatorSync,
-    {
+    )> {
         generate_compile_commands(
             path_transformer,
             executable,
@@ -128,9 +142,6 @@ impl CCompilerImpl for Gcc {
             self.kind(),
             rewrite_includes_only,
         )
-        .map(|(command, dist_command, cacheable)| {
-            (CCompileCommand::new(command), dist_command, cacheable)
-        })
     }
 }
 
@@ -705,23 +716,24 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn preprocess_cmd<T>(
-    cmd: &mut T,
+pub fn preprocess_cmd<T>(
+    mut cmd: T,
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     kind: &CCompilerKind,
     rewrite_includes_only: bool,
-    ignorable_whitespace_flags: &[String],
-) where
+    extra_preprocessor_flags: &[String],
+) -> T
+where
     T: RunCommand,
 {
     cmd.current_dir(cwd).env_clear().envs(env_vars.to_vec());
 
-    if let Some(lang) = parsed_args.language.as_compiler_str(kind.into()) {
-        cmd.arg("-x").arg(lang);
+    if let Some(language) = parsed_args.language.as_compiler_str(kind.into()) {
+        cmd.arg("-x").arg(language);
     }
-    cmd.arg("-E").args(ignorable_whitespace_flags);
+
     if rewrite_includes_only {
         if parsed_args.suppress_rewrite_includes_only {
             trace!(
@@ -762,14 +774,17 @@ fn preprocess_cmd<T>(
         // don't use rewritten arch args if there is only one arch
         arch_args_to_use = &parsed_args.arch_args;
     } else {
-        debug!("-arch args before rewrite: {:?}", parsed_args.arch_args);
-        debug!("-arch args after rewrite:  {:?}", arch_args_to_use);
+        debug_if_trace!("-arch args before rewrite: {:?}", parsed_args.arch_args);
+        debug_if_trace!("-arch args after rewrite:  {:?}", arch_args_to_use);
     }
 
     cmd.args(&parsed_args.preprocessor_args)
         .args(&parsed_args.dependency_args)
         .args(&parsed_args.common_args)
-        .args(arch_args_to_use);
+        .args(arch_args_to_use)
+        // older NVCC versions only support `-E` when it comes after preprocessor and common flags.
+        .arg("-E")
+        .args(extra_preprocessor_flags);
 
     if parsed_args.double_dash_input {
         cmd.arg("--");
@@ -777,10 +792,7 @@ fn preprocess_cmd<T>(
 
     cmd.arg(&parsed_args.input);
 
-    if kind == &CCompilerKind::Nvhpc {
-        // Ensure output goes to stdout. gcc does this by default, but nvc++ needs it spelled out.
-        cmd.arg("-o").arg("-");
-    }
+    cmd
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -793,75 +805,35 @@ pub async fn preprocess<T>(
     kind: CCompilerKind,
     rewrite_includes_only: bool,
     generate_dependencies: bool,
-    ignorable_whitespace_flags: &[String],
+    extra_preprocessor_flags: &[String],
 ) -> Result<PreprocessorOutput>
 where
     T: CommandCreatorSync,
 {
-    let mut cmd = creator.clone().new_command_sync(executable);
-
-    preprocess_cmd(
-        &mut cmd,
+    let cmd = preprocess_cmd(
+        creator.clone().new_command_sync(executable),
         parsed_args,
         cwd,
         env_vars,
         &kind,
         rewrite_includes_only,
-        ignorable_whitespace_flags,
+        extra_preprocessor_flags,
     );
 
-    let depfile = if generate_dependencies {
-        match (
-            parsed_args
-                .dependency_args
-                .iter()
-                .position(|arg| arg == "-MMD"),
-            parsed_args
-                .dependency_args
-                .iter()
-                .position(|arg| arg == "-MD"),
-            parsed_args
-                .dependency_args
-                .iter()
-                .position(|arg| arg == "-MF"),
-        ) {
-            (None, Some(_), Some(mf)) => {
-                // If the user provided `-MD -MF <file>`, read the file
-                Some((cwd.join(&parsed_args.dependency_args[mf + 1]), None))
-            }
-            (mmd, md, mf) => {
-                let temp = tempfile::Builder::new()
-                    .rand_bytes(16)
-                    .tempfile()?
-                    .into_temp_path();
-                let path = PathBuf::from(temp.as_os_str());
-                if mmd.is_none() {
-                    // If no `-MD` or `-MF <file>`, add them
-                    if md.is_none() {
-                        cmd.arg("-MD");
-                    }
-                    if mf.is_none() {
-                        cmd.arg("-MF");
-                        cmd.arg(&path);
-                    }
-                } else {
-                    // If user did `-MMD`, generate all dependencies separately
-                    generate_all_dependencies(
-                        creator,
-                        executable,
-                        parsed_args,
-                        cwd,
-                        env_vars,
-                        &kind,
-                        &path,
-                    )
-                    .await?;
-                }
-                Some((path, Some(temp)))
-            }
-        }
+    let (cmd, depfile) = if generate_dependencies {
+        generate_dependencies_cmd(
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            kind,
+            Some(cmd),
+        )
+        .await
+        .map(|(cmd, depfile)| (cmd, Some(depfile)))?
     } else {
-        None
+        (cmd, None)
     };
 
     debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
@@ -878,48 +850,148 @@ where
     }
 }
 
-async fn generate_all_dependencies<T>(
+pub async fn generate_dependencies<T>(
+    creator: &T,
+    executable: &Path,
+    parsed_args: &ParsedArguments,
+    cwd: &Path,
+    env_vars: &[(OsString, OsString)],
+    kind: CCompilerKind,
+) -> Result<(PathBuf, Option<TempPath>)>
+where
+    T: CommandCreatorSync,
+{
+    let (cmd, dependencies) =
+        generate_dependencies_cmd(creator, executable, parsed_args, cwd, env_vars, kind, None)
+            .await?;
+    run_input_output(cmd, None).await?;
+    Ok(dependencies)
+}
+
+pub async fn generate_dependencies_cmd<T>(
+    creator: &T,
+    executable: &Path,
+    parsed_args: &ParsedArguments,
+    cwd: &Path,
+    env_vars: &[(OsString, OsString)],
+    kind: CCompilerKind,
+    preprocess_command: Option<T::Cmd>,
+) -> Result<(T::Cmd, (PathBuf, Option<TempPath>))>
+where
+    T: CommandCreatorSync,
+{
+    let (cmd, depfile) = if let Some(mut cmd) = preprocess_command {
+        let depfile = match (
+            parsed_args.depfile.as_deref(),
+            parsed_args
+                .dependency_args
+                .iter()
+                .find(|&arg| arg == "-M" || arg == "-MD")
+                .and_then(|s| s.to_str()),
+            parsed_args
+                .dependency_args
+                .iter()
+                .find(|&arg| arg == "-MMD")
+                .and_then(|s| s.to_str()),
+        ) {
+            // If `-MD -MF <file>`
+            (Some(depfile), Some(_), None) => {
+                // write dependencies to the depfile
+                (cwd.join(depfile), None)
+            }
+            // If `-MMD` (with or without `-MF <file>`)
+            (_, None, Some("-MMD")) => {
+                // then generate and write all dependencies a tempfile
+                let temp = temp_path()?;
+                run_input_output(
+                    generate_all_dependencies_cmd(
+                        creator,
+                        executable,
+                        parsed_args,
+                        cwd,
+                        env_vars,
+                        &kind,
+                        &temp,
+                    )
+                    .await,
+                    None,
+                )
+                .await?;
+                (temp.to_path_buf(), Some(temp))
+            }
+            // If only `-MD`, or missing/invalid depflags
+            (_, md, _) => {
+                if md.is_none() {
+                    cmd.arg("-MD");
+                }
+                // then write all dependencies to a tempfile
+                let temp = temp_path()?;
+                cmd.arg("-MF");
+                cmd.arg(&temp);
+                (temp.to_path_buf(), Some(temp))
+            }
+        };
+        (cmd, depfile)
+    } else {
+        let (path, temp) = if let Some(depfile) = parsed_args.depfile.as_deref() {
+            (cwd.join(depfile), None)
+        } else {
+            let temp = temp_path()?;
+            (temp.to_path_buf(), Some(temp))
+        };
+
+        let cmd = generate_all_dependencies_cmd(
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            &kind,
+            &path,
+        )
+        .await;
+
+        debug_if_trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
+
+        (cmd, (path, temp))
+    };
+
+    Ok((cmd, depfile))
+}
+
+async fn generate_all_dependencies_cmd<T>(
     creator: &T,
     executable: &Path,
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     kind: &CCompilerKind,
-    output: &Path,
-) -> Result<ProcessOutput>
+    depfile: &Path,
+) -> T::Cmd
 where
     T: CommandCreatorSync,
 {
-    let language_args = if let Some(lang) = parsed_args.language.as_compiler_str(kind.into()) {
-        vec!["-x", lang]
-    } else {
-        vec!["-E"]
-    };
-
-    let mut cmd = creator.clone().new_command_sync(executable);
-    cmd.current_dir(cwd)
-        .env_clear()
-        .envs(env_vars.iter().cloned())
-        .args(&language_args)
-        .args(&parsed_args.preprocessor_args)
-        .args(&parsed_args.common_args)
-        .arg("-M")
-        .arg("-MF")
-        .arg(output)
-        .args(if parsed_args.double_dash_input {
-            ["--"].as_slice()
-        } else {
-            [].as_slice()
-        })
-        .arg(&parsed_args.input);
+    let cmd = preprocess_cmd(
+        creator.clone().new_command_sync(executable),
+        &ParsedArguments {
+            // Replace existing dependency options with flags to generate and write all dependencies to `depfile`
+            dependency_args: vec!["-M".into(), "-MF".into(), depfile.into()],
+            ..parsed_args.clone()
+        },
+        cwd,
+        env_vars,
+        kind,
+        false,
+        &[],
+    );
 
     debug_if_trace!(
-        "[{}]: generate_all_dependencies cmd: {:?}",
+        "[{}]: generate all dependencies cmd: {}",
         parsed_args.output_pretty(),
         cmd
     );
 
-    run_input_output(cmd, None).await
+    cmd
 }
 
 pub async fn parse_dependencies(
@@ -996,6 +1068,8 @@ pub fn generate_compile_commands(
         let _ = rewrite_includes_only;
     }
 
+    let out_pretty = parsed_args.output_pretty();
+
     let out_file = match parsed_args.outputs.get("obj") {
         Some(obj) => &obj.path,
         None => return Err(anyhow!("Missing object file output")),
@@ -1024,22 +1098,19 @@ pub fn generate_compile_commands(
     }
     arguments.push(parsed_args.input.clone().into());
 
-    trace!(
-        "compile: {} {}",
-        executable.to_string_lossy(),
-        arguments.join(OsStr::new(" ")).to_string_lossy()
-    );
-
     #[cfg(feature = "dist-client")]
     let has_verbose_flag = arguments.contains(&OsString::from("-v"))
         || arguments.contains(&OsString::from("--verbose"));
 
     let command = SingleCompileCommand {
-        executable: executable.to_owned(),
         arguments,
-        env_vars: env_vars.to_owned(),
         cwd: cwd.to_owned(),
+        env_vars: env_vars.to_owned(),
+        executable: executable.to_owned(),
+        out_pretty: out_pretty.to_string(),
     };
+
+    trace!("[{out_pretty}]: compile command: {command}");
 
     #[cfg(not(feature = "dist-client"))]
     let dist_command = None;
@@ -1052,70 +1123,85 @@ pub fn generate_compile_commands(
         None
     } else {
         (|| {
-            // let mut language: Option<String> =
-            //     language_to_arg(parsed_args.language).map(|lang| lang.into());
-            let mut language = language.map(|lang| lang.to_owned());
-            // https://gcc.gnu.org/onlinedocs/gcc-4.9.0/gcc/Overall-Options.html
-            if !rewrite_includes_only {
-                if let CCompilerKind::Nvhpc = kind {
-                    // -x=c|cpp|c++|i|cpp-output|asm|assembler|ASM|assembler-with-cpp|none
-                    // Specify the language for any following input files, instead of letting
-                    // the compiler choose based on suffix. Turn off with -x none
-                    match parsed_args.language {
-                        Language::GenericHeader | Language::CHeader | Language::CxxHeader => {}
-                        Language::C | Language::Cxx => language = Some("cpp-output".into()),
-                        _ => language = Some("none".into()),
-                    }
-                } else {
-                    match parsed_args.language {
-                        Language::GenericHeader | Language::CHeader | Language::CxxHeader => {}
-                        Language::C => language = Some("cpp-output".into()),
-                        _ => {
-                            if let Some(lang) = language.as_mut() {
-                                lang.push_str("-cpp-output")
+            let command = dist::CompileCommand {
+                cwd: path_transformer.as_dist_abs(cwd)?,
+                env_vars: dist::osstring_tuples_to_strings(env_vars)?,
+                executable: path_transformer.as_dist(executable)?,
+                arguments: {
+                    let mut language = language.map(|lang| lang.to_owned());
+
+                    // https://gcc.gnu.org/onlinedocs/gcc-4.9.0/gcc/Overall-Options.html
+                    if !rewrite_includes_only {
+                        if let CCompilerKind::Nvhpc = kind {
+                            // -x=c|cpp|c++|i|cpp-output|asm|assembler|ASM|assembler-with-cpp|none
+                            // Specify the language for any following input files, instead of letting
+                            // the compiler choose based on suffix. Turn off with -x none
+                            match parsed_args.language {
+                                Language::GenericHeader
+                                | Language::CHeader
+                                | Language::CxxHeader => {}
+                                Language::C | Language::Cxx => language = Some("cpp-output".into()),
+                                _ => language = Some("none".into()),
+                            }
+                        } else {
+                            match parsed_args.language {
+                                Language::GenericHeader
+                                | Language::CHeader
+                                | Language::CxxHeader => {}
+                                Language::C => language = Some("cpp-output".into()),
+                                _ => {
+                                    if let Some(lang) = language.as_mut() {
+                                        lang.push_str("-cpp-output")
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }
 
-            let mut arguments: Vec<String> = vec![];
-            // Language needs to be before input
-            if let Some(lang) = &language {
-                arguments.extend(vec!["-x".into(), lang.into()])
-            }
-            arguments.extend(vec![
-                parsed_args.compilation_flag.clone().into_string().ok()?,
-                path_transformer.as_dist(&parsed_args.input)?,
-                "-o".into(),
-                path_transformer.as_dist(out_file)?,
-            ]);
-            if let CCompilerKind::Gcc = kind {
-                // From https://gcc.gnu.org/onlinedocs/gcc/Preprocessor-Options.html:
-                //
-                // -fdirectives-only
-                //
-                //     [...]
-                //
-                //     With -fpreprocessed, predefinition of command line and most
-                //     builtin macros is disabled. Macros such as __LINE__, which
-                //     are contextually dependent, are handled normally. This
-                //     enables compilation of files previously preprocessed with -E
-                //     -fdirectives-only.
-                //
-                // Which is exactly what we do :-)
-                if rewrite_includes_only && !parsed_args.suppress_rewrite_includes_only {
-                    arguments.push("-fdirectives-only".into());
-                }
-                arguments.push("-fpreprocessed".into());
-            }
-            arguments.extend(dist::osstrings_to_strings(&parsed_args.common_args)?);
-            Some(dist::CompileCommand {
-                executable: path_transformer.as_dist(executable)?,
-                arguments,
-                env_vars: dist::osstring_tuples_to_strings(env_vars)?,
-                cwd: path_transformer.as_dist_abs(cwd)?,
-            })
+                    let mut arguments: Vec<String> = vec![];
+                    // Language needs to be before input
+                    if let Some(lang) = &language {
+                        arguments.extend_from_slice(&["-x".into(), lang.into()][..])
+                    }
+
+                    if let CCompilerKind::Gcc = kind {
+                        // From https://gcc.gnu.org/onlinedocs/gcc/Preprocessor-Options.html:
+                        //
+                        // -fdirectives-only
+                        //
+                        //     [...]
+                        //
+                        //     With -fpreprocessed, predefinition of command line and most
+                        //     builtin macros is disabled. Macros such as __LINE__, which
+                        //     are contextually dependent, are handled normally. This
+                        //     enables compilation of files previously preprocessed with -E
+                        //     -fdirectives-only.
+                        //
+                        // Which is exactly what we do :-)
+                        if rewrite_includes_only && !parsed_args.suppress_rewrite_includes_only {
+                            arguments.push("-fdirectives-only".into());
+                        }
+                        arguments.push("-fpreprocessed".into());
+                    }
+
+                    arguments.extend(dist::osstrings_to_strings(&parsed_args.common_args)?);
+
+                    arguments.extend_from_slice(
+                        &[
+                            parsed_args.compilation_flag.clone().into_string().ok()?,
+                            path_transformer.as_dist(&parsed_args.input)?,
+                            "-o".into(),
+                            path_transformer.as_dist(out_file)?,
+                        ][..],
+                    );
+
+                    arguments
+                },
+            };
+
+            debug_if_trace!("[{out_pretty}]: dist command: {command}");
+
+            Some(command)
         })()
     };
 
@@ -1888,12 +1974,11 @@ mod test {
                 CompilerArguments::Ok(args) => args,
                 o => panic!("Got unexpected parse result: {o:?}"),
             };
-            let mut cmd = MockCommand {
-                child: None,
-                args: vec![],
-            };
-            preprocess_cmd(
-                &mut cmd,
+            let cmd = preprocess_cmd(
+                MockCommand {
+                    child: None,
+                    args: vec![],
+                },
                 &parsed_args,
                 Path::new(""),
                 &[],
@@ -1905,10 +1990,10 @@ mod test {
             let expected_args = ovec![
                 "-x",
                 "c++",
-                "-E",
                 "-fdirectives-only",
                 "-D__arm64__=1",
                 "-D__i386__=1",
+                "-E",
                 "foo.cc"
             ];
             assert_eq!(cmd.args, expected_args);
@@ -1922,12 +2007,11 @@ mod test {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {o:?}"),
         };
-        let mut cmd = MockCommand {
-            child: None,
-            args: vec![],
-        };
-        preprocess_cmd(
-            &mut cmd,
+        let cmd = preprocess_cmd(
+            MockCommand {
+                child: None,
+                args: vec![],
+            },
             &parsed_args,
             Path::new(""),
             &[],
@@ -1939,10 +2023,10 @@ mod test {
         let expected_args = ovec![
             "-x",
             "c++",
-            "-E",
             "-fdirectives-only",
             "-arch",
             "arm64",
+            "-E",
             "foo.cc"
         ];
         assert_eq!(cmd.args, expected_args);
@@ -1955,12 +2039,11 @@ mod test {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {o:?}"),
         };
-        let mut cmd = MockCommand {
-            child: None,
-            args: vec![],
-        };
-        preprocess_cmd(
-            &mut cmd,
+        let cmd = preprocess_cmd(
+            MockCommand {
+                child: None,
+                args: vec![],
+            },
             &parsed_args,
             Path::new(""),
             &[],
@@ -1968,7 +2051,7 @@ mod test {
             true,
             &[],
         );
-        let expected_args = ovec!["-x", "c", "-E", "-frewrite-includes", "--", "foo.c"];
+        let expected_args = ovec!["-x", "c", "-frewrite-includes", "-E", "--", "foo.c"];
         assert_eq!(cmd.args, expected_args);
     }
 
@@ -1979,12 +2062,11 @@ mod test {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {o:?}"),
         };
-        let mut cmd = MockCommand {
-            child: None,
-            args: vec![],
-        };
-        preprocess_cmd(
-            &mut cmd,
+        let cmd = preprocess_cmd(
+            MockCommand {
+                child: None,
+                args: vec![],
+            },
             &parsed_args,
             Path::new(""),
             &[],
@@ -2003,12 +2085,11 @@ mod test {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {o:?}"),
         };
-        let mut cmd = MockCommand {
-            child: None,
-            args: vec![],
-        };
-        preprocess_cmd(
-            &mut cmd,
+        let cmd = preprocess_cmd(
+            MockCommand {
+                child: None,
+                args: vec![],
+            },
             &parsed_args,
             Path::new(""),
             &[],
@@ -2027,12 +2108,11 @@ mod test {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {o:?}"),
         };
-        let mut cmd = MockCommand {
-            child: None,
-            args: vec![],
-        };
-        preprocess_cmd(
-            &mut cmd,
+        let cmd = preprocess_cmd(
+            MockCommand {
+                child: None,
+                args: vec![],
+            },
             &parsed_args,
             Path::new(""),
             &[],
@@ -2566,12 +2646,11 @@ mod test {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {o:?}"),
         };
-        let mut cmd = MockCommand {
-            child: None,
-            args: vec![],
-        };
-        preprocess_cmd(
-            &mut cmd,
+        let cmd = preprocess_cmd(
+            MockCommand {
+                child: None,
+                args: vec![],
+            },
             &parsed_args,
             Path::new(""),
             &[],
@@ -2589,12 +2668,11 @@ mod test {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {o:?}"),
         };
-        let mut cmd = MockCommand {
-            child: None,
-            args: vec![],
-        };
-        preprocess_cmd(
-            &mut cmd,
+        let cmd = preprocess_cmd(
+            MockCommand {
+                child: None,
+                args: vec![],
+            },
             &parsed_args,
             Path::new(""),
             &[],
@@ -2612,12 +2690,11 @@ mod test {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {o:?}"),
         };
-        let mut cmd = MockCommand {
-            child: None,
-            args: vec![],
-        };
-        preprocess_cmd(
-            &mut cmd,
+        let cmd = preprocess_cmd(
+            MockCommand {
+                child: None,
+                args: vec![],
+            },
             &parsed_args,
             Path::new(""),
             &[],

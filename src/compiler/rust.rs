@@ -15,9 +15,9 @@
 use crate::cache::{FileObjectSource, Storage};
 use crate::compiler::args::*;
 use crate::compiler::{
-    c::ArtifactDescriptor, CCompileCommand, Cacheable, ColorMode, Compilation, CompileCommand,
-    Compiler, CompilerArguments, CompilerHasher, CompilerKind, CompilerProxy, HashResult, Language,
-    SingleCompileCommand,
+    c::ArtifactDescriptor, Cacheable, ColorMode, Compilation, CompileCommand, Compiler,
+    CompilerArguments, CompilerCommand, CompilerHasher, CompilerKind, CompilerProxy, HashResult,
+    Language, SingleCompileCommand,
 };
 #[cfg(feature = "dist-client")]
 use crate::compiler::{DistPackagers, OutputsRewriter};
@@ -1719,17 +1719,18 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
             let _ = sysroot;
         }
 
-        trace!("[{}]: compile", crate_name);
-
         let command = SingleCompileCommand {
-            executable: executable.to_owned(),
             arguments: arguments
                 .iter()
                 .flat_map(|arg| arg.iter_os_strings())
                 .collect(),
-            env_vars: env_vars.to_owned(),
             cwd: cwd.to_owned(),
+            env_vars: env_vars.to_owned(),
+            executable: executable.to_owned(),
+            out_pretty: crate_name.to_owned(),
         };
+
+        trace!("[{crate_name}]: compile command: {command}");
 
         #[cfg(not(feature = "dist-client"))]
         let dist_command = None;
@@ -1828,15 +1829,19 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
                 .join("rustc")
                 .with_extension(EXE_EXTENSION);
 
-            Some(dist::CompileCommand {
-                executable: path_transformer.as_dist(&sysroot_executable)?,
+            let command = dist::CompileCommand {
                 arguments: dist_arguments,
-                env_vars,
                 cwd: path_transformer.as_dist_abs(cwd)?,
-            })
+                env_vars,
+                executable: path_transformer.as_dist(&sysroot_executable)?,
+            };
+
+            debug_if_trace!("[{crate_name}]: dist command: {command}");
+
+            Some(command)
         })();
 
-        Ok((CCompileCommand::new(command), dist_command, Cacheable::Yes))
+        Ok((CompilerCommand::new(command), dist_command, Cacheable::Yes))
     }
 
     #[cfg(feature = "dist-client")]

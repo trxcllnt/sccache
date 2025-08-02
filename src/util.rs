@@ -39,6 +39,7 @@ use std::{
     sync::Arc,
     time::{self, Duration, SystemTime},
 };
+use tempfile::TempPath;
 use tokio_retry2::strategy::FibonacciBackoff;
 use tokio_retry2::Retry;
 
@@ -1045,6 +1046,10 @@ pub fn normal_tempfile() -> Result<tempfile::NamedTempFile> {
                 .tempfile_in(normal_tempdir)
                 .map_err(anyhow::Error::new)
         })
+}
+
+pub fn temp_path() -> Result<TempPath> {
+    normal_tempfile().map(|p| p.into_temp_path())
 }
 
 /// Pipe `cmd`'s stdio to `/dev/null`, unless a specific env var is set.

@@ -34,7 +34,7 @@ use crate::compiler::ptxas::Ptxas;
 use crate::compiler::rust::{Rust, RustupProxy};
 use crate::compiler::tasking_vx::TaskingVX;
 #[cfg(feature = "dist-client")]
-use crate::dist::pkg::{self, InputsPackager};
+use crate::dist::pkg;
 #[cfg(feature = "dist-client")]
 use crate::lru_disk_cache;
 use crate::mock_command::{CommandChild, CommandCreatorSync, ProcessOutput, RunCommand};
@@ -107,14 +107,14 @@ impl<T: CommandCreatorSync> Clone for Box<dyn CompileCommand<T>> {
 }
 
 #[derive(Debug, Clone)]
-pub struct CCompileCommand<I>
+pub struct CompilerCommand<I>
 where
     I: CompileCommandImpl,
 {
     cmd: I,
 }
 
-impl<I> CCompileCommand<I>
+impl<I> CompilerCommand<I>
 where
     I: CompileCommandImpl,
 {
@@ -123,12 +123,12 @@ where
     where
         T: CommandCreatorSync,
     {
-        Box::new(CCompileCommand { cmd }) as Box<dyn CompileCommand<T>>
+        Box::new(CompilerCommand { cmd }) as Box<dyn CompileCommand<T>>
     }
 }
 
 #[async_trait]
-impl<T, I> CompileCommand<T> for CCompileCommand<I>
+impl<T, I> CompileCommand<T> for CompilerCommand<I>
 where
     T: CommandCreatorSync,
     I: CompileCommandImpl,
@@ -155,7 +155,7 @@ where
     }
 
     fn box_clone(&self) -> Box<dyn CompileCommand<T>> {
-        CCompileCommand::<I>::new(self.cmd.clone())
+        CompilerCommand::<I>::new(self.cmd.clone())
     }
 }
 
@@ -177,10 +177,11 @@ pub trait CompileCommandImpl: Send + Sync + Clone + 'static {
 
 #[derive(Debug, Clone)]
 pub struct SingleCompileCommand {
-    pub executable: PathBuf,
     pub arguments: Vec<OsString>,
-    pub env_vars: Vec<(OsString, OsString)>,
     pub cwd: PathBuf,
+    pub env_vars: Vec<(OsString, OsString)>,
+    pub executable: PathBuf,
+    pub out_pretty: String,
 }
 
 impl fmt::Display for SingleCompileCommand {
@@ -223,11 +224,13 @@ impl CompileCommandImpl for SingleCompileCommand {
         T: CommandCreatorSync,
     {
         let SingleCompileCommand {
-            executable,
             arguments,
-            env_vars,
             cwd,
+            env_vars,
+            executable,
+            out_pretty,
         } = self;
+        trace!("[{out_pretty}]: Compiling locally");
         let mut cmd = creator.clone().new_command_sync(executable);
         cmd.args(arguments)
             .env_clear()
@@ -885,15 +888,10 @@ where
         let dist = if let Some((dist_client, dist_compile_cmd)) =
             dist_client.and_then(|x| dist_compile_cmd.map(|y| (x, y)))
         {
-            let (inputs_packager, toolchain_packager, outputs_rewriter) =
-                compilation.into_dist_packagers()?;
-
             Some(DistCompile {
+                compilation,
                 dist_client,
                 dist_compile_cmd,
-                inputs_packager,
-                toolchain_packager,
-                outputs_rewriter,
                 out_pretty: out_pretty.clone(),
                 path_transformer,
                 weak_toolchain_key,
@@ -1024,7 +1022,7 @@ impl<'a> CacheLookup<'a> {
 
 struct Compile<'a, T: CommandCreatorSync> {
     command_creator: &'a T,
-    dist: Option<DistCompile>,
+    dist: Option<DistCompile<T>>,
     hash_key: String,
     local: LocalCompile<T>,
     out_pretty: String,
@@ -1060,7 +1058,6 @@ where
             ..
         } = self.local;
 
-        trace!("[{}]: Compiling locally", out_pretty);
         compile_cmd
             .execute(sccache_service, command_creator)
             .await
@@ -1093,18 +1090,17 @@ where
         } = self.local;
 
         match self.dist {
-            None => {
-                trace!("[{}]: Compiling locally", out_pretty);
-                compile_cmd
-                    .execute(sccache_service, command_creator)
-                    .await
-                    .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o))
-            }
+            None => compile_cmd
+                .execute(sccache_service, command_creator)
+                .await
+                .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o)),
             Some(dist) => {
                 let executable = compile_cmd.get_executable();
                 let fallback_to_local = dist.dist_client.fallback_to_local_compile();
                 // Do the distributed compilation
-                let dist_compile_res = dist.into_result(&executable, &outputs).await;
+                let dist_compile_res = dist
+                    .into_result(command_creator, &executable, &outputs)
+                    .await;
 
                 match dist_compile_res {
                     Ok((dt, o)) => Ok((hash_key, outputs, cacheable, dt, o)),
@@ -1122,7 +1118,7 @@ where
                             Err(e)
                         } else {
                             // `{:#}` prints the error and the causes in a single line.
-                            warn!("[{out_pretty}]: Could not perform distributed compile, falling back to local: {e:#}");
+                            warn!("[{out_pretty}]: Could not perform distributed compile: {e:#}");
                             compile_cmd
                                 .execute(sccache_service, command_creator)
                                 .await
@@ -1141,15 +1137,11 @@ struct LocalCompile<T: CommandCreatorSync> {
     outputs: Vec<FileObjectSource>,
 }
 
-struct DistCompile {
+struct DistCompile<T: CommandCreatorSync> {
+    #[cfg(feature = "dist-client")]
+    compilation: Box<dyn Compilation<T>>,
     dist_client: Arc<dyn dist::Client>,
     dist_compile_cmd: dist::CompileCommand,
-    #[cfg(feature = "dist-client")]
-    inputs_packager: Box<dyn InputsPackager>,
-    #[cfg(feature = "dist-client")]
-    toolchain_packager: Box<dyn pkg::ToolchainPackager>,
-    #[cfg(feature = "dist-client")]
-    outputs_rewriter: Box<dyn OutputsRewriter>,
     out_pretty: String,
     #[cfg(feature = "dist-client")]
     path_transformer: dist::PathTransformer,
@@ -1157,9 +1149,13 @@ struct DistCompile {
 }
 
 #[cfg(feature = "dist-client")]
-impl DistCompile {
+impl<T> DistCompile<T>
+where
+    T: CommandCreatorSync,
+{
     async fn into_result(
         self,
+        creator: &T,
         executable: &Path,
         outputs: &[FileObjectSource],
     ) -> Result<(DistType, ProcessOutput)> {
@@ -1168,16 +1164,20 @@ impl DistCompile {
         use tokio_retry2::strategy::FibonacciBackoff;
 
         let Self {
+            compilation,
             dist_client,
             mut dist_compile_cmd,
-            inputs_packager,
-            outputs_rewriter,
             ref out_pretty,
             mut path_transformer,
-            toolchain_packager,
             weak_toolchain_key,
             ..
         } = self;
+
+        // Ensure the dependency file exists
+        compilation.generate_dependencies(creator).await?;
+
+        let (inputs_packager, toolchain_packager, outputs_rewriter) =
+            compilation.into_dist_packagers()?;
 
         trace!("[{out_pretty}]: Identifying dist toolchain for {executable:?}");
 
@@ -1562,6 +1562,7 @@ impl<T: CommandCreatorSync> Clone for Box<dyn CompilerHasher<T>> {
 }
 
 /// An interface to a compiler for actually invoking compilation.
+#[async_trait]
 pub trait Compilation<T>: Send + Sync
 where
     T: CommandCreatorSync,
@@ -1578,6 +1579,12 @@ where
         Option<dist::CompileCommand>,
         Cacheable,
     )>;
+
+    /// Run the C preprocessor to generate the dependencies if dist-compiling.
+    #[allow(dead_code)]
+    async fn generate_dependencies(&self, _creator: &T) -> Result<()> {
+        Ok(())
+    }
 
     /// Create a function that will create the inputs used to perform a distributed compilation
     #[cfg(feature = "dist-client")]

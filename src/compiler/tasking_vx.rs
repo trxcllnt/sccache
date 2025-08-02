@@ -22,21 +22,20 @@ use crate::{
         c::{
             ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
         },
-        gcc, CCompileCommand, Cacheable, CompileCommand, CompilerArguments, Language,
-        SingleCompileCommand,
+        gcc, Cacheable, CompileCommandImpl, CompilerArguments, Language, SingleCompileCommand,
     },
     counted_array, debug_if_trace, dist,
     errors::*,
-    mock_command::{CommandCreatorSync, RunCommand},
-    util::run_input_output,
+    mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
+    util::{run_input_output, temp_path},
 };
 use async_trait::async_trait;
-use futures::TryFutureExt;
 use std::{
     collections::HashMap,
     ffi::OsString,
     path::{Path, PathBuf},
 };
+use tempfile::TempPath;
 
 #[derive(Clone, Debug)]
 pub struct TaskingVX;
@@ -79,18 +78,57 @@ impl CCompilerImpl for TaskingVX {
     where
         T: CommandCreatorSync,
     {
-        preprocess(
-            creator,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            generate_dependencies,
-        )
-        .await
+        // Tasking can produce a dep file while preprocessing, BUT if this is
+        // enabled the preprocessor output is discarded. Run depfile generation
+        // first and preprocessing for hash generation afterwards.
+        //
+        // From: TASKING  VX-toolset for TriCore User Guide
+        // With --preprocess=+make the compiler
+        // will generate dependency lines that can be used in a Makefile. The
+        // preprocessor output is discarded. The default target name is the basename
+        // of the input file, with the extension .o. With the option --make-target
+        // you can specify a target name which overrules the default target name.
+        let dependencies = if generate_dependencies || parsed_args.depfile.is_some() {
+            if let Some((depfile, _)) = self
+                .generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
+                .await?
+            {
+                Some(gcc::parse_dependencies(parsed_args, cwd, &depfile).await?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        preprocess(creator, executable, parsed_args, cwd, env_vars)
+            .await
+            .map(|output| {
+                if let Some(dependencies) = dependencies {
+                    PreprocessorOutput::OutputWithDepedencies(output, dependencies)
+                } else {
+                    PreprocessorOutput::Output(output)
+                }
+            })
     }
 
-    fn generate_compile_commands<T>(
+    async fn generate_dependencies<T>(
+        &self,
+        creator: &T,
+        executable: &Path,
+        parsed_args: &ParsedArguments,
+        cwd: &Path,
+        env_vars: &[(OsString, OsString)],
+    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    where
+        T: CommandCreatorSync,
+    {
+        generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
+            .await
+            .map(Some)
+    }
+
+    fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
         executable: &Path,
@@ -100,18 +138,11 @@ impl CCompilerImpl for TaskingVX {
         _rewrite_includes_only: bool,
         _hash_key: &str,
     ) -> Result<(
-        Box<dyn CompileCommand<T>>,
+        impl CompileCommandImpl,
         Option<dist::CompileCommand>,
         Cacheable,
-    )>
-    where
-        T: CommandCreatorSync,
-    {
-        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars).map(
-            |(command, dist_command, cacheable)| {
-                (CCompileCommand::new(command), dist_command, cacheable)
-            },
-        )
+    )> {
+        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
     }
 }
 
@@ -308,14 +339,12 @@ async fn preprocess<T>(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-    generate_dependencies: bool,
-) -> Result<PreprocessorOutput>
+) -> Result<ProcessOutput>
 where
     T: CommandCreatorSync,
 {
-    let mut preprocess = creator.clone().new_command_sync(executable);
-    preprocess
-        .arg("-E")
+    let mut cmd = creator.clone().new_command_sync(executable);
+    cmd.arg("-E")
         .arg(&parsed_args.input)
         .args(&parsed_args.preprocessor_args)
         .args(&parsed_args.common_args)
@@ -323,66 +352,58 @@ where
         .envs(env_vars.to_vec())
         .current_dir(cwd);
 
-    let depfile = if generate_dependencies {
-        if let Some(ref deps) = parsed_args.depfile {
-            Some((cwd.join(deps), None))
-        } else {
-            let temp = tempfile::Builder::new()
-                .rand_bytes(16)
-                .tempfile()?
-                .into_temp_path();
-            let path = PathBuf::from(temp.as_os_str());
-            Some((path, Some(temp)))
-        }
+    debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
+
+    run_input_output(cmd, None).await
+}
+
+async fn generate_dependencies<T>(
+    creator: &T,
+    executable: &Path,
+    parsed_args: &ParsedArguments,
+    cwd: &Path,
+    env_vars: &[(OsString, OsString)],
+) -> Result<(PathBuf, Option<TempPath>)>
+where
+    T: CommandCreatorSync,
+{
+    let (cmd, dependencies) =
+        generate_dependencies_cmd(creator, executable, parsed_args, cwd, env_vars).await?;
+    run_input_output(cmd, None).await?;
+    Ok(dependencies)
+}
+
+async fn generate_dependencies_cmd<T>(
+    creator: &T,
+    executable: &Path,
+    parsed_args: &ParsedArguments,
+    cwd: &Path,
+    env_vars: &[(OsString, OsString)],
+) -> Result<(T::Cmd, (PathBuf, Option<TempPath>))>
+where
+    T: CommandCreatorSync,
+{
+    let (path, temp) = if let Some(depfile) = parsed_args.depfile.as_deref() {
+        (cwd.join(depfile), None)
     } else {
-        None
+        let temp = temp_path()?;
+        (temp.to_path_buf(), Some(temp))
     };
 
-    debug_if_trace!(
-        "[{}]: preprocess: {preprocess}",
-        parsed_args.output_pretty()
-    );
+    let mut cmd = creator.clone().new_command_sync(executable);
+    cmd.current_dir(cwd)
+        .env_clear()
+        .envs(env_vars.to_vec())
+        .args(&parsed_args.preprocessor_args)
+        .args(&parsed_args.common_args)
+        .arg("-Em")
+        .arg(&parsed_args.input)
+        .arg("-o")
+        .arg(&path);
 
-    let preprocess = run_input_output(preprocess, None);
+    debug_if_trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
-    // Tasking can produce a dep file while preprocessing, BUT if this is
-    // enabled the preprocessor output is discarded. Run depfile generation
-    // first and preprocessing for hash generation afterwards.
-    //
-    // From: TASKING  VX-toolset for TriCore User Guide
-    // With --preprocess=+make the compiler
-    // will generate dependency lines that can be used in a Makefile. The
-    // preprocessor output is discarded. The default target name is the basename
-    // of the input file, with the extension .o. With the option --make-target
-    // you can specify a target name which overrules the default target name.
-
-    if let Some((depfile, _)) = depfile {
-        let mut generate_depfile = creator.clone().new_command_sync(executable);
-        generate_depfile
-            .arg("-Em")
-            .arg("-o")
-            .arg(&depfile)
-            .arg(&parsed_args.input)
-            .args(&parsed_args.preprocessor_args)
-            .args(&parsed_args.common_args)
-            .env_clear()
-            .envs(env_vars.to_vec())
-            .current_dir(cwd);
-
-        debug_if_trace!(
-            "[{}]: dep file generation: {generate_depfile}",
-            parsed_args.output_pretty()
-        );
-
-        let generate_depfile = run_input_output(generate_depfile, None);
-        let output = generate_depfile.and_then(|_| preprocess).await?;
-        Ok(PreprocessorOutput::OutputWithDepedencies(
-            output,
-            gcc::parse_dependencies(parsed_args, cwd, &depfile).await?,
-        ))
-    } else {
-        Ok(PreprocessorOutput::Output(preprocess.await?))
-    }
+    Ok((cmd, (path, temp)))
 }
 
 fn generate_compile_commands(
@@ -396,6 +417,7 @@ fn generate_compile_commands(
     Option<dist::CompileCommand>,
     Cacheable,
 )> {
+    let out_pretty = parsed_args.output_pretty();
     let out_file = match parsed_args.outputs.get("obj") {
         Some(obj) => obj,
         None => return Err(anyhow!("Missing object file output")),
@@ -411,11 +433,14 @@ fn generate_compile_commands(
     arguments.extend_from_slice(&parsed_args.unhashed_args);
     arguments.extend_from_slice(&parsed_args.common_args);
     let command = SingleCompileCommand {
-        executable: executable.to_owned(),
         arguments,
-        env_vars: env_vars.to_owned(),
         cwd: cwd.to_owned(),
+        env_vars: env_vars.to_owned(),
+        executable: executable.to_owned(),
+        out_pretty: out_pretty.to_string(),
     };
+
+    trace!("[{out_pretty}]: compile command: {command}");
 
     Ok((command, None, Cacheable::Yes))
 }

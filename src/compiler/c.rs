@@ -12,19 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cache::{FileObjectSource, PreprocessorCacheModeConfig, Storage};
-use crate::compiler::preprocessor_cache::preprocessor_cache_entry_hash_key;
-use crate::compiler::{
-    Cacheable, ColorMode, Compilation, CompileCommand, Compiler, CompilerArguments, CompilerHasher,
-    CompilerKind, HashResult, Language,
+use crate::{
+    cache::{FileObjectSource, PreprocessorCacheModeConfig, Storage},
+    compiler::{
+        preprocessor_cache::preprocessor_cache_entry_hash_key, Cacheable, ColorMode, Compilation,
+        CompileCommand, CompileCommandImpl, Compiler, CompilerArguments, CompilerHasher,
+        CompilerKind, HashResult, Language,
+    },
+    dist,
+    mock_command::{CommandCreatorSync, ProcessOutput},
+    util::{hash_all, Digest, HashToDigest, TimeMacroFinder},
 };
+
 #[cfg(feature = "dist-client")]
-use crate::compiler::{DistPackagers, NoopOutputsRewriter};
-use crate::dist;
-#[cfg(feature = "dist-client")]
-use crate::dist::pkg::{self, InputsWriter};
-use crate::mock_command::{CommandCreatorSync, ProcessOutput};
-use crate::util::{hash_all, Digest, HashToDigest, TimeMacroFinder};
+use crate::{
+    compiler::{DistPackagers, NoopOutputsRewriter},
+    dist::pkg::{self, tar_safe_path, InputsWriter},
+};
 use async_trait::async_trait;
 use bytes::Buf;
 use fs_err as fs;
@@ -38,6 +42,7 @@ use std::hash::Hash;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tempfile::TempPath;
 
 use crate::errors::*;
 
@@ -131,7 +136,7 @@ impl ParsedArguments {
 }
 
 /// A generic implementation of the `Compilation` trait for C/C++ compilers.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct CCompilation<T: CommandCreatorSync, I: CCompilerImpl> {
     service: crate::server::SccacheService<T>,
     creator: T,
@@ -240,10 +245,23 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
     ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync;
+
+    /// Run the C preprocessor to generate the dependencies file.
+    async fn generate_dependencies<T>(
+        &self,
+        creator: &T,
+        executable: &Path,
+        parsed_args: &ParsedArguments,
+        cwd: &Path,
+        env_vars: &[(OsString, OsString)],
+    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    where
+        T: CommandCreatorSync;
+
     /// Generate a command that can be used to invoke the C compiler to perform
     /// the compilation.
     #[allow(clippy::too_many_arguments)]
-    fn generate_compile_commands<T>(
+    fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
         executable: &Path,
@@ -253,12 +271,10 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         rewrite_includes_only: bool,
         hash_key: &str,
     ) -> Result<(
-        Box<dyn CompileCommand<T>>,
+        impl CompileCommandImpl,
         Option<dist::CompileCommand>,
         Cacheable,
-    )>
-    where
-        T: CommandCreatorSync;
+    )>;
 }
 
 impl<I> CCompiler<I>
@@ -682,7 +698,7 @@ where
                         preprocessor_cache_lookup
                     {
                         let paths_and_digests = dependencies.into_iter().map(|path| {
-                            tokio::runtime::Handle::current().spawn_blocking(
+                            tokio::task::spawn_blocking(
                                 move || -> Result<Option<(PathBuf, String)>> {
                                     let file = fs::File::open(&path).map_err(anyhow::Error::new)?;
                                     let (digest, finder) =
@@ -819,7 +835,7 @@ fn use_preprocessor_cache_mode(
 
     if !parsed_args.too_hard_for_preprocessor_cache_mode.is_empty() {
         trace!(
-            "[{out_pretty}]: Cannot use preprocessor cache because of {:?}",
+            "[{out_pretty}]: Cannot use preprocessor cache because {:?}",
             parsed_args
                 .too_hard_for_preprocessor_cache_mode
                 .join(OsStr::new(" "))
@@ -850,6 +866,66 @@ fn use_preprocessor_cache_mode(
     use_preprocessor_cache_mode
 }
 
+#[derive(Debug, Clone)]
+struct CCompilerCommand<C, I, T>
+where
+    C: CCompilerImpl,
+    I: CompileCommandImpl,
+    T: CommandCreatorSync,
+{
+    cmd: I,
+    compilation: CCompilation<T, C>,
+}
+
+impl<C, I, T> CCompilerCommand<C, I, T>
+where
+    C: CCompilerImpl,
+    I: CompileCommandImpl,
+    T: CommandCreatorSync,
+{
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(cmd: I, compilation: CCompilation<T, C>) -> Box<dyn CompileCommand<T>> {
+        Box::new(CCompilerCommand { cmd, compilation }) as Box<dyn CompileCommand<T>>
+    }
+}
+
+#[async_trait]
+impl<C, I, T> CompileCommand<T> for CCompilerCommand<C, I, T>
+where
+    C: CCompilerImpl,
+    I: CompileCommandImpl,
+    T: CommandCreatorSync,
+{
+    fn get_executable(&self) -> PathBuf {
+        self.cmd.get_executable()
+    }
+    fn get_arguments(&self) -> Vec<OsString> {
+        self.cmd.get_arguments()
+    }
+    fn get_env_vars(&self) -> Vec<(OsString, OsString)> {
+        self.cmd.get_env_vars()
+    }
+    fn get_cwd(&self) -> PathBuf {
+        self.cmd.get_cwd()
+    }
+
+    async fn execute(
+        &self,
+        service: &crate::server::SccacheService<T>,
+        creator: &T,
+    ) -> Result<ProcessOutput> {
+        let out = self.cmd.execute(service, creator).await?;
+        // Ensure the dependency file exists
+        self.compilation.generate_dependencies(creator).await?;
+        Ok(out)
+    }
+
+    fn box_clone(&self) -> Box<dyn CompileCommand<T>> {
+        CCompilerCommand::<C, I, T>::new(self.cmd.clone(), self.compilation.clone())
+    }
+}
+
+#[async_trait]
 impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T, I> {
     fn generate_compile_commands(
         &self,
@@ -862,23 +938,64 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
         Cacheable,
     )> {
         let CCompilation {
-            ref parsed_args,
-            ref executable,
-            ref compiler,
-            ref cwd,
-            ref env_vars,
-            ..
-        } = *self;
-
-        compiler.generate_compile_commands(
-            path_transformer,
-            executable,
             parsed_args,
+            executable,
+            compiler,
             cwd,
             env_vars,
-            rewrite_includes_only,
-            hash_key,
-        )
+            ..
+        } = self;
+
+        compiler
+            .generate_compile_commands(
+                path_transformer,
+                executable,
+                parsed_args,
+                cwd,
+                env_vars,
+                rewrite_includes_only,
+                hash_key,
+            )
+            .map(|(command, dist_command, cacheable)| {
+                (
+                    CCompilerCommand::new(command, self.clone()),
+                    dist_command,
+                    cacheable,
+                )
+            })
+    }
+
+    #[allow(dead_code)]
+    async fn generate_dependencies(&self, creator: &T) -> Result<()> {
+        let CCompilation {
+            parsed_args,
+            executable,
+            compiler,
+            cwd,
+            env_vars,
+            ..
+        } = self;
+
+        // Ensure the depfile exists if it is required and doesn't already.
+        //
+        // When not configured for dist-compile, the depfile is either created
+        // by the preprocessor, generated during compile, or restored from
+        // cache.
+        //
+        // If we're using preprocessor cache mode with sccache-dist, it's possible
+        // to get a preprocessor cache hit, an object cache miss (i.e. changed from
+        // remote to local caching), and then dist-compile. However, dist-compile
+        // doesn't generate dependency files because it compiles the preprocessed
+        // source. Preprocessor-cache mode means we skip calling the preprocessor,
+        // so we have to generate the dependency file after the fact.
+        if let Some(depfile) = parsed_args.depfile.as_ref() {
+            if !depfile.exists() {
+                compiler
+                    .generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     #[cfg(feature = "dist-client")]

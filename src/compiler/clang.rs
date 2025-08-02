@@ -15,9 +15,8 @@
 use crate::compiler::{
     args::*,
     c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput},
-    gcc,
-    gcc::ArgData::*,
-    CCompileCommand, Cacheable, CompileCommand, CompilerArguments,
+    gcc::{self, ArgData::*},
+    Cacheable, CompileCommandImpl, CompilerArguments,
 };
 use crate::mock_command::CommandCreatorSync;
 use crate::{counted_array, dist};
@@ -25,6 +24,7 @@ use async_trait::async_trait;
 use semver::{BuildMetadata, Prerelease, Version};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use tempfile::TempPath;
 
 use crate::errors::*;
 
@@ -122,7 +122,7 @@ impl CCompilerImpl for Clang {
     where
         T: CommandCreatorSync,
     {
-        let mut ignorable_whitespace_flags = if include_line_numbers {
+        let mut extra_preprocessor_flags = if include_line_numbers {
             vec![]
         } else {
             vec!["-P".to_string()]
@@ -130,7 +130,7 @@ impl CCompilerImpl for Clang {
 
         // Clang 14 and later support -fminimize-whitespace, which normalizes away non-semantic whitespace which in turn increases cache hit rate.
         if self.supports_fminimize_whitespace {
-            ignorable_whitespace_flags.push("-fminimize-whitespace".to_string())
+            extra_preprocessor_flags.push("-fminimize-whitespace".to_string())
         }
 
         gcc::preprocess(
@@ -142,12 +142,28 @@ impl CCompilerImpl for Clang {
             self.kind(),
             rewrite_includes_only,
             generate_dependencies,
-            &ignorable_whitespace_flags,
+            &extra_preprocessor_flags,
         )
         .await
     }
 
-    fn generate_compile_commands<T>(
+    async fn generate_dependencies<T>(
+        &self,
+        creator: &T,
+        executable: &Path,
+        parsed_args: &ParsedArguments,
+        cwd: &Path,
+        env_vars: &[(OsString, OsString)],
+    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    where
+        T: CommandCreatorSync,
+    {
+        gcc::generate_dependencies(creator, executable, parsed_args, cwd, env_vars, self.kind())
+            .await
+            .map(Some)
+    }
+
+    fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
         executable: &Path,
@@ -157,13 +173,10 @@ impl CCompilerImpl for Clang {
         rewrite_includes_only: bool,
         _hash_key: &str,
     ) -> Result<(
-        Box<dyn CompileCommand<T>>,
+        impl CompileCommandImpl,
         Option<dist::CompileCommand>,
         Cacheable,
-    )>
-    where
-        T: CommandCreatorSync,
-    {
+    )> {
         gcc::generate_compile_commands(
             path_transformer,
             executable,
@@ -173,9 +186,6 @@ impl CCompilerImpl for Clang {
             self.kind(),
             rewrite_includes_only,
         )
-        .map(|(command, dist_command, cacheable)| {
-            (CCompileCommand::new(command), dist_command, cacheable)
-        })
     }
 }
 

@@ -13,15 +13,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compiler::args::*;
 use crate::compiler::c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput};
 use crate::compiler::cicc;
-use crate::compiler::{CCompileCommand, Cacheable, CompileCommand, CompilerArguments, Language};
+use crate::compiler::{args::*, CompileCommandImpl};
+use crate::compiler::{Cacheable, CompilerArguments, Language};
 use crate::{counted_array, dist};
 
 use crate::mock_command::CommandCreatorSync;
 
 use async_trait::async_trait;
+use tempfile::TempPath;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -71,7 +72,20 @@ impl CCompilerImpl for CudaFE {
     {
         cicc::preprocess(cwd, parsed_args).await
     }
-    fn generate_compile_commands<T>(
+    async fn generate_dependencies<T>(
+        &self,
+        _creator: &T,
+        _executable: &Path,
+        _parsed_args: &ParsedArguments,
+        _cwd: &Path,
+        _env_vars: &[(OsString, OsString)],
+    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    where
+        T: CommandCreatorSync,
+    {
+        Ok(None)
+    }
+    fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
         executable: &Path,
@@ -81,13 +95,10 @@ impl CCompilerImpl for CudaFE {
         _rewrite_includes_only: bool,
         _hash_key: &str,
     ) -> Result<(
-        Box<dyn CompileCommand<T>>,
+        impl CompileCommandImpl,
         Option<dist::CompileCommand>,
         Cacheable,
-    )>
-    where
-        T: CommandCreatorSync,
-    {
+    )> {
         cicc::generate_compile_commands(
             path_transformer,
             executable,
@@ -96,9 +107,6 @@ impl CCompilerImpl for CudaFE {
             env_vars,
             "--module_id_file_name",
         )
-        .map(|(command, dist_command, cacheable)| {
-            (CCompileCommand::new(command), dist_command, cacheable)
-        })
     }
 }
 
