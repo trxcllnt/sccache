@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use tempfile::TempPath;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use which::which_in;
 
@@ -749,6 +750,7 @@ impl CompileCommandImpl for NvccCompileCommand {
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
+        job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
@@ -770,6 +772,7 @@ impl CompileCommandImpl for NvccCompileCommand {
         let (mut nvcc_internal_files, nvcc_subcommand_groups) =
             group_nvcc_subcommands_by_compilation_stage(
                 creator,
+                job_slot,
                 executable,
                 arguments,
                 compile_flag,
@@ -834,6 +837,8 @@ impl CompileCommandImpl for NvccCompileCommand {
         let device_compile_range = if n > 2 { 1..n - 1 } else { 0..0 };
 
         let num_parallel = device_compile_range.len().min(*num_parallel).max(1);
+
+        service.stats.lock().await.decrement_pending_compilations();
 
         let run_command_groups =
             |mut output: ProcessOutput, chunks: Vec<Vec<Vec<NvccGeneratedSubcommand>>>| async {
@@ -907,6 +912,7 @@ pub struct NvccGeneratedSubcommand {
     pub cwd: PathBuf,
     pub env_vars: Vec<(OsString, OsString)>,
     pub cacheable: Cacheable,
+    pub job_slot: Option<OwnedSemaphorePermit>,
 }
 
 impl std::fmt::Display for NvccGeneratedSubcommand {
@@ -927,6 +933,7 @@ impl std::fmt::Display for NvccGeneratedSubcommand {
 #[allow(clippy::too_many_arguments)]
 async fn group_nvcc_subcommands_by_compilation_stage<T>(
     creator: &T,
+    job_slot: Option<OwnedSemaphorePermit>,
     executable: &Path,
     arguments: &[OsString],
     compile_flag: &NvccCompileFlag,
@@ -1250,6 +1257,7 @@ where
                 cwd: dir.to_owned(),
                 env_vars,
                 cacheable,
+                job_slot: None,
             };
 
             debug_if_trace!(
@@ -1261,12 +1269,20 @@ where
         }
     }
 
-    let command_groups = std::iter::empty()
+    let mut command_groups = std::iter::empty()
         .chain([cuda_front_end_group].into_iter())
         .chain(device_compile_groups.into_values())
         .chain([final_assembly_group].into_iter())
         .map(|xs| xs.into_iter().map(|(_, c)| c).collect::<Vec<_>>())
         .collect::<Vec<_>>();
+
+    if let Some(first_cmd) = command_groups
+        .iter_mut()
+        .flat_map(|group| group.iter_mut())
+        .find_or_first(|cmd| cmd.cacheable == Cacheable::Yes)
+    {
+        first_cmd.job_slot = job_slot;
+    }
 
     Ok((nvcc_internal_files, command_groups))
 }
@@ -1300,6 +1316,8 @@ fn parse_args_simple(args: &[String], cwd: &Path) -> ParsedArguments {
             },
         );
     }
+
+    trace!("parse_args_simple: input={input:?}, outputs={outputs:?} args={args:?}");
 
     ParsedArguments {
         input,
@@ -1579,6 +1597,8 @@ fn fold_env_vars_or_split_into_exe_and_args(
             }
         }
     }
+
+    trace!("nvcc subcommand: {line}");
 
     let args = match shlex::split(&line) {
         Some(args) => args,
@@ -1947,7 +1967,14 @@ where
                         }
                         CompilerArguments::Ok(hasher) => service
                             .clone()
-                            .start_compile_task(compiler, hasher, args, cmd.cwd, cmd.env_vars, None)
+                            .start_compile_task(
+                                compiler,
+                                hasher,
+                                args,
+                                cmd.cwd,
+                                cmd.env_vars,
+                                cmd.job_slot,
+                            )
                             .await
                             .map_or_else(error_to_output, result_to_output),
                     },
