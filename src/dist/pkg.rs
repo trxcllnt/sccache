@@ -105,6 +105,7 @@ mod toolchain_imp {
 mod toolchain_imp {
     use super::SimplifyPath;
     use fs_err as fs;
+    use is_executable::IsExecutable;
     use std::collections::BTreeMap;
     use std::ffi::OsString;
     use std::io::{Read, Write};
@@ -142,9 +143,9 @@ mod toolchain_imp {
         pub fn add_executable_and_deps(
             &mut self,
             env_vars: &[(OsString, OsString)],
-            executable: PathBuf,
+            executable: &Path,
         ) -> Result<()> {
-            let mut remaining = vec![executable];
+            let mut remaining = vec![executable.to_owned()];
             while let Some(obj_path) = remaining.pop() {
                 assert!(obj_path.is_absolute());
                 // If any parent directories are a symlink, resolve it first and record the link.
@@ -188,13 +189,22 @@ mod toolchain_imp {
             Ok(())
         }
 
-        pub fn add_file(&mut self, file_path: PathBuf) -> Result<()> {
+        pub fn add_file(
+            &mut self,
+            env_vars: &[(OsString, OsString)],
+            file_path: PathBuf,
+        ) -> Result<()> {
             assert!(file_path.is_absolute());
             if !file_path.is_file() {
                 bail!(format!(
                     "{} was not a file when readying for tar",
                     file_path.to_string_lossy()
                 ))
+            }
+            if file_path.is_executable()
+                && self.add_executable_and_deps(env_vars, &file_path).is_ok()
+            {
+                return Ok(());
             }
             trace!("add_file {}", file_path.display());
             let tar_path = self.tarify_path(&file_path)?;
@@ -208,7 +218,11 @@ mod toolchain_imp {
             Ok(())
         }
 
-        pub fn add_dir_contents(&mut self, dir_path: &Path) -> Result<()> {
+        pub fn add_dir_contents(
+            &mut self,
+            env_vars: &[(OsString, OsString)],
+            dir_path: &Path,
+        ) -> Result<()> {
             // Although by not following symlinks we could break a custom
             // constructed toolchain with links everywhere, this is just a
             // best-effort auto packaging
@@ -228,7 +242,7 @@ mod toolchain_imp {
                 }
                 trace!("walkdir add_file {}", entry.path().display());
                 // It's either a file, or a symlink pointing to a file
-                self.add_file(entry.path().to_owned())?
+                self.add_file(env_vars, entry.path().to_owned())?
             }
             Ok(())
         }

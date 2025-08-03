@@ -538,6 +538,8 @@ macro_rules! test_dist_if_compiler_available {
 // Linux
 #[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
 test_dist_if_compiler_available!(stdpar, nvcxx, "nvc++");
+#[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+test_dist_if_compiler_available!(stdpar, mpicxx, "mpic++");
 
 #[cfg(not(target_os = "macos"))]
 macro_rules! test_dist_if_cuda_compiler_available {

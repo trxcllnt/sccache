@@ -2236,12 +2236,12 @@ impl pkg::ToolchainPackager for RustToolchainPackager {
 
         let bins_path = sysroot.join(BINS_DIR);
         let sysroot_executable = bins_path.join("rustc").with_extension(EXE_EXTENSION);
-        package_builder.add_executable_and_deps(&[], sysroot_executable)?;
+        package_builder.add_executable_and_deps(&[], &sysroot_executable)?;
 
-        package_builder.add_dir_contents(&bins_path)?;
+        package_builder.add_dir_contents(&[], &bins_path)?;
         if BINS_DIR != LIBS_DIR {
             let libs_path = sysroot.join(LIBS_DIR);
-            package_builder.add_dir_contents(&libs_path)?
+            package_builder.add_dir_contents(&[], &libs_path)?
         }
 
         package_builder.into_compressed_tar(f).await

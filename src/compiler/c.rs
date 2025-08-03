@@ -29,6 +29,7 @@ use crate::{
     compiler::{DistPackagers, NoopOutputsRewriter},
     dist::pkg::{self, tar_safe_path, InputsWriter},
 };
+
 use async_trait::async_trait;
 use bytes::Buf;
 use fs_err as fs;
@@ -371,6 +372,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
             env_vars: vec![],
             executable: self.executable.clone(),
             kind: self.compiler.kind(),
+            parsed_args: Default::default(),
         })
     }
     fn parse_arguments(
@@ -1020,6 +1022,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
             kind: self.compiler.kind(),
             env_vars: self.env_vars.to_owned(),
             executable: self.executable.to_owned(),
+            parsed_args: self.parsed_args.to_owned(),
         });
 
         let outputs_rewriter = Box::new(NoopOutputsRewriter);
@@ -1159,6 +1162,7 @@ struct CToolchainPackager {
     env_vars: Vec<(OsString, OsString)>,
     executable: PathBuf,
     kind: CCompilerKind,
+    parsed_args: ParsedArguments,
 }
 
 #[cfg(feature = "dist-client")]
@@ -1181,15 +1185,14 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 
         // Helper to use -print-file-name and -print-prog-name to look up
         // files by path.
-        let named_file = |kind: &str, name: &str| -> Option<PathBuf> {
+        let named_file = |arg: &str| -> Option<PathBuf> {
             let mut output = std::process::Command::new(&self.executable)
-                .arg(format!("-print-{kind}-name={name}"))
+                .arg(arg)
                 .output()
                 .ok()?;
             debug!(
-                "find named {} {} output:\n{}\n===\n{}",
-                kind,
-                name,
+                "{} {arg} output:\n{}\n===\n{}",
+                self.executable.display(),
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
             );
@@ -1217,15 +1220,15 @@ impl pkg::ToolchainPackager for CToolchainPackager {
         // We ignore the case where the file doesn't exist, as we don't need it.
         let add_named_prog =
             |builder: &mut pkg::ToolchainPackageBuilder, name: &str| -> Result<()> {
-                if let Some(path) = named_file("prog", name) {
-                    builder.add_executable_and_deps(&self.env_vars, path)?;
+                if let Some(path) = named_file(&format!("-print-prog-name={name}")) {
+                    builder.add_executable_and_deps(&self.env_vars, &path)?;
                 }
                 Ok(())
             };
         let add_named_file =
             |builder: &mut pkg::ToolchainPackageBuilder, name: &str| -> Result<()> {
-                if let Some(path) = named_file("file", name) {
-                    builder.add_file(path)?;
+                if let Some(path) = named_file(&format!("-print-file-name={name}")) {
+                    builder.add_file(&self.env_vars, path)?;
                 }
                 Ok(())
             };
@@ -1237,7 +1240,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 
             // Linker configuration.
             if Path::new("/etc/ld.so.conf").is_file() {
-                package_builder.add_file("/etc/ld.so.conf".into())?;
+                package_builder.add_file(&self.env_vars, "/etc/ld.so.conf".into())?;
             }
             Ok(())
         };
@@ -1246,18 +1249,18 @@ impl pkg::ToolchainPackager for CToolchainPackager {
         match self.kind {
             CCompilerKind::Clang => {
                 add_default_files()?;
-                package_builder.add_executable_and_deps(&self.env_vars, self.executable.clone())?;
+                package_builder.add_executable_and_deps(&self.env_vars, &self.executable)?;
                 // Clang uses internal header files, so add them.
-                if let Some(limits_h) = named_file("file", "include/limits.h") {
+                if let Some(limits_h) = named_file("-print-file-name=include/limits.h") {
                     info!("limits_h = {}", limits_h.display());
-                    package_builder.add_dir_contents(limits_h.parent().unwrap())?;
+                    package_builder.add_dir_contents(&self.env_vars, limits_h.parent().unwrap())?;
                 }
             }
 
             CCompilerKind::Gcc => {
                 // Various external programs / files which may be needed by gcc
                 add_default_files()?;
-                package_builder.add_executable_and_deps(&self.env_vars, self.executable.clone())?;
+                package_builder.add_executable_and_deps(&self.env_vars, &self.executable)?;
                 add_named_prog(&mut package_builder, "cc1")?;
                 add_named_prog(&mut package_builder, "cc1plus")?;
                 add_named_file(&mut package_builder, "specs")?;
@@ -1268,39 +1271,49 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                 // Various programs called by the nvc/nvc++ front end.
                 let _ = add_default_files();
 
-                // Handle NVHPC's symlinks of `mpic++ -> bin/env.sh` where `env.sh` is
-                // a wrapper to the real `mpic++` executable (or symlink) in `bin/.bin/mpic++`
-                if let Err(orig_err) =
-                    package_builder.add_executable_and_deps(&self.env_vars, self.executable.clone())
-                {
-                    let exe_dir = self.executable.parent().expect("exe should have a parent");
+                // Handle NVHPC's mpicc/mpic++ compiler wrappers
+                let executable = if let Some(executable) = named_file("-showme:command") {
+                    package_builder.add_executable_and_deps(&self.env_vars, &executable)?;
 
-                    let dot_bin_dir = if let Ok(path) = self.executable.read_link() {
-                        exe_dir.join(path).parent().map(|p| p.join(".bin"))
-                    } else {
-                        Some(exe_dir).map(|p| p.join(".bin"))
-                    };
-
-                    if let Some(real_exe) = dot_bin_dir
-                        .and_then(|p| self.executable.file_name().map(|name| p.join(name)))
+                    // Handle NVHPC's symlinks of `mpic++ -> bin/env.sh` where `env.sh`
+                    // is a wrapper to the real `mpic++` executable at `bin/.bin/mpic++`
+                    if let Err(orig_err) =
+                        package_builder.add_executable_and_deps(&self.env_vars, &self.executable)
                     {
-                        if !real_exe.exists() {
+                        if let Some(exe_dir) = self.executable.parent() {
+                            let dot_bin_dir = if let Ok(path) = self.executable.read_link() {
+                                exe_dir.join(path).parent().map(|p| p.join(".bin"))
+                            } else {
+                                Some(exe_dir).map(|p| p.join(".bin"))
+                            };
+                            if let Some(real_exe) = dot_bin_dir
+                                .and_then(|p| self.executable.file_name().map(|name| p.join(name)))
+                            {
+                                if !real_exe.exists() {
+                                    return Err(orig_err);
+                                }
+                                // Symlink `bin/mpic++` -> `bin/.bin/mpic++`
+                                package_builder.add_link(&real_exe, &self.executable)?;
+                                package_builder
+                                    .add_executable_and_deps(&self.env_vars, &real_exe)?;
+                            }
+                        } else {
                             return Err(orig_err);
                         }
-                        package_builder.add_link(&real_exe, &self.executable)?;
-                        package_builder.add_executable_and_deps(&self.env_vars, real_exe)?;
                     }
-                }
+                    executable
+                } else {
+                    // If `-showme:command` fails, self.executable is nvc/nvc++
+                    package_builder.add_executable_and_deps(&self.env_vars, &self.executable)?;
+                    self.executable.clone()
+                };
 
-                let (contents, dirs, mut exes, files) = {
-                    use futures::{
-                        future::{ok, ready},
-                        AsyncBufReadExt, TryStreamExt,
-                    };
+                let (contents, dirs, mut files): (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) = {
+                    use futures::{future, io::BufReader, AsyncBufReadExt, TryStreamExt};
                     use std::process::Stdio;
                     use tokio_util::compat::TokioAsyncReadCompatExt;
 
-                    let mut child = tokio::process::Command::new(&self.executable)
+                    let mut child = tokio::process::Command::new(&executable)
                         .arg("-show")
                         .stdin(Stdio::null())
                         .stdout(Stdio::piped())
@@ -1308,7 +1321,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                         .spawn()?;
 
                     let info = child.stdout.take().unwrap();
-                    let info = futures::io::BufReader::new(info.compat());
+                    let info = BufReader::new(info.compat());
 
                     // DEFCPPINC      These dirs just need to exist
                     // DEFSTDINC      These dirs just need to exist
@@ -1328,9 +1341,9 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                     // LLVMBINDIR     Directory containing LLVM tools     =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/share/llvm/bin
 
                     info.lines()
-                        .try_filter(|line| ready(line.len() >= 14 && line.contains('=')))
+                        .try_filter(|line| future::ready(line.len() >= 14 && line.contains('=')))
                         .try_filter_map(|mut line| {
-                            ok(match &line[0..14] {
+                            future::ok(match &line[0..14] {
                                 "CCOMPDIR      " | // .
                                 "COMPBIN       " | // .
                                 "COMPINCDIRFULL" | // .
@@ -1360,9 +1373,8 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                 _ => None,
                             })
                         })
-                        .try_filter_map(|(line, dirs)| async move {
+                        .try_filter_map(|(line, dirs)| {
                             let mut contents = vec![];
-                            let mut exes = vec![];
                             let mut files = vec![];
 
                             match &line[0..14] {
@@ -1376,11 +1388,15 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                             .filter_map_ok(|e| {
                                                 if e.file_type().is_file()
                                                 {
-                                                    if e.file_name().ends_with("rc") || e.file_name().ends_with(".bc") {
-                                                        Some(e.into_path())
-                                                    } else {
-                                                        None
-                                                    }
+                                                    let name = e.file_name();
+                                                    None
+                                                        // rcfiles
+                                                        .or(name.ends_with("rc").then_some(true))
+                                                        .or(name.ends_with(".bc").then_some(true))
+                                                        // mpic++-wrapper-data.txt
+                                                        .or(name.ends_with("-wrapper-data.txt").then_some(true))
+                                                        .or(name.ends_with("help-opal-wrapper.txt").then_some(true))
+                                                        .map(|_| e.into_path())
                                                 } else {
                                                     None
                                                 }
@@ -1407,32 +1423,15 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                 }
                                 "CCOMPDIR      " | // .
                                 "CPPCOMPDIR    " => {
+                                    // Add everything under `compilers/bin/tools`
                                     contents.extend_from_slice(dirs.as_slice());
-                                    exes.extend(dirs.iter().flat_map(|root| {
-                                        walkdir::WalkDir::new(root).into_iter().filter_map_ok(|e| {
-                                            if e.file_type().is_file() {
-                                                match e.file_name().to_str() {
-                                                    Some("llc")
-                                                    | Some("opt")
-                                                    | Some("llvm-as")
-                                                    | Some("llvm-link")
-                                                    | Some("llvm-mc") => {
-                                                        Some(e.into_path())
-                                                    }
-                                                    _ => None
-                                                }
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .filter_map(|r| r.ok())
-                                    }));
                                 }
                                 "COMPINCDIRFULL" => {
+                                    // NVHPC uses internal LLVM header files, so add them.
                                     contents.extend_from_slice(dirs.as_slice());
                                 }
                                 "CUDAROOT      " => {
-                                    exes.extend(dirs.iter().map(|root| root.join("nvvm/bin/cicc")));
+                                    files.extend(dirs.iter().map(|root| root.join("nvvm/bin/cicc")));
                                     files.extend(
                                         dirs.iter().flat_map(|root| {
                                             [
@@ -1445,7 +1444,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                     );
                                 }
                                 "CUDADIR       " => {
-                                    exes.extend(dirs.iter().flat_map(|root| {
+                                    files.extend(dirs.iter().flat_map(|root| {
                                         [
                                             "bin2c",
                                             "cudafe++",
@@ -1461,7 +1460,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                 }
                                 "CUDALIBDIR    " => {}
                                 "LLVMBINDIR    " => {
-                                    exes.extend(dirs.iter().flat_map(|root| {
+                                    files.extend(dirs.iter().flat_map(|root| {
                                         ["llc", "opt", "llvm-as", "llvm-link", "llvm-mc"]
                                             .iter()
                                             .map(|name| root.join(name))
@@ -1470,14 +1469,13 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                 _ => {}
                             }
 
-                            Ok(Some((contents, dirs, exes, files)))
+                            future::ok(Some((contents, dirs, files)))
                         })
-                        .try_fold((vec![], vec![], vec![], vec![]), |mut acc, res| {
-                            ok({
+                        .try_fold((vec![], vec![], vec![]), |mut acc, res| {
+                            future::ok({
                                 acc.0.extend(res.0);
                                 acc.1.extend(res.1);
                                 acc.2.extend(res.2);
-                                acc.3.extend(res.3);
                                 acc
                             })
                         })
@@ -1485,15 +1483,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                 };
 
                 if let Ok(as_path) = which::which("as") {
-                    exes.push(as_path);
-                }
-
-                for path in files.into_iter().filter(|p| p.exists()) {
-                    if path.is_file() || path.is_symlink() {
-                        let _ = package_builder
-                            .add_file(path.clone())
-                            .map_err(|e| trace!("add_file error {path:?}: {e:?}"));
-                    }
+                    files.push(as_path);
                 }
 
                 for path in dirs.into_iter().filter(|p| p.exists()) {
@@ -1504,25 +1494,25 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                     }
                 }
 
-                for path in contents.into_iter().filter(|p| p.exists()) {
-                    if path.is_dir() {
+                for path in files.into_iter().filter(|p| p.exists()) {
+                    if path.is_file() || path.is_symlink() {
                         let _ = package_builder
-                            .add_dir_contents(&path)
-                            .map_err(|e| trace!("add_dir_contents error {path:?}: {e:?}"));
+                            .add_file(&self.env_vars, path.clone())
+                            .map_err(|e| trace!("add_file error {path:?}: {e:?}"));
                     }
                 }
 
-                for path in exes.into_iter().filter(|p| p.exists()) {
-                    if path.is_file() || path.is_symlink() {
+                for path in contents.into_iter().filter(|p| p.exists()) {
+                    if path.is_dir() {
                         let _ = package_builder
-                            .add_executable_and_deps(&self.env_vars, path.clone())
-                            .map_err(|e| trace!("add_executable_and_deps error {path:?}: {e:?}"));
+                            .add_dir_contents(&self.env_vars, &path)
+                            .map_err(|e| trace!("add_dir_contents error {path:?}: {e:?}"));
                     }
                 }
             }
 
             _ => {
-                package_builder.add_executable_and_deps(&self.env_vars, self.executable.clone())?;
+                package_builder.add_executable_and_deps(&self.env_vars, &self.executable)?;
             }
         }
 
