@@ -601,7 +601,7 @@ where
         }
 
         // Instance to perform the cache lookup and prepare to compile
-        let lookup_and_compile = CacheLookupAndCompile::new(
+        let lookup_or_compile = CacheLookupOrCompile::new(
             cache_control,
             &creator,
             hash_result.unwrap(),
@@ -613,8 +613,8 @@ where
             service,
         );
 
-        let lookup_and_compile = lookup_and_compile
-            .into_cache_lookup_and_compile(
+        let lookup = lookup_or_compile
+            .cache_lookup(
                 object_storage.as_ref(),
                 // Set a maximum time limit for the cache to respond before we
                 // forge ahead ourselves with a compilation.
@@ -623,25 +623,22 @@ where
             )
             .await;
 
-        let (lookup, compile) = match lookup_and_compile {
-            Ok((lookup, compile)) => (lookup, compile),
-            Err(err) => {
-                return Err(err);
-            }
-        };
-
         // Check the result of the cache lookup
-        match lookup {
+        match lookup? {
+            // Cache hit
             CacheLookupResult::Success(compile_result, output) => {
                 Ok::<_, Error>((compile_result, output))
             }
+            // Cache miss, compile
             CacheLookupResult::Miss(miss_type) => {
-                // Cache miss, so compile it.
-                let start = Instant::now();
+                let compile = lookup_or_compile.into_compile()?;
                 // Do the compilation (either local or distributed)
                 service.stats.lock().await.increment_active_compilations();
-                let compile = compile.into_result().await;
-                let duration = start.elapsed();
+                let (compile, duration) = {
+                    let start = Instant::now();
+                    let res = compile.into_result().await;
+                    (res, start.elapsed())
+                };
                 service.stats.lock().await.decrement_active_compilations();
 
                 let (hash_key, outputs, cacheable, dist_type, output) = compile?;
@@ -724,7 +721,7 @@ where
     fn get_executable(&self) -> PathBuf;
 }
 
-struct CacheLookupAndCompile<'a, T: CommandCreatorSync> {
+struct CacheLookupOrCompile<'a, T: CommandCreatorSync> {
     cache_control: CacheControl,
     command_creator: &'a T,
     compilation: Box<dyn Compilation<T>>,
@@ -738,7 +735,7 @@ struct CacheLookupAndCompile<'a, T: CommandCreatorSync> {
     weak_toolchain_key: String,
 }
 
-impl<'a, T> CacheLookupAndCompile<'a, T>
+impl<'a, T> CacheLookupOrCompile<'a, T>
 where
     T: CommandCreatorSync,
 {
@@ -785,16 +782,16 @@ where
         }
     }
 
-    async fn into_cache_lookup_and_compile(
-        self,
+    async fn cache_lookup(
+        &self,
         storage: &dyn Storage,
         timeout: Duration,
-    ) -> Result<(CacheLookupResult, Compile<'a, T>)> {
+    ) -> Result<CacheLookupResult> {
         let Self {
             cache_control,
             out_pretty,
             ..
-        } = &self;
+        } = self;
 
         let start = Instant::now();
 
@@ -805,29 +802,22 @@ where
                     "[{out_pretty}]: Cache none in {}",
                     fmt_duration_as_secs(&start.elapsed())
                 );
-                Ok((
-                    CacheLookupResult::Miss(MissType::ForcedNoCache),
-                    self.into_compile()?,
-                ))
+                Ok(CacheLookupResult::Miss(MissType::ForcedNoCache))
             }
             CacheControl::ForceRecache => {
                 trace!(
                     "[{out_pretty}]: Cache recache in {}",
                     fmt_duration_as_secs(&start.elapsed())
                 );
-                Ok((
-                    CacheLookupResult::Miss(MissType::ForcedRecache),
-                    self.into_compile()?,
-                ))
+                Ok(CacheLookupResult::Miss(MissType::ForcedRecache))
             }
             _ => {
                 let service = self.sccache_service;
-                let cache_lookup = CacheLookup::new(&self, start, timeout, storage);
+                let lookup = CacheLookup::new(self, start, timeout, storage);
                 service.stats.lock().await.increment_pending_cache_lookups();
-                let cache_lookup = cache_lookup.into_result().await;
+                let lookup = lookup.into_result().await;
                 service.stats.lock().await.decrement_pending_cache_lookups();
-                let compile = self.into_compile();
-                Ok((cache_lookup?, compile?))
+                lookup
             }
         }
     }
@@ -885,10 +875,8 @@ where
             .generate_compile_commands(&mut path_transformer, rewrite_includes_only, &hash_key)
             .context("Failed to generate compile commands")?;
 
-        let dist = if let Some((dist_client, dist_compile_cmd)) =
-            dist_client.and_then(|x| dist_compile_cmd.map(|y| (x, y)))
-        {
-            Some(DistCompile {
+        let dist = dist_client.and_then(|dist_client| {
+            dist_compile_cmd.map(|dist_compile_cmd| DistCompile {
                 compilation,
                 dist_client,
                 dist_compile_cmd,
@@ -896,9 +884,7 @@ where
                 path_transformer,
                 weak_toolchain_key,
             })
-        } else {
-            None
-        };
+        });
 
         Ok(Compile {
             command_creator,
@@ -927,7 +913,7 @@ struct CacheLookup<'a> {
 
 impl<'a> CacheLookup<'a> {
     fn new<T: CommandCreatorSync>(
-        details: &CacheLookupAndCompile<'a, T>,
+        details: &CacheLookupOrCompile<'a, T>,
         start: Instant,
         timeout: Duration,
         storage: &'a dyn Storage,

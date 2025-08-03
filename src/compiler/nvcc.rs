@@ -680,7 +680,7 @@ fn parsed_to_nvcc_args(
 
     args.push(parsed_args.input.as_path().into());
 
-    (args, output.clone(), keep_dir, num_parallel)
+    (args, output.clone(), keep_dir, num_parallel.max(1))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
