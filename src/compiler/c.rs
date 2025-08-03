@@ -477,9 +477,14 @@ where
             compiler.plusplus(),
             &preprocessor_cache_mode_config,
         )?
-        .filter(|_| matches!(cache_control, CacheControl::Default));
+        .filter(|_| !matches!(cache_control, CacheControl::ForceNoCache));
 
         if let Some(preprocessor_key) = preprocessor_key {
+            if matches!(cache_control, CacheControl::ForceRecache) {
+                debug!("[{out_pretty}]: Preprocessor forced re-cache: {preprocessor_key}");
+                return Ok(PreprocessorCacheLookup::Miss(preprocessor_key));
+            }
+
             if let Some(mut preprocessor_cache_entry) = storage
                 .get_preprocessor_cache_entry(&preprocessor_key)
                 .await
