@@ -1985,7 +1985,7 @@ where
     {
         Ok(res) => Ok(res),
         Err(e) => {
-            // in case we attempted to test for rustc while it didn't look like it, fallback to c compiler detection one lat time
+            // in case we attempted to test for rustc while it didn't look like it, fallback to c compiler detection one last time
             if maybe_rustc_executable.is_none() {
                 let executable = executable.to_path_buf();
                 let cc = detect_c_compiler(creator, executable, args, env.to_vec(), pool).await;
@@ -2257,8 +2257,8 @@ compiler_version=__VERSION__
             .stderr
             .lines()
             .filter_map_ok(|line| {
-                line.split_once("Reading specs from")
-                    .map(|(_, path)| PathBuf::from(path))
+                line.split_once("Reading specs from ")
+                    .map(|(_, path)| PathBuf::from(path.trim()))
             })
             .try_collect()?;
 
@@ -2450,11 +2450,52 @@ mod test {
         );
         // Try to read gcc implicit specfiles
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
-        let c = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
+        let c1 = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
             .wait()
             .unwrap()
             .0;
-        assert_eq!(CompilerKind::C(CCompilerKind::Gcc), c.kind());
+        assert_eq!(CompilerKind::C(CCompilerKind::Gcc), c1.kind());
+
+        // Now with implicit specfiles
+        let creator = new_creator();
+        let (_tempdir, specfile) =
+            write_temp_file(pool, "file.spec".as_ref(), "specfile".as_bytes().to_vec())
+                .wait()
+                .unwrap();
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                exit_status(1),
+                "",
+                "gcc: error: unrecognized command-line option '-vV'; did you mean '-v'?",
+            )),
+        );
+        next_command(
+            &creator,
+            Ok(MockChild::new(exit_status(0), "\n\ncompiler_id=gcc", "")),
+        );
+        // Try to read gcc implicit specfiles
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                exit_status(0),
+                "",
+                format!("Reading specs from {}", specfile.display()),
+            )),
+        );
+        let c2 = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
+            .wait()
+            .unwrap()
+            .0;
+        assert_eq!(CompilerKind::C(CCompilerKind::Gcc), c2.kind());
+        if let (Ok(c1), Ok(c2)) = (
+            c1.into_any().downcast::<CCompiler<Gcc>>(),
+            c2.into_any().downcast::<CCompiler<Gcc>>(),
+        ) {
+            assert_ne!(c1.executable_digest, c2.executable_digest);
+        } else {
+            unreachable!("Failed to downcast");
+        }
     }
 
     #[test]
@@ -2577,11 +2618,45 @@ mod test {
         );
         // Try to read gcc implicit specfiles
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
-        let c = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
+        let c1 = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
             .wait()
             .unwrap()
             .0;
-        assert_eq!(CompilerKind::C(CCompilerKind::Nvcc), c.kind());
+        assert_eq!(CompilerKind::C(CCompilerKind::Nvcc), c1.kind());
+
+        // Now with implicit specfiles
+        let creator = new_creator();
+        let (_tempdir, specfile) =
+            write_temp_file(pool, "file.spec".as_ref(), "specfile".as_bytes().to_vec())
+                .wait()
+                .unwrap();
+        next_command(&creator, Ok(MockChild::new(exit_status(1), "", "no -vV")));
+        next_command(
+            &creator,
+            Ok(MockChild::new(exit_status(0), "compiler_id=nvcc\n", "")),
+        );
+        // Try to read gcc implicit specfiles
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                exit_status(0),
+                "",
+                format!("Reading specs from {}", specfile.display()),
+            )),
+        );
+        let c2 = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
+            .wait()
+            .unwrap()
+            .0;
+        assert_eq!(CompilerKind::C(CCompilerKind::Nvcc), c2.kind());
+        if let (Ok(c1), Ok(c2)) = (
+            c1.into_any().downcast::<CCompiler<Nvcc>>(),
+            c2.into_any().downcast::<CCompiler<Nvcc>>(),
+        ) {
+            assert_ne!(c1.executable_digest, c2.executable_digest);
+        } else {
+            unreachable!("Failed to downcast");
+        }
     }
 
     #[test]

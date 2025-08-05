@@ -58,6 +58,9 @@ where
     I: CCompilerImpl,
 {
     executable: PathBuf,
+    #[cfg(test)]
+    pub executable_digest: String,
+    #[cfg(not(test))]
     executable_digest: String,
     compiler: I,
 }
