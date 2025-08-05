@@ -1276,8 +1276,21 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                 package_builder.add_executable_and_deps(&self.env_vars, &self.executable)?;
                 add_named_prog(&mut package_builder, "cc1")?;
                 add_named_prog(&mut package_builder, "cc1plus")?;
-                add_named_file(&mut package_builder, "specs")?;
                 add_named_file(&mut package_builder, "liblto_plugin.so")?;
+                // Add gcc implicit specfiles
+                let jobserver = crate::jobserver::Client::new_num(1);
+                let mut creator = crate::mock_command::ProcessCommandCreator::new(&jobserver);
+                for path in crate::compiler::gcc::Gcc::read_implicit_specfiles(
+                    &mut creator,
+                    &self.executable,
+                    &[],
+                    &self.env_vars,
+                    "-v",
+                )
+                .await?
+                {
+                    package_builder.add_file(&self.env_vars, path)?;
+                }
             }
 
             CCompilerKind::Nvhpc => {

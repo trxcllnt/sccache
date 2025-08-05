@@ -45,7 +45,6 @@ use async_trait::async_trait;
 use filetime::FileTime;
 use fs::File;
 use fs_err as fs;
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
@@ -2142,7 +2141,7 @@ pub fn compiler_info_args(arguments: &[OsString]) -> Vec<OsString> {
 }
 
 async fn detect_c_compiler<T, P>(
-    creator: T,
+    mut creator: T,
     executable: P,
     arguments: &[OsString],
     env: Vec<(OsString, OsString)>,
@@ -2205,7 +2204,7 @@ compiler_id=unknown
 compiler_version=__VERSION__
 "
     .to_vec();
-    let (_tempdir, src) = write_temp_file(&pool, "testfile.c".as_ref(), test).await?;
+    let (tempdir, src) = write_temp_file(&pool, "testfile.c".as_ref(), test).await?;
 
     let executable = executable.as_ref();
     let mut cmd = creator.clone().new_command_sync(executable);
@@ -2222,6 +2221,8 @@ compiler_version=__VERSION__
         .await
         .context("failed to read child output")?;
 
+    drop(tempdir);
+
     let stdout = match str::from_utf8(&output.stdout) {
         Ok(s) => s,
         Err(_) => bail!("Failed to parse output"),
@@ -2236,34 +2237,6 @@ compiler_version=__VERSION__
             None
         }
     });
-
-    let read_gcc_specfiles = |verbose_flag: String| async {
-        let mut cmd = creator.clone().new_command_sync(executable);
-        cmd.stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .envs(env.iter().map(|s| (&s.0, &s.1)))
-            .args(arguments)
-            .arg(verbose_flag)
-            .arg("-E")
-            .arg(&src);
-
-        let child = cmd.spawn().await?;
-        let output = child
-            .wait_with_output()
-            .await
-            .context("failed to read child output")?;
-
-        let specfiles = output
-            .stderr
-            .lines()
-            .filter_map_ok(|line| {
-                line.split_once("Reading specs from ")
-                    .map(|(_, path)| PathBuf::from(path.trim()))
-            })
-            .try_collect()?;
-
-        Ok::<Vec<PathBuf>, anyhow::Error>(specfiles)
-    };
 
     if let Some(kind) = lines.next() {
         let mut next_version = || {
@@ -2300,13 +2273,18 @@ compiler_version=__VERSION__
             }
             "gcc" | "g++" => {
                 trace!("Found {kind} (version: {})", version.as_ref().unwrap());
+                let specfiles =
+                    Gcc::read_implicit_specfiles(&mut creator, &executable, arguments, &env, "-v")
+                        .await?;
+
                 return CCompiler::new(
                     Gcc {
                         gplusplus: kind == "g++",
+                        specfiles: specfiles.clone(),
                         version,
                     },
                     executable,
-                    read_gcc_specfiles("-v".into()).await?,
+                    specfiles,
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
@@ -2314,7 +2292,7 @@ compiler_version=__VERSION__
             "msvc" | "msvc-clang" => {
                 let is_clang = kind == "msvc-clang";
                 trace!("Found {kind} (version: {})", version.as_ref().unwrap());
-                let prefix = msvc::detect_showincludes_prefix(
+                let includes_prefix = msvc::detect_showincludes_prefix(
                     &creator,
                     executable.as_ref(),
                     is_clang,
@@ -2322,11 +2300,11 @@ compiler_version=__VERSION__
                     &pool,
                 )
                 .await?;
-                trace!("showIncludes prefix: '{}'", prefix);
+                trace!("showIncludes prefix: '{}'", includes_prefix);
 
                 return CCompiler::new(
                     Msvc {
-                        includes_prefix: prefix,
+                        includes_prefix,
                         is_clang,
                         version,
                     },
@@ -2353,14 +2331,28 @@ compiler_version=__VERSION__
                     host_compiler_version.as_ref().unwrap()
                 );
 
+                let specfiles = if matches!(host_compiler, NvccHostCompiler::Gcc) {
+                    Gcc::read_implicit_specfiles(
+                        &mut creator,
+                        &executable,
+                        arguments,
+                        &env,
+                        "-Xcompiler=-v",
+                    )
+                    .await?
+                } else {
+                    vec![]
+                };
+
                 return CCompiler::new(
                     Nvcc {
                         host_compiler,
                         version,
                         host_compiler_version,
+                        specfiles,
                     },
                     executable,
-                    read_gcc_specfiles("-Xcompiler=-v".into()).await?,
+                    vec![],
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
@@ -2623,40 +2615,6 @@ mod test {
             .unwrap()
             .0;
         assert_eq!(CompilerKind::C(CCompilerKind::Nvcc), c1.kind());
-
-        // Now with implicit specfiles
-        let creator = new_creator();
-        let (_tempdir, specfile) =
-            write_temp_file(pool, "file.spec".as_ref(), "specfile".as_bytes().to_vec())
-                .wait()
-                .unwrap();
-        next_command(&creator, Ok(MockChild::new(exit_status(1), "", "no -vV")));
-        next_command(
-            &creator,
-            Ok(MockChild::new(exit_status(0), "compiler_id=nvcc\n", "")),
-        );
-        // Try to read gcc implicit specfiles
-        next_command(
-            &creator,
-            Ok(MockChild::new(
-                exit_status(0),
-                "",
-                format!("Reading specs from {}", specfile.display()),
-            )),
-        );
-        let c2 = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
-            .wait()
-            .unwrap()
-            .0;
-        assert_eq!(CompilerKind::C(CCompilerKind::Nvcc), c2.kind());
-        if let (Ok(c1), Ok(c2)) = (
-            c1.into_any().downcast::<CCompiler<Nvcc>>(),
-            c2.into_any().downcast::<CCompiler<Nvcc>>(),
-        ) {
-            assert_ne!(c1.executable_digest, c2.executable_digest);
-        } else {
-            unreachable!("Failed to downcast");
-        }
     }
 
     #[test]

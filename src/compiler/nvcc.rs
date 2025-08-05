@@ -73,6 +73,7 @@ impl NvccHostCompiler {
 pub struct Nvcc {
     pub host_compiler: NvccHostCompiler,
     pub host_compiler_version: Option<String>,
+    pub specfiles: Vec<PathBuf>,
     pub version: Option<String>,
 }
 
@@ -174,6 +175,11 @@ impl CCompilerImpl for Nvcc {
                 if input.exists() {
                     parsed_args.input = dunce::canonicalize(input).unwrap();
                 }
+
+                // Include gcc's implicit specfiles in the object hash
+                parsed_args
+                    .extra_hash_files
+                    .extend(self.specfiles.iter().cloned());
 
                 CompilerArguments::Ok(parsed_args)
             }
@@ -2143,6 +2149,7 @@ mod test {
         Nvcc {
             host_compiler: NvccHostCompiler::Gcc,
             host_compiler_version: None,
+            specfiles: vec![],
             version: None,
         }
         .parse_arguments(&arguments, ".".as_ref(), &[])
@@ -2152,6 +2159,7 @@ mod test {
         Nvcc {
             host_compiler: NvccHostCompiler::Msvc,
             host_compiler_version: None,
+            specfiles: vec![],
             version: None,
         }
         .parse_arguments(&arguments, ".".as_ref(), &[])
@@ -2161,6 +2169,7 @@ mod test {
         Nvcc {
             host_compiler: NvccHostCompiler::Nvhpc,
             host_compiler_version: None,
+            specfiles: vec![],
             version: None,
         }
         .parse_arguments(&arguments, ".".as_ref(), &[])

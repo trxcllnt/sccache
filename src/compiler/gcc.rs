@@ -44,7 +44,54 @@ use crate::errors::*;
 #[derive(Clone, Debug, Default)]
 pub struct Gcc {
     pub gplusplus: bool,
+    pub specfiles: Vec<PathBuf>,
     pub version: Option<String>,
+}
+
+impl Gcc {
+    pub async fn read_implicit_specfiles<T>(
+        creator: &mut T,
+        exe: &Path,
+        arguments: &[OsString],
+        env_vars: &[(OsString, OsString)],
+        v_flag: &str,
+    ) -> Result<Vec<PathBuf>>
+    where
+        T: CommandCreatorSync,
+    {
+        use crate::compiler::write_temp_file;
+        use bytes::Buf;
+        use itertools::Itertools;
+        use std::io::BufRead;
+
+        let (_tempdir, src) = write_temp_file(
+            &tokio::runtime::Handle::current(),
+            "testfile.c".as_ref(),
+            Default::default(),
+        )
+        .await?;
+
+        let mut cmd = creator.new_command_sync(exe);
+        cmd.env_clear()
+            .envs(env_vars.iter().map(|s| (&s.0, &s.1)))
+            .args(arguments)
+            .arg(v_flag)
+            .arg("-E")
+            .arg(&src);
+
+        let output = run_input_output(cmd, None).await.unwrap_or_default();
+
+        Ok(output
+            .stderr
+            .reader()
+            .lines()
+            .filter_map_ok(|line| {
+                line.split_once("Reading specs from ")
+                    .map(|(_, path)| PathBuf::from(path.trim()))
+            })
+            .try_collect()
+            .unwrap_or_default())
+    }
 }
 
 #[async_trait]
@@ -64,7 +111,15 @@ impl CCompilerImpl for Gcc {
         cwd: &Path,
         _env_vars: &[(OsString, OsString)],
     ) -> CompilerArguments<ParsedArguments> {
-        parse_arguments(arguments, cwd, &ARGS[..], self.gplusplus, self.kind())
+        let mut parsed_args =
+            parse_arguments(arguments, cwd, &ARGS[..], self.gplusplus, self.kind());
+        if let CompilerArguments::Ok(ref mut parsed_args) = parsed_args {
+            // Include gcc's implicit specfiles in the object hash
+            parsed_args
+                .extra_hash_files
+                .extend(self.specfiles.iter().cloned());
+        }
+        parsed_args
     }
 
     #[allow(clippy::too_many_arguments)]

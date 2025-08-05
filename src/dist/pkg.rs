@@ -258,27 +258,23 @@ mod toolchain_imp {
                 par::compress::{Compression, ParCompressBuilder},
             };
 
-            let clone_pair = |(a, b): (&PathBuf, &PathBuf)| (a.to_owned(), b.to_owned());
+            let this = self;
 
             // Compute the archive first so we can feed bytes to ParCompress as fast as possible
-            let dir_set = self.dir_set.iter().map(clone_pair).collect::<Vec<_>>();
-            let file_set = self.file_set.iter().map(clone_pair).collect::<Vec<_>>();
-            let symlinks = self.symlinks.iter().map(clone_pair).collect::<Vec<_>>();
-
-            tokio::task::spawn_blocking(move || {
+            let this = tokio::task::spawn_blocking(move || {
                 let compressor = ParCompressBuilder::<Gzip>::new()
                     .compression_level(Compression::default())
                     .from_writer(writer);
 
                 let mut builder = tar::Builder::new(compressor);
 
-                for (tar_path, dir_path) in dir_set.iter() {
+                for (tar_path, dir_path) in this.dir_set.iter() {
                     builder.append_dir(tar_path, dir_path)?;
                 }
-                for (tar_path, file_path) in file_set.iter() {
+                for (tar_path, file_path) in this.file_set.iter() {
                     builder.append_file(tar_path, fs::File::open(file_path)?.file_mut())?;
                 }
-                for (from_path, to_path) in symlinks.iter() {
+                for (from_path, to_path) in this.symlinks.iter() {
                     let mut header = tar::Header::new_gnu();
                     header.set_size(0);
                     header.set_entry_type(tar::EntryType::Symlink);
@@ -287,26 +283,25 @@ mod toolchain_imp {
                     builder.append_link(&mut header, tar_safe_path(from_path), to_path)?;
                 }
 
-                builder.finish()
+                builder.finish().map(|_| this)
             })
             .await??;
-
-            let dir_set = self.dir_set.iter().map(clone_pair).collect::<Vec<_>>();
-            let file_set = self.file_set.iter().map(clone_pair).collect::<Vec<_>>();
-            let symlinks = self.symlinks.iter().map(clone_pair).collect::<Vec<_>>();
 
             // Now compute the digest so it doesn't block ParCompress
             tokio::task::spawn_blocking(move || {
                 let mut digest = Digest::new();
 
-                for (_, dir_path) in dir_set.iter() {
+                for (_, dir_path) in this.dir_set.iter() {
                     digest.update(dir_path.to_string_lossy().as_bytes());
                 }
-                for (_, file_path) in file_set.iter() {
-                    digest.update(Digest::reader_sync(fs::File::open(file_path)?)?.as_bytes());
+                for (_, file_path) in this.file_set.iter() {
+                    digest.update_from_reader_sync(fs::File::open(file_path)?)?;
                     digest.update(file_path.to_string_lossy().as_bytes());
                 }
-                for (from_path, to_path) in symlinks.iter() {
+                for (from_path, to_path) in this.symlinks.iter() {
+                    if to_path.is_file() {
+                        digest.update_from_reader_sync(fs::File::open(to_path)?)?;
+                    }
                     digest.update(to_path.to_string_lossy().as_bytes());
                     digest.update(from_path.to_string_lossy().as_bytes());
                 }
