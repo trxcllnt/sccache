@@ -45,6 +45,7 @@ use async_trait::async_trait;
 use filetime::FileTime;
 use fs::File;
 use fs_err as fs;
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
@@ -1934,6 +1935,7 @@ where
                 version: Some(String::new()),
             },
             executable.to_owned(),
+            vec![],
         )
         .await
         .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
@@ -1945,6 +1947,7 @@ where
                 version: Some(String::new()),
             },
             executable.to_owned(),
+            vec![],
         )
         .await
         .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
@@ -1956,6 +1959,7 @@ where
                 version: Some(String::new()),
             },
             executable.to_owned(),
+            vec![],
         )
         .await
         .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
@@ -2201,7 +2205,7 @@ compiler_id=unknown
 compiler_version=__VERSION__
 "
     .to_vec();
-    let (tempdir, src) = write_temp_file(&pool, "testfile.c".as_ref(), test).await?;
+    let (_tempdir, src) = write_temp_file(&pool, "testfile.c".as_ref(), test).await?;
 
     let executable = executable.as_ref();
     let mut cmd = creator.clone().new_command_sync(executable);
@@ -2210,15 +2214,13 @@ compiler_version=__VERSION__
         .envs(env.iter().map(|s| (&s.0, &s.1)))
         .args(arguments)
         .arg("-E")
-        .arg(src);
+        .arg(&src);
 
     let child = cmd.spawn().await?;
     let output = child
         .wait_with_output()
         .await
         .context("failed to read child output")?;
-
-    drop(tempdir);
 
     let stdout = match str::from_utf8(&output.stdout) {
         Ok(s) => s,
@@ -2234,6 +2236,34 @@ compiler_version=__VERSION__
             None
         }
     });
+
+    let read_gcc_specfiles = |verbose_flag: String| async {
+        let mut cmd = creator.clone().new_command_sync(executable);
+        cmd.stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .envs(env.iter().map(|s| (&s.0, &s.1)))
+            .args(arguments)
+            .arg(verbose_flag)
+            .arg("-E")
+            .arg(&src);
+
+        let child = cmd.spawn().await?;
+        let output = child
+            .wait_with_output()
+            .await
+            .context("failed to read child output")?;
+
+        let specfiles = output
+            .stderr
+            .lines()
+            .filter_map_ok(|line| {
+                line.split_once("Reading specs from")
+                    .map(|(_, path)| PathBuf::from(path))
+            })
+            .try_collect()?;
+
+        Ok::<Vec<PathBuf>, anyhow::Error>(specfiles)
+    };
 
     if let Some(kind) = lines.next() {
         let mut next_version = || {
@@ -2257,13 +2287,14 @@ compiler_version=__VERSION__
                         version,                    // version
                     ),
                     executable,
+                    vec![],
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "diab" => {
                 trace!("Found {kind} (version: {})", version.as_ref().unwrap());
-                return CCompiler::new(Diab { version }, executable)
+                return CCompiler::new(Diab { version }, executable, vec![])
                     .await
                     .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
@@ -2275,6 +2306,7 @@ compiler_version=__VERSION__
                         version,
                     },
                     executable,
+                    read_gcc_specfiles("-v".into()).await?,
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
@@ -2299,6 +2331,7 @@ compiler_version=__VERSION__
                         version,
                     },
                     executable,
+                    vec![],
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
@@ -2327,6 +2360,7 @@ compiler_version=__VERSION__
                         host_compiler_version,
                     },
                     executable,
+                    read_gcc_specfiles("-Xcompiler=-v".into()).await?,
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
@@ -2340,13 +2374,14 @@ compiler_version=__VERSION__
                         version,
                     },
                     executable,
+                    vec![],
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "tasking_vx" => {
                 trace!("Found Tasking VX");
-                return CCompiler::new(TaskingVX, executable)
+                return CCompiler::new(TaskingVX, executable, vec![])
                     .await
                     .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
@@ -2413,6 +2448,8 @@ mod test {
             &creator,
             Ok(MockChild::new(exit_status(0), "\n\ncompiler_id=gcc", "")),
         );
+        // Try to read gcc implicit specfiles
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
         let c = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
             .wait()
             .unwrap()
@@ -2538,6 +2575,8 @@ mod test {
             &creator,
             Ok(MockChild::new(exit_status(0), "compiler_id=nvcc\n", "")),
         );
+        // Try to read gcc implicit specfiles
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
         let c = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
             .wait()
             .unwrap()
@@ -2910,6 +2949,8 @@ LLVM version: 6.0",
             &creator,
             Ok(MockChild::new(exit_status(0), "compiler_id=gcc", "")),
         );
+        // Try to read gcc implicit specfiles
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
         let c = get_compiler_info(creator, &gcc, f.tempdir.path(), &[], &[], pool, None)
             .wait()
             .unwrap()
@@ -2952,6 +2993,8 @@ LLVM version: 6.0",
             &creator,
             Ok(MockChild::new(exit_status(0), "compiler_id=gcc", "")),
         );
+        // Try to read gcc implicit specfiles
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
         let c = get_compiler_info(
             creator.clone(),
             &gcc,
@@ -3086,6 +3129,8 @@ LLVM version: 6.0",
             &creator,
             Ok(MockChild::new(exit_status(0), "compiler_id=gcc", "")),
         );
+        // Try to read gcc implicit specfiles
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
         let c = get_compiler_info(
             creator.clone(),
             &gcc,
@@ -3224,6 +3269,8 @@ LLVM version: 6.0",
             &creator,
             Ok(MockChild::new(exit_status(0), "compiler_id=gcc", "")),
         );
+        // Try to read gcc implicit specfiles
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
         let c = get_compiler_info(
             creator.clone(),
             &gcc,
@@ -3320,6 +3367,8 @@ LLVM version: 6.0",
             &creator,
             Ok(MockChild::new(exit_status(0), "compiler_id=gcc", "")),
         );
+        // Try to read gcc implicit specfiles
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
         let c = get_compiler_info(
             creator.clone(),
             &gcc,
@@ -3418,6 +3467,8 @@ LLVM version: 6.0",
             &creator,
             Ok(MockChild::new(exit_status(0), "compiler_id=gcc", "")),
         );
+        // Try to read gcc implicit specfiles
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
         let c = get_compiler_info(
             creator.clone(),
             &gcc,
@@ -3562,6 +3613,8 @@ LLVM version: 6.0",
             f.write_all(b"file contents")?;
             Ok(MockChild::new(exit_status(0), "compiler_id=gcc", ""))
         });
+        // Try to read gcc implicit specfiles
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
         let c = get_compiler_info(
             creator.clone(),
             &gcc,
@@ -3655,6 +3708,8 @@ LLVM version: 6.0",
             &creator,
             Ok(MockChild::new(exit_status(0), "compiler_id=gcc", "")),
         );
+        // Try to read gcc implicit specfiles
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
         let c = get_compiler_info(
             creator.clone(),
             &gcc,

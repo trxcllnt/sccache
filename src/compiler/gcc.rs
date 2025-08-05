@@ -262,6 +262,7 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     flag!("-pedantic-errors", PedanticFlag),
     flag!("-remap", PreprocessorArgumentFlag),
     flag!("-save-temps", TooHardFlag),
+    take_arg!("-specs", PathBuf, Concatenated('='), ExtraHashFile),
     take_arg!("-std", OsString, Concatenated('='), Standard),
     take_arg!("-stdlib", OsString, Concatenated('='), PreprocessorArgument),
     flag!("-trigraphs", PreprocessorArgumentFlag),

@@ -236,6 +236,8 @@ fn test_server_compile() {
         let mut c = server_creator.lock().unwrap();
         // The server will check the compiler. Pretend it's GCC.
         c.next_command_spawns(Ok(MockChild::new(exit_status(0), "compiler_id=gcc", "")));
+        // Try to read gcc implicit specfiles
+        c.next_command_spawns(Ok(MockChild::new(exit_status(0), "", "")));
         // Preprocessor invocation.
         c.next_command_spawns(Ok(MockChild::new(
             exit_status(0),

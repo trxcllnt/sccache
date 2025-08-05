@@ -283,20 +283,30 @@ impl<I> CCompiler<I>
 where
     I: CCompilerImpl,
 {
-    pub async fn new(compiler: I, executable: PathBuf) -> Result<CCompiler<I>> {
-        let digest = Digest::file(&executable).await?;
+    pub async fn new(
+        compiler: I,
+        executable: PathBuf,
+        extra_hash_files: Vec<PathBuf>,
+    ) -> Result<CCompiler<I>> {
+        let mut digests = vec![];
+        for path in std::iter::once(&executable).chain(extra_hash_files.iter()) {
+            if path.exists() {
+                digests.push(Digest::file(path).await?);
+            }
+        }
+
+        let mut digest = Digest::new();
+        for hash in digests {
+            digest.update(hash.as_bytes());
+        }
 
         Ok(CCompiler {
             executable,
             executable_digest: {
                 if let Some(version) = compiler.version() {
-                    let mut m = Digest::new();
-                    m.update(digest.as_bytes());
-                    m.update(version.as_bytes());
-                    m.finish()
-                } else {
-                    digest
+                    digest.update(version.as_bytes());
                 }
+                digest.finish()
             },
             compiler,
         })
