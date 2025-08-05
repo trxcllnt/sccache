@@ -597,6 +597,7 @@ where
         );
 
         if let Err(e) = hash_result {
+            service.stats.lock().await.decrement_pending_compilations();
             return match e.downcast::<ProcessError>() {
                 Ok(ProcessError(output)) => Ok((CompileResult::Error(start.elapsed()), output)),
                 Err(e) => Err(e),
@@ -627,14 +628,19 @@ where
             .await;
 
         // Check the result of the cache lookup
-        match lookup? {
+        match lookup {
+            // Cache error
+            Err(err) => {
+                service.stats.lock().await.decrement_pending_compilations();
+                Err(err)
+            }
             // Cache hit
-            CacheLookupResult::Success(compile_result, output) => {
+            Ok(CacheLookupResult::Success(compile_result, output)) => {
                 service.stats.lock().await.decrement_pending_compilations();
                 Ok::<_, Error>((compile_result, output))
             }
             // Cache miss, compile
-            CacheLookupResult::Miss(miss_type) => {
+            Ok(CacheLookupResult::Miss(miss_type)) => {
                 let compile = lookup_or_compile.into_compile(job_slot)?;
                 // Do the compilation (either local or distributed)
                 service.stats.lock().await.increment_active_compilations();
