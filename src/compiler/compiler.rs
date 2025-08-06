@@ -1184,11 +1184,6 @@ where
         // Ensure the dependency file exists
         compilation.generate_dependencies(creator).await?;
 
-        // Decrement pending_compilations
-        service.stats.lock().await.decrement_pending_compilations();
-        // Drop the job slot
-        drop(job_slot.take());
-
         let (inputs_packager, toolchain_packager, outputs_rewriter) =
             compilation.into_dist_packagers()?;
 
@@ -1261,6 +1256,11 @@ where
         let mut retry_delay = FibonacciBackoff::from_millis(1000)
             .max_delay(Duration::from_secs(10))
             .map(tokio_retry2::strategy::jitter);
+
+        // Decrement pending_compilations
+        service.stats.lock().await.decrement_pending_compilations();
+        // Drop the job slot
+        drop(job_slot.take());
 
         let dist_compile_res = loop {
             let job_id: &String;

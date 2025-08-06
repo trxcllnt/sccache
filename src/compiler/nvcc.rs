@@ -791,7 +791,8 @@ impl CompileCommandImpl for NvccCompileCommand {
             )
             .await?;
 
-        let mut maybe_keep_temps_then_clean = || {
+        let maybe_keep_temps_then_clean = || async move {
+            service.stats.lock().await.increment_active_compilations();
             // Move and/or delete nvcc's internal files.
             //
             // If the caller passed `-keep` or `-keep-dir`, copy the internal
@@ -844,7 +845,11 @@ impl CompileCommandImpl for NvccCompileCommand {
 
         let num_parallel = device_compile_range.len().min(*num_parallel).max(1);
 
-        service.stats.lock().await.decrement_pending_compilations();
+        {
+            let mut stats = service.stats.lock().await;
+            stats.decrement_active_compilations();
+            stats.decrement_pending_compilations();
+        }
 
         let run_command_groups =
             |mut output: ProcessOutput, chunks: Vec<Vec<Vec<NvccGeneratedSubcommand>>>| async {
@@ -871,16 +876,15 @@ impl CompileCommandImpl for NvccCompileCommand {
         let mut device_compile_groups = cudafe_commands_group.split_off(cuda_front_end_range.len());
         let final_host_compiler_group = device_compile_groups.split_off(device_compile_range.len());
 
-        // Run the `cudafe++` command group first
-        if !cudafe_commands_group.is_empty() {
-            output = run_command_groups(output, vec![cudafe_commands_group])
-                .await
-                .or_else(|err| maybe_keep_temps_then_clean().and(Err(err)))?;
-        }
-
-        // Compile multiple device architectures in parallel when `nvcc -t=N` is specified
-        if !device_compile_groups.is_empty() {
-            output = run_command_groups(output, {
+        for command_groups in [
+            // Run the `cudafe++` command group first
+            if cudafe_commands_group.is_empty() {
+                vec![]
+            } else {
+                vec![cudafe_commands_group]
+            },
+            // Compile multiple device architectures in parallel when `nvcc -t=N` is specified
+            {
                 let mut chunks = vec![];
                 let mut head = device_compile_groups;
                 loop {
@@ -892,21 +896,25 @@ impl CompileCommandImpl for NvccCompileCommand {
                     head = tail;
                 }
                 chunks
-            })
-            .await
-            .or_else(|err| maybe_keep_temps_then_clean().and(Err(err)))?;
-        }
-
-        // Run the final host compile and link command group
-        if !final_host_compiler_group.is_empty() {
-            output = run_command_groups(output, vec![final_host_compiler_group])
-                .await
-                .or_else(|err| maybe_keep_temps_then_clean().and(Err(err)))?;
+            },
+            // Run the final host compile and link command group
+            if final_host_compiler_group.is_empty() {
+                vec![]
+            } else {
+                vec![final_host_compiler_group]
+            },
+        ] {
+            if !command_groups.is_empty() {
+                output = match run_command_groups(output, command_groups).await {
+                    Ok(output) => output,
+                    Err(err) => return maybe_keep_temps_then_clean().await.and(Err(err)),
+                };
+            }
         }
 
         output.stdout.shrink_to_fit();
         output.stderr.shrink_to_fit();
-        maybe_keep_temps_then_clean()?;
+        maybe_keep_temps_then_clean().await?;
         Ok(output)
     }
 }
@@ -1255,7 +1263,6 @@ where
                 }
             }
         {
-            let sccache_no_cache = env_vars.iter().any(|(k, _)| k == "SCCACHE_NO_CACHE");
             let args = dist::osstrings_to_strings(&parsed_args.common_args).unwrap_or_default();
             let cmd = NvccGeneratedSubcommand {
                 exe: exe.clone(),
@@ -1267,7 +1274,7 @@ where
             };
 
             debug_if_trace!(
-                "[{}]: transformed nvcc command: {cmd} (SCCACHE_NO_CACHE={sccache_no_cache})",
+                "[{}]: transformed nvcc command: {cmd}",
                 output_path.display(),
             );
 
@@ -1322,8 +1329,6 @@ fn parse_args_simple(args: &[String], cwd: &Path) -> ParsedArguments {
             },
         );
     }
-
-    trace!("parse_args_simple: input={input:?}, outputs={outputs:?} args={args:?}");
 
     ParsedArguments {
         input,
@@ -1603,8 +1608,6 @@ fn fold_env_vars_or_split_into_exe_and_args(
             }
         }
     }
-
-    trace!("nvcc subcommand: {line}");
 
     let args = match shlex::split(&line) {
         Some(args) => args,
