@@ -468,13 +468,31 @@ impl Server {
 
         let status = self.status(report_interval);
 
-        let (sigint, celery, _) = futures::join!(sigint, celery, status);
-        let pending_jobs_terminated = self.terminate_pending_jobs().await;
+        let celery = futures::select_biased! {
+            res = sigint.fuse() => res,
+            res = celery.fuse() => res,
+            res = status.fuse() => res,
+        };
+
+        let sigterm = if celery.is_ok() {
+            let timeout = Duration::from_secs(10);
+            let sigterm = self.terminate_pending_jobs();
+            tracing::info!(
+                "Waiting {}s for pending jobs to shutdown",
+                timeout.as_secs()
+            );
+            tokio::time::timeout(timeout, sigterm)
+                .await
+                .unwrap_or_else(|_| Ok(()))
+        } else {
+            celery
+        };
+
         let closed = self.tasks.app().close().await.map_err(|e| e.into());
 
         tracing::info!("Server shutdown");
 
-        sigint.and(celery).and(pending_jobs_terminated).and(closed)
+        sigterm.and(closed)
     }
 
     async fn status(&self, interval: Duration) -> Result<()> {
