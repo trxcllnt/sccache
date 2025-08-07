@@ -222,14 +222,14 @@ impl CompileCommandImpl for SingleCompileCommand {
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
-        job_slot: Option<OwnedSemaphorePermit>,
+        mut job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
         // Decrement pending_compilations and drop the job slot before compiling
         service.stats.lock().await.decrement_pending_compilations();
-        drop(job_slot);
+        drop(job_slot.take());
         let SingleCompileCommand {
             arguments,
             cwd,
@@ -1184,11 +1184,6 @@ where
         // Ensure the dependency file exists
         compilation.generate_dependencies(creator).await?;
 
-        // Decrement pending_compilations
-        service.stats.lock().await.decrement_pending_compilations();
-        // Drop the job slot
-        drop(job_slot.take());
-
         let (inputs_packager, toolchain_packager, outputs_rewriter) =
             compilation.into_dist_packagers()?;
 
@@ -1261,6 +1256,9 @@ where
         let mut retry_delay = FibonacciBackoff::from_millis(1000)
             .max_delay(Duration::from_secs(10))
             .map(tokio_retry2::strategy::jitter);
+
+        // Decrement pending_compilations
+        service.stats.lock().await.decrement_pending_compilations();
 
         let dist_compile_res = loop {
             let job_id: &String;
@@ -1345,6 +1343,9 @@ where
                 dist_compile_cmd.clone(),
                 dist_output_paths.clone(),
             );
+
+            // Drop the job slot as soon as we've sent run_job at least once
+            drop(job_slot.take());
 
             let (build_result, server_id) = match run_job.await {
                 // Job completed, regardless of whether compilation succeeded or failed
