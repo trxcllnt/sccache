@@ -91,7 +91,6 @@ where
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
-        job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<ProcessOutput>;
 
     fn get_executable(&self) -> PathBuf;
@@ -151,9 +150,8 @@ where
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
-        job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<ProcessOutput> {
-        self.cmd.execute(service, creator, job_slot).await
+        self.cmd.execute(service, creator).await
     }
 
     fn box_clone(&self) -> Box<dyn CompileCommand<T>> {
@@ -172,7 +170,6 @@ pub trait CompileCommandImpl: Send + Sync + Clone + 'static {
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
-        job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync;
@@ -220,16 +217,12 @@ impl CompileCommandImpl for SingleCompileCommand {
 
     async fn execute<T>(
         &self,
-        service: &server::SccacheService<T>,
+        _service: &server::SccacheService<T>,
         creator: &T,
-        mut job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
-        // Decrement pending_compilations and drop the job slot before compiling
-        service.stats.lock().await.decrement_pending_compilations();
-        drop(job_slot.take());
         let SingleCompileCommand {
             arguments,
             cwd,
@@ -596,8 +589,11 @@ where
             fmt_duration_as_secs(&start.elapsed())
         );
 
+        // Drop the job slot as soon as we're done preprocessing
+        service.stats.lock().await.decrement_pending_compilations();
+        drop(job_slot);
+
         if let Err(e) = hash_result {
-            service.stats.lock().await.decrement_pending_compilations();
             return match e.downcast::<ProcessError>() {
                 Ok(ProcessError(output)) => Ok((CompileResult::Error(start.elapsed()), output)),
                 Err(e) => Err(e),
@@ -628,20 +624,14 @@ where
             .await;
 
         // Check the result of the cache lookup
-        match lookup {
-            // Cache error
-            Err(err) => {
-                service.stats.lock().await.decrement_pending_compilations();
-                Err(err)
-            }
+        match lookup? {
             // Cache hit
-            Ok(CacheLookupResult::Success(compile_result, output)) => {
-                service.stats.lock().await.decrement_pending_compilations();
+            CacheLookupResult::Success(compile_result, output) => {
                 Ok::<_, Error>((compile_result, output))
             }
             // Cache miss, compile
-            Ok(CacheLookupResult::Miss(miss_type)) => {
-                let compile = lookup_or_compile.into_compile(job_slot)?;
+            CacheLookupResult::Miss(miss_type) => {
+                let compile = lookup_or_compile.into_compile()?;
                 // Do the compilation (either local or distributed)
                 service.stats.lock().await.increment_active_compilations();
                 let (compile, duration) = {
@@ -833,7 +823,7 @@ where
     }
 
     #[cfg(not(feature = "dist-client"))]
-    fn into_compile(self, job_slot: Option<OwnedSemaphorePermit>) -> Result<Compile<'a, T>> {
+    fn into_compile(self) -> Result<Compile<'a, T>> {
         let Self {
             command_creator,
             compilation,
@@ -853,7 +843,6 @@ where
         Ok(Compile {
             command_creator,
             hash_key,
-            job_slot,
             local: LocalCompile {
                 compile_cmd,
                 cacheable,
@@ -866,7 +855,7 @@ where
     }
 
     #[cfg(feature = "dist-client")]
-    fn into_compile(self, job_slot: Option<OwnedSemaphorePermit>) -> Result<Compile<'a, T>> {
+    fn into_compile(self) -> Result<Compile<'a, T>> {
         let Self {
             command_creator,
             compilation,
@@ -900,7 +889,6 @@ where
         Ok(Compile {
             command_creator,
             hash_key,
-            job_slot,
             local: LocalCompile {
                 compile_cmd,
                 cacheable,
@@ -1022,7 +1010,6 @@ struct Compile<'a, T: CommandCreatorSync> {
     command_creator: &'a T,
     dist: Option<DistCompile<T>>,
     hash_key: String,
-    job_slot: Option<OwnedSemaphorePermit>,
     local: LocalCompile<T>,
     out_pretty: String,
     sccache_service: &'a server::SccacheService<T>,
@@ -1045,7 +1032,6 @@ where
         let Self {
             command_creator,
             hash_key,
-            job_slot,
             out_pretty,
             sccache_service,
             ..
@@ -1059,7 +1045,7 @@ where
         } = self.local;
 
         compile_cmd
-            .execute(sccache_service, command_creator, job_slot)
+            .execute(sccache_service, command_creator)
             .await
             .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o))
     }
@@ -1077,7 +1063,6 @@ where
         let Self {
             command_creator,
             hash_key,
-            mut job_slot,
             out_pretty,
             sccache_service,
             ..
@@ -1092,7 +1077,7 @@ where
 
         match self.dist {
             None => compile_cmd
-                .execute(sccache_service, command_creator, job_slot)
+                .execute(sccache_service, command_creator)
                 .await
                 .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o)),
             Some(dist) => {
@@ -1100,13 +1085,7 @@ where
                 let fallback_to_local = dist.dist_client.fallback_to_local_compile();
                 // Do the distributed compilation
                 let dist_compile_res = dist
-                    .into_result(
-                        command_creator,
-                        &executable,
-                        &outputs,
-                        sccache_service,
-                        &mut job_slot,
-                    )
+                    .into_result(command_creator, &executable, &outputs)
                     .await;
 
                 match dist_compile_res {
@@ -1127,7 +1106,7 @@ where
                             // `{:#}` prints the error and the causes in a single line.
                             warn!("[{out_pretty}]: Could not perform distributed compile: {e:#}");
                             compile_cmd
-                                .execute(sccache_service, command_creator, job_slot)
+                                .execute(sccache_service, command_creator)
                                 .await
                                 .map(move |o| (hash_key, outputs, cacheable, DistType::Error, o))
                         }
@@ -1164,8 +1143,6 @@ where
         creator: &T,
         executable: &Path,
         outputs: &[FileObjectSource],
-        service: &server::SccacheService<T>,
-        job_slot: &mut Option<OwnedSemaphorePermit>,
     ) -> Result<(DistType, ProcessOutput)> {
         use dist::RunJobResponse;
         use std::io;
@@ -1257,9 +1234,6 @@ where
             .max_delay(Duration::from_secs(10))
             .map(tokio_retry2::strategy::jitter);
 
-        // Decrement pending_compilations
-        service.stats.lock().await.decrement_pending_compilations();
-
         let dist_compile_res = loop {
             let job_id: &String;
             let timeout: u32;
@@ -1343,9 +1317,6 @@ where
                 dist_compile_cmd.clone(),
                 dist_output_paths.clone(),
             );
-
-            // Drop the job slot as soon as we've sent run_job at least once
-            drop(job_slot.take());
 
             let (build_result, server_id) = match run_job.await {
                 // Job completed, regardless of whether compilation succeeded or failed

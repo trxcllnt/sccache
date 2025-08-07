@@ -44,7 +44,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempPath;
-use tokio::sync::OwnedSemaphorePermit;
 
 use crate::errors::*;
 
@@ -934,9 +933,8 @@ where
         &self,
         service: &crate::server::SccacheService<T>,
         creator: &T,
-        job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<ProcessOutput> {
-        let out = self.cmd.execute(service, creator, job_slot).await?;
+        let out = self.cmd.execute(service, creator).await?;
         // Ensure the dependency file exists
         self.compilation.generate_dependencies(creator).await?;
         Ok(out)
