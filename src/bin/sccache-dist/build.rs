@@ -397,12 +397,6 @@ impl OverlayBuilder {
             .spawn_blocking(move || {
                 // Explicitly launch a new thread outside tokio's thread pool,
                 // so that our overlayfs and tmpfs are unmounted when it dies.
-                //
-                // This might be equivalent to tokio's Handle::spawn_blocking,
-                // but their docs say they use a thread pool, and the comment
-                // about overlayfs unmounting says it happens when the thread
-                // dies. Being less efficient here is better than accidentally
-                // sharing the build context because tokio uses a thread pool.
                 std::thread::scope(|scope| {
                     scope
                         .spawn(build_in_overlay)
