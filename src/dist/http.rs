@@ -32,8 +32,7 @@ mod common {
     where
         T: for<'de> serde::Deserialize<'de> + Send + 'static,
     {
-        tokio::runtime::Handle::current()
-            .spawn_blocking(move || bincode::deserialize(&bytes))
+        tokio::task::spawn_blocking(move || bincode::deserialize(&bytes))
             .await
             .map_err(anyhow::Error::new)?
             .map_err(anyhow::Error::new)
@@ -43,8 +42,7 @@ mod common {
     where
         T: serde::Serialize + Send + 'static,
     {
-        tokio::runtime::Handle::current()
-            .spawn_blocking(move || bincode::serialize(&value))
+        tokio::task::spawn_blocking(move || bincode::serialize(&value))
             .await
             .map_err(anyhow::Error::new)?
             .map_err(anyhow::Error::new)

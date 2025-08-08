@@ -2163,47 +2163,46 @@ impl pkg::InputsPackager for RustInputsPackager {
 
         let mut builder = tar::Builder::new(compressor);
 
-        tokio::runtime::Handle::current()
-            .spawn_blocking(move || -> Result<_> {
-                for (input_path, dist_input_path) in all_tar_inputs.iter() {
-                    let (mut file_header, dist_input_path) =
-                        pkg::make_tar_header(input_path, dist_input_path)?;
-                    let file = fs::File::open(input_path)?;
-                    if can_trim_rlibs && can_trim_this(input_path) {
-                        let mut archive = ar::Archive::new(file);
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            for (input_path, dist_input_path) in all_tar_inputs.iter() {
+                let (mut file_header, dist_input_path) =
+                    pkg::make_tar_header(input_path, dist_input_path)?;
+                let file = fs::File::open(input_path)?;
+                if can_trim_rlibs && can_trim_this(input_path) {
+                    let mut archive = ar::Archive::new(file);
 
-                        while let Some(entry_result) = archive.next_entry() {
-                            let mut entry = entry_result?;
-                            if entry.header().identifier() != b"rust.metadata.bin" {
-                                continue;
-                            }
-                            let mut metadata_ar = vec![];
-                            {
-                                let mut ar_builder = ar::Builder::new(&mut metadata_ar);
-                                let header = entry.header().clone();
-                                ar_builder.append(&header, &mut entry)?
-                            }
-                            file_header.set_size(metadata_ar.len() as u64);
-                            file_header.set_cksum();
-                            builder.append_data(
-                                &mut file_header,
-                                dist_input_path,
-                                metadata_ar.as_slice(),
-                            )?;
-                            break;
+                    while let Some(entry_result) = archive.next_entry() {
+                        let mut entry = entry_result?;
+                        if entry.header().identifier() != b"rust.metadata.bin" {
+                            continue;
                         }
-                    } else {
+                        let mut metadata_ar = vec![];
+                        {
+                            let mut ar_builder = ar::Builder::new(&mut metadata_ar);
+                            let header = entry.header().clone();
+                            ar_builder.append(&header, &mut entry)?
+                        }
+                        file_header.set_size(metadata_ar.len() as u64);
                         file_header.set_cksum();
-                        builder.append_data(&mut file_header, dist_input_path, file)?
+                        builder.append_data(
+                            &mut file_header,
+                            dist_input_path,
+                            metadata_ar.as_slice(),
+                        )?;
+                        break;
                     }
+                } else {
+                    file_header.set_cksum();
+                    builder.append_data(&mut file_header, dist_input_path, file)?
                 }
+            }
 
-                // Finish archive
-                let _ = builder.into_inner()?.finish()?;
+            // Finish archive
+            let _ = builder.into_inner()?.finish()?;
 
-                Ok(())
-            })
-            .await?
+            Ok(())
+        })
+        .await?
     }
 }
 

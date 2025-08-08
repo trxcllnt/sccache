@@ -1142,22 +1142,21 @@ pub async fn parse_dependencies(
 ) -> Result<(ProcessOutput, Result<Vec<PathBuf>>)> {
     let cwd = cwd.to_owned();
     let input = cwd.join(&parsed_args.input);
-    Ok(tokio::runtime::Handle::current()
-        .spawn_blocking(move || {
-            match process_preprocessed_file(
-                input.as_path(),
-                cwd.as_path(),
-                &mut output.stdout,
-                Default::default(),
-                start,
-                StandardFsAbstraction,
-            ) {
-                Err(err) => (output, Err(err)),
-                Ok(None) => (output, Ok(vec![])),
-                Ok(Some(deps)) => (output, Ok(deps)),
-            }
-        })
-        .await?)
+    Ok(tokio::task::spawn_blocking(move || {
+        match process_preprocessed_file(
+            input.as_path(),
+            cwd.as_path(),
+            &mut output.stdout,
+            Default::default(),
+            start,
+            StandardFsAbstraction,
+        ) {
+            Err(err) => (output, Err(err)),
+            Ok(None) => (output, Ok(vec![])),
+            Ok(Some(deps)) => (output, Ok(deps)),
+        }
+    })
+    .await?)
 }
 
 fn generate_compile_commands(

@@ -80,14 +80,13 @@ impl Digest {
 
     /// Calculate the BLAKE3 digest of the contents of `path`.
     pub async fn reader<R: AsyncRead + Send + 'static>(reader: R) -> Result<String> {
-        tokio::runtime::Handle::current()
-            .spawn(async move {
-                let mut digest = Digest::new();
-                let reader = std::pin::pin!(reader);
-                digest.update_from_reader(reader).await?;
-                Ok(digest.finish())
-            })
-            .await?
+        tokio::spawn(async move {
+            let mut digest = Digest::new();
+            let reader = std::pin::pin!(reader);
+            digest.update_from_reader(reader).await?;
+            Ok(digest.finish())
+        })
+        .await?
     }
 
     /// Calculate the BLAKE3 digest of the contents read from `reader`.
@@ -1343,7 +1342,7 @@ where
             state.insert(args.clone(), sndr);
 
             // Run the function on a worker thread
-            tokio::runtime::Handle::current().spawn({
+            tokio::spawn({
                 let run_f = self.run_f.clone();
                 let state = self.state.clone();
                 async move {

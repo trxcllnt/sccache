@@ -393,18 +393,17 @@ impl OverlayBuilder {
         let job_slot = job_queue.acquire().await?;
 
         // Run build in a blocking background thread
-        let res = tokio::runtime::Handle::current()
-            .spawn_blocking(move || {
-                // Explicitly launch a new thread outside tokio's thread pool,
-                // so that our overlayfs and tmpfs are unmounted when it dies.
-                std::thread::scope(|scope| {
-                    scope
-                        .spawn(build_in_overlay)
-                        .join()
-                        .unwrap_or_else(|e| Err(anyhow!("Build thread exited with error: {e:?}")))
-                })
+        let res = tokio::task::spawn_blocking(move || {
+            // Explicitly launch a new thread outside tokio's thread pool,
+            // so that our overlayfs and tmpfs are unmounted when it dies.
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(build_in_overlay)
+                    .join()
+                    .unwrap_or_else(|e| Err(anyhow!("Build thread exited with error: {e:?}")))
             })
-            .await?;
+        })
+        .await?;
 
         // Drop the job slot once compile is finished
         drop(job_slot);
