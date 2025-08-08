@@ -208,7 +208,7 @@ impl CCompilerImpl for Nvcc {
             .cloned()
             .collect::<Vec<_>>();
 
-        let (arguments, output_path, _, num_parallel) = parsed_to_nvcc_args(cwd, parsed_args);
+        let (arguments, output_path, _, _ /*num_parallel*/) = parsed_to_nvcc_args(cwd, parsed_args);
 
         // Only generate dependencies for compilations that produce object files
         let outer_dependencies = match parsed_args.compilation_flag.as_os_str().into() {
@@ -271,7 +271,8 @@ impl CCompilerImpl for Nvcc {
             .await?
             .into_iter()
             .map(|(_, exe, args)| (exe, dist::strings_to_osstrings(&args)))
-            .chunks(num_parallel)
+            // .chunks(num_parallel)
+            .chunks(1)
             .into_iter()
             .map(|chunk| chunk.collect::<Vec<_>>())
             .collect::<Vec<_>>();

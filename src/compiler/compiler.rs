@@ -1061,7 +1061,7 @@ where
             command_creator,
             hash_key,
             out_pretty,
-            sccache_service,
+            sccache_service: service,
             ..
         } = self;
 
@@ -1074,7 +1074,7 @@ where
 
         match self.dist {
             None => compile_cmd
-                .execute(sccache_service, command_creator)
+                .execute(service, command_creator)
                 .await
                 .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o)),
             Some(dist) => {
@@ -1082,7 +1082,7 @@ where
                 let fallback_to_local = dist.dist_client.fallback_to_local_compile();
                 // Do the distributed compilation
                 let dist_compile_res = dist
-                    .into_result(command_creator, &executable, &outputs, sccache_service)
+                    .into_result(command_creator, &executable, &outputs, service)
                     .await;
 
                 match dist_compile_res {
@@ -1103,7 +1103,7 @@ where
                             // `{:#}` prints the error and the causes in a single line.
                             warn!("[{out_pretty}]: Could not perform distributed compile: {e:#}");
                             compile_cmd
-                                .execute(sccache_service, command_creator)
+                                .execute(service, command_creator)
                                 .await
                                 .map(move |o| (hash_key, outputs, cacheable, DistType::Error, o))
                         }

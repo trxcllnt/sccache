@@ -900,7 +900,7 @@ where
     preprocessor_storage: Arc<dyn Storage>,
 
     /// Limits the number of concurrent pending compilations
-    num_cpus: u64,
+    pending_compilations_limit: u64,
 
     /// Ensures asynchronous compiler_info lookups for the same compiler
     /// execute once and are cached
@@ -1054,7 +1054,7 @@ where
             dist_client,
             storage,
             preprocessor_storage,
-            num_cpus: util::num_cpus() as u64,
+            pending_compilations_limit: (util::num_cpus() as f32 * 1.1).round() as u64,
             compiler_info_queue,
             rt,
             creator,
@@ -1086,7 +1086,7 @@ where
             dist_client,
             storage,
             preprocessor_storage,
-            num_cpus: util::num_cpus() as u64,
+            pending_compilations_limit: (util::num_cpus() as f32 * 1.1).round() as u64,
             compiler_info_queue,
             rt,
             creator,
@@ -1133,7 +1133,7 @@ where
             dist_client,
             storage,
             preprocessor_storage,
-            num_cpus: util::num_cpus() as u64,
+            pending_compilations_limit: (util::num_cpus() as f32 * 1.1).round() as u64,
             compiler_info_queue,
             rt: rt.clone(),
             creator,
@@ -1268,18 +1268,18 @@ where
             // It's unlikely the CUDA subcompilation will land exactly on a timeout
             // boundary and be scheduled after the next outer compile request. But
             // even if a few sometimes do, most won't, which is good enough.
-            let mut backlog = {
+            let mut pending_compilations = {
                 let mut stats = self.stats.lock().await;
                 stats.increment_queued_compilations();
                 stats.pending_compilations
             };
             loop {
-                if backlog >= self.num_cpus {
+                if pending_compilations >= self.pending_compilations_limit {
                     // Make this configurable?
                     let delay = Duration::from_millis(1000);
                     // Jitter so not every task retries at the same time
                     tokio::time::sleep(tokio_retry2::strategy::jitter(delay)).await;
-                    backlog = self.stats.lock().await.pending_compilations;
+                    pending_compilations = self.stats.lock().await.pending_compilations;
                 } else {
                     break;
                 }
