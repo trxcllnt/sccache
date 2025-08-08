@@ -58,7 +58,6 @@ use std::str;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
-use tokio::sync::OwnedSemaphorePermit;
 
 use crate::errors::*;
 
@@ -540,7 +539,6 @@ where
         env_vars: Vec<(OsString, OsString)>,
         cache_control: CacheControl,
         runtime: tokio::runtime::Handle,
-        job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<(CompileResult, ProcessOutput)> {
         let out_pretty = self.output_pretty().into_owned();
         // [<file>] get_cached_or_compile: "/path/to/exe <args...>"
@@ -589,9 +587,8 @@ where
             fmt_duration_as_secs(&start.elapsed())
         );
 
-        // Drop the job slot as soon as we're done preprocessing
+        // Decrement pending_compilations as soon as we're done preprocessing
         service.stats.lock().await.decrement_pending_compilations();
-        drop(job_slot);
 
         if let Err(e) = hash_result {
             return match e.downcast::<ProcessError>() {
@@ -1085,7 +1082,7 @@ where
                 let fallback_to_local = dist.dist_client.fallback_to_local_compile();
                 // Do the distributed compilation
                 let dist_compile_res = dist
-                    .into_result(command_creator, &executable, &outputs)
+                    .into_result(command_creator, &executable, &outputs, sccache_service)
                     .await;
 
                 match dist_compile_res {
@@ -1143,6 +1140,7 @@ where
         creator: &T,
         executable: &Path,
         outputs: &[FileObjectSource],
+        service: &server::SccacheService<T>,
     ) -> Result<(DistType, ProcessOutput)> {
         use dist::RunJobResponse;
         use std::io;
@@ -1158,11 +1156,49 @@ where
             ..
         } = self;
 
+        macro_rules! try_or_cleanup {
+            ($res:expr) => {{
+                match $res {
+                    Ok(res) => res,
+                    Err(err) => {
+                        service.stats.lock().await.decrement_pending_compilations();
+                        return Err(err.into());
+                    }
+                }
+            }};
+        }
+
+        service.stats.lock().await.increment_pending_compilations();
+
         // Ensure the dependency file exists
-        compilation.generate_dependencies(creator).await?;
+        try_or_cleanup!(compilation.generate_dependencies(creator).await);
 
         let (inputs_packager, toolchain_packager, outputs_rewriter) =
-            compilation.into_dist_packagers()?;
+            try_or_cleanup!(compilation.into_dist_packagers());
+
+        let job_inputs = {
+            trace!("[{out_pretty}]: Serializing dist inputs");
+
+            // Write the job inputs to a tempfile because they can be huge
+            // and we don't want to OOM the server during parallel builds.
+            let job_inputs = try_or_cleanup!(crate::util::normal_tempfile());
+
+            try_or_cleanup!(inputs_packager
+                .write_inputs(
+                    &mut path_transformer,
+                    crate::dist::pkg::InputsCompressor::new(flate2::write::ZlibEncoder::new(
+                        try_or_cleanup!(job_inputs.reopen()),
+                        // Optimize for size since bandwidth costs more than client CPU cycles
+                        flate2::Compression::best(),
+                    )),
+                )
+                .await
+                .context("Could not write inputs for compilation"));
+
+            job_inputs
+        };
+
+        service.stats.lock().await.decrement_pending_compilations();
 
         trace!("[{out_pretty}]: Identifying dist toolchain for {executable:?}");
 
@@ -1175,28 +1211,6 @@ where
                 dist_compile_cmd.executable = dist_compile_executable;
                 archive_path
             });
-
-        let job_inputs = {
-            trace!("[{out_pretty}]: Serializing dist inputs");
-
-            // Write the job inputs to a tempfile because they can be huge
-            // and we don't want to OOM the server during parallel builds.
-            let job_inputs = crate::util::normal_tempfile()?;
-
-            inputs_packager
-                .write_inputs(
-                    &mut path_transformer,
-                    crate::dist::pkg::InputsCompressor::new(flate2::write::ZlibEncoder::new(
-                        job_inputs.reopen()?,
-                        // Optimize for size since bandwidth costs more than client CPU cycles
-                        flate2::Compression::best(),
-                    )),
-                )
-                .await
-                .context("Could not write inputs for compilation")?;
-
-            job_inputs
-        };
 
         let dist_output_paths: Vec<String> = outputs
             .iter()
@@ -3059,7 +3073,6 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool.clone(),
-                        None,
                     )
                     .await
             })
@@ -3098,7 +3111,6 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool,
-                        None,
                     )
                     .await
             })
@@ -3202,7 +3214,6 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool.clone(),
-                        None,
                     )
                     .await
             })
@@ -3241,7 +3252,6 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool,
-                        None,
                     )
                     .await
             })
@@ -3334,7 +3344,6 @@ LLVM version: 6.0",
                 vec![],
                 CacheControl::Default,
                 pool,
-                None,
             ))
             .unwrap();
         // Ensure that the object file was created.
@@ -3434,7 +3443,6 @@ LLVM version: 6.0",
                 vec![],
                 CacheControl::Default,
                 pool,
-                None,
             ))
             .unwrap();
         match cached {
@@ -3537,7 +3545,6 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool.clone(),
-                        None,
                     )
                     .await
             })
@@ -3568,7 +3575,6 @@ LLVM version: 6.0",
                 vec![],
                 CacheControl::ForceRecache,
                 pool,
-                None,
             )
             .wait()
             .unwrap();
@@ -3670,7 +3676,6 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool,
-                        None,
                     )
                     .await
             })
@@ -3695,7 +3700,7 @@ LLVM version: 6.0",
         let runtime = Runtime::new().unwrap();
         let pool = runtime.handle().clone();
         let dist_clients = vec![
-            (false, test_dist::ErrorPutToolchainClient::new()),
+            (true, test_dist::ErrorPutToolchainClient::new()),
             (true, test_dist::ErrorAllocJobClient::new()),
             (true, test_dist::ErrorSubmitToolchainClient::new()),
             (true, test_dist::ErrorRunJobClient::new()),
@@ -3795,7 +3800,6 @@ LLVM version: 6.0",
                     vec![],
                     CacheControl::ForceRecache,
                     pool.clone(),
-                    None,
                 )
                 .wait()
                 .expect("Does not error if storage put fails. qed");

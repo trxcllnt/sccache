@@ -208,7 +208,7 @@ impl CCompilerImpl for Nvcc {
             .cloned()
             .collect::<Vec<_>>();
 
-        let (arguments, output_path, _, _ /*num_parallel*/) = parsed_to_nvcc_args(cwd, parsed_args);
+        let (arguments, output_path, _, num_parallel) = parsed_to_nvcc_args(cwd, parsed_args);
 
         // Only generate dependencies for compilations that produce object files
         let outer_dependencies = match parsed_args.compilation_flag.as_os_str().into() {
@@ -271,8 +271,7 @@ impl CCompilerImpl for Nvcc {
             .await?
             .into_iter()
             .map(|(_, exe, args)| (exe, dist::strings_to_osstrings(&args)))
-            // .chunks(num_parallel)
-            .chunks(1)
+            .chunks(num_parallel)
             .into_iter()
             .map(|chunk| chunk.collect::<Vec<_>>())
             .collect::<Vec<_>>();
@@ -774,7 +773,21 @@ impl CompileCommandImpl for NvccCompileCommand {
             ..
         } = self;
 
-        let (mut nvcc_internal_files, nvcc_subcommand_groups) =
+        macro_rules! try_or_cleanup {
+            ($res:expr) => {{
+                match $res {
+                    Ok(res) => res,
+                    Err(err) => {
+                        service.stats.lock().await.decrement_pending_compilations();
+                        return Err(err.into());
+                    }
+                }
+            }};
+        }
+
+        service.stats.lock().await.increment_pending_compilations();
+
+        let (mut nvcc_internal_files, nvcc_subcommand_groups) = try_or_cleanup!(
             group_nvcc_subcommands_by_compilation_stage(
                 creator,
                 executable,
@@ -787,7 +800,14 @@ impl CompileCommandImpl for NvccCompileCommand {
                 host_compiler,
                 output_path,
             )
-            .await?;
+            .await
+        );
+
+        {
+            let mut stats = service.stats.lock().await;
+            stats.decrement_pending_compilations();
+            stats.decrement_active_compilations();
+        }
 
         let maybe_keep_temps_then_clean = || async move {
             service.stats.lock().await.increment_active_compilations();
@@ -842,8 +862,6 @@ impl CompileCommandImpl for NvccCompileCommand {
         let device_compile_range = if n > 2 { 1..n - 1 } else { 0..0 };
 
         let num_parallel = device_compile_range.len().min(*num_parallel).max(1);
-
-        service.stats.lock().await.decrement_active_compilations();
 
         let run_command_groups =
             |mut output: ProcessOutput, chunks: Vec<Vec<Vec<NvccGeneratedSubcommand>>>| async {
@@ -1959,7 +1977,7 @@ where
                         }
                         CompilerArguments::Ok(hasher) => service
                             .clone()
-                            .start_compile_task(compiler, hasher, args, cmd.cwd, cmd.env_vars, None)
+                            .start_compile_task(compiler, hasher, args, cmd.cwd, cmd.env_vars)
                             .await
                             .map_or_else(error_to_output, result_to_output),
                     },

@@ -61,7 +61,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     runtime::Runtime,
-    sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore},
+    sync::{Mutex, RwLock},
     time::{self, sleep, Sleep},
 };
 use tokio_serde::Framed;
@@ -899,8 +899,8 @@ where
     /// Preprocessor cache storage.
     preprocessor_storage: Arc<dyn Storage>,
 
-    /// Semaphore to rate limit compile requests
-    compile_queue: Arc<Semaphore>,
+    /// Limits the number of concurrent pending compilations
+    num_cpus: u64,
 
     /// Ensures asynchronous compiler_info lookups for the same compiler
     /// execute once and are cached
@@ -1054,7 +1054,7 @@ where
             dist_client,
             storage,
             preprocessor_storage,
-            compile_queue: Arc::new(Semaphore::new(util::num_cpus())),
+            num_cpus: util::num_cpus() as u64,
             compiler_info_queue,
             rt,
             creator,
@@ -1086,7 +1086,7 @@ where
             dist_client,
             storage,
             preprocessor_storage,
-            compile_queue: Arc::new(Semaphore::new(util::num_cpus())),
+            num_cpus: util::num_cpus() as u64,
             compiler_info_queue,
             rt,
             creator,
@@ -1133,7 +1133,7 @@ where
             dist_client,
             storage,
             preprocessor_storage,
-            compile_queue: Arc::new(Semaphore::new(util::num_cpus())),
+            num_cpus: util::num_cpus() as u64,
             compiler_info_queue,
             rt: rt.clone(),
             creator,
@@ -1216,55 +1216,86 @@ where
     /// the initial information and an optional body which will eventually
     /// contain the results of the compilation.
     async fn handle_compile(&self, mut compile: Compile) -> SccacheResponse {
-        // Limit the number of concurrent compile requests that are in the
-        // pre-compilation stage to `self.num_cpus`.
-        //
-        // `stats.pending_compilations` is the number of compile requests that have
-        // been accepted by the server but have not started compiling yet. In other
-        // words, compile requests that are in the preprocess or `generate_hash_key`
-        // stages (collectively, the pre-compilation stages).
-        //
-        // When the client is configured for local compilation, this has no impact
-        // on job throughput, since subprocess invocation is already guarded by the
-        // jobserver's semaphore.
-        //
-        // If the client is configured for distributed compilation, this gives the
-        // client time to send the `new_job`/`run_job` requests to the build cluster
-        // as soon as they're done with the pre-compilation stages.
-        //
-        // Without this, all the incoming pre-compilation tasks are interleaved,
-        // because tokio's scheduler is fair/breadth-first. The implication is all
-        // the compile requests are preprocessed at roughly the same time, then all
-        // their hash keys are computed, then all cache lookups occur, and finally
-        // all the cache misses are compiled.
-        //
-        // This is a problem in massively parallel (`make -j$(ulimit -n)`)
-        // distributed compilations -- especially with CUDA in the mix, because that
-        // fans out into potentially many parallel subcompilations.
-        //
-        // We don't want to peg the client's CPU at ~100% preprocessing every file,
-        // generating all hash keys, whipping up a cache lookup request storm, etc.
-        // before any jobs are sent to the build cluster.
-        //
-        // Jobs should be sent to the build cluster as soon as we know they're not
-        // in the cache. Then we can handle more compile requests while the build
-        // cluster is busy.
-        self.stats.lock().await.increment_pending_compilations();
-        let job_slot = self.compile_queue.clone().acquire_owned().await.ok();
+        if cfg!(not(feature = "dist-client")) {
+            self.stats.lock().await.increment_pending_compilations();
+        } else {
+            // Limit the number of concurrent compile requests that are in the
+            // pre-compilation stage to `self.num_cpus`.
+            //
+            // `stats.pending_compilations` is the number of compile requests that have
+            // been submitted to the server but have not started compiling yet. In other
+            // words, compile requests that are in the preprocess or `generate_hash_key`
+            // stages (collectively, the pre-compilation stages).
+            //
+            // When the client is configured for local compilation, this has no impact
+            // on job throughput, since subprocess invocation is already guarded by the
+            // jobserver's semaphore.
+            //
+            // If the client is configured for distributed compilation, this gives the
+            // client time to send the `new_job`/`run_job` requests to the build cluster
+            // as soon as they're done with the pre-compilation stages.
+            //
+            // Without this, all the incoming pre-compilation tasks are interleaved,
+            // because tokio's scheduler is fair/breadth-first. The implication is all
+            // the compile requests are preprocessed at roughly the same time, then all
+            // their hash keys are computed, then all cache lookups occur, and finally
+            // all the cache misses are compiled.
+            //
+            // This is a problem in massively parallel (`make -j$(ulimit -n)`)
+            // distributed compilations -- especially with CUDA in the mix, because that
+            // fans out into potentially many parallel subcompilations.
+            //
+            // We don't want to peg the client's CPU at ~100% preprocessing every file,
+            // generating all hash keys, whipping up a cache lookup request storm, etc.
+            // before any jobs are sent to the build cluster.
+            //
+            // Jobs should be sent to the build cluster as soon as we know they're not
+            // in the cache. Then we can handle more compile requests while the build
+            // cluster is busy.
+            //
+            // So this loop is effectively a semaphore, but not implemented with an
+            // actual Semaphore because we need to introduce a short a delay before
+            // "unlocking".
+            //
+            // Why is that? Good question.
+            //
+            // The "lock" for a compile request is "released" just before the first
+            // async call of a compilation phase starts. But with a CUDA compilation,
+            // a re-entrant subcompilation is scheduled, which should take precedence
+            // over (and continue to block) processing another outer compile request.
+            //
+            // Delaying a short amount of time here is an approximation of this logic.
+            // It's unlikely the CUDA subcompilation will land exactly on a timeout
+            // boundary and be scheduled after the next outer compile request. But
+            // even if a few sometimes do, most won't, which is good enough.
+            let mut backlog = {
+                let mut stats = self.stats.lock().await;
+                stats.increment_queued_compilations();
+                stats.pending_compilations
+            };
+            loop {
+                if backlog >= self.num_cpus {
+                    // Make this configurable?
+                    let delay = Duration::from_millis(1000);
+                    // Jitter so not every task retries at the same time
+                    tokio::time::sleep(tokio_retry2::strategy::jitter(delay)).await;
+                    backlog = self.stats.lock().await.pending_compilations;
+                } else {
+                    break;
+                }
+            }
+            let mut stats = self.stats.lock().await;
+            stats.decrement_queued_compilations();
+            stats.increment_pending_compilations();
+        }
 
         let args = compile.args;
         compile.args = compiler_info_args(&args);
 
         match self.compiler_info_queue.call(compile).await {
             Ok((compile, compiler)) => {
-                self.check_compile(
-                    compiler,
-                    args,
-                    compile.cwd.into(),
-                    compile.env_vars,
-                    job_slot,
-                )
-                .await
+                self.check_compile(compiler, args, compile.cwd.into(), compile.env_vars)
+                    .await
             }
             Err(err) => {
                 warn!("handle_compile: Unsupported compiler: {}", err.to_string());
@@ -1307,14 +1338,13 @@ where
         cmd: Vec<OsString>,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
-        job_slot: Option<OwnedSemaphorePermit>,
     ) -> SccacheResponse {
         // Check that we can handle this compiler with the provided commandline.
         match compiler.parse_arguments(&cmd, &cwd, &env_vars) {
             CompilerArguments::Ok(hasher) => {
                 let body = self
                     .clone()
-                    .start_compile_task(compiler, hasher, cmd, cwd, env_vars, job_slot)
+                    .start_compile_task(compiler, hasher, cmd, cwd, env_vars)
                     .and_then(|res| async { Ok(Response::CompileFinished(res)) })
                     .boxed();
 
@@ -1356,7 +1386,6 @@ where
         arguments: Vec<OsString>,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
-        job_slot: Option<OwnedSemaphorePermit>,
     ) -> Result<CompileFinished> {
         self.stats.lock().await.requests_executed += 1;
 
@@ -1396,7 +1425,6 @@ where
                                 env_vars,
                                 cache_control,
                                 me.rt.clone(),
-                                job_slot
                             )
                         )
                         .catch_unwind()
@@ -1761,10 +1789,12 @@ impl PerLanguageCount {
 pub struct ServerStats {
     /// The count of currently active compile requests.
     pub active_compilations: u64,
-    /// The count of currently active cache lookups.
-    pub pending_cache_lookups: u64,
+    /// The count of currently queued compile requests.
+    pub queued_compilations: u64,
     /// The count of currently pending compile requests.
     pub pending_compilations: u64,
+    /// The count of currently active cache lookups.
+    pub pending_cache_lookups: u64,
     /// The count of client compile requests.
     pub compile_requests: u64,
     /// The count of errors handling compile requests (per language).
@@ -1846,8 +1876,9 @@ impl Default for ServerStats {
     fn default() -> ServerStats {
         ServerStats {
             active_compilations: u64::default(),
-            pending_cache_lookups: u64::default(),
+            queued_compilations: u64::default(),
             pending_compilations: u64::default(),
+            pending_cache_lookups: u64::default(),
             compile_requests: u64::default(),
             compile_request_errors: PerLanguageCount::new(),
             requests_unsupported_compiler: u64::default(),
@@ -1951,6 +1982,7 @@ impl ServerStats {
         let mut stats_vec = vec![];
         //TODO: this would be nice to replace with a custom derive implementation.
         set_stat!(stats_vec, self.active_compilations, "Active compilations");
+        set_stat!(stats_vec, self.queued_compilations, "Queued compilations");
         set_stat!(stats_vec, self.pending_compilations, "Pending compilations");
         set_stat!(
             stats_vec,
@@ -2153,6 +2185,14 @@ impl ServerStats {
 
     pub fn decrement_active_compilations(&mut self) {
         self.active_compilations = self.active_compilations.saturating_sub(1);
+    }
+
+    pub fn increment_queued_compilations(&mut self) {
+        self.queued_compilations = self.queued_compilations.saturating_add(1);
+    }
+
+    pub fn decrement_queued_compilations(&mut self) {
+        self.queued_compilations = self.queued_compilations.saturating_sub(1);
     }
 
     pub fn increment_pending_cache_lookups(&mut self) {
