@@ -115,7 +115,7 @@ impl CCompilerImpl for Nvhpc {
             env_vars,
             self.kind(),
             rewrite_includes_only,
-            false,
+            false, // generate_dependencies
             &extra_preprocessor_flags,
         )
         .await
