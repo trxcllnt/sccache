@@ -112,14 +112,7 @@ strip-ansi-escapes = "0.2"
 sysinfo = "0.33"
 tar = "0.4.44"
 tempfile = "3"
-tokio = { version = "1", features = [
-  "rt-multi-thread",
-  "io-util",
-  "time",
-  "net",
-  "process",
-  "macros",
-] }
+tokio = { version = "1", features = ["full"] }
 tokio-serde = "0.8"
 tokio-util = { version = "0.7", features = ["codec", "compat", "io"] }
 toml = "0.8"

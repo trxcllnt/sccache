@@ -26,6 +26,8 @@ jobs:
           toolchain: "stable"
 
       - name: Build
+        env:
+          RUSTFLAGS: "--cfg tokio_uring"
         run: |
           cargo build --all-features
 
