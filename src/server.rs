@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use std::mem;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::linux::net::SocketAddrExt;
+use std::sync::atomic::AtomicU64;
 #[cfg(feature = "dist-client")]
 use std::time::Instant;
 use std::{
@@ -901,6 +902,14 @@ where
 
     /// Limits the number of concurrent pending compilations
     pending_compilations_limit: u64,
+    /// The count of currently queued compile requests.
+    queued_compilations: Arc<AtomicU64>,
+    /// The count of currently pending compile requests.
+    pending_compilations: Arc<AtomicU64>,
+    /// The count of currently active cache lookups.
+    pending_cache_lookups: Arc<AtomicU64>,
+    /// The count of currently active compile requests.
+    active_compilations: Arc<AtomicU64>,
 
     /// Ensures asynchronous compiler_info lookups for the same compiler
     /// execute once and are cached
@@ -930,6 +939,71 @@ where
 
     // System info (CPU/mem usage)
     sysinfo: Arc<std::sync::Mutex<sysinfo::System>>,
+}
+
+impl<C> SccacheService<C>
+where
+    C: Send,
+{
+    pub fn active_compilations(&self) -> u64 {
+        self.active_compilations
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn increment_active_compilations(&self) {
+        self.active_compilations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn decrement_active_compilations(&self) {
+        self.active_compilations
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn queued_compilations(&self) -> u64 {
+        self.queued_compilations
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn increment_queued_compilations(&self) {
+        self.queued_compilations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn decrement_queued_compilations(&self) {
+        self.queued_compilations
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn pending_cache_lookups(&self) -> u64 {
+        self.pending_cache_lookups
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn increment_pending_cache_lookups(&self) {
+        self.pending_cache_lookups
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn decrement_pending_cache_lookups(&self) {
+        self.pending_cache_lookups
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn pending_compilations(&self) -> u64 {
+        self.pending_compilations
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn increment_pending_compilations(&self) {
+        self.pending_compilations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn decrement_pending_compilations(&self) {
+        self.pending_compilations
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl<C> std::fmt::Debug for SccacheService<C>
@@ -1051,6 +1125,10 @@ where
         }));
         SccacheService {
             stats: Arc::default(),
+            queued_compilations: Arc::default(),
+            pending_compilations: Arc::default(),
+            pending_cache_lookups: Arc::default(),
+            active_compilations: Arc::default(),
             dist_client,
             storage,
             preprocessor_storage,
@@ -1083,6 +1161,10 @@ where
         }));
         SccacheService {
             stats: Arc::default(),
+            queued_compilations: Arc::default(),
+            pending_compilations: Arc::default(),
+            pending_cache_lookups: Arc::default(),
+            active_compilations: Arc::default(),
             dist_client,
             storage,
             preprocessor_storage,
@@ -1130,6 +1212,10 @@ where
         }));
         SccacheService {
             stats: Arc::default(),
+            queued_compilations: Arc::default(),
+            pending_compilations: Arc::default(),
+            pending_cache_lookups: Arc::default(),
+            active_compilations: Arc::default(),
             dist_client,
             storage,
             preprocessor_storage,
@@ -1196,7 +1282,13 @@ where
 
     /// Get info and stats about the cache.
     async fn get_info(&self) -> Result<ServerInfo> {
-        let stats = self.stats.lock().await.clone();
+        let stats = ServerStats {
+            active_compilations: self.active_compilations(),
+            queued_compilations: self.queued_compilations(),
+            pending_cache_lookups: self.pending_cache_lookups(),
+            pending_compilations: self.pending_compilations(),
+            ..self.stats.lock().await.clone()
+        };
         ServerInfo::new(
             stats,
             Some(&*self.storage),
@@ -1217,7 +1309,7 @@ where
     /// contain the results of the compilation.
     async fn handle_compile(&self, mut compile: Compile) -> SccacheResponse {
         if cfg!(not(feature = "dist-client")) {
-            self.stats.lock().await.increment_pending_compilations();
+            self.increment_pending_compilations();
         } else {
             // Limit the number of concurrent compile requests that are in the
             // pre-compilation stage to `self.num_cpus`.
@@ -1268,25 +1360,31 @@ where
             // It's unlikely the CUDA subcompilation will land exactly on a timeout
             // boundary and be scheduled after the next outer compile request. But
             // even if a few sometimes do, most won't, which is good enough.
-            let mut pending_compilations = {
-                let mut stats = self.stats.lock().await;
-                stats.increment_queued_compilations();
-                stats.pending_compilations
-            };
+            self.increment_queued_compilations();
             loop {
-                if pending_compilations >= self.pending_compilations_limit {
-                    // Make this configurable?
-                    let delay = Duration::from_millis(1000);
-                    // Jitter so not every task retries at the same time
-                    tokio::time::sleep(tokio_retry2::strategy::jitter(delay)).await;
-                    pending_compilations = self.stats.lock().await.pending_compilations;
-                } else {
-                    break;
+                match self.pending_compilations.fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |pending_compilations| {
+                        if pending_compilations >= self.pending_compilations_limit {
+                            None
+                        } else {
+                            Some(pending_compilations + 1)
+                        }
+                    },
+                ) {
+                    Ok(_) => {
+                        break;
+                    }
+                    Err(_) => {
+                        // Make this configurable?
+                        let delay = Duration::from_millis(1000);
+                        // Jitter so not every task retries at the same time
+                        tokio::time::sleep(tokio_retry2::strategy::jitter(delay)).await;
+                    }
                 }
             }
-            let mut stats = self.stats.lock().await;
-            stats.decrement_queued_compilations();
-            stats.increment_pending_compilations();
+            self.decrement_queued_compilations();
         }
 
         let args = compile.args;
@@ -1299,8 +1397,8 @@ where
             }
             Err(err) => {
                 warn!("handle_compile: Unsupported compiler: {}", err.to_string());
+                self.decrement_pending_compilations();
                 let mut stats = self.stats.lock().await;
-                stats.decrement_pending_compilations();
                 stats.requests_unsupported_compiler += 1;
                 Message::WithoutBody(Response::Compile(CompileResponse::UnsupportedCompiler(
                     err.to_string().into(),
@@ -1359,16 +1457,15 @@ where
                 } else {
                     debug!("parse_arguments: CannotCache({}): {:?}", why, cmd)
                 }
+                self.decrement_pending_compilations();
                 let mut stats = self.stats.lock().await;
-                stats.decrement_pending_compilations();
                 stats.requests_not_cacheable += 1;
                 *stats.not_cached.entry(why.to_string()).or_insert(0) += 1;
             }
             CompilerArguments::NotCompilation => {
                 debug!("parse_arguments: NotCompilation: {:?}", cmd);
-                let mut stats = self.stats.lock().await;
-                stats.decrement_pending_compilations();
-                stats.requests_not_compile += 1;
+                self.decrement_pending_compilations();
+                self.stats.lock().await.requests_not_compile += 1;
             }
         }
 
@@ -1526,7 +1623,6 @@ where
 
                         // Make sure the write guard has been dropped ASAP.
                         drop(stats);
-
 
                         res.output = out;
                     }
@@ -1981,7 +2077,6 @@ impl ServerStats {
 
         let mut stats_vec = vec![];
         //TODO: this would be nice to replace with a custom derive implementation.
-        set_stat!(stats_vec, self.active_compilations, "Active compilations");
         set_stat!(stats_vec, self.queued_compilations, "Queued compilations");
         set_stat!(stats_vec, self.pending_compilations, "Pending compilations");
         set_stat!(
@@ -1989,6 +2084,7 @@ impl ServerStats {
             self.pending_cache_lookups,
             "Pending cache lookups"
         );
+        set_stat!(stats_vec, self.active_compilations, "Active compilations");
         set_stat!(stats_vec, self.compile_requests, "Compile requests");
         set_stat!(
             stats_vec,
@@ -2177,38 +2273,6 @@ impl ServerStats {
                 &format!("Cache hits rate ({lang})"),
             );
         }
-    }
-
-    pub fn increment_active_compilations(&mut self) {
-        self.active_compilations = self.active_compilations.saturating_add(1);
-    }
-
-    pub fn decrement_active_compilations(&mut self) {
-        self.active_compilations = self.active_compilations.saturating_sub(1);
-    }
-
-    pub fn increment_queued_compilations(&mut self) {
-        self.queued_compilations = self.queued_compilations.saturating_add(1);
-    }
-
-    pub fn decrement_queued_compilations(&mut self) {
-        self.queued_compilations = self.queued_compilations.saturating_sub(1);
-    }
-
-    pub fn increment_pending_cache_lookups(&mut self) {
-        self.pending_cache_lookups = self.pending_cache_lookups.saturating_add(1);
-    }
-
-    pub fn decrement_pending_cache_lookups(&mut self) {
-        self.pending_cache_lookups = self.pending_cache_lookups.saturating_sub(1);
-    }
-
-    pub fn increment_pending_compilations(&mut self) {
-        self.pending_compilations = self.pending_compilations.saturating_add(1);
-    }
-
-    pub fn decrement_pending_compilations(&mut self) {
-        self.pending_compilations = self.pending_compilations.saturating_sub(1);
     }
 }
 

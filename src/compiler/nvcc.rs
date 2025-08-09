@@ -752,14 +752,14 @@ impl CompileCommandImpl for NvccCompileCommand {
                 match $res {
                     Ok(res) => res,
                     Err(err) => {
-                        service.stats.lock().await.decrement_pending_compilations();
+                        service.decrement_pending_compilations();
                         return Err(err.into());
                     }
                 }
             }};
         }
 
-        service.stats.lock().await.increment_pending_compilations();
+        service.increment_pending_compilations();
 
         let (mut nvcc_internal_files, nvcc_subcommand_groups) = try_or_cleanup!(
             group_nvcc_subcommands_by_compilation_stage(
@@ -777,14 +777,11 @@ impl CompileCommandImpl for NvccCompileCommand {
             .await
         );
 
-        {
-            let mut stats = service.stats.lock().await;
-            stats.decrement_pending_compilations();
-            stats.decrement_active_compilations();
-        }
+        service.decrement_pending_compilations();
+        service.decrement_active_compilations();
 
         let maybe_keep_temps_then_clean = || async move {
-            service.stats.lock().await.increment_active_compilations();
+            service.increment_active_compilations();
             // Move and/or delete nvcc's internal files.
             //
             // If the caller passed `-keep` or `-keep-dir`, copy the internal
@@ -1924,24 +1921,24 @@ where
                     ..
                 } = &cmd;
 
-                service.stats.lock().await.increment_pending_compilations();
+                service.increment_pending_compilations();
 
                 let args = dist::strings_to_osstrings(args);
 
                 match service.compiler_info(exe, cwd, &args, env_vars).await {
                     Err(err) => {
-                        service.stats.lock().await.decrement_pending_compilations();
+                        service.decrement_pending_compilations();
                         error_to_output(err)
                     }
                     Ok(compiler) => match compiler.parse_arguments(&args, cwd, env_vars) {
                         CompilerArguments::NotCompilation => {
-                            service.stats.lock().await.decrement_pending_compilations();
+                            service.decrement_pending_compilations();
                             run_nvcc_subcommand(creator, output_path, cmd)
                                 .await
                                 .unwrap_or_else(error_to_output)
                         }
                         CompilerArguments::CannotCache(why, extra_info) => {
-                            service.stats.lock().await.decrement_pending_compilations();
+                            service.decrement_pending_compilations();
                             error_to_output(extra_info.map_or_else(
                                 || anyhow!("Cannot cache({}): {:?} {:?}", why, exe, args),
                                 |desc| {

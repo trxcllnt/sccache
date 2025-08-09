@@ -588,7 +588,7 @@ where
         );
 
         // Decrement pending_compilations as soon as we're done preprocessing
-        service.stats.lock().await.decrement_pending_compilations();
+        service.decrement_pending_compilations();
 
         if let Err(e) = hash_result {
             return match e.downcast::<ProcessError>() {
@@ -630,13 +630,11 @@ where
             CacheLookupResult::Miss(miss_type) => {
                 let compile = lookup_or_compile.into_compile()?;
                 // Do the compilation (either local or distributed)
-                service.stats.lock().await.increment_active_compilations();
                 let (compile, duration) = {
                     let start = Instant::now();
                     let res = compile.into_result().await;
                     (res, start.elapsed())
                 };
-                service.stats.lock().await.decrement_active_compilations();
 
                 let (hash_key, outputs, cacheable, dist_type, output) = compile?;
 
@@ -809,11 +807,10 @@ where
                 Ok(CacheLookupResult::Miss(MissType::ForcedRecache))
             }
             _ => {
-                let service = self.sccache_service;
                 let lookup = CacheLookup::new(self, start, timeout, storage);
-                service.stats.lock().await.increment_pending_cache_lookups();
+                self.sccache_service.increment_pending_cache_lookups();
                 let lookup = lookup.into_result().await;
-                service.stats.lock().await.decrement_pending_cache_lookups();
+                self.sccache_service.decrement_pending_cache_lookups();
                 lookup
             }
         }
@@ -1073,10 +1070,15 @@ where
         } = self.local;
 
         match self.dist {
-            None => compile_cmd
-                .execute(service, command_creator)
-                .await
-                .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o)),
+            None => {
+                service.increment_active_compilations();
+                let res = compile_cmd
+                    .execute(service, command_creator)
+                    .await
+                    .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o));
+                service.decrement_active_compilations();
+                res
+            }
             Some(dist) => {
                 let executable = compile_cmd.get_executable();
                 let fallback_to_local = dist.dist_client.fallback_to_local_compile();
@@ -1102,10 +1104,13 @@ where
                         } else {
                             // `{:#}` prints the error and the causes in a single line.
                             warn!("[{out_pretty}]: Could not perform distributed compile: {e:#}");
-                            compile_cmd
+                            service.increment_active_compilations();
+                            let res = compile_cmd
                                 .execute(service, command_creator)
                                 .await
-                                .map(move |o| (hash_key, outputs, cacheable, DistType::Error, o))
+                                .map(move |o| (hash_key, outputs, cacheable, DistType::Error, o));
+                            service.decrement_active_compilations();
+                            res
                         }
                     }
                 }
@@ -1161,14 +1166,14 @@ where
                 match $res {
                     Ok(res) => res,
                     Err(err) => {
-                        service.stats.lock().await.decrement_pending_compilations();
+                        service.decrement_pending_compilations();
                         return Err(err.into());
                     }
                 }
             }};
         }
 
-        service.stats.lock().await.increment_pending_compilations();
+        service.increment_pending_compilations();
 
         // Ensure the dependency file exists
         try_or_cleanup!(compilation.generate_dependencies(creator).await);
@@ -1198,7 +1203,7 @@ where
             job_inputs
         };
 
-        service.stats.lock().await.decrement_pending_compilations();
+        service.decrement_pending_compilations();
 
         trace!("[{out_pretty}]: Identifying dist toolchain for {executable:?}");
 
@@ -1332,7 +1337,11 @@ where
                 dist_output_paths.clone(),
             );
 
-            let (build_result, server_id) = match run_job.await {
+            service.increment_active_compilations();
+            let run_job = run_job.await;
+            service.decrement_active_compilations();
+
+            let (build_result, server_id) = match run_job {
                 // Job completed, regardless of whether compilation succeeded or failed
                 Ok(RunJobResponse::Complete { result, server_id }) => (result, server_id),
                 // Job failed with an unrecoverable fatal error. These should be rare, since
