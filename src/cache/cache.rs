@@ -263,17 +263,17 @@ impl CacheRead {
                             }
                         }
 
-                        let file = match tmp.persist_noclobber(&path) {
+                        let file = match tmp.persist(&path) {
                             Ok(file) => {
                                 if let Some(mode) = mode {
                                     set_file_mode(&path, mode)?;
                                 }
-                                Ok(file)
+                                // Sync immediately so other readers see the file.
+                                // This is important for nvcc's .module_id files,
+                                // which are read during many pararllel compilations.
+                                file.sync_all().map(|_| file)
                             }
-                            Err(err) => match err.error.kind() {
-                                io::ErrorKind::AlreadyExists => std::fs::File::open(&path),
-                                _ => Err(err.error),
-                            },
+                            Err(err) => Err(err.error),
                         }?;
 
                         if must_be_non_empty {

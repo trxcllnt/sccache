@@ -1490,16 +1490,15 @@ where
                         return Err((output_paths, anyhow!(UnexpectedEmptyFile(path))));
                     }
 
-                    // Persist the tempfile to its real location, but don't overwrite
-                    // if it already exists (e.g. nvcc's .module_id files).
-                    let file = match tmp.persist_noclobber(&path) {
-                        Ok(file) => Ok(file),
-                        Err(err) => {
-                            match err.error.kind() {
-                                io::ErrorKind::AlreadyExists => std::fs::File::open(&path),
-                                _ => Err(err.error)
-                            }
-                        }
+                    // Persist the tempfile to its real location
+                    let file = match tmp.persist(&path) {
+                        Ok(file) => {
+                            // Sync immediately so other readers see the file.
+                            // This is important for nvcc's .module_id files,
+                            // which are read during many pararllel compilations.
+                            file.sync_all().map(|_| file)
+                        },
+                        Err(err) => Err(err.error),
                     }
                     .with_context(|| format!("Failed to persist tempfile to {path:?}"))
                     .map_err(|err| (output_paths.clone(), anyhow!(err)))?;
