@@ -147,11 +147,13 @@ pub struct CacheRead {
 
 /// Represents a failure to decompress stored object data.
 #[derive(Debug)]
-pub struct DecompressionFailure;
+pub struct DecompressionFailure {
+    message: String,
+}
 
 impl std::fmt::Display for DecompressionFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "failed to decompress content")
+        write!(f, "{}", self.message)
     }
 }
 
@@ -198,12 +200,22 @@ impl CacheRead {
     where
         T: Write,
     {
-        let file = self.zip.by_name(name).or(Err(DecompressionFailure))?;
+        let file = self.zip.by_name(name).or(Err(DecompressionFailure {
+            message: format!("Failed to decompress {name:?}"),
+        }))?;
         if file.compression() != CompressionMethod::Stored {
-            bail!(DecompressionFailure);
+            bail!(DecompressionFailure {
+                message: format!(
+                    "Compression method must be {:?}, received {:?}",
+                    CompressionMethod::Stored,
+                    file.compression()
+                )
+            });
         }
         let mode = file.unix_mode();
-        zstd::stream::copy_decode(file, to).or(Err(DecompressionFailure))?;
+        zstd::stream::copy_decode(file, to).or(Err(DecompressionFailure {
+            message: format!("Failed to decompress {name:?}"),
+        }))?;
         Ok(mode)
     }
 

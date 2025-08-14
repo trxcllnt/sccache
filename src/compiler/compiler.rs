@@ -990,8 +990,8 @@ impl<'a> CacheLookup<'a> {
                         ProcessOutput::new(0, stdout, stderr),
                     )),
                     Err(e) => {
-                        if e.downcast_ref::<DecompressionFailure>().is_some() {
-                            debug!("[{out_pretty}]: Failed to decompress object");
+                        if let Some(err) = e.downcast_ref::<DecompressionFailure>() {
+                            debug!("[{out_pretty}]: Failed to decompress object: {err:?}");
                             Ok(CacheLookupResult::Miss(MissType::CacheReadError))
                         } else if let Some(err) = e.downcast_ref::<UnexpectedEmptyFile>() {
                             debug!("[{out_pretty}]: {err:?}");
