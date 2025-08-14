@@ -461,8 +461,8 @@ where
                 dep_flag = OsString::from(arg.flag_str().expect("Dep target flag expected"));
                 dep_target = Some(s.clone());
             }
-            Some(DepArgumentPath(p)) => {
-                depfile = Some(p.clone());
+            Some(DepArgumentPath(path)) => {
+                depfile = Some(path.clone());
                 need_explicit_dep_argument_path = DepArgumentRequirePath::Provided;
             }
             Some(SerializeDiagnostics(path)) => {

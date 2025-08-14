@@ -44,7 +44,6 @@ fn cc_compile(client: &SccacheClient, tmpdir: &Path) {
         .arg("-o")
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
-        .env("SCCACHE_RECACHE", "1")
         .env("TOKIO_WORKER_THREADS", "2")
         .assert()
         .success();
@@ -68,7 +67,6 @@ fn nvcc_compile(
         .arg("-o")
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
-        .env("SCCACHE_RECACHE", "1")
         .env("TOKIO_WORKER_THREADS", "2")
         .assert()
         .success();
@@ -115,7 +113,6 @@ fn stdpar_compile(client: &SccacheClient, compiler: &Compiler, tmpdir: &Path) {
         .arg("-o")
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
-        .env("SCCACHE_RECACHE", "1")
         .env("TOKIO_WORKER_THREADS", "2")
         .assert()
         .success();
@@ -158,7 +155,6 @@ fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Output {
         .env("RUSTC_WRAPPER", &client.path)
         .env("CARGO_TARGET_DIR", "target")
         .env("RUST_BACKTRACE", "1")
-        .env("SCCACHE_RECACHE", "1")
         .env("TOKIO_WORKER_THREADS", "2")
         .output()
         .unwrap()
@@ -167,8 +163,9 @@ fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Output {
 pub fn dist_test_sccache_client_cfg(
     tmpdir: &Path,
     scheduler_url: HTTPUrl,
+    preprocessor_cache_mode: bool,
 ) -> sccache::config::FileConfig {
-    let mut sccache_cfg = harness::client::sccache_client_cfg(tmpdir, false);
+    let mut sccache_cfg = harness::client::sccache_client_cfg(tmpdir, preprocessor_cache_mode);
     sccache_cfg.cache.disk.as_mut().unwrap().size = 0;
     sccache_cfg.dist.scheduler_url = Some(scheduler_url);
     sccache_cfg.dist.net.connect_timeout = 10;
@@ -192,6 +189,7 @@ async fn test_dist_cargo_build(message_broker: &str) {
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0).unwrap().url(),
+        false,
     ));
 
     let output = rust_compile(&client, system.data_dir());
@@ -211,7 +209,6 @@ async fn test_dist_cargo_build(message_broker: &str) {
     assert_eq!(1, stats.requests_executed);
     assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(1, stats.forced_recaches);
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
@@ -230,6 +227,7 @@ async fn test_dist_cpp_disk_storage(message_broker: &str) {
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0).unwrap().url(),
+        false,
     ));
 
     cc_compile(&client, system.data_dir());
@@ -241,7 +239,6 @@ async fn test_dist_cpp_disk_storage(message_broker: &str) {
     assert_eq!(1, stats.requests_executed);
     assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(1, stats.forced_recaches);
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
@@ -261,6 +258,7 @@ async fn test_dist_cpp_cloud_storage(message_broker: &str) {
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0).unwrap().url(),
+        false,
     ));
 
     cc_compile(&client, system.data_dir());
@@ -272,7 +270,6 @@ async fn test_dist_cpp_cloud_storage(message_broker: &str) {
     assert_eq!(1, stats.requests_executed);
     assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(1, stats.forced_recaches);
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
@@ -292,6 +289,7 @@ async fn test_dist_cpp_server_restart(message_broker: &str) {
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0).unwrap().url(),
+        false,
     ));
 
     cc_compile(&client, system.data_dir());
@@ -307,7 +305,6 @@ async fn test_dist_cpp_server_restart(message_broker: &str) {
     assert_eq!(2, stats.requests_executed);
     assert_eq!(2, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(2, stats.forced_recaches);
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
@@ -327,6 +324,7 @@ async fn test_dist_cpp_no_server_times_out(message_broker: &str) {
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0).unwrap().url(),
+        false,
     ));
 
     cc_compile(&client, system.data_dir());
@@ -338,7 +336,6 @@ async fn test_dist_cpp_no_server_times_out(message_broker: &str) {
     assert_eq!(1, stats.requests_executed);
     assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(1, stats.forced_recaches);
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
@@ -359,6 +356,7 @@ async fn test_dist_cpp_two_servers(message_broker: &str) {
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0).unwrap().url(),
+        false,
     ));
 
     let compile_cpp = || {
@@ -381,7 +379,6 @@ async fn test_dist_cpp_two_servers(message_broker: &str) {
     assert_eq!(4, stats.requests_executed);
     assert_eq!(4, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(4, stats.forced_recaches);
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
@@ -402,6 +399,7 @@ async fn test_dist_cpp_errors_on_job_load_failures(message_broker: &str) {
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0).unwrap().url(),
+        false,
     ));
 
     cc_compile(&client, system.data_dir());
@@ -413,7 +411,6 @@ async fn test_dist_cpp_errors_on_job_load_failures(message_broker: &str) {
     assert_eq!(1, stats.requests_executed);
     assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(1, stats.forced_recaches);
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
@@ -434,6 +431,7 @@ async fn test_dist_cpp_errors_on_toolchain_load_failures(message_broker: &str) {
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0).unwrap().url(),
+        false,
     ));
 
     cc_compile(&client, system.data_dir());
@@ -445,7 +443,78 @@ async fn test_dist_cpp_errors_on_toolchain_load_failures(message_broker: &str) {
     assert_eq!(1, stats.requests_executed);
     assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(1, stats.forced_recaches);
+}
+
+#[cfg_attr(not(feature = "dist-tests"), ignore)]
+#[test_case("rabbitmq" ; "with rabbitmq")]
+#[test_case("redis" ; "with redis")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_dist_preprocesspr_cache_bug_2173(message_broker: &str) {
+    // Bug 2173: preprocessor cache hit but main cache miss - because using the preprocessor cache
+    // means not doing regular preprocessing, there was no preprocessed translation unit to send
+    // out for distributed compilation, so an empty u8 array was compiled - which "worked", but
+    // the object file *was* the result of compiling an empty file.
+
+    let test_name = format!("test_dist_preprocesspr_cache_bug_2173_{message_broker}");
+    let system = DistSystem::builder()
+        .with_name(&test_name)
+        .with_scheduler()
+        .with_server()
+        .with_message_broker(message_broker)
+        .build();
+
+    let mut config =
+        dist_test_sccache_client_cfg(system.data_dir(), system.scheduler(0).unwrap().url(), true);
+    config.cache.disk.as_mut().unwrap().size = 10_000_000; // enough for one tiny object file
+
+    let client = system.new_client(&config);
+
+    cc_compile(&client, system.data_dir());
+
+    let stats = client.stats().unwrap();
+    assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
+    assert_eq!(0, stats.dist_errors);
+    assert_eq!(1, stats.compile_requests);
+    assert_eq!(1, stats.requests_executed);
+    assert_eq!(1, stats.compilations);
+    assert_eq!(0, stats.cache_hits.all());
+    assert_eq!(0, stats.preprocessor_cache_hits.all());
+
+    let obj_file = "x.o";
+    let obj_path = system.data_dir().join(obj_file);
+    let data_a = std::fs::read(&obj_path).unwrap();
+    let cache_path = config.cache.disk.unwrap().dir;
+
+    // Don't touch the preprocessor cache - and check that it exists
+    assert!(
+        cache_path.join("preprocessor").is_dir(),
+        "The preprocessor cache should exist"
+    );
+
+    // Delete the main cache to ensure a cache miss - potential dirs are "0".."f".
+    let main_cache_dirs = "0123456789abcdef";
+    let delete_count = main_cache_dirs.chars().fold(0, |res, dir| {
+        res + (std::fs::remove_dir_all(cache_path.join(String::from(dir))).is_ok() as u32)
+    });
+    assert_eq!(delete_count, 1, "Did the disk cache format change?");
+
+    cc_compile(&client, system.data_dir());
+
+    let stats = client.stats().unwrap();
+    assert_eq!(2, stats.dist_compiles.values().sum::<usize>());
+    assert_eq!(0, stats.dist_errors);
+    assert_eq!(2, stats.compile_requests);
+    assert_eq!(2, stats.requests_executed);
+    assert_eq!(2, stats.compilations);
+    assert_eq!(0, stats.cache_hits.all());
+    assert_eq!(1, stats.preprocessor_cache_hits.all());
+
+    // Check that this gave the same result (i.e. that it didn't compile a completely empty file).
+    // It would be nice to check directly that the object file contains the symbol for the x() function
+    // from cc_compile(), but that seems pretty involved and this happens to work...
+    let data_b = std::fs::read(&obj_path).unwrap();
+
+    assert_eq!(data_a, data_b);
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
@@ -469,6 +538,7 @@ async fn test_dist_cuda_compiles(
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0).unwrap().url(),
+        false,
     ));
 
     nvcc_compile(&client, cuda_compiler, host_compiler, system.data_dir());
@@ -480,7 +550,6 @@ async fn test_dist_cuda_compiles(
     assert_eq!(5, stats.requests_executed);
     assert_eq!(5, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(4, stats.forced_recaches);
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
@@ -499,6 +568,7 @@ async fn test_dist_stdpar_compiles(compiler: &Compiler, message_broker: &str) {
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0).unwrap().url(),
+        false,
     ));
 
     stdpar_compile(&client, compiler, system.data_dir());
@@ -510,7 +580,6 @@ async fn test_dist_stdpar_compiles(compiler: &Compiler, message_broker: &str) {
     assert_eq!(1, stats.requests_executed);
     assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
-    assert_eq!(1, stats.forced_recaches);
 }
 
 #[cfg(not(target_os = "macos"))]

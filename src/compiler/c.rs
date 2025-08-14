@@ -145,6 +145,7 @@ struct CCompilation<T: CommandCreatorSync, I: CCompilerImpl> {
     service: crate::server::SccacheService<T>,
     creator: T,
     parsed_args: ParsedArguments,
+    is_locally_preprocessed: bool,
     executable: PathBuf,
     compiler: I,
     cwd: PathBuf,
@@ -602,8 +603,11 @@ where
             ..
         } = *self;
 
+        let mut is_locally_preprocessed = true;
+
         match preprocessor_cache_lookup {
             PreprocessorCacheLookup::Hit(_) => {
+                is_locally_preprocessed = false;
                 service
                     .stats
                     .lock()
@@ -813,14 +817,15 @@ where
         Ok(HashResult {
             key,
             compilation: Box::new(CCompilation {
-                service: service.to_owned(),
-                creator: creator.to_owned(),
                 compiler,
+                creator: creator.to_owned(),
                 cwd,
                 env_vars,
                 executable,
+                is_locally_preprocessed,
                 parsed_args,
                 rewrite_includes_only,
+                service: service.to_owned(),
             }),
             weak_toolchain_key,
         })
@@ -1041,6 +1046,10 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
         Ok((self, toolchain_packager, outputs_rewriter))
     }
 
+    fn is_locally_preprocessed(&self) -> bool {
+        self.is_locally_preprocessed
+    }
+
     fn outputs<'a>(&'a self) -> Box<dyn Iterator<Item = FileObjectSource> + 'a> {
         Box::new(
             self.parsed_args
@@ -1073,6 +1082,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
             env_vars,
             parsed_args,
             rewrite_includes_only,
+            ..
         } = *self;
 
         // Preprocess again but this time with line numbers

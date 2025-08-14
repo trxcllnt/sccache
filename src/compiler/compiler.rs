@@ -762,6 +762,27 @@ where
             })
             .collect::<Vec<_>>();
 
+        let outputs = if compilation.is_locally_preprocessed() {
+            // In this mode, cache entries are exclusively distinguished by their preprocessed
+            // source contents. But two files may differ in their names and / or the names of
+            // included files while still producing the same preprocessed output, so they get the
+            // same cache entry. That entry will have wrong (file names) dependency informaton in
+            // the dependency file except for the compilation unit that originally produced it.
+            // Since we did local preprocessing, that should already have produced the dependency
+            // file - just leave that one alone and don't overwrite it from the cache.
+            outputs
+                .iter()
+                .filter(|fobj_source| fobj_source.key != "dep") // key "dep" means dependency file
+                .cloned()
+                .collect()
+        } else {
+            // In this mode, no local preprocessing was done, so the dependency file (if any)
+            // has not been created. But in this mode, the cache key also includes a lot of
+            // information about filenames (and less relevant here, file hashes), so it *is* safe
+            // to restore the dependency file from the cache.
+            outputs.clone()
+        };
+
         Self {
             cache_control,
             command_creator,
@@ -1597,6 +1618,10 @@ where
     /// Create a function that will create the inputs used to perform a distributed compilation
     #[cfg(feature = "dist-client")]
     fn into_dist_packagers(self: Box<Self>) -> Result<DistPackagers>;
+
+    fn is_locally_preprocessed(&self) -> bool {
+        true
+    }
 
     /// Returns an iterator over the results of this compilation.
     ///
@@ -3070,7 +3095,7 @@ LLVM version: 6.0",
         let hasher2 = hasher.clone();
         let (cached, res) = runtime
             .block_on(async {
-                hasher
+                hasher2
                     .get_cached_or_compile(
                         &service,
                         None,
@@ -3106,6 +3131,7 @@ LLVM version: 6.0",
             Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
         );
         // There should be no actual compiler invocation.
+        let hasher2 = hasher.clone();
         let (cached, res) = runtime
             .block_on(async {
                 hasher2
@@ -3211,7 +3237,7 @@ LLVM version: 6.0",
         let hasher2 = hasher.clone();
         let (cached, res) = runtime
             .block_on(async {
-                hasher
+                hasher2
                     .get_cached_or_compile(
                         &service,
                         Some(dist_client.clone()),
@@ -3247,6 +3273,7 @@ LLVM version: 6.0",
             Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
         );
         // There should be no actual compiler invocation.
+        let hasher2 = hasher.clone();
         let (cached, res) = runtime
             .block_on(async {
                 hasher2
@@ -3542,7 +3569,7 @@ LLVM version: 6.0",
         let hasher2 = hasher.clone();
         let (cached, res) = runtime
             .block_on(async {
-                hasher
+                hasher2
                     .get_cached_or_compile(
                         &service,
                         None,
@@ -3572,7 +3599,7 @@ LLVM version: 6.0",
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
         // Now compile again, but force recaching.
         fs::remove_file(&obj).unwrap();
-        let (cached, res) = hasher2
+        let (cached, res) = hasher
             .get_cached_or_compile(
                 &service,
                 None,
