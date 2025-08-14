@@ -724,6 +724,7 @@ struct CacheLookupOrCompile<'a, T: CommandCreatorSync> {
     hash_key: String,
     out_pretty: String,
     outputs: Vec<FileObjectSource>,
+    filtered_outputs: Vec<FileObjectSource>,
     rewrite_includes_only: bool,
     runtime: tokio::runtime::Handle,
     sccache_service: &'a server::SccacheService<T>,
@@ -762,7 +763,7 @@ where
             })
             .collect::<Vec<_>>();
 
-        let outputs = if compilation.is_locally_preprocessed() {
+        let filtered_outputs = if compilation.is_locally_preprocessed() {
             // In this mode, cache entries are exclusively distinguished by their preprocessed
             // source contents. But two files may differ in their names and / or the names of
             // included files while still producing the same preprocessed output, so they get the
@@ -791,6 +792,7 @@ where
             hash_key,
             out_pretty,
             outputs,
+            filtered_outputs,
             rewrite_includes_only,
             runtime,
             sccache_service,
@@ -936,7 +938,7 @@ impl<'a> CacheLookup<'a> {
         Self {
             hash_key: details.hash_key.clone(),
             out_pretty: details.out_pretty.clone(),
-            outputs: details.outputs.clone(),
+            outputs: details.filtered_outputs.clone(),
             runtime: details.runtime.clone(),
             start,
             storage,
