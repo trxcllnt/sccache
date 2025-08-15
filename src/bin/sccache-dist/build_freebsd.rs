@@ -108,6 +108,7 @@ pub struct PotBuilder {
     image_map: Arc<Mutex<HashMap<PathBuf, String>>>,
     container_lists: Arc<Mutex<HashMap<PathBuf, Vec<String>>>>,
     job_queue: Arc<tokio::sync::Semaphore>,
+    cids: Arc<Mutex<HashMap<String, (String, PathBuf)>>>,
 }
 
 impl PotBuilder {
@@ -128,6 +129,7 @@ impl PotBuilder {
             image_map: Arc::new(Mutex::new(HashMap::new())),
             container_lists: Arc::new(Mutex::new(HashMap::new())),
             job_queue,
+            cids: Default::default(),
         };
         ret.cleanup().await?;
         Ok(ret)
@@ -525,6 +527,11 @@ impl BuilderIncoming for PotBuilder {
             .await
             .context("Failed to get a container for build")?;
 
+        self.cids
+            .lock()
+            .await
+            .insert(job_id.to_owned(), (cid.clone(), toolchain_dir.to_owned()));
+
         tracing::debug!("[run_build({job_id})]: Performing build in container {cid}");
 
         let res = Self::perform_build(
@@ -540,19 +547,23 @@ impl BuilderIncoming for PotBuilder {
 
         // Unwrap the result
         let res = res.context("Failed to perform build")?;
-        tracing::debug!("[run_build({job_id})]: Finishing with container {cid}");
-
-        Self::finish_container(
-            job_id,
-            self.container_lists.clone(),
-            toolchain_dir,
-            &cid,
-            &self.pot_cmd,
-        )
-        .await;
 
         tracing::debug!("[run_build({job_id})]: Returning result");
 
         Ok(res)
+    }
+
+    async fn finish_build(&self, job_id: &str) {
+        if let Some((cid, toolchain_dir)) = self.cids.lock().await.remove(job_id) {
+            tracing::debug!("[run_build({job_id})]: Finishing with container {cid}");
+            Self::finish_container(
+                job_id,
+                self.container_lists.clone(),
+                &toolchain_dir,
+                &cid,
+                &self.pot_cmd,
+            )
+            .await;
+        }
     }
 }

@@ -109,11 +109,12 @@ struct OverlaySpec {
     toolchain_dir: PathBuf,
 }
 
+#[derive(Clone)]
 pub struct OverlayBuilder {
     bubblewrap: PathBuf,
     dir: PathBuf,
     job_queue: Arc<tokio::sync::Semaphore>,
-    overlays: Mutex<HashMap<String, OverlaySpec>>,
+    overlays: Arc<Mutex<HashMap<String, OverlaySpec>>>,
 }
 
 impl OverlayBuilder {
@@ -518,6 +519,7 @@ const BUSYBOX_DOCKER_IMAGE: &str = "busybox:stable-musl";
 // the sleep (it's not a builtin) so it needs to be a loop.
 const DOCKER_SHELL_INIT: &str = "while true; do busybox sleep 365d && busybox true; done";
 
+#[derive(Clone)]
 pub struct DockerBuilder {
     job_queue: Arc<tokio::sync::Semaphore>,
 }
