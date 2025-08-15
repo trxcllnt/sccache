@@ -717,6 +717,8 @@ pub trait BuilderIncoming: Send + Sync {
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> Result<BuildResult>;
+    // From Server
+    async fn finish_build(&self, job_id: &str);
 }
 
 /////////

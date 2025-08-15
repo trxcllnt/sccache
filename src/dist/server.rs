@@ -288,7 +288,7 @@ pub trait ServerTasks: Send + Sync {
 
     async fn job_finished(
         &self,
-        job_id: String,
+        job_id: &str,
         reply_to: &str,
         server: ServerDetails,
     ) -> std::result::Result<AsyncResult, CeleryError>;
@@ -781,11 +781,14 @@ impl ServerService for Server {
         self.state.jobs.lock().unwrap().remove(job_id);
         self.state.metrics.inc_job_finished_count();
 
+        // Clean up the build resources
+        self.builder.finish_build(job_id).await;
+
         // Store the job result for retrieval by a scheduler
         let _ = self.put_job_result(job_id, res).await;
 
         self.tasks
-            .job_finished(job_id.to_owned(), reply_to, From::from(&self.state))
+            .job_finished(job_id, reply_to, From::from(&self.state))
             .await
             .map_err(anyhow::Error::new)
             .map(|_| ())

@@ -215,12 +215,12 @@ impl ServerTasks for Tasks {
 
     async fn job_finished(
         &self,
-        job_id: String,
+        job_id: &str,
         reply_to: &str,
         server: ServerDetails,
     ) -> std::result::Result<AsyncResult, CeleryError> {
         self.app
-            .send_task(JobFinished::new(job_id, server).with_queue(reply_to))
+            .send_task(JobFinished::new(job_id.to_owned(), server).with_queue(reply_to))
             .await
     }
 }
