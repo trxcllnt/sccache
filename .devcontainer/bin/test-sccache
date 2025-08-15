@@ -7,5 +7,8 @@ cd "${SCCACHE_REPO:-$(pwd)}"
 pkill -9 sccache || true
 sudo rm -rf /tmp/{,.}sccache_*
 
-RUST_BACKTRACE=${RUST_BACKTRACE:-1} \
+RUST_BACKTRACE="${RUST_BACKTRACE:-1}" \
+CC="$(which gcc || which clang || which nvc)" \
+CXX="$(which g++ || which clang++ || which nvc++)" \
+CUDAHOSTCXX="$(which g++ || which clang++ || which nvc++)" \
 cargo test -F all,vendored-openssl,dist-client,dist-server --package sccache "$@"
