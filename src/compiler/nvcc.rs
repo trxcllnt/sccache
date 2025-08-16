@@ -792,7 +792,7 @@ impl CompileCommandImpl for NvccCompileCommand {
             let temps_kept = {
                 if let Some(keep_dir) = keep_dir.as_ref() {
                     // Ensure `--keep-dir` exists
-                    fs::create_dir_all(keep_dir)?;
+                    tokio::fs::create_dir_all(keep_dir).await?;
 
                     // Rename files back to original nvcc names
                     for (curr, prev) in nvcc_internal_files.drain() {
@@ -801,7 +801,9 @@ impl CompileCommandImpl for NvccCompileCommand {
                         if dst == src || !src.exists() {
                             continue;
                         }
-                        fs::rename(src, dst)?;
+                        tokio::fs::rename(src, dst)
+                            .await
+                            .map_err(anyhow::Error::new)?;
                     }
 
                     // Move intermediate files to `--keep-dir`
@@ -813,7 +815,9 @@ impl CompileCommandImpl for NvccCompileCommand {
                             if dst == src || !src.exists() {
                                 continue;
                             }
-                            fs::rename(src, dst)?;
+                            tokio::fs::rename(src, dst)
+                                .await
+                                .map_err(anyhow::Error::new)?;
                         }
                     }
                 }
@@ -821,9 +825,9 @@ impl CompileCommandImpl for NvccCompileCommand {
             };
 
             // Delete sccache internal intermediate files dir
+            let _ = tokio::fs::remove_dir_all(out_dir).await;
+
             temps_kept
-                .and(fs::remove_dir_all(out_dir))
-                .map_err(anyhow::Error::new)
         };
 
         let mut output = ProcessOutput::default();
