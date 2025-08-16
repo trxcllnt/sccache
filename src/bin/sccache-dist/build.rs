@@ -397,8 +397,8 @@ impl OverlayBuilder {
                                 Ok(output) => outputs.push((path.clone(), output)),
                                 Err(err) => {
                                     tracing::error!(
-                                    "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, overlay={path:?}: {err}"
-                                )
+                                        "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, overlay={path:?}: {err}"
+                                    )
                                 }
                             },
                             Err(e) => {
@@ -429,13 +429,17 @@ impl OverlayBuilder {
         //
         // Keeping the handle alive for the lifetime of the oneshot channel
         // to ensure it's only dropped if the Future is cancelled.
-        let _handle = std::thread::spawn(move || {
-            let _ = completed_tx.send(build_in_overlay(&runtime, cancelled_rx));
+        let handle = std::thread::spawn(move || {
+            let res = build_in_overlay(&runtime, cancelled_rx);
+            let _ = completed_tx.send(());
+            res
         });
 
         // Wait till the thread is done. This ensures the handle is dropped if this Future is cancelled.
-        let res = completed_rx
-            .await
+        let _ = completed_rx.await;
+
+        let res = handle
+            .join()
             .unwrap_or_else(|e| Err(anyhow!("Build thread exited with error: {e:?}")));
 
         // Drop the job slot once compile is finished
