@@ -1421,7 +1421,7 @@ where
             };
 
             debug!(
-                "[{out_pretty}, {job_id}]: Fetched {:?}",
+                "[{out_pretty}, {job_id}, {server_id}]: Fetched {:?}",
                 build_result
                     .outputs
                     .iter()
