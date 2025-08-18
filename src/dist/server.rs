@@ -778,19 +778,22 @@ impl ServerService for Server {
 
     async fn job_finished(&self, job_id: &str, reply_to: &str, res: &RunJobResponse) -> Result<()> {
         // Remove job and increment the job_finished counter
-        self.state.jobs.lock().unwrap().remove(job_id);
-        self.state.metrics.inc_job_finished_count();
+        if self.state.jobs.lock().unwrap().remove(job_id).is_some() {
+            self.state.metrics.inc_job_finished_count();
 
-        // Clean up the build resources
-        self.builder.finish_build(job_id).await;
+            // Clean up the build resources
+            self.builder.finish_build(job_id).await;
 
-        // Store the job result for retrieval by a scheduler
-        let _ = self.put_job_result(job_id, res).await;
+            // Store the job result for retrieval by a scheduler
+            let _ = self.put_job_result(job_id, res).await;
 
-        self.tasks
-            .job_finished(job_id, reply_to, From::from(&self.state))
-            .await
-            .map_err(anyhow::Error::new)
-            .map(|_| ())
+            self.tasks
+                .job_finished(job_id, reply_to, From::from(&self.state))
+                .await
+                .map_err(anyhow::Error::new)
+                .map(|_| ())
+        } else {
+            Ok(())
+        }
     }
 }
