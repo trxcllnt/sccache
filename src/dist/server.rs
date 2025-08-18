@@ -501,14 +501,14 @@ impl Server {
             async move {
                 let mut alive = this.alive.subscribe();
                 loop {
-                    tokio::select! {
-                        _ = alive.changed() => break,
-                        _ = this.send_status() => {}
+                    futures::select_biased! {
+                        _ = alive.changed().fuse() => break,
+                        _ = this.send_status().fuse() => {}
                     }
 
-                    tokio::select! {
-                        _ = alive.changed() => break,
-                        _ = tokio::time::sleep(interval) => {}
+                    futures::select_biased! {
+                        _ = alive.changed().fuse() => break,
+                        _ = tokio::time::sleep(interval).fuse() => {}
                     }
                 }
             }
@@ -742,12 +742,12 @@ impl ServerService for Server {
     ) -> std::result::Result<RunJobResponse, RunJobError> {
         if self.is_alive() {
             let mut alive = self.alive.subscribe();
-            tokio::select! {
+            futures::select_biased! {
                 // If the build failed because the server was terminated,
                 // report it as a server termination, not a failed build.
-                _ = alive.changed() => Err(RunJobError::server_terminated()),
+                _ = alive.changed().fuse() => Err(RunJobError::server_terminated()),
                 // Do the build
-                res = self.load_job_and_run_build(job_id, reply_to, toolchain, command, outputs) => res,
+                res = self.load_job_and_run_build(job_id, reply_to, toolchain, command, outputs).fuse() => res,
             }
         } else {
             Err(RunJobError::server_terminated())
