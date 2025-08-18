@@ -518,7 +518,12 @@ impl Server {
     }
 
     async fn terminate_pending_jobs(&self) -> Result<()> {
-        let jobs = self.state.jobs.lock().unwrap().drain().collect::<Vec<_>>();
+        let jobs = {
+            let jobs = self.state.jobs.lock().unwrap();
+            jobs.iter()
+                .map(|(a, b)| (a.clone(), b.clone()))
+                .collect::<Vec<_>>()
+        };
 
         tracing::info!("Server shutdown with {} pending jobs", jobs.len());
 
