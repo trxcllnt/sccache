@@ -16,12 +16,15 @@ runs:
       run: |
           df -h;
           docker images;
-          docker rmi $(docker image ls -aq) || true;
+          time docker rmi $(docker image ls -aq) || true;
           docker images;
+          df -h;
           sudo swapoff -a;
-          sudo rm -f /swapfile /mnt/swapfile;
-          sudo apt clean;
-          sudo rm -rf                                               \
+          time sudo rm -f /swapfile /mnt/swapfile;
+          df -h;
+          time sudo apt clean;
+          df -h;
+          time sudo rm -rf                                          \
             /opt/{az,ghc,google,microsoft}                          \
             /usr/lib/mono                                           \
             /usr/local/julia*                                       \
