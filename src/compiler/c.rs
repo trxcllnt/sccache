@@ -1095,8 +1095,8 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                 &cwd,
                 &env_vars,
                 rewrite_includes_only,
-                false, // generate_dependencies
-                true,  // include_line_numbers
+                true, // generate_dependencies
+                true, // include_line_numbers
             )
             .await?;
 
@@ -1104,7 +1104,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
         let mut path_transformer = path_transformer.clone();
 
         tokio::task::spawn_blocking(move || -> Result<_> {
-            {
+            let dependencies = {
                 let input_path = cwd.join(&parsed_args.input);
                 let input_path = pkg::simplify_path(&input_path)?;
                 let dist_input_path = path_transformer.as_dist(&input_path).with_context(|| {
@@ -1114,10 +1114,15 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                 match preprocessor_output {
                     PreprocessorOutput::File(file) => {
                         builder
-                            .append_path_with_name(file.path(), tar_safe_path(&dist_input_path))?;
+                            .append_path_with_name(file.path(), tar_safe_path(dist_input_path))?;
+                        vec![]
                     }
-                    PreprocessorOutput::Output(output)
-                    | PreprocessorOutput::OutputWithDepedencies(output, _) => {
+                    PreprocessorOutput::OutputWithDepedencies(output, dependencies) => {
+                        let dist_input_path = path_transformer
+                            .as_dist_input_path(&input_path)
+                            .with_context(|| {
+                                format!("unable to transform input path {}", input_path.display())
+                            })?;
                         let (mut file_header, dist_input_path) =
                             pkg::make_tar_header(&input_path, &dist_input_path)?;
                         file_header.set_size(output.stdout.len() as u64); // The metadata is from non-preprocessed
@@ -1127,37 +1132,43 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                             dist_input_path,
                             output.stdout.as_slice(),
                         )?;
+                        dependencies
                     }
+                    _ => unreachable!(),
                 }
-            }
+            };
 
             let extra_dist_files = parsed_args.extra_dist_files;
             let extra_hash_files = parsed_args.extra_hash_files;
 
-            for input_path in extra_hash_files.iter().chain(extra_dist_files.iter()) {
-                let input_path = pkg::simplify_path(input_path)?;
+            for extra_path in dependencies
+                .iter()
+                .chain(extra_hash_files.iter())
+                .chain(extra_dist_files.iter())
+            {
+                let extra_path = pkg::simplify_path(extra_path)?;
 
                 if !super::CAN_DIST_DYLIBS
-                    && input_path
+                    && extra_path
                         .extension()
                         .is_some_and(|ext| ext == std::env::consts::DLL_EXTENSION)
                 {
                     bail!(
                         "Cannot distribute dylib input {} on this platform",
-                        input_path.display()
+                        extra_path.display()
                     )
                 }
 
-                let dist_input_path = path_transformer.as_dist(&input_path).with_context(|| {
-                    format!("unable to transform input path {}", input_path.display())
+                let dist_extra_path = path_transformer.as_dist(&extra_path).with_context(|| {
+                    format!("unable to transform input path {}", extra_path.display())
                 })?;
 
-                let mut file = io::BufReader::new(fs::File::open(&input_path)?);
+                let mut file = io::BufReader::new(fs::File::open(&extra_path)?);
                 let mut output = vec![];
                 io::copy(&mut file, &mut output)?;
 
                 let (mut file_header, dist_input_path) =
-                    pkg::make_tar_header(&input_path, &dist_input_path)?;
+                    pkg::make_tar_header(&extra_path, &dist_extra_path)?;
                 file_header.set_size(output.len() as u64);
                 file_header.set_cksum();
                 builder.append_data(&mut file_header, dist_input_path, &*output)?;

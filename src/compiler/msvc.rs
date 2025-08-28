@@ -871,6 +871,8 @@ pub fn parse_arguments(
         );
     }
 
+    let extra_dist_files = vec![cwd.join(&input)];
+
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),
         double_dash_input,
@@ -882,6 +884,7 @@ pub fn parse_arguments(
         preprocessor_args,
         common_args,
         unhashed_args,
+        extra_dist_files,
         extra_hash_files,
         msvc_show_includes: show_includes,
         profile_generate,
@@ -1240,7 +1243,7 @@ fn generate_compile_commands(
                 if parsed_args.double_dash_input {
                     arguments.push("--".into());
                 }
-                arguments.push(path_transformer.as_dist(&parsed_args.input)?);
+                arguments.push(path_transformer.as_dist_input_path(&parsed_args.input)?);
                 arguments
             },
         };

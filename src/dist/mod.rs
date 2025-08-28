@@ -182,6 +182,9 @@ mod path_transform {
                 dist_to_local_path: HashMap::new(),
             }
         }
+        pub fn as_dist_input_path(&mut self, input_path: &Path) -> Option<String> {
+            self.as_dist(&input_path.with_extension("").with_extension("preprocessed"))
+        }
         pub fn as_dist_abs(&mut self, p: &Path) -> Option<String> {
             if !p.is_absolute() {
                 return None;
@@ -354,6 +357,42 @@ mod path_transform {
     impl PathTransformer {
         pub fn new() -> Self {
             PathTransformer
+        }
+        ///
+        /// Remove the extension so preprocessed file doesn't have the same name as
+        /// the source file. This works around a GCC bug when compiling preprocessed
+        /// input -- namely, if the preprocessed file has the same name as the source
+        /// file, error source lines aren't mapped correctly:
+        ///
+        /// ```shell
+        /// # Preprocess some file with an error:
+        /// $ gcc -x c++ -E tests/test.c > tests/test.ii
+        ///
+        /// # Compile the preprocessed file (error source is correct):
+        /// $ gcc -x c++-cpp-output -c tests/test.ii -o tests/test.c.o
+        /// > tests/test.c: In function ‘void foo()’:
+        /// > tests/test.c:5:19: error: invalid conversion from ‘const char*’ to ‘int’ [-fpermissive]
+        /// >     5 |   const int foo = "5";
+        /// >       |                   ^~~
+        /// >       |                   |
+        /// >       |                   const char*
+        ///
+        ///
+        /// # Rename `test.ii` -> `test.c`
+        /// $ mv tests/test.{ii,c}
+        ///
+        /// # Compile the renamed preprocessed file (error source is wrong):
+        /// $ gcc -x c++-cpp-output -c tests/test.c -o tests/test.c.o
+        /// > tests/test.c: In function ‘void foo()’:
+        /// > tests/test.c:5:19: error: invalid conversion from ‘const char*’ to ‘int’ [-fpermissive]
+        /// >     5 | # 0 "<command-line>" 2
+        /// >       |                   ^~~
+        /// >       |                   |
+        /// >       |                   const char*
+        /// ```
+        ///
+        pub fn as_dist_input_path(&mut self, input_path: &Path) -> Option<String> {
+            self.as_dist(&input_path.with_extension("").with_extension("preprocessed"))
         }
         pub fn as_dist_abs(&mut self, p: &Path) -> Option<String> {
             if !p.is_absolute() {

@@ -750,6 +750,8 @@ where
         },
     );
 
+    let extra_dist_files = vec![cwd.join(&input)];
+
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),
         double_dash_input,
@@ -762,6 +764,7 @@ where
         common_args,
         arch_args,
         unhashed_args,
+        extra_dist_files,
         extra_hash_files,
         profile_generate,
         color_mode,
@@ -1245,7 +1248,7 @@ pub fn generate_compile_commands(
                     arguments.extend_from_slice(
                         &[
                             parsed_args.compilation_flag.clone().into_string().ok()?,
-                            path_transformer.as_dist(&parsed_args.input)?,
+                            path_transformer.as_dist_input_path(&parsed_args.input)?,
                             "-o".into(),
                             path_transformer.as_dist(out_file)?,
                         ][..],
