@@ -12,10 +12,12 @@ runs:
   using: composite
   steps:
     - name: Free up disk space
-      shell: bash --noprofile --norc -x -eo pipefail {0}
+      shell: bash --noprofile --norc -eo pipefail {0}
+      env:
+        TIMEFORMAT: 'time: %3lR'
       run: |
         _run_cmd() {
-          time sudo -s /bin/bash -c "$@"
+          time sudo -s /bin/bash -cx "$@"
           df -h --output='size,avail,used,pcent' /
         }
         _run_cmd 'echo "initial size:"'
@@ -28,7 +30,7 @@ runs:
         _run_cmd 'rm -rf /usr/share/az_*'
         _run_cmd 'rm -rf /usr/share/gradle-*'
         _run_cmd 'rm -rf /usr/share/{swift,dotnet,kotlinc,miniconda}'
-        _run_cmd 'rm -rf /usr/local/lib/android'
+        # _run_cmd 'rm -rf /usr/local/lib/android'
         _run_cmd 'rm -rf /usr/local/share/{boost,chromium,powershell}'
         _run_cmd 'rm -rf /home/linuxbrew/.linuxbrew'
         _run_cmd 'rm -rf "${{ inputs.tool_cache }}"/{go,Ruby,PyPy,CodeQL,Python}'
