@@ -439,60 +439,66 @@ impl Server {
 
         crate::util::daemonize()?;
 
+        // Start celery
+        let celery = async {
+            let res = self.tasks.app().consume().await;
+            tracing::info!("Celery shutdown");
+            res.map_err(|e| e.into())
+        };
+
         // Install our own SIGINT handler so pending jobs can bail early and
         // record server_terminated responses. This gives the client a chance
         // to retry the job or build locally.
         let sigint = async {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("Received SIGINT");
-            if self.is_alive() {
-                // Broadcast shutdown signal
-                self.alive.send_replace(false);
-            }
             Ok(())
-        };
-
-        let celery = async {
-            let res = match self.tasks.app().consume().await {
-                Err(CeleryError::ForcedShutdown) => Ok(()),
-                Err(err) => Err(err.into()),
-                Ok(res) => Ok(res),
-            };
-            tracing::info!("Celery shutdown");
-            if self.is_alive() {
-                // Broadcast shutdown signal
-                self.alive.send_replace(false);
-            }
-            res
         };
 
         let status = self.status(report_interval);
 
+        // futures::select_biased! deterministically polls its futures in order,
+        // so register celery first and sigint second so this sigint handler
+        // doesn't override celery's internal sigint handler.
+        //
+        // This ensures celery progresses to "warm shutdown" mode, cancelling
+        // the queue consumers. This ensures the server doesn't attempt to pull
+        // more `run_job` messages from the queue while it is shutting down.
         let celery = futures::select_biased! {
-            res = sigint.fuse() => res,
             res = celery.fuse() => res,
+            res = sigint.fuse() => res,
+            // This should never resolve before either celery or sigint unless
+            // a catastrophic error occurs (tokio dies somehow?). Just polling
+            // it here so the task is cancelled once either of the above two
+            // futures complete first.
             res = status.fuse() => res,
         };
 
-        let sigterm = if celery.is_ok() {
-            let timeout = Duration::from_secs(10);
-            let sigterm = self.terminate_pending_jobs();
-            tracing::info!(
-                "Waiting {}s for pending jobs to shutdown",
-                timeout.as_secs()
-            );
-            tokio::time::timeout(timeout, sigterm)
-                .await
-                .unwrap_or_else(|_| Ok(()))
-        } else {
-            celery
-        };
+        // Drain the jobs map before broadcasting the shutdown signal.
+        // This ensures the "Server terminated" response is written for all
+        // jobs active when SIGINT was received.
+        let jobs = self.state.jobs.lock().unwrap().drain().collect::<Vec<_>>();
 
+        // Broadcast the shutdown signal so futures for active jobs are interrupted.
+        // This will kill and reap their build processes, destroy overlayfs, shutdown
+        // containers, remove build workdirs, etc.
+        //
+        // Because the jobs map is now empty, interrupting each job future will not
+        // lead to writing a job response to the storage. This is important, because
+        // we want `self.terminate_pending_jobs()` to write the "Server terminated"
+        // job responses to the job storage without racing other threads.
+        self.alive.send_replace(false);
+
+        // Write "Server terminated" job responses and send the `job_finished` tasks
+        // back to each interested scheduler.
+        let terminated = self.terminate_pending_jobs(jobs).await;
+
+        // Close broker consumer/producer channels and connection.
         let closed = self.tasks.app().close().await.map_err(|e| e.into());
 
         tracing::info!("Server shutdown");
 
-        sigterm.and(closed)
+        celery.and(terminated).and(closed)
     }
 
     async fn status(&self, interval: Duration) -> Result<()> {
@@ -517,23 +523,31 @@ impl Server {
         .map_err(anyhow::Error::new)
     }
 
-    async fn terminate_pending_jobs(&self) -> Result<()> {
-        let jobs = {
-            let jobs = self.state.jobs.lock().unwrap();
-            jobs.iter()
-                .map(|(a, b)| (a.clone(), b.clone()))
-                .collect::<Vec<_>>()
-        };
-
+    async fn terminate_pending_jobs(&self, jobs: Vec<(String, String)>) -> Result<()> {
         tracing::info!("Server shutdown with {} pending jobs", jobs.len());
 
         if !jobs.is_empty() {
-            futures::future::join_all(jobs.iter().map(|(job_id, reply_to)| {
-                tracing::info!("Sending server terminated error for job {job_id} to {reply_to}");
-                self.job_failed(job_id, reply_to, RunJobError::server_terminated())
-                    .boxed()
-            }))
-            .await;
+            let timeout = Duration::from_secs(10);
+
+            tracing::info!(
+                "Waiting {}s for pending jobs to shutdown",
+                timeout.as_secs()
+            );
+
+            let terminated =
+                futures::future::join_all(jobs.into_iter().map(|(job_id, reply_to)| async move {
+                    tracing::info!(
+                        "Sending server terminated response for job {job_id} to {reply_to}"
+                    );
+                    self.job_finished(
+                        &job_id,
+                        &reply_to,
+                        &RunJobResponse::server_terminated(&self.state.id),
+                    )
+                    .await
+                }));
+
+            let _ = tokio::time::timeout(timeout, terminated).await;
 
             tracing::info!("Terminated all pending jobs");
         }
@@ -724,7 +738,6 @@ impl Server {
                     if !result.output.exit() {
                         return RunJobResponse::build_process_killed(&self.state.id);
                     }
-                    tracing::warn!("[run_build({job_id})]: Build failed: {:?}", result.output);
                 }
                 RunJobResponse::Complete {
                     result,
@@ -732,6 +745,22 @@ impl Server {
                 }
             })
             .map_err(Into::into)
+    }
+
+    async fn job_finished(&self, job_id: &str, reply_to: &str, res: &RunJobResponse) -> Result<()> {
+        self.state.metrics.inc_job_finished_count();
+
+        // Clean up the build resources
+        self.builder.finish_build(job_id).await;
+
+        // Store the job result for retrieval by a scheduler
+        let _ = self.put_job_result(job_id, res).await;
+
+        self.tasks
+            .job_finished(job_id, reply_to, From::from(&self.state))
+            .await
+            .map_err(anyhow::Error::new)
+            .map(|_| ())
     }
 }
 
@@ -759,44 +788,44 @@ impl ServerService for Server {
         }
     }
 
-    async fn job_failed(&self, job_id: &str, reply_to: &str, job_err: RunJobError) -> Result<()> {
-        let server_id = self.state.id.clone();
-
-        let job_res = match job_err {
-            // Unrecoverable errors
-            RunJobError::Fatal(e) => RunJobResponse::FatalError {
-                message: format!("{e:#}"),
-                server_id,
-            },
-            // Retryable errors
-            RunJobError::Retryable(e) => RunJobResponse::RetryableError {
-                message: format!("{e:#}"),
-                server_id,
-            },
-            RunJobError::MissingJobInputs => RunJobResponse::MissingJobInputs { server_id },
-            RunJobError::MissingJobResult => RunJobResponse::MissingJobResult { server_id },
-            RunJobError::MissingToolchain => RunJobResponse::MissingToolchain { server_id },
-        };
-
-        self.job_finished(job_id, reply_to, &job_res).await
-    }
-
-    async fn job_finished(&self, job_id: &str, reply_to: &str, res: &RunJobResponse) -> Result<()> {
+    async fn on_failure(&self, job_id: &str, reply_to: &str, job_err: RunJobError) -> Result<()> {
         // Remove job and increment the job_finished counter
         if self.state.jobs.lock().unwrap().remove(job_id).is_some() {
-            self.state.metrics.inc_job_finished_count();
+            let server_id = self.state.id.clone();
 
-            // Clean up the build resources
-            self.builder.finish_build(job_id).await;
+            let job_res = match job_err {
+                // Unrecoverable errors
+                RunJobError::Fatal(e) => RunJobResponse::FatalError {
+                    message: format!("{e:#}"),
+                    server_id,
+                },
+                // Retryable errors
+                RunJobError::Retryable(e) => RunJobResponse::RetryableError {
+                    message: format!("{e:#}"),
+                    server_id,
+                },
+                RunJobError::MissingJobInputs => RunJobResponse::MissingJobInputs { server_id },
+                RunJobError::MissingJobResult => RunJobResponse::MissingJobResult { server_id },
+                RunJobError::MissingToolchain => RunJobResponse::MissingToolchain { server_id },
+            };
 
-            // Store the job result for retrieval by a scheduler
-            let _ = self.put_job_result(job_id, res).await;
+            tracing::warn!("[on_failure({job_id})]: {job_res:?}");
 
-            self.tasks
-                .job_finished(job_id, reply_to, From::from(&self.state))
-                .await
-                .map_err(anyhow::Error::new)
-                .map(|_| ())
+            self.job_finished(job_id, reply_to, &job_res).await
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn on_success(
+        &self,
+        job_id: &str,
+        reply_to: &str,
+        job_res: &RunJobResponse,
+    ) -> Result<()> {
+        // Remove job and increment the job_finished counter
+        if self.state.jobs.lock().unwrap().remove(job_id).is_some() {
+            self.job_finished(job_id, reply_to, job_res).await
         } else {
             Ok(())
         }

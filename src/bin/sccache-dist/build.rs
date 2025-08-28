@@ -366,7 +366,7 @@ impl OverlayBuilder {
                         cancelled
                             .await
                             .or_else(|_| Ok(()))
-                            .map(|_| ProcessOutput::new(1, vec![], "Build timeout".into()))
+                            .map(|_| ProcessOutput::new(1, vec![], "Build cancelled".into()))
                     };
                     futures::select_biased! {
                         res = cancelled.fuse() => res,

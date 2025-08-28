@@ -586,6 +586,19 @@ mod server {
         }
     }
 
+    fn is_special_tokio_shutdown_io_error(err: &anyhow::Error) -> bool {
+        if let Some(io_error) = err.downcast_ref::<std::io::Error>() {
+            // tokio::fs returns an io::ErrorKind::Other error when a future
+            // representing an IO operation is cancelled. This usually only
+            // happens during server shutdown, so don't warn about this error
+            // and bail early.
+            if io_error.kind() == std::io::ErrorKind::Other {
+                return true;
+            }
+        }
+        false
+    }
+
     impl ServerToolchains {
         pub fn new<P: AsRef<OsStr>>(
             root: P,
@@ -612,19 +625,21 @@ mod server {
                 // Inflate, unpack, and cache it in a directory.
                 // Return the path to the unpacked toolchain dir.
                 self.load_inflated_toolchain(tc).await.map_err(|err| {
-                    tracing::warn!(
-                        "[ServerToolchains({})]: Error loading toolchain: {err:?}",
-                        &tc.archive_id
-                    );
-                    RetryError::transient(err)
+                    if is_special_tokio_shutdown_io_error(&err) {
+                        RetryError::permanent(err)
+                    } else {
+                        RetryError::transient(err)
+                    }
                 })
             })
             .await
             .map_err(|err| {
-                tracing::error!(
-                    "[ServerToolchains({})]: Error loading toolchain: {err:?}",
-                    &tc.archive_id
-                );
+                if !is_special_tokio_shutdown_io_error(&err) {
+                    tracing::error!(
+                        "[ServerToolchains({})]: Error loading toolchain: {err:?}",
+                        &tc.archive_id
+                    );
+                }
                 err
             })
         }

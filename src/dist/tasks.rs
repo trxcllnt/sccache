@@ -365,15 +365,13 @@ impl Task for RunJob {
             }
         };
 
-        tracing::warn!("[run_job({job_id})]: {err}");
-
         if let Err(err) = self
             .server()
-            .map(|server| server.job_failed(job_id, reply_to, err).boxed())
+            .map(|server| server.on_failure(job_id, reply_to, err).boxed())
             .unwrap_or_else(|err| futures::future::err(err).boxed())
             .await
         {
-            tracing::error!("[on_run_job_failure({job_id})]: Error reporting job failure: {err:#}");
+            tracing::error!("[run_job_on_failure({job_id})]: Error reporting job failure: {err:#}");
         }
     }
 
@@ -383,11 +381,11 @@ impl Task for RunJob {
 
         if let Err(err) = self
             .server()
-            .map(|server| server.job_finished(job_id, reply_to, res).boxed())
+            .map(|server| server.on_success(job_id, reply_to, res).boxed())
             .unwrap_or_else(|e| futures::future::err(e).boxed())
             .await
         {
-            tracing::error!("[on_run_job_success({job_id})]: Error reporting job success: {err:#}");
+            tracing::error!("[run_job_on_success({job_id})]: Error reporting job success: {err:#}");
         }
     }
 }

@@ -135,13 +135,20 @@ impl DiskCache {
                 .await
                 .map_err(|e| e.into()),
             Err(err) => {
-                self.lru
+                match self
+                    .lru
                     .lock()
                     .await
                     .get_or_init()?
                     .commit_dir(Err(tmp))
-                    .await?;
-                Err(err.into())
+                    .await
+                {
+                    // Usual case: return the original error
+                    Err(LruError::FileNotInCache) => Err(err.into()),
+                    // Unusual case: encountered an IO error
+                    Err(err) => Err(err.into()),
+                    Ok(res) => Ok(res),
+                }
             }
         }
     }
