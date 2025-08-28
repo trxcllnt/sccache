@@ -27,7 +27,7 @@ use crate::{
 #[cfg(feature = "dist-client")]
 use crate::{
     compiler::{DistPackagers, NoopOutputsRewriter},
-    dist::pkg::{self, tar_safe_path, InputsWriter},
+    dist::pkg::{self, InputsWriter},
 };
 
 use async_trait::async_trait;
@@ -1100,21 +1100,27 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
             )
             .await?;
 
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+
         let mut builder = tar::Builder::new(compressor);
         let mut path_transformer = path_transformer.clone();
+        let mut symlinks = BTreeMap::<PathBuf, PathBuf>::new();
 
         tokio::task::spawn_blocking(move || -> Result<_> {
             let dependencies = {
                 let input_path = cwd.join(&parsed_args.input);
-                let input_path = pkg::simplify_path(&input_path)?;
+                let input_path = pkg::tarify_path(&mut symlinks, &input_path)?;
                 let dist_input_path = path_transformer.as_dist(&input_path).with_context(|| {
                     format!("unable to transform input path {}", input_path.display())
                 })?;
 
                 match preprocessor_output {
                     PreprocessorOutput::File(file) => {
-                        builder
-                            .append_path_with_name(file.path(), tar_safe_path(dist_input_path))?;
+                        builder.append_path_with_name(
+                            file.path(),
+                            pkg::tar_safe_path(dist_input_path),
+                        )?;
                         vec![]
                     }
                     PreprocessorOutput::OutputWithDepedencies(output, dependencies) => {
@@ -1146,7 +1152,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                 .chain(extra_hash_files.iter())
                 .chain(extra_dist_files.iter())
             {
-                let extra_path = pkg::simplify_path(extra_path)?;
+                let extra_path = pkg::tarify_path(&mut symlinks, extra_path)?;
 
                 if !super::CAN_DIST_DYLIBS
                     && extra_path
@@ -1167,11 +1173,20 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                 let mut output = vec![];
                 io::copy(&mut file, &mut output)?;
 
-                let (mut file_header, dist_input_path) =
+                let (mut file_header, dist_extra_path) =
                     pkg::make_tar_header(&extra_path, &dist_extra_path)?;
                 file_header.set_size(output.len() as u64);
                 file_header.set_cksum();
-                builder.append_data(&mut file_header, dist_input_path, &*output)?;
+                builder.append_data(&mut file_header, dist_extra_path, &*output)?;
+            }
+
+            for (from_path, to_path) in symlinks.iter() {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(0);
+                header.set_entry_type(tar::EntryType::Symlink);
+                // Leave `to_path` as absolute, assuming the tar will
+                // be used in a chroot-like environment.
+                builder.append_link(&mut header, pkg::tar_safe_path(from_path), to_path)?;
             }
 
             // Finish archive

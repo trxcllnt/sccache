@@ -103,7 +103,6 @@ mod toolchain_imp {
     all(target_os = "linux", target_arch = "aarch64"),
 ))]
 mod toolchain_imp {
-    use super::SimplifyPath;
     use fs_err as fs;
     use is_executable::IsExecutable;
     use std::collections::BTreeMap;
@@ -315,11 +314,7 @@ mod toolchain_imp {
         ///
         /// Symlinks in the path are recorded for inclusion in the tarball.
         fn tarify_path(&mut self, path: &Path) -> Result<PathBuf> {
-            SimplifyPath {
-                resolved_symlinks: Some(&mut self.symlinks),
-            }
-            .simplify(path)
-            .map(tar_safe_path)
+            super::tarify_path(&mut self.symlinks, path).map(tar_safe_path)
         }
     }
 
@@ -543,6 +538,16 @@ pub fn make_tar_header(src: &Path, dest: &str) -> io::Result<(tar::Header, PathB
     }
 
     Ok((file_header, tar_safe_path(dest)))
+}
+
+pub fn tarify_path(
+    symlinks: &mut std::collections::BTreeMap<PathBuf, PathBuf>,
+    path: &Path,
+) -> Result<PathBuf> {
+    SimplifyPath {
+        resolved_symlinks: Some(symlinks),
+    }
+    .simplify(path)
 }
 
 /// Simplify a path to one without any relative components, erroring if it looks
