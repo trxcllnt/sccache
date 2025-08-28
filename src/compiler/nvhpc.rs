@@ -189,7 +189,8 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
 
     take_arg!("-Mconcur", OsString, CanBeSeparated('='), PassThrough),
     flag!("-Mnostdlib", PreprocessorArgumentFlag),
-    take_arg!("-Werror", OsString, CanBeSeparated, PreprocessorArgument),
+    flag!("-Werror", PreprocessorArgumentFlag),
+    take_arg!("-Werror=", OsString, Concatenated, PreprocessorArgument),
     take_arg!("-Xcompiler", OsString, CanBeSeparated('='), PreprocessorArgument),
     take_arg!("-Xfatbinary", OsString, CanBeSeparated, PassThrough),
     take_arg!("-Xlinker", OsString, CanBeSeparated('='), PassThrough),
@@ -282,7 +283,6 @@ mod test {
     fn test_parse_arguments_values() {
         let a = parses!(
             "-c",
-            "foo.cpp",
             "-fabc",
             "-I",
             "include-file",
@@ -293,8 +293,9 @@ mod test {
             "-isystem",
             "/system/include/file",
             "-gpu=ccnative",
+            "-Werror=an_error",
             "-Werror",
-            "an_error"
+            "foo.cpp"
         );
         assert_eq!(Some("foo.cpp"), a.input.to_str());
         assert_eq!(Language::Cxx, a.language);
@@ -316,8 +317,8 @@ mod test {
                 "include-file",
                 "-isystem",
                 "/system/include/file",
-                "-Werror",
-                "an_error"
+                "-Werror=an_error",
+                "-Werror"
             ],
             a.preprocessor_args
         );

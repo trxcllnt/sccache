@@ -200,6 +200,8 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("-MF", PathBuf, CanBeSeparated, DepArgumentPath),
     take_arg!("-MQ", OsString, CanBeSeparated, DepTarget),
     take_arg!("-MT", OsString, CanBeSeparated, DepTarget),
+    flag!("-Werror", PreprocessorArgumentFlag),
+    take_arg!("-Werror=", OsString, Concatenated, PreprocessorArgument),
     flag!("-Wno-unknown-cuda-version", PassThroughFlag),
     flag!("-Wno-unused-parameter", PassThroughFlag),
     take_arg!("-Xclang", OsString, Separated, XClang),
@@ -358,7 +360,6 @@ mod test {
     fn test_parse_arguments_values() {
         let a = parses!(
             "-c",
-            "foo.cxx",
             "-arch",
             "xyz",
             "-fabc",
@@ -368,6 +369,9 @@ mod test {
             "foo.o",
             "-include",
             "file",
+            "-Werror=an_error",
+            "-Werror",
+            "foo.cxx",
             "/winsysroot../some/dir"
         );
         assert_eq!(Some("foo.cxx"), a.input.to_str());
@@ -383,7 +387,16 @@ mod test {
                 }
             )
         );
-        assert_eq!(ovec!["-Iinclude", "-include", "file"], a.preprocessor_args);
+        assert_eq!(
+            ovec![
+                "-Iinclude",
+                "-include",
+                "file",
+                "-Werror=an_error",
+                "-Werror"
+            ],
+            a.preprocessor_args
+        );
         assert_eq!(ovec!["-fabc", "/winsysroot", "../some/dir"], a.common_args);
         assert_eq!(ovec!["-arch", "xyz"], a.arch_args);
     }
