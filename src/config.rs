@@ -756,6 +756,9 @@ impl DistConfig {
             max_retries: number_from_env_var("SCCACHE_DIST_MAX_RETRIES")
                 .map(|val| val.unwrap_or(self.max_retries))
                 .unwrap_or(self.max_retries),
+            rewrite_includes_only: bool_from_env_var("SCCACHE_DIST_REWRITE_INCLUDES_ONLY")
+                .map(|val| val.unwrap_or(self.rewrite_includes_only))
+                .unwrap_or(self.rewrite_includes_only),
             ..self.clone()
         }
     }
