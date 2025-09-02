@@ -18,7 +18,7 @@
   "runArgs": [
     "--rm",
     "--name",
-    "${localEnv:USER:anon}-${localWorkspaceFolderBasename}-cuda12.9-amd64",
+    "${localEnv:USER:anon}-${localWorkspaceFolderBasename}-cuda13.0-amd64",
     "--network",
     "host",
     "--platform",
@@ -82,7 +82,7 @@
       "version": "19"
     },
     "ghcr.io/rapidsai/devcontainers/features/cuda:25.10": {
-      "version": "12.9",
+      "version": "13.0",
       "installCompilers": "true",
       "installProfilers": "false",
       "installCTKLibraries": "false",

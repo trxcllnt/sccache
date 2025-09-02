@@ -75,13 +75,13 @@
       "version": "latest"
     },
     "ghcr.io/devcontainers/features/github-cli:1": {},
-    "ghcr.io/rapidsai/devcontainers/features/gcc:25.8": {
+    "ghcr.io/rapidsai/devcontainers/features/gcc:25.10": {
       "version": "11"
     },
-    "ghcr.io/rapidsai/devcontainers/features/llvm:25.8": {
+    "ghcr.io/rapidsai/devcontainers/features/llvm:25.10": {
       "version": "14"
     },
-    "ghcr.io/rapidsai/devcontainers/features/cuda:25.8": {
+    "ghcr.io/rapidsai/devcontainers/features/cuda:25.10": {
       "version": "11.8",
       "installCompilers": "true",
       "installProfilers": "false",
