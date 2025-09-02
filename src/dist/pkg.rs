@@ -160,7 +160,11 @@ mod toolchain_imp {
                     format!("Failed to analyse {} with ldd", obj_path.display())
                 })?;
                 remaining.extend(ldd_libraries);
-                trace!("add_executable_and_deps {}", obj_path.display());
+                trace!(
+                    "add_executable_and_deps {} -> {}",
+                    obj_path.display(),
+                    tar_path.display()
+                );
                 self.file_set.insert(tar_path, obj_path);
             }
             Ok(())
@@ -182,8 +186,8 @@ mod toolchain_imp {
             {
                 return Ok(());
             }
-            trace!("add_dir {}", dir_path.display());
             let tar_path = self.tarify_path(&dir_path)?;
+            trace!("add_dir {} -> {}", dir_path.display(), tar_path.display());
             self.dir_set.insert(tar_path, dir_path);
             Ok(())
         }
@@ -205,15 +209,38 @@ mod toolchain_imp {
             {
                 return Ok(());
             }
-            trace!("add_file {}", file_path.display());
             let tar_path = self.tarify_path(&file_path)?;
+            trace!("add_file {} -> {}", file_path.display(), tar_path.display());
             self.file_set.insert(tar_path, file_path);
             Ok(())
         }
 
         pub fn add_link(&mut self, file_path: &Path, link_name: &Path) -> Result<()> {
+            assert!(file_path.is_absolute());
+            assert!(link_name.is_absolute());
+            let mut tarify = |path: &Path| -> Result<PathBuf> {
+                Ok(if let Some(parent) = path.parent() {
+                    let root = path.components().next().unwrap();
+                    let root = Path::new(root.as_os_str());
+                    root.join(if let Some(name) = path.file_name() {
+                        self.tarify_path(parent)?.join(name)
+                    } else {
+                        self.tarify_path(path)?
+                    })
+                } else {
+                    self.tarify_path(path)?
+                })
+            };
+
+            let tar_link_name = tarify(link_name)?;
+            let tar_file_path = tarify(file_path)?;
+            trace!(
+                "add_link {} -> {}",
+                tar_link_name.display(),
+                tar_file_path.display()
+            );
             self.symlinks
-                .insert(link_name.to_path_buf(), file_path.to_path_buf());
+                .insert(tar_link_name.to_path_buf(), tar_file_path.to_path_buf());
             Ok(())
         }
 
