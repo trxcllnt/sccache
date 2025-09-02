@@ -388,6 +388,7 @@ pub fn split_os_string_arg(val: OsString, split: &str) -> ArgParseResult<(String
 
 /// The description of how an argument may be parsed
 #[derive(PartialEq, Eq, Clone, Debug)]
+#[allow(unpredictable_function_pointer_comparisons)]
 pub enum ArgInfo<T> {
     /// An simple flag argument, of the form "-foo"
     Flag(&'static str, T),
