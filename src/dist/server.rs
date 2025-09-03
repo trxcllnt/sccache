@@ -750,9 +750,6 @@ impl Server {
     async fn job_finished(&self, job_id: &str, reply_to: &str, res: &RunJobResponse) -> Result<()> {
         self.state.metrics.inc_job_finished_count();
 
-        // Clean up the build resources
-        self.builder.finish_build(job_id).await;
-
         // Store the job result for retrieval by a scheduler
         let _ = self.put_job_result(job_id, res).await;
 
@@ -779,7 +776,12 @@ impl ServerService for Server {
             futures::select_biased! {
                 // If the build failed because the server was terminated,
                 // report it as a server termination, not a failed build.
-                _ = alive.changed().fuse() => Err(RunJobError::server_terminated()),
+                _ = alive.changed().fuse() => {
+                    // Give the run_build future time to cancel and shutdown
+                    // the build thread/process before removing the overlayfs
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    Err(RunJobError::server_terminated())
+                },
                 // Do the build
                 res = self.load_job_and_run_build(job_id, reply_to, toolchain, command, outputs).fuse() => res,
             }
@@ -789,6 +791,9 @@ impl ServerService for Server {
     }
 
     async fn on_failure(&self, job_id: &str, reply_to: &str, job_err: RunJobError) -> Result<()> {
+        // Clean up the build resources
+        self.builder.finish_build(job_id).await;
+
         // Remove job and increment the job_finished counter
         if self.state.jobs.lock().unwrap().remove(job_id).is_some() {
             let server_id = self.state.id.clone();
@@ -823,6 +828,9 @@ impl ServerService for Server {
         reply_to: &str,
         job_res: &RunJobResponse,
     ) -> Result<()> {
+        // Clean up the build resources
+        self.builder.finish_build(job_id).await;
+
         // Remove job and increment the job_finished counter
         if self.state.jobs.lock().unwrap().remove(job_id).is_some() {
             self.job_finished(job_id, reply_to, job_res).await

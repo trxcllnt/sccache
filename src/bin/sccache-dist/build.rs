@@ -355,18 +355,18 @@ impl OverlayBuilder {
                 tracing::trace!("[perform_build({job_id})]: bubblewrap command: {:?}", cmd);
 
                 let output: ProcessOutput = runtime.block_on(async move {
+                    let cancelled = async move {
+                        cancelled
+                            .await
+                            .or_else(|_| Ok(()))
+                            .map(|_| ProcessOutput::new(1, vec![], "Build cancelled".into()))
+                    };
                     let completed = async move {
                         cmd.output()
                             .await
                             .map(|o| o.into())
                             .map_err(anyhow::Error::new)
                             .context("Failed to retrieve output from compile")
-                    };
-                    let cancelled = async move {
-                        cancelled
-                            .await
-                            .or_else(|_| Ok(()))
-                            .map(|_| ProcessOutput::new(1, vec![], "Build cancelled".into()))
                     };
                     futures::select_biased! {
                         res = cancelled.fuse() => res,
