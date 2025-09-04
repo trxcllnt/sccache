@@ -29,6 +29,7 @@ use std::io;
 use std::path::{self, Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::sync::Arc;
+use tokio::io::AsyncReadExt;
 use tokio::process::ChildStdin;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use version_compare::Version;
@@ -52,7 +53,6 @@ impl AsyncCommandExt for tokio::process::Command {
             String::from_utf8(output.stdout).context("Output from listing containers not UTF8")?;
         Ok(stdout.trim().to_owned())
     }
-    // Should really take a FnOnce/FnBox
     async fn check_piped<F, Fut>(&mut self, pipe: F) -> Result<()>
     where
         F: FnOnce(ChildStdin) -> Fut + std::marker::Send,
@@ -109,12 +109,23 @@ struct OverlaySpec {
     toolchain_dir: PathBuf,
 }
 
+type OverlayChildren = Mutex<
+    HashMap<
+        String,
+        (
+            OverlaySpec,
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        ),
+    >,
+>;
+
 #[derive(Clone)]
 pub struct OverlayBuilder {
     bubblewrap: PathBuf,
+    children: Arc<OverlayChildren>,
     dir: PathBuf,
     job_queue: Arc<tokio::sync::Semaphore>,
-    overlays: Arc<Mutex<HashMap<String, OverlaySpec>>>,
 }
 
 impl OverlayBuilder {
@@ -167,9 +178,9 @@ impl OverlayBuilder {
         // TODO: pidfile
         let ret = Self {
             bubblewrap,
+            children: Default::default(),
             dir,
             job_queue,
-            overlays: Default::default(),
         };
         ret.cleanup().await?;
         tokio::fs::create_dir_all(&ret.dir)
@@ -209,6 +220,7 @@ impl OverlayBuilder {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn perform_build(
         job_id: &str,
         bubblewrap: PathBuf,
@@ -222,16 +234,24 @@ impl OverlayBuilder {
         output_paths: Vec<String>,
         overlay: OverlaySpec,
         job_queue: &tokio::sync::Semaphore,
+        children: &OverlayChildren,
     ) -> Result<BuildResult> {
         tracing::trace!("[perform_build({job_id})]: Compile environment: {env_vars:?}");
         tracing::trace!("[perform_build({job_id})]: Compile command: {executable:?} {arguments:?}");
         tracing::trace!("[perform_build({job_id})]: Output paths: {output_paths:?}");
 
-        let job_id = job_id.to_owned();
+        let job_id_1 = job_id.to_owned();
+        let overlay_1 = overlay.clone();
 
         let build_in_overlay =
             move |runtime: &tokio::runtime::Handle,
-                  cancelled: tokio::sync::oneshot::Receiver<()>| {
+                  cancelled_tx: tokio::sync::oneshot::Sender<()>,
+                  cancelled_rx: tokio::sync::oneshot::Receiver<()>| {
+                let job_id = job_id_1.clone();
+                let job_id_1 = job_id.clone();
+                let build_dir = overlay_1.build_dir;
+                let toolchain_dir = overlay_1.toolchain_dir;
+
                 // Now mounted filesystems will be automatically unmounted when this thread dies
                 // (and tmpfs filesystems will be completely destroyed)
                 nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS)
@@ -251,9 +271,9 @@ impl OverlayBuilder {
                 )
                 .context("Failed to turn / into a slave")?;
 
-                let work_dir = overlay.build_dir.join("work");
-                let upper_dir = overlay.build_dir.join("upper");
-                let target_dir = overlay.build_dir.join("target");
+                let work_dir = build_dir.join("work");
+                let upper_dir = build_dir.join("upper");
+                let target_dir = build_dir.join("target");
                 fs::create_dir_all(&work_dir).context("Failed to create overlay work directory")?;
                 fs::create_dir_all(&upper_dir)
                     .context("Failed to create overlay upper directory")?;
@@ -261,7 +281,7 @@ impl OverlayBuilder {
                     .context("Failed to create overlay target directory")?;
 
                 let () = Overlay::writable(
-                    std::iter::once(overlay.toolchain_dir.as_path()),
+                    std::iter::once(toolchain_dir.as_path()),
                     upper_dir,
                     work_dir,
                     &target_dir,
@@ -354,25 +374,64 @@ impl OverlayBuilder {
                 tracing::trace!("[perform_build({job_id})]: performing compile");
                 tracing::trace!("[perform_build({job_id})]: bubblewrap command: {:?}", cmd);
 
-                let output: ProcessOutput = runtime.block_on(async move {
-                    let cancelled = async move {
-                        cancelled
-                            .await
-                            .or_else(|_| Ok(()))
-                            .map(|_| ProcessOutput::new(1, vec![], "Build cancelled".into()))
+                let output = runtime.block_on(async move {
+                    let mut child = match cmd.spawn() {
+                        Ok(child) => child,
+                        Err(e) => return Some(Err(e.into())),
                     };
-                    let completed = async move {
-                        cmd.output()
-                            .await
-                            .map(|o| o.into())
-                            .map_err(anyhow::Error::new)
-                            .context("Failed to retrieve output from compile")
-                    };
-                    futures::select_biased! {
-                        res = cancelled.fuse() => res,
-                        res = completed.fuse() => res,
+
+                    async fn buffer_output<S>(stream: Option<S>) -> Result<Vec<u8>>
+                    where
+                        S: AsyncReadExt + Unpin,
+                    {
+                        let mut buf = Vec::new();
+                        if let Some(mut stream) = stream {
+                            stream
+                                .read_to_end(&mut buf)
+                                .await
+                                .context("Failed to read output")?;
+                        }
+                        Ok(buf)
                     }
-                })?;
+
+                    let stdout = buffer_output(child.stdout.take());
+                    let stderr = buffer_output(child.stderr.take());
+                    let status = {
+                        let status = child.wait();
+                        async move { status.await.context("Failed to wait for child") }
+                    };
+
+                    let completed = async move {
+                        futures::future::try_join3(status, stdout, stderr)
+                            .await
+                            .map(|(status, stdout, stderr)| {
+                                ProcessOutput::from(std::process::Output {
+                                    status,
+                                    stdout,
+                                    stderr,
+                                })
+                            })
+                    };
+
+                    futures::select_biased! {
+                        _ = cancelled_rx.fuse() => {
+                            if let Err(err) = child.kill().await.context("Failed to kill child") {
+                                tracing::warn!("[perform_build({job_id_1})]: {err:?}");
+                            }
+                            let _ = cancelled_tx.send(());
+                            None
+                        },
+                        output = completed.fuse() => {
+                            Some(output.context("Failed to retrieve output from compile"))
+                        },
+                    }
+                });
+
+                if output.is_none() {
+                    return Err(anyhow!("Build cancelled"));
+                }
+
+                let output = output.unwrap()?;
 
                 let mut outputs = vec![];
 
@@ -417,40 +476,45 @@ impl OverlayBuilder {
                 Ok(BuildResult { output, outputs })
             };
 
-        // Guard compiling until we get a token from the job queue
-        let job_slot = job_queue.acquire().await?;
-
         let runtime = tokio::runtime::Handle::current();
-        let (_cancelledtx, cancelled_rx) = tokio::sync::oneshot::channel();
+        let (cancel_job_tx, cancel_job_rx) = tokio::sync::oneshot::channel();
+        let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
         let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
-        //
-        // Explicitly launch a new thread outside tokio's thread pool,
-        // so that our overlayfs and tmpfs are unmounted when it dies.
-        //
-        // Keeping the handle alive for the lifetime of the oneshot channel
-        // to ensure it's only dropped if the Future is cancelled.
-        let handle = std::thread::spawn(move || {
-            let res = build_in_overlay(&runtime, cancelled_rx);
-            let _ = completed_tx.send(());
-            res
-        });
 
-        // Wait till the thread is done. This ensures the handle is dropped if this Future is cancelled.
-        let _ = completed_rx.await;
+        children
+            .lock()
+            .await
+            .insert(job_id.to_owned(), (overlay, cancel_job_tx, cancelled_rx));
 
-        let res = handle
-            .join()
-            .unwrap_or_else(|e| Err(anyhow!("Build thread exited with error: {e:?}")));
+        {
+            // Guard compiling until we get a token from the job queue
+            let _job_slot = job_queue.acquire().await?;
 
-        // Drop the job slot once compile is finished
-        drop(job_slot);
+            // Explicitly launch a new thread outside tokio's thread pool,
+            // so that our overlayfs and tmpfs are unmounted when it dies.
+            //
+            // Keeping the handle alive for the lifetime of the oneshot channel
+            // to ensure it's only dropped if the Future is cancelled.
+            let handle = std::thread::spawn(move || {
+                completed_tx.send(build_in_overlay(&runtime, cancelled_tx, cancel_job_rx))
+            });
 
-        res
+            // Asynchronously wait till the build thread is done so we don't block the tokio worker thread.
+            let res = completed_rx
+                .await
+                .unwrap_or_else(|e| Err(anyhow!("Build thread exited with error: {e:?}")));
+
+            // Now that the build thread is done, join() will return immediately.
+            handle
+                .join()
+                // Handle panics
+                .map_err(|e| anyhow!("Build thread exited with error: {e:?}"))
+                // Handle unwrapping if completed_tx.send() returns Err
+                .and_then(|out| out.map(|_| res).unwrap_or_else(|out| out))
+        }
     }
 
-    // Failing during cleanup is pretty unexpected, but we can still return the successful compile
-    // TODO: if too many of these fail, we should mark this builder as faulty
-    async fn finish_overlay(&self, job_id: &str, overlay: &OverlaySpec) {
+    async fn finish_overlay(job_id: &str, overlay: &OverlaySpec) {
         let OverlaySpec {
             build_dir,
             toolchain_dir: _,
@@ -459,7 +523,7 @@ impl OverlayBuilder {
         if build_dir.exists() {
             if let Err(e) = tokio::fs::remove_dir_all(build_dir).await {
                 tracing::warn!(
-                    "[finish_overlay({job_id})]: Failed to remove build directory {}: {e:?}",
+                    "[finish_overlay({job_id})]: Failed to remove build directory {:?}: {e:?}",
                     build_dir.display()
                 );
             }
@@ -477,17 +541,15 @@ impl BuilderIncoming for OverlayBuilder {
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> Result<BuildResult> {
+        // Bail early if job_queue is closed while this job is running
+        drop(self.job_queue.acquire().await?);
+
         tracing::debug!("[run_build({job_id})]: Preparing overlay");
 
         let overlay = self
             .prepare_overlay_dirs(job_id, toolchain_dir)
             .await
             .context("failed to prepare overlay dirs")?;
-
-        self.overlays
-            .lock()
-            .await
-            .insert(job_id.to_owned(), overlay.clone());
 
         tracing::debug!("[run_build({job_id})]: Performing build in {overlay:?}");
 
@@ -499,6 +561,7 @@ impl BuilderIncoming for OverlayBuilder {
             outputs,
             overlay.clone(),
             self.job_queue.as_ref(),
+            self.children.as_ref(),
         )
         .await;
 
@@ -508,10 +571,31 @@ impl BuilderIncoming for OverlayBuilder {
     }
 
     async fn finish_build(&self, job_id: &str) {
-        if let Some(overlay) = self.overlays.lock().await.remove(job_id) {
-            tracing::debug!("[run_build({job_id})]: Finishing with overlay");
-            self.finish_overlay(job_id, &overlay).await;
+        if let Some((overlay, cancel, cancelled)) = self.children.lock().await.remove(job_id) {
+            let _ = cancel.send(());
+            let _ = cancelled.await;
+            tracing::debug!(
+                "[finish_build({job_id})]: Finishing with overlay {:?}",
+                overlay.build_dir.display()
+            );
+            Self::finish_overlay(job_id, &overlay).await;
         }
+    }
+
+    async fn shutdown(&self) {
+        self.job_queue.close();
+        futures::future::join_all(self.children.lock().await.drain().map(
+            |(job_id, (overlay, cancel, cancelled))| async move {
+                let _ = cancel.send(());
+                let _ = cancelled.await;
+                tracing::debug!(
+                    "[shutdown({job_id})]: Finishing with overlay {:?}",
+                    overlay.build_dir.display()
+                );
+                Self::finish_overlay(&job_id, &overlay).await;
+            },
+        ))
+        .await;
     }
 }
 
@@ -525,6 +609,7 @@ const DOCKER_SHELL_INIT: &str = "while true; do busybox sleep 365d && busybox tr
 
 #[derive(Clone)]
 pub struct DockerBuilder {
+    containers: Arc<Mutex<HashMap<String, String>>>,
     job_queue: Arc<tokio::sync::Semaphore>,
 }
 
@@ -534,7 +619,10 @@ impl DockerBuilder {
     // instances - pidfile in /tmp
     pub async fn new(job_queue: Arc<tokio::sync::Semaphore>) -> Result<Self> {
         tracing::info!("Creating docker builder");
-        Ok(Self { job_queue })
+        Ok(Self {
+            containers: Default::default(),
+            job_queue,
+        })
     }
 
     async fn perform_build(
@@ -605,16 +693,21 @@ impl DockerBuilder {
                 .collect::<Vec<_>>()
         };
 
-        tracing::trace!("[perform_build({job_id})]: creating output directories");
-
-        for path in host_bindmount_paths.iter() {
-            tracing::trace!("[perform_build({job_id})]: creating dir: {path:?}");
-            tokio::fs::create_dir_all(path)
-                .await
-                .context(format!("Failed to create output directory {path:?}"))?;
+        {
+            // Bail early if job_queue is closed while this job is running
+            drop(job_queue.acquire().await?);
+            tracing::trace!("[perform_build({job_id})]: creating output directories");
+            for path in host_bindmount_paths.iter() {
+                tracing::trace!("[perform_build({job_id})]: creating dir: {path:?}");
+                tokio::fs::create_dir_all(path)
+                    .await
+                    .context(format!("Failed to create output directory {path:?}"))?;
+            }
         }
 
         {
+            // Bail early if job_queue is closed while this job is running
+            drop(job_queue.acquire().await?);
             tracing::trace!("[perform_build({job_id})]: creating docker container");
             let mut cmd = tokio::process::Command::new("docker");
             cmd.args(["run", "--init", "-d", "--name", c_name])
@@ -633,6 +726,8 @@ impl DockerBuilder {
         }
 
         {
+            // Bail early if job_queue is closed while this job is running
+            drop(job_queue.acquire().await?);
             tracing::trace!("[perform_build({job_id})]: copying in toolchain");
             let mut cmd = tokio::process::Command::new("docker");
             cmd.arg("cp")
@@ -644,6 +739,8 @@ impl DockerBuilder {
         }
 
         {
+            // Bail early if job_queue is closed while this job is running
+            drop(job_queue.acquire().await?);
             tracing::trace!("[perform_build({job_id})]: copying in inputs");
             let inputs_rdr = inputs.reader();
             let inputs_rdr = futures::io::AllowStdIo::new(inputs_rdr);
@@ -661,84 +758,102 @@ impl DockerBuilder {
                 .context("Failed to copy inputs tar into container")?;
         }
 
-        tracing::trace!("[perform_build({job_id})]: creating compile command");
+        let output: ProcessOutput = {
+            // Guard compiling until we get a token from the job queue
+            let _job_slot = job_queue.acquire().await?;
 
-        // TODO: likely shouldn't perform the compile as root in the container
-        let mut cmd = tokio::process::Command::new("docker");
+            tracing::trace!("[perform_build({job_id})]: creating compile command");
 
-        cmd.args(["exec"])
-            // Run in `cwd`
-            .arg("--workdir")
-            .arg(cwd)
-            // Define envvars
-            .args(env_vars.iter().flat_map(|(k, v)| {
-                if k.contains('=') {
-                    tracing::warn!(
-                        "[perform_build({job_id})]: Skipping environment variable: {k:?}"
-                    );
-                    vec![]
+            // TODO: likely shouldn't perform the compile as root in the container
+            let mut cmd = tokio::process::Command::new("docker");
+
+            cmd.args(["exec"])
+                // Run in `cwd`
+                .arg("--workdir")
+                .arg(cwd)
+                // Define envvars
+                .args(env_vars.iter().flat_map(|(k, v)| {
+                    if k.contains('=') {
+                        tracing::warn!(
+                            "[perform_build({job_id})]: Skipping environment variable: {k:?}"
+                        );
+                        vec![]
+                    } else {
+                        vec!["--env".into(), format!("{k}=\"{v}\"")]
+                    }
+                }))
+                // container name
+                .arg(c_name)
+                // Finally, the executable and arguments
+                .arg(&executable)
+                .args(arguments);
+
+            tracing::trace!("[perform_build({job_id})]: performing compile");
+            tracing::trace!("[perform_build({job_id})]: {:?}", cmd.as_std());
+
+            cmd.output().await.context("Failed to compile")?.into()
+        };
+
+        let outputs = {
+            // Bail early if job_queue is closed while this job is running
+            drop(job_queue.acquire().await?);
+
+            let mut outputs = vec![];
+
+            if !output.success() {
+                if output.exit() {
+                    tracing::trace!("[perform_build({job_id})]: compile failure: {output:?}");
                 } else {
-                    vec!["--env".into(), format!("{k}=\"{v}\"")]
+                    // Warn on abnormal terminations (i.e. SIGTERM, SIGKILL)
+                    tracing::warn!(
+                        "[perform_build({job_id})]: {executable:?} terminated with {}",
+                        output.desc()
+                    );
                 }
-            }))
-            // container name
-            .arg(c_name)
-            // Finally, the executable and arguments
-            .arg(&executable)
-            .args(arguments);
-
-        // Guard compiling until we get a token from the job queue
-        let job_slot = job_queue.acquire().await?;
-
-        tracing::trace!("[perform_build({job_id})]: performing compile");
-        tracing::trace!("[perform_build({job_id})]: {:?}", cmd.as_std());
-
-        let output: ProcessOutput = cmd.output().await.context("Failed to compile")?.into();
-
-        // Drop the job slot once compile is finished
-        drop(job_slot);
-
-        let mut outputs = vec![];
-
-        if !output.success() {
-            if output.exit() {
-                tracing::trace!("[perform_build({job_id})]: compile failure: {output:?}");
             } else {
-                // Warn on abnormal terminations (i.e. SIGTERM, SIGKILL)
-                tracing::warn!(
-                    "[perform_build({job_id})]: {executable:?} terminated with {}",
-                    output.desc()
-                );
-            }
-        } else {
-            tracing::trace!("[perform_build({job_id})]: compile success: {output:?}");
-            tracing::trace!("[perform_build({job_id})]: retrieving {output_paths:?}");
+                tracing::trace!("[perform_build({job_id})]: compile success: {output:?}");
+                tracing::trace!("[perform_build({job_id})]: retrieving {output_paths:?}");
 
-            for (path, abspath) in output_paths.iter().zip(output_paths_absolute.iter()) {
-                let abspath = join_suffix(host_root, abspath); // Resolve in case it's relative since we copy it from the root level
-                match fs::File::open(&abspath) {
-                    Ok(file) => match OutputData::try_from_reader(file) {
-                        Ok(output) => outputs.push((path.clone(), output)),
-                        Err(err) => {
-                            tracing::error!(
+                for (path, abspath) in output_paths.iter().zip(output_paths_absolute.iter()) {
+                    let abspath = join_suffix(host_root, abspath); // Resolve in case it's relative since we copy it from the root level
+                    match fs::File::open(&abspath) {
+                        Ok(file) => match OutputData::try_from_reader(file) {
+                            Ok(output) => outputs.push((path.clone(), output)),
+                            Err(err) => {
+                                tracing::error!(
                                 "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, container={path:?}: {err}"
                             )
-                        }
-                    },
-                    Err(e) => {
-                        if e.kind() == io::ErrorKind::NotFound {
-                            tracing::debug!(
+                            }
+                        },
+                        Err(e) => {
+                            if e.kind() == io::ErrorKind::NotFound {
+                                tracing::debug!(
                                 "[perform_build({job_id})]: Missing output path host={abspath:?}, container={path:?}"
                             )
-                        } else {
-                            return Err(Error::from(e).context("Failed to open output file"));
+                            } else {
+                                return Err(Error::from(e).context("Failed to open output file"));
+                            }
                         }
                     }
                 }
             }
-        }
+
+            outputs
+        };
 
         Ok(BuildResult { output, outputs })
+    }
+
+    async fn finish_container(job_id: &str, c_name: &str) {
+        if let Err(err) = tokio::process::Command::new("docker")
+            .args(["rm", "-f", c_name])
+            .check_run()
+            .await
+        {
+            tracing::warn!(
+                "[finish_container({job_id})]: Failed to remove docker container {c_name:?}: {err:#}",
+            );
+        }
     }
 }
 
@@ -753,9 +868,16 @@ impl BuilderIncoming for DockerBuilder {
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> Result<BuildResult> {
-        tracing::debug!("[run_build({})]: Performing build in container", job_id);
+        // Bail early if job_queue is closed while this job is running
+        drop(self.job_queue.acquire().await?);
 
+        tracing::debug!("[run_build({job_id})]: Performing build in container");
         let c_name = format!("sccache-builder-{job_id}");
+
+        self.containers
+            .lock()
+            .await
+            .insert(job_id.to_owned(), c_name.clone());
 
         let res = Self::perform_build(
             job_id,
@@ -768,20 +890,26 @@ impl BuilderIncoming for DockerBuilder {
         )
         .await;
 
-        tracing::debug!("[run_build({})]: Returning result", job_id);
+        tracing::debug!("[run_build({job_id})]: Returning result");
 
         res.context("Failed to perform build")
     }
-    async fn finish_build(&self, job_id: &str) {
-        let c_name = format!("sccache-builder-{job_id}");
 
-        if let Err(err) = tokio::process::Command::new("docker")
-            .args(["rm", "-f", &c_name])
-            .check_run()
-            .await
-            .context("Failed to remove docker container")
-        {
-            tracing::warn!("{err:#}");
+    async fn finish_build(&self, job_id: &str) {
+        if let Some(c_name) = self.containers.lock().await.remove(job_id) {
+            tracing::debug!("[finish_build({job_id})]: Removing container {c_name:?}");
+            Self::finish_container(job_id, &c_name).await;
         }
+    }
+
+    async fn shutdown(&self) {
+        self.job_queue.close();
+        futures::future::join_all(self.containers.lock().await.drain().map(
+            |(job_id, c_name)| async move {
+                tracing::debug!("[shutdown({job_id})]: Removing container {c_name:?}");
+                Self::finish_container(&job_id, &c_name).await;
+            },
+        ))
+        .await;
     }
 }

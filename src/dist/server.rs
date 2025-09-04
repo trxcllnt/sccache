@@ -474,31 +474,26 @@ impl Server {
             res = status.fuse() => res,
         };
 
+        // Broadcast server is now shutting down.
+        self.alive.send_replace(false);
+
         // Drain the jobs map before broadcasting the shutdown signal.
         // This ensures the "Server terminated" response is written for all
         // jobs active when SIGINT was received.
         let jobs = self.state.jobs.lock().unwrap().drain().collect::<Vec<_>>();
 
-        // Broadcast the shutdown signal so futures for active jobs are interrupted.
-        // This will kill and reap their build processes, destroy overlayfs, shutdown
-        // containers, remove build workdirs, etc.
-        //
-        // Because the jobs map is now empty, interrupting each job future will not
-        // lead to writing a job response to the storage. This is important, because
-        // we want `self.terminate_pending_jobs()` to write the "Server terminated"
-        // job responses to the job storage without racing other threads.
-        self.alive.send_replace(false);
+        tracing::info!("Begin graceful shutdown with {} pending job(s)", jobs.len());
 
-        // Write "Server terminated" job responses and send the `job_finished` tasks
-        // back to each interested scheduler.
-        let terminated = self.terminate_pending_jobs(jobs).await;
+        let delay = Duration::from_secs(10);
+        tracing::info!("Waiting {}s for graceful shutdown", delay.as_secs());
+        let shutdown = tokio::time::timeout(delay, self.shutdown(jobs))
+            .await
+            .unwrap_or_else(|e| Err(e.into()));
 
-        // Close broker consumer/producer channels and connection.
-        let closed = self.tasks.app().close().await.map_err(|e| e.into());
-
-        tracing::info!("Server shutdown");
-
-        celery.and(terminated).and(closed)
+        celery
+            .and(shutdown)
+            .context("Server shutdown error")
+            .map(|_| tracing::info!("Server shutdown gracefully"))
     }
 
     async fn status(&self, interval: Duration) -> Result<()> {
@@ -523,35 +518,39 @@ impl Server {
         .map_err(anyhow::Error::new)
     }
 
-    async fn terminate_pending_jobs(&self, jobs: Vec<(String, String)>) -> Result<()> {
-        tracing::info!("Server shutdown with {} pending jobs", jobs.len());
+    async fn shutdown(&self, jobs: Vec<(String, String)>) -> Result<()> {
+        let jobs_len = jobs.len();
 
-        if !jobs.is_empty() {
-            let timeout = Duration::from_secs(10);
+        // Kill build processes, remove containers, overlayfs dirs, etc.
+        let builder = async {
+            self.builder.shutdown().await;
+            tracing::info!("Killed {jobs_len} pending job(s)");
+        };
 
-            tracing::info!(
-                "Waiting {}s for pending jobs to shutdown",
-                timeout.as_secs()
-            );
+        // Write "Server terminated" job responses and send the `job_finished` tasks
+        // back to each interested scheduler.
+        let replies = jobs.into_iter().map(|(job_id, reply_to)| async move {
+            tracing::info!("Sending server terminated response for job {job_id} to {reply_to}");
+            self.job_finished(
+                &job_id,
+                &reply_to,
+                &RunJobResponse::server_terminated(&self.state.id),
+            )
+            .await
+        });
 
-            let terminated =
-                futures::future::join_all(jobs.into_iter().map(|(job_id, reply_to)| async move {
-                    tracing::info!(
-                        "Sending server terminated response for job {job_id} to {reply_to}"
-                    );
-                    self.job_finished(
-                        &job_id,
-                        &reply_to,
-                        &RunJobResponse::server_terminated(&self.state.id),
-                    )
-                    .await
-                }));
+        let replies = async {
+            futures::future::join_all(replies).await;
+            tracing::info!("Reported server termination for {jobs_len} pending job(s)");
+        };
 
-            let _ = tokio::time::timeout(timeout, terminated).await;
+        futures::future::join(builder, replies).await;
 
-            tracing::info!("Terminated all pending jobs");
-        }
-        Ok(())
+        // Close broker connection.
+        let broker = self.tasks.app().close().await;
+        tracing::info!("Closed broker connection");
+
+        broker.context("Broker shutdown error")
     }
 
     async fn send_status(&self) -> Result<()> {
@@ -731,20 +730,24 @@ impl Server {
             .map(|result| {
                 // If the build failed because the server was terminated,
                 // report it as a server termination, not a failed build.
-                if !result.output.success() {
-                    if !self.is_alive() {
-                        return RunJobResponse::server_terminated(&self.state.id);
-                    }
-                    if !result.output.exit() {
-                        return RunJobResponse::build_process_killed(&self.state.id);
-                    }
+                if !self.is_alive() {
+                    return RunJobResponse::server_terminated(&self.state.id);
+                }
+                if !result.output.success() && !result.output.exit() {
+                    return RunJobResponse::build_process_killed(&self.state.id);
                 }
                 RunJobResponse::Complete {
                     result,
                     server_id: self.state.id.clone(),
                 }
             })
-            .map_err(Into::into)
+            .map_err(|e| {
+                if self.is_alive() {
+                    e.into()
+                } else {
+                    RunJobError::server_terminated()
+                }
+            })
     }
 
     async fn job_finished(&self, job_id: &str, reply_to: &str, res: &RunJobResponse) -> Result<()> {
@@ -772,28 +775,14 @@ impl ServerService for Server {
         outputs: Vec<String>,
     ) -> std::result::Result<RunJobResponse, RunJobError> {
         if self.is_alive() {
-            let mut alive = self.alive.subscribe();
-            futures::select_biased! {
-                // If the build failed because the server was terminated,
-                // report it as a server termination, not a failed build.
-                _ = alive.changed().fuse() => {
-                    // Give the run_build future time to cancel and shutdown
-                    // the build thread/process before removing the overlayfs
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    Err(RunJobError::server_terminated())
-                },
-                // Do the build
-                res = self.load_job_and_run_build(job_id, reply_to, toolchain, command, outputs).fuse() => res,
-            }
+            self.load_job_and_run_build(job_id, reply_to, toolchain, command, outputs)
+                .await
         } else {
             Err(RunJobError::server_terminated())
         }
     }
 
     async fn on_failure(&self, job_id: &str, reply_to: &str, job_err: RunJobError) -> Result<()> {
-        // Clean up the build resources
-        self.builder.finish_build(job_id).await;
-
         // Remove job and increment the job_finished counter
         if self.state.jobs.lock().unwrap().remove(job_id).is_some() {
             let server_id = self.state.id.clone();
@@ -816,7 +805,11 @@ impl ServerService for Server {
 
             tracing::warn!("[on_failure({job_id})]: {job_res:?}");
 
-            self.job_finished(job_id, reply_to, &job_res).await
+            // Store the job result and notify the interested scheduler
+            let res = self.job_finished(job_id, reply_to, &job_res).await;
+            // Clean up the build resources
+            self.builder.finish_build(job_id).await;
+            res
         } else {
             Ok(())
         }
@@ -828,12 +821,13 @@ impl ServerService for Server {
         reply_to: &str,
         job_res: &RunJobResponse,
     ) -> Result<()> {
-        // Clean up the build resources
-        self.builder.finish_build(job_id).await;
-
         // Remove job and increment the job_finished counter
         if self.state.jobs.lock().unwrap().remove(job_id).is_some() {
-            self.job_finished(job_id, reply_to, job_res).await
+            // Store the job result and notify the interested scheduler
+            let res = self.job_finished(job_id, reply_to, job_res).await;
+            // Clean up the build resources
+            self.builder.finish_build(job_id).await;
+            res
         } else {
             Ok(())
         }

@@ -758,6 +758,8 @@ pub trait BuilderIncoming: Send + Sync {
     ) -> Result<BuildResult>;
     // From Server
     async fn finish_build(&self, job_id: &str);
+    // From Server
+    async fn shutdown(&self);
 }
 
 /////////

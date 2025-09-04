@@ -381,15 +381,15 @@ impl PotBuilder {
 
         // Do as much asyncio work as possible before acquiring a job slot
 
-        tracing::trace!("[perform_build({job_id})]: copying in inputs");
-
-        let jail_root = pot_fs_root.join("jails").join(cid).join("m");
-
-        // Copy inputs to jail_root
         {
+            // Bail early if job_queue is closed while this job is running
+            drop(job_queue.acquire().await?);
+            tracing::trace!("[perform_build({job_id})]: copying in inputs");
+            let jail_root = pot_fs_root.join("jails").join(cid).join("m");
             let reader = inputs.reader();
             let reader = futures::io::AllowStdIo::new(reader);
             let reader = ZlibDecoderAsync::new(reader);
+            // Copy inputs to jail_root
             async_tar::Archive::new(reader)
                 .unpack(&jail_root)
                 .await
@@ -404,106 +404,117 @@ impl PotBuilder {
             .map(|path| cwd.join(Path::new(path)))
             .collect::<Vec<_>>();
 
-        tracing::trace!("[perform_build({job_id})]: creating output directories");
+        {
+            // Bail early if job_queue is closed while this job is running
+            drop(job_queue.acquire().await?);
+            tracing::trace!("[perform_build({job_id})]: creating output directories");
 
-        let mut cmd = tokio::process::Command::new("jexec");
+            let mut cmd = tokio::process::Command::new("jexec");
 
-        cmd.args([cid, "mkdir", "-p"]).arg(cwd);
+            cmd.args([cid, "mkdir", "-p"]).arg(cwd);
 
-        for path in output_paths_absolute.iter() {
-            // If it doesn't have a parent, nothing needs creating
-            if let Some(path) = path.parent() {
-                cmd.arg(path);
-            }
-        }
-
-        tracing::trace!(
-            "[perform_build({job_id})]: mkdir command: {:?}",
-            cmd.as_std()
-        );
-
-        cmd.check_run()
-            .await
-            .context("Failed to create directories required for compiling in container")?;
-
-        tracing::trace!("[perform_build({job_id})]: creating compile command");
-
-        // TODO: likely shouldn't perform the compile as root in the container
-        let mut cmd = tokio::process::Command::new("jexec");
-        cmd.arg(cid);
-        cmd.arg("env");
-        for (k, v) in env_vars {
-            if k.contains('=') {
-                tracing::warn!("[perform_build({job_id})]: Skipping environment variable: {k:?}");
-                continue;
-            }
-            let mut env = k;
-            env.push('=');
-            env.push_str(&v);
-            cmd.arg(env);
-        }
-        let shell_cmd = "cd \"$1\" && shift && exec \"$@\"";
-        cmd.args(["sh", "-c", shell_cmd]);
-        cmd.arg(&executable);
-        cmd.arg(cwd);
-        cmd.arg(&executable);
-        cmd.args(&arguments);
-
-        // Guard compiling until we get a token from the job queue
-        let job_slot = job_queue.acquire().await?;
-
-        tracing::trace!("[perform_build({job_id})]: performing compile");
-        tracing::trace!("[perform_build({job_id})]: {:?}", cmd.as_std());
-
-        let output: ProcessOutput = cmd
-            .output()
-            .await
-            .context("Failed to start executing compile")?
-            .into();
-
-        // Drop the job slot once compile is finished
-        drop(job_slot);
-
-        let mut outputs = vec![];
-
-        if !output.success() {
-            if output.exit() {
-                tracing::trace!("[perform_build({job_id})]: compile failure: {output:?}");
-            } else {
-                // Warn on abnormal terminations (i.e. SIGTERM, SIGKILL)
-                tracing::warn!(
-                    "[perform_build({job_id})]: {executable:?} terminated with {}",
-                    output.desc()
-                );
-            }
-        } else {
-            tracing::trace!("[perform_build({job_id})]: retrieving {output_paths:?}");
-
-            for (path, abspath) in output_paths.iter().zip(output_paths_absolute.iter()) {
-                // TODO: this isn't great, but cp gives it out as a tar
-                let output = tokio::process::Command::new("jexec")
-                    .args([cid, "cat"])
-                    .arg(abspath)
-                    .output()
-                    .await
-                    .context("Failed to start command to retrieve output file")?;
-
-                if output.status.success() {
-                    match OutputData::try_from_reader(&*output.stdout) {
-                        Ok(output) => outputs.push((path.clone(), output)),
-                        Err(err) => {
-                            tracing::error!(
-                                "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, container={path:?}: {err}"
-                            )
-                        }
-                    }
-                } else {
-                    tracing::debug!(
-                        "[perform_build({job_id})]: Missing output path {path:?} ({abspath:?})"
-                    )
+            for path in output_paths_absolute.iter() {
+                // If it doesn't have a parent, nothing needs creating
+                if let Some(path) = path.parent() {
+                    cmd.arg(path);
                 }
             }
+
+            tracing::trace!(
+                "[perform_build({job_id})]: mkdir command: {:?}",
+                cmd.as_std()
+            );
+
+            cmd.check_run()
+                .await
+                .context("Failed to create directories required for compiling in container")?;
         }
+
+        let output: ProcessOutput = {
+            // Guard compiling until we get a token from the job queue
+            let _job_slot = job_queue.acquire().await?;
+
+            tracing::trace!("[perform_build({job_id})]: creating compile command");
+
+            // TODO: likely shouldn't perform the compile as root in the container
+            let mut cmd = tokio::process::Command::new("jexec");
+            cmd.arg(cid);
+            cmd.arg("env");
+            for (k, v) in env_vars {
+                if k.contains('=') {
+                    tracing::warn!(
+                        "[perform_build({job_id})]: Skipping environment variable: {k:?}"
+                    );
+                    continue;
+                }
+                let mut env = k;
+                env.push('=');
+                env.push_str(&v);
+                cmd.arg(env);
+            }
+            let shell_cmd = "cd \"$1\" && shift && exec \"$@\"";
+            cmd.args(["sh", "-c", shell_cmd]);
+            cmd.arg(&executable);
+            cmd.arg(cwd);
+            cmd.arg(&executable);
+            cmd.args(&arguments);
+
+            tracing::trace!("[perform_build({job_id})]: performing compile");
+            tracing::trace!("[perform_build({job_id})]: {:?}", cmd.as_std());
+
+            cmd.output()
+                .await
+                .context("Failed to start executing compile")?
+                .into()
+        };
+
+        let outputs = {
+            // Bail early if job_queue is closed while this job is running
+            drop(job_queue.acquire().await?);
+
+            let mut outputs = vec![];
+
+            if !output.success() {
+                if output.exit() {
+                    tracing::trace!("[perform_build({job_id})]: compile failure: {output:?}");
+                } else {
+                    // Warn on abnormal terminations (i.e. SIGTERM, SIGKILL)
+                    tracing::warn!(
+                        "[perform_build({job_id})]: {executable:?} terminated with {}",
+                        output.desc()
+                    );
+                }
+            } else {
+                tracing::trace!("[perform_build({job_id})]: retrieving {output_paths:?}");
+
+                for (path, abspath) in output_paths.iter().zip(output_paths_absolute.iter()) {
+                    // TODO: this isn't great, but cp gives it out as a tar
+                    let output = tokio::process::Command::new("jexec")
+                        .args([cid, "cat"])
+                        .arg(abspath)
+                        .output()
+                        .await
+                        .context("Failed to start command to retrieve output file")?;
+
+                    if output.status.success() {
+                        match OutputData::try_from_reader(&*output.stdout) {
+                            Ok(output) => outputs.push((path.clone(), output)),
+                            Err(err) => {
+                                tracing::error!(
+                                    "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, container={path:?}: {err}"
+                                )
+                            }
+                        }
+                    } else {
+                        tracing::debug!(
+                            "[perform_build({job_id})]: Missing output path {path:?} ({abspath:?})"
+                        )
+                    }
+                }
+            }
+
+            outputs
+        };
 
         Ok(BuildResult { output, outputs })
     }
@@ -520,6 +531,9 @@ impl BuilderIncoming for PotBuilder {
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> Result<BuildResult> {
+        // Bail early if job_queue is closed while this job is running
+        drop(self.job_queue.acquire().await?);
+
         tracing::debug!("[run_build({job_id})]: Finding container");
 
         let cid = self
@@ -545,17 +559,14 @@ impl BuilderIncoming for PotBuilder {
         )
         .await;
 
-        // Unwrap the result
-        let res = res.context("Failed to perform build")?;
-
         tracing::debug!("[run_build({job_id})]: Returning result");
 
-        Ok(res)
+        res.context("Failed to perform build")
     }
 
     async fn finish_build(&self, job_id: &str) {
         if let Some((cid, toolchain_dir)) = self.cids.lock().await.remove(job_id) {
-            tracing::debug!("[run_build({job_id})]: Finishing with container {cid}");
+            tracing::debug!("[finish_build({job_id})]: Finishing with container {cid}");
             Self::finish_container(
                 job_id,
                 self.container_lists.clone(),
@@ -565,5 +576,21 @@ impl BuilderIncoming for PotBuilder {
             )
             .await;
         }
+    }
+
+    async fn shutdown(&self) {
+        self.job_queue.close();
+        futures::future::join_all(self.cids.lock().await.drain().map(
+            |(job_id, (cid, toolchain_dir))| {
+                let pot_cmd = self.pot_cmd.clone();
+                let container_lists = self.container_lists.clone();
+                async move {
+                    tracing::debug!("[shutdown({job_id})]: Finishing with container {cid}");
+                    Self::finish_container(&job_id, container_lists, &toolchain_dir, &cid, &pot_cmd)
+                        .await
+                }
+            },
+        ))
+        .await;
     }
 }
