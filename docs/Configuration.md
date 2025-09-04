@@ -37,8 +37,6 @@ file_stat_matches = true
 use_ctime_for_stat = true
 # Whether to ignore `__TIME__` when caching
 ignore_time_macros = false
-# Whether hash the current working directory
-hash_working_directory = true
 
 [cache.gcs]
 # optional oauth url

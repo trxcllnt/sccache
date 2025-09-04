@@ -79,14 +79,25 @@ fn get_clap_command() -> ClapCommand {
     ClapCommand::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
         .subcommand_required(true)
-        .subcommand(ClapCommand::new("scheduler").args(&[
-            config_with_help_message("Use the scheduler config file at PATH").required(true),
-            syslog.clone(),
-        ]))
-        .subcommand(ClapCommand::new("server").args(&[
-            config_with_help_message("Use the server config file at PATH").required(true),
-            syslog,
-        ]))
+        .subcommand(
+            ClapCommand::new("scheduler")
+                .about(
+                    "Launch as a scheduler, to dispatch distributed builds across multiple servers",
+                )
+                .args(&[
+                    config_with_help_message("Use the scheduler config file at PATH")
+                        .required(true),
+                    syslog.clone(),
+                ]),
+        )
+        .subcommand(
+            ClapCommand::new("server")
+                .about("Launch as a server, to handle distributed builds assigned by the scheduler")
+                .args(&[
+                    config_with_help_message("Use the server config file at PATH").required(true),
+                    syslog,
+                ]),
+        )
 }
 
 fn check_init_syslog(name: &str, log_level: LogLevel) {
