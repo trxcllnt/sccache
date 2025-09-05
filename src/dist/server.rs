@@ -446,12 +446,21 @@ impl Server {
             res.map_err(|e| e.into())
         };
 
-        // Install our own SIGINT handler so pending jobs can bail early and
-        // record server_terminated responses. This gives the client a chance
-        // to retry the job or build locally.
+        // Install our own handlers so pending jobs can bail early and record
+        // server_terminated responses. This gives the client a chance to retry
+        // the job or build locally.
         let sigint = async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("Received SIGINT");
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigint = signal(SignalKind::interrupt())?;
+            let mut sigterm = signal(SignalKind::terminate())?;
+            futures::select_biased! {
+                _ = sigint.recv().fuse() => {
+                    tracing::info!("Received SIGINT");
+                },
+                _ = sigterm.recv().fuse() => {
+                    tracing::info!("Received SIGTERM");
+                },
+            }
             Ok(())
         };
 
