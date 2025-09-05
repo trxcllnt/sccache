@@ -369,6 +369,8 @@ impl OverlayBuilder {
                 cmd.arg("--");
                 cmd.arg(&executable);
                 cmd.args(arguments);
+                cmd.stdout(Stdio::piped());
+                cmd.stderr(Stdio::piped());
                 cmd.kill_on_drop(true);
 
                 tracing::trace!("[perform_build({job_id})]: performing compile");
