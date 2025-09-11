@@ -1554,7 +1554,7 @@ where
                 let mut stats = me.stats.lock().await;
 
                 match result {
-                    Ok((compiled, out)) => {
+                    Ok((compiled, output)) => {
 
                         let mut dist_type = DistType::NoDist;
 
@@ -1607,6 +1607,7 @@ where
                             }
                             CompileResult::CompileFailed(dt, duration) => {
                                 trace!("[{}]: compile result: compile failed", out_pretty);
+                                debug!("[{}]: Compilation failed: {:?}", out_pretty, output);
                                 dist_type = dt;
                                 stats.compile_fails += 1;
                                 stats.compiler_write_duration += duration;
@@ -1624,7 +1625,7 @@ where
                         // Make sure the write guard has been dropped ASAP.
                         drop(stats);
 
-                        res.output = out;
+                        res.output = output;
                     }
                     Err(err) => {
                         match err.downcast::<ProcessError>() {
