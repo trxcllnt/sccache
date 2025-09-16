@@ -572,7 +572,7 @@ impl PreprocessorCacheModeConfig {
 impl Storage for opendal::Operator {
     async fn get(&self, key: &str) -> Result<Cache> {
         // TODO: Allow configuring the number of retries
-        retry_with_jitter(3, || async {
+        retry_with_jitter(usize::MAX, || async {
             match self.read(&normalize_key(key)).await {
                 Ok(res) => CacheRead::from(io::Cursor::new(res.to_bytes()))
                     .map_err(RetryError::permanent)
@@ -602,12 +602,35 @@ impl Storage for opendal::Operator {
     }
 
     async fn get_stream(&self, key: &str) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>> {
-        Ok(Box::new(
-            self.reader(&normalize_key(key))
-                .await?
-                .into_futures_async_read(..)
-                .await?,
-        ) as Box<dyn futures::AsyncRead + Send + Unpin>)
+        // TODO: Allow configuring the number of retries
+        let reader = retry_with_jitter(usize::MAX, || async {
+            match self.reader(&normalize_key(key)).await {
+                Ok(reader) => Ok(reader),
+                Err(err) => match err.kind() {
+                    opendal::ErrorKind::NotFound => Err(RetryError::permanent(err)),
+                    opendal::ErrorKind::PermissionDenied => Err(RetryError::permanent(err)),
+                    opendal::ErrorKind::RateLimited => Err(RetryError::transient(err)),
+                    opendal::ErrorKind::Unsupported => Err(RetryError::permanent(err)),
+                    opendal::ErrorKind::Unexpected => {
+                        if err.is_temporary() {
+                            debug!("cache lookup error: {err}");
+                            Err(RetryError::transient(err))
+                        } else {
+                            debug!("cache lookup error: {err}");
+                            Err(RetryError::permanent(err))
+                        }
+                    }
+                    _ => {
+                        warn!("cache lookup error: {err:?}");
+                        Err(RetryError::permanent(err))
+                    }
+                },
+            }
+        })
+        .await?;
+
+        Ok(Box::new(reader.into_futures_async_read(..).await?)
+            as Box<dyn futures::AsyncRead + Send + Unpin>)
     }
 
     async fn del(&self, key: &str) -> Result<()> {
