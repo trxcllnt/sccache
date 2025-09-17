@@ -1049,7 +1049,6 @@ where
         let Self {
             command_creator,
             hash_key,
-            out_pretty,
             sccache_service,
             ..
         } = self;

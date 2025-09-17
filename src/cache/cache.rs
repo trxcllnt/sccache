@@ -33,6 +33,7 @@ use crate::compiler::PreprocessorCacheEntry;
 use crate::config::{CacheType, DiskCacheConfig};
 use async_trait::async_trait;
 use fs_err as fs;
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{self, Cursor, Read, Seek, Write};
@@ -55,7 +56,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 ))]
 use {
     crate::{config, util::retry_with_jitter},
-    futures::{AsyncWriteExt, SinkExt, StreamExt, TryStreamExt},
+    futures::{AsyncWriteExt, SinkExt, StreamExt},
     tokio_retry2::RetryError,
 };
 
@@ -518,11 +519,10 @@ pub trait Storage: Send + Sync {
         key: &str,
         preprocessor_cache_entry: PreprocessorCacheEntry,
     ) -> Result<()> {
-        use futures::{stream, TryStreamExt};
         let mut buf = vec![];
         preprocessor_cache_entry.serialize_to(&mut buf)?;
         let size = buf.len();
-        let stream = stream::iter([Ok(buf)]);
+        let stream = futures::stream::iter([Ok(buf)]);
         let stream = stream.into_async_read();
         let stream = std::pin::pin!(stream);
         self.put_async_reader(key, size as u64, stream).await
