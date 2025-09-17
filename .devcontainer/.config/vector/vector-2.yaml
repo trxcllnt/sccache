@@ -1,0 +1,12 @@
+sources:
+  sccache_instance_metrics:
+    type: vector
+    address: '0.0.0.0:9089'
+
+sinks:
+  prometheus_metrics:
+    type: prometheus_remote_write
+    inputs: [sccache_instance_metrics]
+    batch: {aggregate: false, timeout_secs: 10}
+    endpoint: 'http://prometheus:9090/api/v1/write'
+    healthcheck: {enabled: false}

@@ -1,6 +1,3 @@
-api:
-  enabled: true
-
 sources:
   pushgateway:
     type: prometheus_pushgateway
@@ -13,6 +10,7 @@ sources:
 sinks:
   prometheus:
     type: prometheus_remote_write
-    inputs:
-      - pushgateway
-    endpoint: http://prometheus:9090/api/v1/write
+    inputs: [pushgateway]
+    batch: {aggregate: false, timeout_secs: 10}
+    endpoint: "http://prometheus:9090/api/v1/write"
+    healthcheck: {enabled: false}
