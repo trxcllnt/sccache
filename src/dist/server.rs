@@ -16,7 +16,8 @@ use async_trait::async_trait;
 
 use bytes::Buf;
 use celery::{error::CeleryError, task::AsyncResult};
-use futures::{AsyncReadExt, FutureExt};
+use futures::{FutureExt, TryStreamExt};
+use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 use std::{
     collections::HashMap,
@@ -621,20 +622,17 @@ impl Server {
         // Record get_job_inputs time
         let _timer = self.state.metrics.get_job_inputs_timer();
         async {
-            let mut reader = self
+            let inputs = self
                 .jobs_storage
-                .get_stream(&job_inputs_key(job_id))
+                .get_byte_stream(&job_inputs_key(job_id))
                 .await
                 .map_err(|err| {
                     tracing::warn!("[get_job_inputs({job_id})]: Error loading stream: {err:?}");
                     err
-                })?;
-
-            let mut inputs = vec![];
-            reader.read_to_end(&mut inputs).await.map_err(|err| {
-                tracing::warn!("[get_job_inputs({job_id})]: Error reading stream: {err:?}");
-                err
-            })?;
+                })?
+                .try_collect::<Vec<_>>()
+                .await?
+                .concat();
 
             Ok(inputs)
         }
@@ -680,11 +678,13 @@ impl Server {
             err
         })?;
         retry_with_jitter(3, || async {
+            let reader = futures::io::AllowStdIo::new(result.reader());
+            let stream = tokio_util::io::ReaderStream::new(reader.compat());
             self.jobs_storage
-                .put_stream(
+                .put_byte_stream(
                     &job_result_key(job_id),
                     result.len() as u64,
-                    std::pin::pin!(futures::io::AllowStdIo::new(result.reader())),
+                    std::pin::pin!(stream.map_err(|e| e.into())),
                 )
                 .await
                 .map_err(|err| {

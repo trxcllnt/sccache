@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use bytes::Buf;
 use celery::{error::CeleryError, task::AsyncResult};
 
-use futures::{lock::Mutex, AsyncReadExt};
+use futures::{lock::Mutex, TryStreamExt};
 use tokio_retry2::RetryError;
 
 use crate::{
@@ -246,20 +246,17 @@ impl Scheduler {
         // Record get_job_result time
         let _timer = self.metrics.get_job_result_timer();
         // Retrieve the result
-        let mut reader = self
+        let result = self
             .jobs_storage
-            .get_stream(&job_result_key(job_id))
+            .get_byte_stream(&job_result_key(job_id))
             .await
             .map_err(|err| {
                 tracing::warn!("[get_job_result({job_id})]: Error loading stream: {err:?}");
                 err
-            })?;
-
-        let mut result = vec![];
-        reader.read_to_end(&mut result).await.map_err(|err| {
-            tracing::warn!("[get_job_result({job_id})]: Error reading stream: {err:?}");
-            err
-        })?;
+            })?
+            .try_collect::<Vec<_>>()
+            .await?
+            .concat();
 
         // Deserialize the result
         bincode_deserialize(result).await.map_err(|err| {
@@ -304,7 +301,7 @@ impl Scheduler {
         let _timer = self.metrics.put_job_inputs_timer();
         // Store the job inputs
         self.jobs_storage
-            .put_stream(&job_inputs_key(job_id), inputs_size, inputs)
+            .put_async_reader(&job_inputs_key(job_id), inputs_size, inputs)
             .await
             .map_err(|e| {
                 tracing::warn!("[put_job_inputs({job_id})]: Error writing stream: {e:?}");
@@ -380,13 +377,13 @@ impl SchedulerService for Scheduler {
         &self,
         toolchain: &Toolchain,
         toolchain_size: u64,
-        toolchain_reader: Pin<&mut (dyn futures::AsyncRead + Send)>,
+        toolchain_stream: Pin<&mut (dyn futures::Stream<Item = Result<bytes::Bytes>> + Send)>,
     ) -> Result<SubmitToolchainResult> {
         // Record put_toolchain time
         let _timer = self.metrics.put_toolchain_timer();
         // Upload toolchain to toolchains storage (S3, GCS, etc.)
         self.toolchains
-            .put_stream(&toolchain.archive_id, toolchain_size, toolchain_reader)
+            .put_byte_stream(&toolchain.archive_id, toolchain_size, toolchain_stream)
             .await
             .context("Failed to put toolchain")
             .map(|_| SubmitToolchainResult::Success)

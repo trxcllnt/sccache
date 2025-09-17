@@ -701,7 +701,7 @@ pub trait SchedulerService: Send + Sync {
         &self,
         toolchain: &Toolchain,
         toolchain_size: u64,
-        toolchain_reader: Pin<&mut (dyn futures::AsyncRead + Send)>,
+        toolchain_stream: Pin<&mut (dyn futures::Stream<Item = Result<bytes::Bytes>> + Send)>,
     ) -> Result<SubmitToolchainResult>;
 
     async fn del_toolchain(&self, toolchain: &Toolchain) -> Result<()>;

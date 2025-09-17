@@ -30,8 +30,18 @@ impl Storage for ReadOnlyStorage {
         self.0.get(key).await
     }
 
-    async fn get_stream(&self, key: &str) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>> {
-        self.0.get_stream(key).await
+    async fn get_async_reader(
+        &self,
+        key: &str,
+    ) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>> {
+        self.0.get_async_reader(key).await
+    }
+
+    async fn get_byte_stream(
+        &self,
+        key: &str,
+    ) -> Result<Box<dyn futures::Stream<Item = Result<bytes::Bytes>> + Send + Unpin>> {
+        self.0.get_byte_stream(key).await
     }
 
     async fn del(&self, _key: &str) -> Result<()> {
@@ -50,11 +60,20 @@ impl Storage for ReadOnlyStorage {
         Err(anyhow!("Cannot write to read-only storage"))
     }
 
-    async fn put_stream(
+    async fn put_async_reader(
         &self,
         _key: &str,
         _size: u64,
         _stream: Pin<&mut (dyn futures::AsyncRead + Send)>,
+    ) -> Result<()> {
+        Err(anyhow!("Cannot write to read-only storage"))
+    }
+
+    async fn put_byte_stream(
+        &self,
+        _key: &str,
+        _size: u64,
+        _source: Pin<&mut (dyn futures::Stream<Item = Result<bytes::Bytes>> + Send)>,
     ) -> Result<()> {
         Err(anyhow!("Cannot write to read-only storage"))
     }

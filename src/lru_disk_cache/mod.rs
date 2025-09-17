@@ -511,7 +511,7 @@ impl LruDiskCache {
     /// Commit an entry coming from `LruDiskCache::prepare_dir`.
     pub async fn commit_dir(
         &mut self,
-        entry: Result<LruDiskCacheDirEntry, LruDiskCacheDirEntry>,
+        entry: Result<&LruDiskCacheDirEntry, &LruDiskCacheDirEntry>,
     ) -> Result<(PathBuf, u64)> {
         match entry {
             Err(entry) => {
@@ -523,7 +523,7 @@ impl LruDiskCache {
                 let abs_path = self.rel_to_abs_path(&entry.key);
                 tokio::fs::create_dir_all(abs_path.parent().unwrap()).await?;
                 tokio::fs::rename(entry.as_path(), &abs_path).await?;
-                self.lru.insert(entry.key, entry.size);
+                self.lru.insert(entry.key.clone(), entry.size);
                 Ok((abs_path, entry.size))
             }
         }
