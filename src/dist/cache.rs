@@ -669,9 +669,9 @@ mod server {
             let deflated_key = format!("{}.tgz", tc.archive_id);
             if !self.cache.has(&deflated_key).await {
                 let deflated_size = self.load_deflated_toolchain_size(tc).await?;
-                let stream = self.store.get_byte_stream(&tc.archive_id).await?;
+                let reader = self.store.get_async_reader(&tc.archive_id).await?;
                 self.cache
-                    .put_byte_stream(&deflated_key, deflated_size, std::pin::pin!(stream))
+                    .put_async_reader(&deflated_key, deflated_size, std::pin::pin!(reader))
                     .await?;
             }
             self.cache.entry(&deflated_key).await.map(|(path, _)| path)

@@ -18,8 +18,7 @@ use crate::lru_disk_cache::Error as LruError;
 use crate::lru_disk_cache::LruDiskCache;
 use async_trait::async_trait;
 use bytes::Buf;
-use futures::{lock::Mutex, AsyncWriteExt, StreamExt};
-use futures::{SinkExt, TryStreamExt};
+use futures::lock::Mutex;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -189,20 +188,6 @@ impl Storage for DiskCache {
         Ok(Box::new(reader))
     }
 
-    async fn get_byte_stream(
-        &self,
-        key: &str,
-    ) -> Result<Box<dyn futures::Stream<Item = Result<bytes::Bytes>> + Send + Unpin>> {
-        use tokio_util::compat::FuturesAsyncReadCompatExt;
-        let reader = futures::io::AllowStdIo::new(
-            self.reader(key)
-                .await
-                .with_context(|| format!("[DiskCache::get_byte_stream({key})]"))?,
-        );
-        let stream = tokio_util::io::ReaderStream::new(reader.compat());
-        Ok(Box::new(stream.map_err(|e| e.into())))
-    }
-
     async fn del(&self, key: &str) -> Result<()> {
         match self.lru.lock().await.get_or_init() {
             Err(err) => Err(err),
@@ -281,43 +266,6 @@ impl Storage for DiskCache {
             .get_or_init()?
             .commit(f)
             .with_context(|| format!("[DiskCache::put_async_reader({key})]"))?;
-
-        Ok(())
-    }
-
-    async fn put_byte_stream(
-        &self,
-        key: &str,
-        size: u64,
-        source: Pin<&mut (dyn futures::Stream<Item = Result<bytes::Bytes>> + Send)>,
-    ) -> Result<()> {
-        if self.rw_mode == CacheMode::ReadOnly {
-            return Err(anyhow!("Cannot write to a read-only cache"));
-        }
-
-        let mut f = self
-            .lru
-            .lock()
-            .await
-            .get_or_init()?
-            .prepare_add(key, size)
-            .with_context(|| format!("[DiskCache::put_byte_stream({key})]"))?;
-
-        source
-            .forward(
-                futures::io::AllowStdIo::new(f.as_file_mut())
-                    .into_sink()
-                    .sink_err_into(),
-            )
-            .await
-            .with_context(|| format!("[DiskCache::put_byte_stream({key})]"))?;
-
-        self.lru
-            .lock()
-            .await
-            .get_or_init()?
-            .commit(f)
-            .with_context(|| format!("[DiskCache::put_byte_stream({key})]"))?;
 
         Ok(())
     }

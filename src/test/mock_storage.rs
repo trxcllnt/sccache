@@ -17,7 +17,6 @@ use crate::compiler::PreprocessorCacheEntry;
 use crate::errors::*;
 use async_trait::async_trait;
 use futures::channel::mpsc;
-use futures::TryStreamExt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,30 +77,6 @@ impl Storage for MockStorage {
             _ => Err(anyhow!("No cache entry for key `{key}`")),
         }
     }
-    async fn get_byte_stream(
-        &self,
-        key: &str,
-    ) -> Result<Box<dyn futures::Stream<Item = Result<bytes::Bytes>> + Send + Unpin>> {
-        if let Some(delay) = self.delay {
-            sleep(delay).await;
-        }
-        let next = self.rx.lock().await.try_next().unwrap();
-        let next = next.expect("MockStorage get called but no get results available")?;
-        match next {
-            Cache::Hit(file) => {
-                use tokio_util::compat::FuturesAsyncReadCompatExt;
-                let reader = file.into_inner();
-                let reader = futures::io::AllowStdIo::new(reader);
-                let stream = tokio_util::io::ReaderStream::new(reader.compat());
-                let stream = stream.map_err(|e| e.into());
-                Ok(Box::new(stream)
-                    as Box<
-                        dyn futures::Stream<Item = Result<bytes::Bytes>> + Send + Unpin,
-                    >)
-            }
-            _ => Err(anyhow!("No cache entry for key `{key}`")),
-        }
-    }
     async fn del(&self, _key: &str) -> Result<()> {
         if let Some(delay) = self.delay {
             sleep(delay).await;
@@ -124,17 +99,6 @@ impl Storage for MockStorage {
         _key: &str,
         _size: u64,
         _source: Pin<&mut (dyn futures::AsyncRead + Send)>,
-    ) -> Result<()> {
-        if let Some(delay) = self.delay {
-            sleep(delay).await;
-        }
-        Ok(())
-    }
-    async fn put_byte_stream(
-        &self,
-        _key: &str,
-        _size: u64,
-        _source: Pin<&mut (dyn futures::Stream<Item = Result<bytes::Bytes>> + Send)>,
     ) -> Result<()> {
         if let Some(delay) = self.delay {
             sleep(delay).await;

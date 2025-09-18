@@ -33,7 +33,7 @@ use crate::compiler::PreprocessorCacheEntry;
 use crate::config::{CacheType, DiskCacheConfig};
 use async_trait::async_trait;
 use fs_err as fs;
-use futures::TryStreamExt;
+use futures::AsyncReadExt;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{self, Cursor, Read, Seek, Write};
@@ -56,7 +56,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 ))]
 use {
     crate::{config, util::retry_with_jitter},
-    futures::{AsyncWriteExt, SinkExt, StreamExt},
+    futures::AsyncWriteExt,
     tokio_retry2::RetryError,
 };
 
@@ -430,11 +430,6 @@ pub trait Storage: Send + Sync {
         key: &str,
     ) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>>;
 
-    async fn get_byte_stream(
-        &self,
-        key: &str,
-    ) -> Result<Box<dyn futures::Stream<Item = Result<bytes::Bytes>> + Send + Unpin>>;
-
     /// Delete the cache entry for `key`.
     async fn del(&self, key: &str) -> Result<()>;
 
@@ -455,13 +450,6 @@ pub trait Storage: Send + Sync {
         key: &str,
         size: u64,
         source: Pin<&mut (dyn futures::AsyncRead + Send)>,
-    ) -> Result<()>;
-
-    async fn put_byte_stream(
-        &self,
-        key: &str,
-        size: u64,
-        source: Pin<&mut (dyn futures::Stream<Item = Result<bytes::Bytes>> + Send)>,
     ) -> Result<()>;
 
     async fn size(&self, key: &str) -> Result<u64>;
@@ -500,15 +488,10 @@ pub trait Storage: Send + Sync {
     /// if it exists.
     /// Only applicable when using preprocessor cache mode.
     async fn get_preprocessor_cache_entry(&self, key: &str) -> Option<PreprocessorCacheEntry> {
-        let data = self
-            .get_byte_stream(key)
-            .await
-            .ok()?
-            .try_collect::<Vec<_>>()
-            .await
-            .ok()?
-            .concat();
-        PreprocessorCacheEntry::read(&data).ok()
+        let mut reader = self.get_async_reader(key).await.ok()?;
+        let mut buf = vec![];
+        reader.read_to_end(&mut buf).await.ok()?;
+        PreprocessorCacheEntry::read(&buf).ok()
     }
 
     /// Insert a preprocessor cache entry at the given preprocessor key,
@@ -519,6 +502,7 @@ pub trait Storage: Send + Sync {
         key: &str,
         preprocessor_cache_entry: PreprocessorCacheEntry,
     ) -> Result<()> {
+        use futures::TryStreamExt;
         let mut buf = vec![];
         preprocessor_cache_entry.serialize_to(&mut buf)?;
         let size = buf.len();
@@ -713,19 +697,6 @@ impl Storage for opendal::Operator {
             as Box<dyn futures::AsyncRead + Send + Unpin>)
     }
 
-    async fn get_byte_stream(
-        &self,
-        key: &str,
-    ) -> Result<Box<dyn futures::Stream<Item = Result<bytes::Bytes>> + Send + Unpin>> {
-        let reader = operator::async_reader_with_retry(self, key).await?;
-        let stream = reader.into_bytes_stream(..).await?;
-        let stream = stream.map_err(|e| e.into());
-        Ok(Box::new(stream)
-            as Box<
-                dyn futures::Stream<Item = Result<bytes::Bytes>> + Send + Unpin,
-            >)
-    }
-
     async fn del(&self, key: &str) -> Result<()> {
         self.delete(&normalize_key(key))
             .await
@@ -758,24 +729,6 @@ impl Storage for opendal::Operator {
             Err(err.into())
         } else {
             sink.close().await?;
-            Ok(())
-        }
-    }
-
-    async fn put_byte_stream(
-        &self,
-        key: &str,
-        _size: u64,
-        source: Pin<&mut (dyn futures::Stream<Item = Result<bytes::Bytes>> + Send)>,
-    ) -> Result<()> {
-        let mut sink = operator::async_writer_with_retry(self, key)
-            .await?
-            .into_bytes_sink()
-            .sink_err_into();
-        if let Err(err) = source.forward(&mut sink).await {
-            sink.close().await?;
-            Err(err)
-        } else {
             Ok(())
         }
     }
@@ -880,13 +833,6 @@ impl Storage for PreprocessorCache {
         self.0.get_async_reader(key).await
     }
 
-    async fn get_byte_stream(
-        &self,
-        key: &str,
-    ) -> Result<Box<dyn futures::Stream<Item = Result<bytes::Bytes>> + Send + Unpin>> {
-        self.0.get_byte_stream(key).await
-    }
-
     async fn del(&self, _key: &str) -> Result<()> {
         Err(anyhow!("Cannot write to read-only storage"))
     }
@@ -906,15 +852,6 @@ impl Storage for PreprocessorCache {
         source: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<()> {
         self.0.put_async_reader(key, size, source).await
-    }
-
-    async fn put_byte_stream(
-        &self,
-        key: &str,
-        size: u64,
-        source: Pin<&mut (dyn futures::Stream<Item = Result<bytes::Bytes>> + Send)>,
-    ) -> Result<()> {
-        self.0.put_byte_stream(key, size, source).await
     }
 
     async fn size(&self, key: &str) -> Result<u64> {

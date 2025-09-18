@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use bytes::Buf;
 use celery::{error::CeleryError, task::AsyncResult};
 
-use futures::{lock::Mutex, TryStreamExt};
+use futures::{lock::Mutex, AsyncReadExt};
 use tokio_retry2::RetryError;
 
 use crate::{
@@ -246,17 +246,20 @@ impl Scheduler {
         // Record get_job_result time
         let _timer = self.metrics.get_job_result_timer();
         // Retrieve the result
-        let result = self
+        let mut reader = self
             .jobs_storage
-            .get_byte_stream(&job_result_key(job_id))
+            .get_async_reader(&job_result_key(job_id))
             .await
             .map_err(|err| {
                 tracing::warn!("[get_job_result({job_id})]: Error loading stream: {err:?}");
                 err
-            })?
-            .try_collect::<Vec<_>>()
-            .await?
-            .concat();
+            })?;
+
+        let mut result = vec![];
+        reader.read_to_end(&mut result).await.map_err(|err| {
+            tracing::warn!("[get_job_result({job_id})]: Error reading stream: {err:?}");
+            err
+        })?;
 
         // Deserialize the result
         bincode_deserialize(result).await.map_err(|err| {
@@ -377,13 +380,13 @@ impl SchedulerService for Scheduler {
         &self,
         toolchain: &Toolchain,
         toolchain_size: u64,
-        toolchain_stream: Pin<&mut (dyn futures::Stream<Item = Result<bytes::Bytes>> + Send)>,
+        toolchain_reader: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<SubmitToolchainResult> {
         // Record put_toolchain time
         let _timer = self.metrics.put_toolchain_timer();
         // Upload toolchain to toolchains storage (S3, GCS, etc.)
         self.toolchains
-            .put_byte_stream(&toolchain.archive_id, toolchain_size, toolchain_stream)
+            .put_async_reader(&toolchain.archive_id, toolchain_size, toolchain_reader)
             .await
             .context("Failed to put toolchain")
             .map(|_| SubmitToolchainResult::Success)

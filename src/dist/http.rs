@@ -589,11 +589,10 @@ mod scheduler {
                          uri: Uri,
                          Extension(state): Extension<Arc<SchedulerState>>,
                          Path(archive_id): Path<String>,
-                         req: Request| async move {
+                         RequestBodyAsyncRead(toolchain): RequestBodyAsyncRead| async move {
                             let tc = Toolchain { archive_id };
+                            let src = std::pin::pin!(toolchain);
                             let len = get_content_length(&headers);
-                            let src = req.into_body().into_data_stream();
-                            let src = std::pin::pin!(src.map_err(|e| e.into()));
                             state
                                 .service
                                 .put_toolchain(&tc, len, src)
