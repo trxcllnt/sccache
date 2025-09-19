@@ -416,15 +416,15 @@ impl OverlayBuilder {
                     };
 
                     futures::select_biased! {
+                        output = completed.fuse() => {
+                            Some(output.context("Failed to retrieve output from compile"))
+                        },
                         _ = cancelled_rx.fuse() => {
                             if let Err(err) = child.kill().await.context("Failed to kill child") {
                                 tracing::warn!("[perform_build({job_id_1})]: {err:?}");
                             }
                             let _ = cancelled_tx.send(());
                             None
-                        },
-                        output = completed.fuse() => {
-                            Some(output.context("Failed to retrieve output from compile"))
                         },
                     }
                 });
@@ -574,12 +574,11 @@ impl BuilderIncoming for OverlayBuilder {
 
     async fn finish_build(&self, job_id: &str) {
         if let Some((overlay, cancel, cancelled)) = self.children.lock().await.remove(job_id) {
-            let _ = cancel.send(());
-            let _ = cancelled.await;
             tracing::debug!(
                 "[finish_build({job_id})]: Finishing with overlay {:?}",
                 overlay.build_dir.display()
             );
+            let _ = futures::join!(async { cancel.send(()) }, cancelled);
             Self::finish_overlay(job_id, &overlay).await;
         }
     }
@@ -588,12 +587,11 @@ impl BuilderIncoming for OverlayBuilder {
         self.job_queue.close();
         futures::future::join_all(self.children.lock().await.drain().map(
             |(job_id, (overlay, cancel, cancelled))| async move {
-                let _ = cancel.send(());
-                let _ = cancelled.await;
                 tracing::debug!(
                     "[shutdown({job_id})]: Finishing with overlay {:?}",
                     overlay.build_dir.display()
                 );
+                let _ = futures::join!(async { cancel.send(()) }, cancelled);
                 Self::finish_overlay(&job_id, &overlay).await;
             },
         ))
