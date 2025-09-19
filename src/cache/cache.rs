@@ -576,19 +576,19 @@ mod operator {
     fn to_retry_err(kind: &str, err: opendal::Error) -> RetryError<opendal::Error> {
         match err.kind() {
             opendal::ErrorKind::NotFound => {
-                debug!("cache {kind} error (permanent): {err}");
+                trace!("cache {kind} error (permanent): {err}");
                 RetryError::permanent(err)
             }
             opendal::ErrorKind::PermissionDenied => {
-                debug!("cache {kind} error (permanent): {err}");
+                trace!("cache {kind} error (permanent): {err}");
                 RetryError::permanent(err)
             }
             opendal::ErrorKind::RateLimited => {
-                debug!("cache {kind} error (transient): {err}");
+                trace!("cache {kind} error (transient): {err}");
                 RetryError::transient(err)
             }
             opendal::ErrorKind::Unsupported => {
-                debug!("cache {kind} error (permanent): {err}");
+                trace!("cache {kind} error (permanent): {err}");
                 RetryError::permanent(err)
             }
             opendal::ErrorKind::Unexpected => {
