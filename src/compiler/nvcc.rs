@@ -44,9 +44,10 @@ use crate::errors::*;
 
 static IS_VALID_LINE_RE: Lazy<Regex> = regex_static::lazy_regex!(r"^#\$ (.*)$");
 static IS_ENVVAR_LINE_RE: Lazy<Regex> = regex_static::lazy_regex!(r"^([_A-Z]+)=(.*)$");
-static HAS_SM_IN_NAME_RE: Lazy<Regex> = regex_static::lazy_regex!(r"^(.*).sm_([0-9A-Za-z]+).(.*)$");
+static HAS_SM_IN_NAME_RE: Lazy<Regex> =
+    regex_static::lazy_regex!(r"^(.*)\.sm_([0-9A-Za-z]+)\.(.*)$");
 static HAS_COMPUTE_IN_NAME_RE: Lazy<Regex> =
-    regex_static::lazy_regex!(r"^(.*).compute_([0-9A-Za-z]+).(.*)$");
+    regex_static::lazy_regex!(r"^(.*)\.compute_([0-9A-Za-z]+)\.(.*)$");
 static ARG_HAS_FILE_WITH_EXTENSION_RE: Lazy<Regex> = regex_static::lazy_regex!(r"-.*=(.*)");
 
 /// A unit struct on which to implement `CCompilerImpl`.
