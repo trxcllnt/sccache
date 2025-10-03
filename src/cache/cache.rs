@@ -818,6 +818,120 @@ pub(in crate::cache) fn normalize_key(key: &str) -> String {
     format!("{}/{}/{}/{}", &key[0..1], &key[1..2], &key[2..3], &key)
 }
 
+struct QueuedRequests {
+    inner: Arc<dyn Storage>,
+    queue: Arc<tokio::sync::Semaphore>,
+}
+
+// Opendal memcached and redis use connection pools with
+// non-configurable max sizes and connection timeouts of 30s.
+// Limit the number of concurrent requests when using those storage backends.
+impl QueuedRequests {
+    pub fn new(inner: Arc<dyn Storage>, max_size: usize) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            queue: Arc::new(tokio::sync::Semaphore::new(max_size)),
+        })
+    }
+}
+
+#[async_trait]
+impl Storage for QueuedRequests {
+    async fn get(&self, key: &str) -> Result<Cache> {
+        let _permit = self.queue.acquire().await?;
+        self.inner.get(key).await
+    }
+
+    async fn get_async_reader(
+        &self,
+        key: &str,
+    ) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>> {
+        let _permit = self.queue.acquire().await?;
+        self.inner.get_async_reader(key).await
+    }
+
+    async fn del(&self, key: &str) -> Result<()> {
+        let _permit = self.queue.acquire().await?;
+        self.inner.del(key).await
+    }
+
+    async fn has(&self, key: &str) -> bool {
+        let permit = self.queue.acquire().await;
+        if permit.is_ok() {
+            self.inner.has(key).await
+        } else {
+            false
+        }
+    }
+
+    async fn put(&self, key: &str, entry: CacheWrite) -> Result<Duration> {
+        let _permit = self.queue.acquire().await?;
+        self.inner.put(key, entry).await
+    }
+
+    async fn put_async_reader(
+        &self,
+        key: &str,
+        size: u64,
+        source: Pin<&mut (dyn futures::AsyncRead + Send)>,
+    ) -> Result<()> {
+        let _permit = self.queue.acquire().await?;
+        self.inner.put_async_reader(key, size, source).await
+    }
+
+    async fn size(&self, key: &str) -> Result<u64> {
+        let _permit = self.queue.acquire().await?;
+        self.inner.size(key).await
+    }
+
+    /// Check the cache capability.
+    async fn check(&self) -> Result<CacheMode> {
+        self.inner.check().await
+    }
+
+    /// Get the storage location.
+    async fn location(&self) -> String {
+        self.inner.location().await
+    }
+
+    /// Get the current storage usage, if applicable.
+    async fn current_size(&self) -> Result<Option<u64>> {
+        self.inner.current_size().await
+    }
+
+    /// Get the maximum storage size, if applicable.
+    async fn max_size(&self) -> Result<Option<u64>> {
+        self.inner.max_size().await
+    }
+
+    /// Return the config for preprocessor cache mode if applicable
+    fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
+        self.inner.preprocessor_cache_mode_config()
+    }
+
+    /// Return the preprocessor cache entry for a given preprocessor key,
+    /// if it exists.
+    /// Only applicable when using preprocessor cache mode.
+    async fn get_preprocessor_cache_entry(&self, key: &str) -> Option<PreprocessorCacheEntry> {
+        let _permit = self.queue.acquire().await.ok()?;
+        self.inner.get_preprocessor_cache_entry(key).await
+    }
+
+    /// Insert a preprocessor cache entry at the given preprocessor key,
+    /// overwriting the entry if it exists.
+    /// Only applicable when using preprocessor cache mode.
+    async fn put_preprocessor_cache_entry(
+        &self,
+        key: &str,
+        preprocessor_cache_entry: PreprocessorCacheEntry,
+    ) -> Result<()> {
+        let _permit = self.queue.acquire().await?;
+        self.inner
+            .put_preprocessor_cache_entry(key, preprocessor_cache_entry)
+            .await
+    }
+}
+
 pub struct PreprocessorCache(pub Arc<dyn Storage>, pub PreprocessorCacheModeConfig);
 
 #[async_trait]
@@ -833,8 +947,8 @@ impl Storage for PreprocessorCache {
         self.0.get_async_reader(key).await
     }
 
-    async fn del(&self, _key: &str) -> Result<()> {
-        Err(anyhow!("Cannot write to read-only storage"))
+    async fn del(&self, key: &str) -> Result<()> {
+        self.0.del(key).await
     }
 
     async fn has(&self, key: &str) -> bool {
@@ -989,7 +1103,10 @@ pub fn storage_from_config(
                 *expiration,
             )
             .map_err(|err| anyhow!("create memcached cache failed: {err:?}"))?;
-            (Arc::new(storage), *preprocessor_cache_mode)
+            (
+                QueuedRequests::new(Arc::new(storage), 10),
+                *preprocessor_cache_mode,
+            )
         }
         #[cfg(feature = "redis")]
         Some(CacheType::Redis(config::RedisCacheConfig {
@@ -1037,7 +1154,10 @@ pub fn storage_from_config(
                     _ => bail!("Only one of `endpoint`, `cluster_endpoints`, `url` must be set"),
                 }
                 .map_err(|err| anyhow!("create redis cache failed: {err:?}"))?;
-            (Arc::new(storage), *preprocessor_cache_mode)
+            (
+                QueuedRequests::new(Arc::new(storage), 10),
+                *preprocessor_cache_mode,
+            )
         }
         #[cfg(feature = "s3")]
         Some(CacheType::S3(config::S3CacheConfig {
