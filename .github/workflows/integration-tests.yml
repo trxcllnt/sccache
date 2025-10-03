@@ -339,7 +339,7 @@ jobs:
     # Setup memcached server
     services:
       memcached:
-        image: bitnami/memcached
+        image: bitnamilegacy/memcached
         env:
           # memcache's max item size is 1MiB, But our tests
           # will produce larger file.
@@ -401,7 +401,7 @@ jobs:
     # Setup memcached server
     services:
       memcached:
-        image: bitnami/memcached
+        image: bitnamilegacy/memcached
         env:
           # memcache's max item size is 1MiB, But our tests
           # will produce larger file.
