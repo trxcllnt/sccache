@@ -88,8 +88,19 @@ fn compile_cmdline<T: AsRef<OsStr>>(
     mut extra_args: Vec<OsString>,
 ) -> Vec<OsString> {
     let mut arg = match compiler {
-        "gcc" | "clang" | "clang++" | "nvc" | "nvc++" | "nvcc" => {
+        "gcc" | "clang" | "clang++" | "nvc" | "nvc++" => {
             vec_from!(OsString, exe.as_ref(), "-c", input, "-o", output)
+        }
+        "nvcc" => {
+            vec_from!(
+                OsString,
+                exe.as_ref(),
+                "-allow-unsupported-compiler",
+                "-c",
+                input,
+                "-o",
+                output
+            )
         }
         "cl" => vec_from!(OsString, exe, "-c", input, format!("-Fo{}", output)),
         _ => panic!("Unsupported compiler: {compiler}"),
@@ -111,14 +122,22 @@ fn compile_cuda_cmdline<T: AsRef<OsStr>>(
     extra_args: &[OsString],
 ) -> Vec<OsString> {
     let mut args = match compiler {
-        "nvcc" => vec_from!(OsString, exe.as_ref(), compile_flag, input, "-o", output),
+        "nvcc" => vec_from!(
+            OsString,
+            exe.as_ref(),
+            "-allow-unsupported-compiler",
+            compile_flag,
+            input,
+            "-o",
+            output
+        ),
         "clang++" => {
             vec_from!(
                 OsString,
                 exe,
                 compile_flag,
                 input,
-                "--cuda-gpu-arch=sm_70",
+                "--cuda-gpu-arch=sm_75",
                 format!(
                     "--cuda-path={}",
                     env::var_os("CUDA_PATH")
