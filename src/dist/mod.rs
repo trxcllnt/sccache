@@ -707,7 +707,7 @@ pub trait SchedulerService: Send + Sync {
     async fn del_toolchain(&self, toolchain: &Toolchain) -> Result<()>;
 
     async fn has_job(&self, job_id: &str) -> bool;
-    async fn new_job(&self, toolchain: &Toolchain, inputs: &[u8]) -> Result<NewJobResponse>;
+    async fn new_job(&self, toolchain: Toolchain, inputs: Vec<u8>) -> Result<NewJobResponse>;
     async fn run_job(&self, job_id: &str, request: RunJobRequest) -> Result<RunJobResponse>;
     async fn put_job(
         &self,

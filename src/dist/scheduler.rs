@@ -31,6 +31,7 @@ use crate::{
         Toolchain,
     },
     errors::*,
+    util::Digest,
 };
 
 use std::{
@@ -410,10 +411,24 @@ impl SchedulerService for Scheduler {
             })
     }
 
-    async fn new_job(&self, toolchain: &Toolchain, inputs: &[u8]) -> Result<NewJobResponse> {
-        let job_id = uuid::Uuid::new_v4().simple().to_string();
+    async fn new_job(&self, toolchain: Toolchain, inputs: Vec<u8>) -> Result<NewJobResponse> {
+        // Compute `job_id` as a hash of inputs + toolchain + uuid for maximum uniqueness
+        let (inputs, toolchain, job_id) = tokio::task::spawn_blocking(move || {
+            let mut digest = Digest::new();
+            let res = digest.update_from_reader_sync(inputs.reader());
+            // rustc can't infer the Error type without doing this...
+            #[allow(clippy::question_mark)]
+            if let Err(err) = res {
+                return Err(err);
+            }
+            digest.update(toolchain.archive_id.as_bytes());
+            digest.update(uuid::Uuid::new_v4().as_simple().to_string().as_bytes());
+            Ok((inputs, toolchain, digest.finish()))
+        })
+        .await??;
+
         let (has_toolchain, has_inputs) = futures::future::join(
-            async { Ok::<bool, anyhow::Error>(self.has_toolchain(toolchain).await) },
+            async { Ok::<bool, anyhow::Error>(self.has_toolchain(&toolchain).await) },
             async {
                 retry_with_jitter(3, || async {
                     let reader = futures::io::AllowStdIo::new(inputs.reader());

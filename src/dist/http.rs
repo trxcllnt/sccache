@@ -670,7 +670,7 @@ mod scheduler {
                                 (toolchain, inputs)
                             };
 
-                            state.service.new_job(&toolchain, &inputs).await.map_or_else(
+                            state.service.new_job(toolchain, inputs).await.map_or_else(
                                 anyhow_to_response(method, uri),
                                 result_to_response(headers),
                             )
