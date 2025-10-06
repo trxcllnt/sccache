@@ -1152,6 +1152,7 @@ pub fn new_reqwest_client(config: Option<crate::config::DistNetworking>) -> reqw
 
     let builder = reqwest::Client::builder()
         // HTTP/2
+        .http2_adaptive_window(true)
         .http2_prior_knowledge() // force HTTP/2
         // Timeouts
         .timeout(request_timeout)
@@ -1173,15 +1174,21 @@ pub fn new_reqwest_client(config: Option<crate::config::DistNetworking>) -> reqw
     // keepalive
     let builder = if config.keepalive.enabled {
         let builder = if config.keepalive.timeout > 0 {
-            builder.http2_keep_alive_timeout(Duration::from_secs(config.keepalive.timeout))
+            let timeout = Duration::from_secs(config.keepalive.timeout);
+            let builder = builder.tcp_keepalive(timeout);
+            #[cfg(target_os = "linux")]
+            let builder = builder.tcp_user_timeout(timeout);
+            builder.http2_keep_alive_timeout(timeout)
         } else {
             builder
         };
 
         if config.keepalive.interval > 0 {
+            let interval = Duration::from_secs(config.keepalive.interval);
             builder
                 .http2_keep_alive_while_idle(true)
-                .http2_keep_alive_interval(Duration::from_secs(config.keepalive.interval))
+                .tcp_keepalive_interval(interval)
+                .http2_keep_alive_interval(interval)
         } else {
             builder
         }
