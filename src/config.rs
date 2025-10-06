@@ -1591,7 +1591,7 @@ pub mod scheduler {
             let scheduler_id = env::var("SCCACHE_DIST_SCHEDULER_ID")
                 .ok()
                 .or(scheduler_id)
-                .unwrap_or(uuid::Uuid::new_v4().simple().to_string());
+                .unwrap_or(uuid::Uuid::new_v4().as_simple().to_string());
 
             Ok(Self {
                 client_auth,
@@ -1877,7 +1877,7 @@ pub mod server {
             let server_id = env::var("SCCACHE_DIST_SERVER_ID")
                 .ok()
                 .or(server_id)
-                .unwrap_or(uuid::Uuid::new_v4().simple().to_string());
+                .unwrap_or(uuid::Uuid::new_v4().as_simple().to_string());
 
             let toolchain_cache_size = number_from_env_var("SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE")
                 .transpose()?

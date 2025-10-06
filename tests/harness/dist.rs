@@ -704,7 +704,7 @@ impl DistSystem {
 
         // Persist the tempdir if SCCACHE_DEBUG is defined
         let (data_dir, data_temp_dir) = if env::var("SCCACHE_DEBUG").is_ok() {
-            (tempdir.into_path(), None)
+            (tempdir.keep(), None)
         } else {
             (tempdir.path().to_path_buf(), Some(tempdir))
         };

@@ -203,7 +203,7 @@ impl OverlayBuilder {
         job_id: &str,
         toolchain_dir: &Path,
     ) -> Result<OverlaySpec> {
-        let build_dir = self.dir.join(uuid::Uuid::new_v4().simple().to_string());
+        let build_dir = self.dir.join(uuid::Uuid::new_v4().as_simple().to_string());
 
         tracing::trace!(
             "[prepare_overlay_dirs({job_id})]: Creating build directory: {build_dir:?}"
@@ -288,7 +288,7 @@ impl OverlayBuilder {
                     // This error is unfortunately not Send+Sync
                 )
                 .mount()
-                .map_err(|e| anyhow!("Failed to mount overlay FS: {}", e.to_string()))?;
+                .map_err(|e| anyhow!("Failed to mount overlay FS: {e}"))?;
 
                 tracing::trace!("[perform_build({job_id})]: copying in inputs");
                 // Note that we don't unpack directly into the upperdir since there overlayfs has some

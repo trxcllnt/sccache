@@ -2808,7 +2808,7 @@ fn make_sccache_client(
 
     // Persist the tempdir if SCCACHE_DEBUG is defined
     let (tempdir_path, maybe_tempdir) = if env::var("SCCACHE_DEBUG").is_ok() {
-        (tempdir.into_path(), None)
+        (tempdir.keep(), None)
     } else {
         (tempdir.path().to_path_buf(), Some(tempdir))
     };

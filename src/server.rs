@@ -1396,7 +1396,7 @@ where
                     .await
             }
             Err(err) => {
-                warn!("handle_compile: Unsupported compiler: {}", err.to_string());
+                warn!("handle_compile: Unsupported compiler: {err}");
                 self.decrement_pending_compilations();
                 let mut stats = self.stats.lock().await;
                 stats.requests_unsupported_compiler += 1;

@@ -62,6 +62,7 @@ fn nvcc_compile(
         .cmd()
         .arg(&cuda_compiler.exe)
         .arg(format!("-ccbin={}", host_compiler.exe.to_string_lossy()))
+        .arg("-allow-unsupported-compiler")
         .args(["-c", "-DSCCACHE_TEST_DEFINE"])
         .arg(tmpdir.join(source_file))
         .arg("-o")
