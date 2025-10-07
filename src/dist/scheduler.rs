@@ -169,6 +169,7 @@ pub trait SchedulerTasks: Send + Sync {
 
 #[derive(Clone, Debug)]
 struct ServerInfo {
+    pub m_time: SystemTime,
     pub u_time: SystemTime,
     pub info: ServerStats,
     pub jobs: JobStats,
@@ -228,7 +229,7 @@ impl Scheduler {
         let now = SystemTime::now();
         // Prune servers we haven't seen in 90s
         let timeout = Duration::from_secs(90);
-        servers.retain(|_, server| now.duration_since(server.u_time).unwrap() <= timeout);
+        servers.retain(|_, server| now.duration_since(server.m_time).unwrap() <= timeout);
     }
 
     async fn has_job_inputs(&self, job_id: &str) -> bool {
@@ -327,7 +328,7 @@ impl SchedulerService for Scheduler {
                     id: server_id.clone(),
                     info: server.info.clone(),
                     jobs: server.jobs.clone(),
-                    u_time: server.u_time.elapsed().unwrap().as_secs(),
+                    u_time: server.m_time.elapsed().unwrap().as_secs(),
                 });
             }
             server_statuses
@@ -587,6 +588,7 @@ impl SchedulerService for Scheduler {
                 if t2 >= t1 {
                     server.info = details.info.clone();
                     server.jobs = details.jobs.clone();
+                    server.m_time = SystemTime::now();
                     // Increment prev time with the difference between prev and next
                     server.u_time = server.u_time.checked_add(t2 - t1).unwrap();
                 }
@@ -594,6 +596,7 @@ impl SchedulerService for Scheduler {
             .or_insert_with(|| ServerInfo {
                 info: details.info.clone(),
                 jobs: details.jobs.clone(),
+                m_time: SystemTime::now(),
                 // Convert to absolute duration since the Unix epoch
                 u_time: UNIX_EPOCH
                     .checked_add(duration_from_micros(details.created_at))
