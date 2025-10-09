@@ -27,10 +27,17 @@ use crate::cache::oss::OSSCache;
 use crate::cache::redis::RedisCache;
 #[cfg(feature = "s3")]
 use crate::cache::s3::S3Cache;
+#[cfg(feature = "watcher")]
+use crate::cache::watch::WatchStorage;
 #[cfg(feature = "webdav")]
 use crate::cache::webdav::WebdavCache;
-use crate::compiler::PreprocessorCacheEntry;
-use crate::config::{CacheType, DiskCacheConfig};
+
+use crate::{
+    cache::readonly::ReadOnlyStorage,
+    compiler::PreprocessorCacheEntry,
+    config::{CacheType, DiskCacheConfig},
+};
+
 use async_trait::async_trait;
 use fs_err as fs;
 use futures::AsyncReadExt;
@@ -827,7 +834,7 @@ struct QueuedRequests {
 // non-configurable max sizes and connection timeouts of 30s.
 // Limit the number of concurrent requests when using those storage backends.
 impl QueuedRequests {
-    pub fn new(inner: Arc<dyn Storage>, max_size: usize) -> Arc<Self> {
+    pub fn create(inner: Arc<dyn Storage>, max_size: usize) -> Arc<dyn Storage> {
         Arc::new(Self {
             inner,
             queue: Arc::new(tokio::sync::Semaphore::new(max_size)),
@@ -1018,38 +1025,163 @@ impl Storage for PreprocessorCache {
     }
 }
 
-/// Get a suitable `Storage` implementation from configuration.
-#[allow(clippy::cognitive_complexity)] // TODO simplify!
-pub fn storage_from_config(
-    cache: &Option<CacheType>,
-    fallback_cache: &DiskCacheConfig,
-) -> Result<(Arc<dyn Storage>, Arc<dyn Storage>)> {
-    let fallback_storage = || -> (Arc<dyn Storage>, _) {
-        let dir = &fallback_cache.dir;
-        let size = fallback_cache.size;
-        let rw_mode = fallback_cache.rw_mode.into();
-        let preprocessor_cache_mode = fallback_cache.preprocessor_cache_mode;
-        debug!("Init disk cache with dir={dir:?}, size={size}, rw_mode={rw_mode:?}, preprocessor_cache_mode={preprocessor_cache_mode:?})");
-        let storage = DiskCache::new(dir, size, rw_mode);
-        (Arc::new(storage), Some(preprocessor_cache_mode))
-    };
+#[derive(Default)]
+struct StorageBuilder {
+    create_storage: Option<Box<dyn Fn() -> Result<Arc<dyn Storage>> + Send>>,
+    fallback_cache: DiskCacheConfig,
+    max_concurrent_requests: Option<usize>,
+    preprocessor_cache_mode_config: Option<PreprocessorCacheModeConfig>,
+    watch_paths: Vec<String>,
+}
 
-    let (storage, preprocessor_cache_mode): (Arc<dyn Storage>, _) = match &cache {
-        #[cfg(feature = "azure")]
-        Some(CacheType::Azure(config::AzureCacheConfig {
-            ref connection_string,
-            ref container,
-            ref key_prefix,
-            ref preprocessor_cache_mode,
-        })) => {
-            debug!("Init azure cache with container {container}, key_prefix {key_prefix}");
-            let storage = AzureBlobCache::build(connection_string, container, key_prefix)
-                .map_err(|err| anyhow!("create azure cache failed: {err:?}"))?;
-
-            (Arc::new(storage), *preprocessor_cache_mode)
+impl StorageBuilder {
+    pub fn create_storage<F: Fn() -> Result<Arc<dyn Storage>> + Send + 'static>(
+        self,
+        factory: F,
+    ) -> Self {
+        Self {
+            create_storage: Some(Box::new(factory)),
+            ..self
         }
-        #[cfg(feature = "gcs")]
-        Some(CacheType::GCS(config::GCSCacheConfig {
+    }
+
+    pub fn preprocessor_cache_mode_config<P: Into<Option<PreprocessorCacheModeConfig>>>(
+        self,
+        config: P,
+    ) -> Self {
+        Self {
+            preprocessor_cache_mode_config: config.into(),
+            ..self
+        }
+    }
+
+    pub fn fallback_cache(self, disk_cache_config: DiskCacheConfig) -> Self {
+        Self {
+            fallback_cache: disk_cache_config,
+            ..self
+        }
+    }
+
+    pub fn max_concurrent_requests<P: Into<Option<usize>>>(self, limit: P) -> Self {
+        Self {
+            max_concurrent_requests: limit.into(),
+            ..self
+        }
+    }
+
+    pub fn watch_paths<P: ToOwned<Owned = Vec<String>>>(self, paths: P) -> Self {
+        Self {
+            watch_paths: paths.to_owned(),
+            ..self
+        }
+    }
+
+    pub async fn build(self) -> Result<(Arc<dyn Storage>, Arc<dyn Storage>)> {
+        let Self {
+            create_storage,
+            fallback_cache,
+            max_concurrent_requests,
+            preprocessor_cache_mode_config,
+            #[allow(unused_variables)]
+            watch_paths,
+        } = self;
+
+        let create_fallback = move || {
+            let dir = &fallback_cache.dir;
+            let size = fallback_cache.size;
+            let rw_mode = fallback_cache.rw_mode.into();
+            let preprocessor_cache_mode = fallback_cache.preprocessor_cache_mode;
+            debug!("Init disk cache with dir={dir:?}, size={size}, rw_mode={rw_mode:?}, preprocessor_cache_mode={preprocessor_cache_mode:?})");
+            Arc::new(DiskCache::new(dir, size, rw_mode))
+        };
+
+        let create_storage = create_storage.unwrap_or_else(|| {
+            let fallback_storage = create_fallback.clone();
+            Box::new(move || Ok(fallback_storage()))
+        });
+
+        let create_storage = move || {
+            let storage = create_storage()?;
+            Ok(if let Some(limit) = max_concurrent_requests {
+                QueuedRequests::create(storage, limit)
+            } else {
+                storage
+            })
+        };
+
+        let create_storage = move || {
+            use futures::{future, FutureExt, TryFutureExt};
+            future::ready(create_storage())
+                .and_then(|storage| async {
+                    storage.check().await.map(|mode| match mode {
+                        CacheMode::ReadWrite => storage,
+                        CacheMode::ReadOnly => ReadOnlyStorage::create(storage),
+                    })
+                })
+                .boxed()
+        };
+
+        #[cfg(not(feature = "watcher"))]
+        let storage = create_storage().await?;
+        #[cfg(feature = "watcher")]
+        let storage = WatchStorage::from(create_storage, &watch_paths).await?;
+
+        let preprocessor_storage = preprocessor_cache_mode_config
+            .map(|cfg| PreprocessorCache(storage.clone(), cfg))
+            .unwrap_or_else(|| {
+                PreprocessorCache(create_fallback(), fallback_cache.preprocessor_cache_mode)
+            });
+
+        Ok((storage, Arc::new(preprocessor_storage)))
+    }
+}
+
+impl From<DiskCacheConfig> for StorageBuilder {
+    fn from(config: DiskCacheConfig) -> Self {
+        let DiskCacheConfig {
+            dir,
+            size,
+            rw_mode,
+            preprocessor_cache_mode,
+        } = config;
+
+        let rw_mode = rw_mode.into();
+
+        Self::default()
+            .create_storage(move || {
+                debug!("Init disk cache with dir={dir:?}, size={size}, rw_mode={rw_mode:?}, preprocessor_cache_mode={preprocessor_cache_mode:?})");
+                Ok(Arc::new(DiskCache::new(&dir, size, rw_mode)))
+            })
+            .preprocessor_cache_mode_config(preprocessor_cache_mode)
+    }
+}
+
+#[cfg(feature = "azure")]
+impl From<config::AzureCacheConfig> for StorageBuilder {
+    fn from(config: config::AzureCacheConfig) -> Self {
+        let config::AzureCacheConfig {
+            connection_string,
+            container,
+            key_prefix,
+            preprocessor_cache_mode,
+        } = config;
+
+        Self::default()
+            .create_storage(move || {
+                debug!("Init azure cache with container {container}, key_prefix {key_prefix}");
+
+                AzureBlobCache::build(&connection_string, &container, &key_prefix)
+                    .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                    .map_err(|err| anyhow!("create azure cache failed: {err:?}"))
+            })
+            .preprocessor_cache_mode_config(preprocessor_cache_mode)
+    }
+}
+
+#[cfg(feature = "gcs")]
+impl From<config::GCSCacheConfig> for StorageBuilder {
+    fn from(config: config::GCSCacheConfig) -> Self {
+        let config::GCSCacheConfig {
             bucket,
             key_prefix,
             cred_path,
@@ -1057,190 +1189,266 @@ pub fn storage_from_config(
             service_account,
             credential_url,
             preprocessor_cache_mode,
-        })) => {
-            debug!("Init gcs cache with bucket {bucket}, key_prefix {key_prefix}");
+        } = config;
 
-            let storage = GCSCache::build(
-                bucket,
-                key_prefix,
-                cred_path.as_deref(),
-                service_account.as_deref(),
-                (*rw_mode).into(),
-                credential_url.as_deref(),
-            )
-            .map_err(|err| anyhow!("create gcs cache failed: {err:?}"))?;
+        Self::default()
+            .create_storage(move || {
+                debug!("Init gcs cache with bucket {bucket}, key_prefix {key_prefix}");
 
-            (Arc::new(storage), *preprocessor_cache_mode)
-        }
-        #[cfg(feature = "gha")]
-        Some(CacheType::GHA(config::GHACacheConfig {
-            ref version,
-            ref preprocessor_cache_mode,
+                GCSCache::build(
+                    &bucket,
+                    &key_prefix,
+                    cred_path.as_deref(),
+                    service_account.as_deref(),
+                    rw_mode.into(),
+                    credential_url.as_deref(),
+                )
+                .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                .map_err(|err| anyhow!("create gcs cache failed: {err:?}"))
+            })
+            .preprocessor_cache_mode_config(preprocessor_cache_mode)
+    }
+}
+
+#[cfg(feature = "gha")]
+impl From<config::GHACacheConfig> for StorageBuilder {
+    fn from(config: config::GHACacheConfig) -> Self {
+        let config::GHACacheConfig {
+            version,
+            preprocessor_cache_mode,
             ..
-        })) => {
-            debug!("Init gha cache with version {version}");
+        } = config;
 
-            let storage = GHACache::build(version)
-                .map_err(|err| anyhow!("create gha cache failed: {err:?}"))?;
-            (Arc::new(storage), *preprocessor_cache_mode)
-        }
-        #[cfg(feature = "memcached")]
-        Some(CacheType::Memcached(config::MemcachedCacheConfig {
-            ref url,
-            ref username,
-            ref password,
-            ref expiration,
-            ref key_prefix,
-            ref preprocessor_cache_mode,
-        })) => {
-            debug!("Init memcached cache with url {url}");
+        Self::default()
+            .create_storage(move || {
+                debug!("Init gha cache with version {version}");
 
-            let storage = MemcachedCache::build(
-                url,
-                username.as_deref(),
-                password.as_deref(),
-                key_prefix,
-                *expiration,
-            )
-            .map_err(|err| anyhow!("create memcached cache failed: {err:?}"))?;
-            (
-                QueuedRequests::new(Arc::new(storage), 10),
-                *preprocessor_cache_mode,
-            )
-        }
-        #[cfg(feature = "redis")]
-        Some(CacheType::Redis(config::RedisCacheConfig {
-            ref endpoint,
-            ref cluster_endpoints,
-            ref username,
-            ref password,
-            ref db,
-            ref url,
-            ref ttl,
-            ref key_prefix,
-            ref preprocessor_cache_mode,
-        })) => {
-            let storage = match (endpoint, cluster_endpoints, url) {
-                    (Some(url), None, None) => {
-                        debug!("Init redis single-node cache with url {url}");
-                        RedisCache::build_single(
-                            url,
-                            username.as_deref(),
-                            password.as_deref(),
-                            *db,
-                            key_prefix,
-                            *ttl,
-                        )
-                    }
-                    (None, Some(urls), None) => {
-                        debug!("Init redis cluster cache with urls {urls}");
-                        RedisCache::build_cluster(
-                            urls,
-                            username.as_deref(),
-                            password.as_deref(),
-                            *db,
-                            key_prefix,
-                            *ttl,
-                        )
-                    }
-                    (None, None, Some(url)) => {
-                        warn!("Init redis single-node cache from deprecated API with url {url}");
-                        if username.is_some() || password.is_some() || *db != crate::config::DEFAULT_REDIS_DB {
-                            bail!("`username`, `password` and `db` has no effect when `url` is set. Please use `endpoint` or `cluster_endpoints` for new API accessing");
-                        }
+                GHACache::build(&version)
+                    .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                    .map_err(|err| anyhow!("create gha cache failed: {err:?}"))
+            })
+            .preprocessor_cache_mode_config(preprocessor_cache_mode)
+    }
+}
 
-                        RedisCache::build_from_url(url, key_prefix, *ttl)
-                    }
-                    _ => bail!("Only one of `endpoint`, `cluster_endpoints`, `url` must be set"),
+#[cfg(feature = "memcached")]
+impl From<config::MemcachedCacheConfig> for StorageBuilder {
+    fn from(config: config::MemcachedCacheConfig) -> Self {
+        let config::MemcachedCacheConfig {
+            url,
+            username,
+            password,
+            expiration,
+            key_prefix,
+            preprocessor_cache_mode,
+        } = config;
+
+        Self::default()
+            .create_storage(move || {
+                debug!("Init memcached cache with url {url}");
+
+                MemcachedCache::build(
+                    &url,
+                    username.as_deref(),
+                    password.as_deref(),
+                    &key_prefix,
+                    expiration,
+                )
+                .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                .map_err(|err| anyhow!("create memcached cache failed: {err:?}"))
+            })
+            .max_concurrent_requests(10)
+            .preprocessor_cache_mode_config(preprocessor_cache_mode)
+    }
+}
+
+#[cfg(feature = "redis")]
+impl From<config::RedisCacheConfig> for StorageBuilder {
+    fn from(config: config::RedisCacheConfig) -> Self {
+        let config::RedisCacheConfig {
+            endpoint,
+            cluster_endpoints,
+            username,
+            password,
+            db,
+            url,
+            ttl,
+            key_prefix,
+            preprocessor_cache_mode,
+        } = config;
+        Self::default().create_storage(move || {
+            match (&endpoint, &cluster_endpoints, &url) {
+                (Some(ref url), None, None) => {
+                    debug!("Init redis single-node cache with url {url}");
+                    RedisCache::build_single(
+                        url,
+                        username.as_deref(),
+                        password.as_deref(),
+                        db,
+                        &key_prefix,
+                        ttl,
+                    )
                 }
-                .map_err(|err| anyhow!("create redis cache failed: {err:?}"))?;
-            (
-                QueuedRequests::new(Arc::new(storage), 10),
-                *preprocessor_cache_mode,
-            )
-        }
-        #[cfg(feature = "s3")]
-        Some(CacheType::S3(config::S3CacheConfig {
-            ref bucket,
-            ref enable_virtual_host_style,
-            ref endpoint,
-            ref key_prefix,
-            ref no_credentials,
-            ref region,
-            ref server_side_encryption,
-            ref use_ssl,
-            ref preprocessor_cache_mode,
-        })) => {
-            debug!(
-                    "Init s3 cache with endpoint {endpoint:?}, bucket {bucket:?}, and key prefix: {key_prefix:?}"
-                );
-            let storage_builder = S3Cache::new(bucket.clone(), key_prefix.clone(), *no_credentials);
-            let storage = storage_builder
+                (None, Some(ref urls), None) => {
+                    debug!("Init redis cluster cache with urls {urls}");
+                    RedisCache::build_cluster(
+                        urls,
+                        username.as_deref(),
+                        password.as_deref(),
+                        db,
+                        &key_prefix,
+                        ttl,
+                    )
+                }
+                (None, None, Some(ref url)) => {
+                    warn!("Init redis single-node cache from deprecated API with url {url}");
+                    if username.is_some() || password.is_some() || db != crate::config::DEFAULT_REDIS_DB {
+                        bail!("`username`, `password` and `db` has no effect when `url` is set. Please use `endpoint` or `cluster_endpoints` for new API accessing");
+                    }
+
+                    RedisCache::build_from_url(url, &key_prefix, ttl)
+                }
+                _ => bail!("Only one of `endpoint`, `cluster_endpoints`, `url` must be set"),
+            }
+            .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+            .map_err(|err| anyhow!("create redis cache failed: {err:?}"))
+        })
+        .max_concurrent_requests(10)
+        .preprocessor_cache_mode_config(preprocessor_cache_mode)
+    }
+}
+
+#[cfg(feature = "s3")]
+impl From<config::S3CacheConfig> for StorageBuilder {
+    fn from(config: config::S3CacheConfig) -> Self {
+        let config::S3CacheConfig {
+            bucket,
+            enable_virtual_host_style,
+            endpoint,
+            key_prefix,
+            no_credentials,
+            region,
+            server_side_encryption,
+            use_ssl,
+            preprocessor_cache_mode,
+        } = config;
+
+        Self::default().create_storage(move || {
+            debug!("Init s3 cache with endpoint {endpoint:?}, bucket {bucket:?}, and key prefix: {key_prefix:?}");
+
+            S3Cache::new(bucket.clone(), key_prefix.clone(), no_credentials)
                 .with_region(region.clone())
                 .with_endpoint(endpoint.clone())
-                .with_use_ssl(*use_ssl)
-                .with_server_side_encryption(*server_side_encryption)
-                .with_enable_virtual_host_style(*enable_virtual_host_style)
+                .with_use_ssl(use_ssl)
+                .with_server_side_encryption(server_side_encryption)
+                .with_enable_virtual_host_style(enable_virtual_host_style)
                 .build()
-                .map_err(|err| anyhow!("create s3 cache failed: {err:?}"))?;
-
-            (Arc::new(storage), *preprocessor_cache_mode)
-        }
-        #[cfg(feature = "webdav")]
-        Some(CacheType::Webdav(config::WebdavCacheConfig {
-            ref endpoint,
-            ref key_prefix,
-            ref password,
-            ref token,
-            ref username,
-            ref preprocessor_cache_mode,
-        })) => {
-            debug!("Init webdav cache with endpoint {}", endpoint);
-
-            let storage = WebdavCache::build(
-                endpoint,
-                key_prefix,
-                username.as_deref(),
-                password.as_deref(),
-                token.as_deref(),
-            )
-            .map_err(|err| anyhow!("create webdav cache failed: {err:?}"))?;
-
-            (Arc::new(storage), *preprocessor_cache_mode)
-        }
-        #[cfg(feature = "oss")]
-        Some(CacheType::OSS(config::OSSCacheConfig {
-            ref bucket,
-            ref endpoint,
-            ref key_prefix,
-            ref no_credentials,
-            ref preprocessor_cache_mode,
-        })) => {
-            debug!(
-                "Init oss cache with bucket {}, endpoint {:?}",
-                bucket, endpoint
-            );
-
-            let storage = OSSCache::build(bucket, key_prefix, endpoint.as_deref(), *no_credentials)
-                .map_err(|err| anyhow!("create oss cache failed: {err:?}"))?;
-
-            (Arc::new(storage), *preprocessor_cache_mode)
-        }
-        #[allow(unreachable_patterns)]
-        // if we build only with `cargo build --no-default-features`
-        // we only want to use sccache with a local cache (no remote storage)
-        _ => fallback_storage(),
-    };
-
-    if let Some(cfg) = preprocessor_cache_mode {
-        Ok((storage.clone(), Arc::new(PreprocessorCache(storage, cfg))))
-    } else {
-        let (disk, cfg) = fallback_storage();
-        Ok((
-            storage,
-            Arc::new(PreprocessorCache(disk, cfg.unwrap_or_default())),
-        ))
+                .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                .map_err(|err| anyhow!("create s3 cache failed: {err:?}"))
+        })
+        .preprocessor_cache_mode_config(preprocessor_cache_mode)
+        .watch_paths({
+            let cfg = reqsign::AwsConfig::default().from_profile().from_env();
+            vec![cfg.config_file.clone(), cfg.shared_credentials_file.clone()]
+        })
     }
+}
+
+#[cfg(feature = "webdav")]
+impl From<config::WebdavCacheConfig> for StorageBuilder {
+    fn from(config: config::WebdavCacheConfig) -> Self {
+        let config::WebdavCacheConfig {
+            endpoint,
+            key_prefix,
+            password,
+            token,
+            username,
+            preprocessor_cache_mode,
+        } = config;
+
+        Self::default()
+            .create_storage(move || {
+                debug!("Init webdav cache with endpoint {}", endpoint);
+
+                WebdavCache::build(
+                    &endpoint,
+                    &key_prefix,
+                    username.as_deref(),
+                    password.as_deref(),
+                    token.as_deref(),
+                )
+                .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                .map_err(|err| anyhow!("create webdav cache failed: {err:?}"))
+            })
+            .preprocessor_cache_mode_config(preprocessor_cache_mode)
+    }
+}
+
+#[cfg(feature = "oss")]
+impl From<config::OSSCacheConfig> for StorageBuilder {
+    fn from(config: config::OSSCacheConfig) -> Self {
+        let config::OSSCacheConfig {
+            bucket,
+            endpoint,
+            key_prefix,
+            no_credentials,
+            preprocessor_cache_mode,
+        } = config;
+
+        Self::default()
+            .create_storage(move || {
+                debug!(
+                    "Init oss cache with bucket {}, endpoint {:?}",
+                    bucket, endpoint
+                );
+
+                OSSCache::build(&bucket, &key_prefix, endpoint.as_deref(), no_credentials)
+                    .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                    .map_err(|err| anyhow!("create oss cache failed: {err:?}"))
+            })
+            .preprocessor_cache_mode_config(preprocessor_cache_mode)
+    }
+}
+
+impl From<CacheType> for StorageBuilder {
+    fn from(cache_type: CacheType) -> Self {
+        #[allow(unreachable_patterns)]
+        match cache_type {
+            #[cfg(feature = "azure")]
+            CacheType::Azure(cfg) => cfg.into(),
+            #[cfg(feature = "gcs")]
+            CacheType::GCS(cfg) => cfg.into(),
+            #[cfg(feature = "gha")]
+            CacheType::GHA(cfg) => cfg.into(),
+            #[cfg(feature = "memcached")]
+            CacheType::Memcached(cfg) => cfg.into(),
+            #[cfg(feature = "redis")]
+            CacheType::Redis(cfg) => cfg.into(),
+            #[cfg(feature = "s3")]
+            CacheType::S3(cfg) => cfg.into(),
+            #[cfg(feature = "webdav")]
+            CacheType::Webdav(cfg) => cfg.into(),
+            #[cfg(feature = "oss")]
+            CacheType::OSS(cfg) => cfg.into(),
+            _ => Self::default(),
+        }
+    }
+}
+
+/// Get a suitable `Storage` implementation from configuration.
+pub async fn storage_from_config(
+    config: &Option<CacheType>,
+    fallback: &DiskCacheConfig,
+) -> Result<(Arc<dyn Storage>, Arc<dyn Storage>)> {
+    config
+        .clone()
+        .map(Into::<StorageBuilder>::into)
+        .unwrap_or_default()
+        // If we build only with `cargo build --no-default-features`
+        // we only want to use sccache with a local cache (no remote storage)
+        .fallback_cache(fallback.clone())
+        .build()
+        .await
 }
 
 #[cfg(test)]
@@ -1284,10 +1492,12 @@ mod test {
         config.fallback_cache.rw_mode = CacheModeConfig::ReadWrite;
 
         {
-            let (cache, preprocessor_cache) =
-                storage_from_config(&config.cache, &config.fallback_cache).unwrap();
+            runtime.block_on(async {
+                let (cache, preprocessor_cache) =
+                    storage_from_config(&config.cache, &config.fallback_cache)
+                        .await
+                        .unwrap();
 
-            runtime.block_on(async move {
                 cache.put("test1", CacheWrite::default()).await.unwrap();
                 preprocessor_cache
                     .put_preprocessor_cache_entry("test1", PreprocessorCacheEntry::default())
@@ -1300,17 +1510,19 @@ mod test {
         config.fallback_cache.rw_mode = CacheModeConfig::ReadOnly;
 
         {
-            let (cache, preprocessor_cache) =
-                storage_from_config(&config.cache, &config.fallback_cache).unwrap();
+            runtime.block_on(async {
+                let (cache, preprocessor_cache) =
+                    storage_from_config(&config.cache, &config.fallback_cache)
+                        .await
+                        .unwrap();
 
-            runtime.block_on(async move {
                 assert_eq!(
                     cache
                         .put("test1", CacheWrite::default())
                         .await
                         .unwrap_err()
                         .to_string(),
-                    "Cannot write to a read-only cache"
+                    "Cannot write to read-only storage"
                 );
                 assert_eq!(
                     preprocessor_cache
@@ -1318,7 +1530,7 @@ mod test {
                         .await
                         .unwrap_err()
                         .to_string(),
-                    "Cannot write to a read-only cache"
+                    "Cannot write to read-only storage"
                 );
             });
         }

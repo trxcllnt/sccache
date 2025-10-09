@@ -24,6 +24,12 @@ use super::PreprocessorCacheModeConfig;
 
 pub struct ReadOnlyStorage(pub Arc<dyn Storage>);
 
+impl ReadOnlyStorage {
+    pub fn create(inner: Arc<dyn Storage>) -> Arc<dyn Storage> {
+        Arc::new(Self(inner))
+    }
+}
+
 #[async_trait]
 impl Storage for ReadOnlyStorage {
     async fn get(&self, key: &str) -> Result<Cache> {

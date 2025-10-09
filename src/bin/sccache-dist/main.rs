@@ -112,6 +112,7 @@ fn run(command: Command) -> Result<()> {
                     )?;
 
                     let (jobs_storage, _) = storage_from_config(&jobs.storage, &jobs.fallback)
+                        .await
                         .context("Failed to initialize jobs storage")?;
 
                     // Verify read/write access to jobs storage
@@ -124,6 +125,7 @@ fn run(command: Command) -> Result<()> {
 
                     let (toolchains_storage, _) =
                         storage_from_config(&toolchains.storage, &toolchains.fallback)
+                            .await
                             .context("Failed to initialize toolchain storage")?;
 
                     // Verify read/write access to toolchain storage
@@ -190,6 +192,7 @@ fn run(command: Command) -> Result<()> {
                     )?;
 
                     let (jobs_storage, _) = storage_from_config(&jobs.storage, &jobs.fallback)
+                        .await
                         .context("Failed to initialize jobs storage")?;
 
                     // Verify read/write access to jobs storage
@@ -202,6 +205,7 @@ fn run(command: Command) -> Result<()> {
 
                     let (toolchains_storage, _) =
                         storage_from_config(&toolchains.storage, &toolchains.fallback)
+                            .await
                             .context("Failed to initialize toolchain storage")?;
 
                     // Verify toolchain storage

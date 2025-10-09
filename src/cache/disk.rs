@@ -189,6 +189,10 @@ impl Storage for DiskCache {
     }
 
     async fn del(&self, key: &str) -> Result<()> {
+        if self.rw_mode == CacheMode::ReadOnly {
+            return Err(anyhow!("Cannot write to read-only storage"));
+        }
+
         match self.lru.lock().await.get_or_init() {
             Err(err) => Err(err),
             Ok(lru) => lru
@@ -208,7 +212,7 @@ impl Storage for DiskCache {
         trace!("DiskCache::put({})", key);
 
         if self.rw_mode == CacheMode::ReadOnly {
-            return Err(anyhow!("Cannot write to a read-only cache"));
+            return Err(anyhow!("Cannot write to read-only storage"));
         }
 
         let start = Instant::now();
@@ -245,7 +249,7 @@ impl Storage for DiskCache {
         source: Pin<&mut (dyn futures::AsyncRead + Send)>,
     ) -> Result<()> {
         if self.rw_mode == CacheMode::ReadOnly {
-            return Err(anyhow!("Cannot write to a read-only cache"));
+            return Err(anyhow!("Cannot write to read-only storage"));
         }
 
         let mut f = self
@@ -322,7 +326,7 @@ impl Storage for DiskCache {
         preprocessor_cache_entry: PreprocessorCacheEntry,
     ) -> Result<()> {
         if self.rw_mode == CacheMode::ReadOnly {
-            return Err(anyhow!("Cannot write to a read-only cache"));
+            return Err(anyhow!("Cannot write to read-only storage"));
         }
 
         let mut f = self

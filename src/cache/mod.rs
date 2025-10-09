@@ -43,4 +43,7 @@ pub mod webdav;
 ))]
 pub(crate) mod http_client;
 
+#[cfg(feature = "watcher")]
+pub(crate) mod watch;
+
 pub use crate::cache::cache::*;

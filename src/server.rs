@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.SCCACHE_MAX_FRAME_LENGTH
 
-use crate::cache::readonly::ReadOnlyStorage;
-use crate::cache::{storage_from_config, CacheMode, Storage};
+use crate::cache::{storage_from_config, Storage};
 use crate::compiler::{
     compiler_info_args, get_compiler_info, CacheControl, CompileResult, Compiler,
     CompilerArguments, CompilerHasher, CompilerKind, CompilerProxy, DistType, Language, MissType,
@@ -441,61 +440,48 @@ pub fn start_server(config: &Config, addr: &crate::net::SocketAddr) -> Result<()
     let notify = env::var_os("SCCACHE_STARTUP_NOTIFY");
 
     let init_storage = || -> Result<(Arc<dyn Storage>, Arc<dyn Storage>)> {
-        let (storage, preprocessor_storage) =
-            storage_from_config(&config.cache, &config.fallback_cache).map_err(|err| {
-                error!("storage init failed for: {err:?}");
-                err
-            })?;
+        runtime.block_on(async {
+            let (storage, preprocessor_storage) =
+                storage_from_config(&config.cache, &config.fallback_cache)
+                    .await
+                    .map_err(|err| {
+                        error!("storage init failed for: {err:?}");
+                        err
+                    })?;
 
-        let storage = runtime.block_on(async {
             match storage.check().await {
-                Ok(ref mode) if mode == &CacheMode::ReadOnly => {
+                Ok(mode) => {
                     info!("server has setup with cache={mode:?}");
-                    Ok(Arc::new(ReadOnlyStorage(storage)) as Arc<dyn Storage>)
-                }
-                Ok(ref mode) => {
-                    info!("server has setup with cache={mode:?}");
-                    Ok(storage)
                 }
                 Err(err) => {
                     error!("storage check failed for: {err:?}");
-                    Err(err)
+                    return Err(err);
                 }
             }
-        })?;
 
-        let preprocessor_storage = runtime.block_on(async {
             match preprocessor_storage.check().await {
-                Ok(ref mode) if mode == &CacheMode::ReadOnly => {
+                Ok(mode) => {
                     info!("server has setup with preprocessor_cache={mode:?}");
-                    Ok(Arc::new(ReadOnlyStorage(preprocessor_storage)) as Arc<dyn Storage>)
-                }
-                Ok(ref mode) => {
-                    info!("server has setup with preprocessor_cache={mode:?}");
-                    Ok(preprocessor_storage)
                 }
                 Err(err) => {
                     error!("storage check failed for: {err:?}");
-                    Err(err)
+                    return Err(err);
                 }
             }
-        })?;
 
-        Ok((storage, preprocessor_storage))
+            Ok((storage, preprocessor_storage))
+        })
     };
 
-    let (storage, preprocessor_storage) = match init_storage() {
-        Ok((storage, preprocessor_storage)) => (storage, preprocessor_storage),
-        Err(err) => {
-            notify_server_startup(
-                &notify,
-                ServerStartup::Err {
-                    reason: err.to_string(),
-                },
-            )?;
-            return Err(err);
-        }
-    };
+    let (storage, preprocessor_storage) = init_storage().or_else(|err| {
+        notify_server_startup(
+            &notify,
+            ServerStartup::Err {
+                reason: err.to_string(),
+            },
+        )?;
+        Err(err)
+    })?;
 
     let res = (|| -> io::Result<_> {
         match addr {
