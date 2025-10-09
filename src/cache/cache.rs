@@ -14,7 +14,6 @@
 
 #[cfg(feature = "azure")]
 use crate::cache::azure::AzureBlobCache;
-use crate::cache::disk::DiskCache;
 #[cfg(feature = "gcs")]
 use crate::cache::gcs::GCSCache;
 #[cfg(feature = "gha")]
@@ -33,7 +32,7 @@ use crate::cache::watch::WatchStorage;
 use crate::cache::webdav::WebdavCache;
 
 use crate::{
-    cache::readonly::ReadOnlyStorage,
+    cache::{disk::DiskCache, readonly::ReadOnlyStorage},
     compiler::PreprocessorCacheEntry,
     config::{CacheType, DiskCacheConfig},
 };
