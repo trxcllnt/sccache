@@ -1614,39 +1614,62 @@ where
                         res.output = output;
                     }
                     Err(err) => {
-                        match err.downcast::<ProcessError>() {
-                            Ok(ProcessError(output)) => {
-                                debug!("[{}]: Compilation failed: {:?}", out_pretty, output);
-                                stats.compile_fails += 1;
-                                // Make sure the write guard has been dropped ASAP.
-                                drop(stats);
-                                res.output = output;
-                            }
-                            Err(err) => match err.downcast::<HttpClientError>() {
-                                Ok(HttpClientError(msg)) => {
-                                    // Make sure the write guard has been dropped ASAP.
-                                    drop(stats);
-                                    me.dist_client.reset_state().await;
-                                    let stderr = format!("[{out_pretty}] http error status: {msg}");
-                                    error!("{}", stderr);
-                                    res.output = ProcessOutput::new(1, res.output.stdout, stderr.into_bytes());
+
+                        let mut reset_dist_client = false;
+
+                        res.output = Err(err)
+                            .or_else(|err| {
+                                err.downcast::<HttpClientError>().map(|err| {
+                                    reset_dist_client = true;
+                                    error!("[{out_pretty}]: HTTP {err}");
+                                    let stderr = format!("sccache: HTTP {err}");
+                                    ProcessOutput::new(1, vec![], stderr.into_bytes())
+                                })
+                            })
+                            .or_else(|err| {
+                                #[cfg(feature = "dist-client")]
+                                return err.downcast::<DistClientError>().map(|err| {
+                                    let stderr = "sccache: distributed compilation failed and local compile disabled\n";
+                                    error!("[{out_pretty}]: {err}");
+                                    stats.dist_errors += 1;
+                                    ProcessOutput::new(
+                                        //TODO: figure out a better way to communicate this?
+                                        -1,
+                                        vec![],
+                                        stderr.to_string().into_bytes()
+                                    )
+                                });
+                                #[cfg(not(feature = "dist-client"))]
+                                return Err(err);
+                            })
+                            .or_else(|err| {
+                                err.downcast::<ProcessError>().map(|ProcessError(output)| {
+                                    debug!("[{out_pretty}]: Compilation failed: {output:?}");
+                                    stats.compile_fails += 1;
+                                    output
+                                })
+                            })
+                            .or_else(|err| {
+                                stats.fatal_errors.increment(&kind, &lang);
+                                use std::fmt::Write;
+                                error!("[{out_pretty}] fatal error: {err:?}");
+                                let mut stderr = "sccache: encountered fatal error\n".to_string();
+                                let _ = writeln!(stderr, "sccache: error: {err}");
+                                for err in err.chain() {
+                                    error!("[{out_pretty}] {err:?}");
+                                    let _ = writeln!(stderr, "sccache: caused by: {err}");
                                 }
-                                Err(err) => {
-                                    stats.fatal_errors.increment(&kind, &lang);
-                                    // Make sure the write guard has been dropped ASAP.
-                                    drop(stats);
-                                    use std::fmt::Write;
-                                    error!("[{out_pretty}] fatal error: {err:?}");
-                                    let mut stderr = "sccache: encountered fatal error\n".to_string();
-                                    let _ = writeln!(stderr, "sccache: error: {err}");
-                                    for err in err.chain() {
-                                        error!("[{out_pretty}] {err:?}");
-                                        let _ = writeln!(stderr, "sccache: caused by: {err}");
-                                    }
+                                Ok::<ProcessOutput, Error>(
                                     //TODO: figure out a better way to communicate this?
-                                    res.output = ProcessOutput::new(-2, res.output.stdout, stderr.into_bytes());
-                                }
-                            },
+                                    ProcessOutput::new(-1, vec![], stderr.into_bytes())
+                                )
+                            })?;
+
+                        // Make sure the write guard has been dropped ASAP.
+                        drop(stats);
+
+                        if reset_dist_client {
+                            me.dist_client.reset_state().await;
                         }
                     }
                 };

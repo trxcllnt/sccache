@@ -19,13 +19,13 @@ use crate::mock_command::ProcessOutput;
 // We use `anyhow` for error handling.
 // - Use `context()`/`with_context()` to annotate errors.
 // - Use `anyhow!` with a string to create a new `anyhow::Error`.
-// - The error types below (`BadHttpStatusError`, etc.) are internal ones that
+// - The error types below (`DistClientError`, etc.) are internal ones that
 //   need to be checked at points other than the outermost error-checking
 //   layer.
 
-#[cfg(feature = "hyper")]
+#[cfg(feature = "dist-client")]
 #[derive(Debug)]
-pub struct BadHttpStatusError(pub hyper::StatusCode);
+pub struct DistClientError(pub Error);
 
 #[derive(Debug)]
 pub struct HttpClientError(pub String);
@@ -33,17 +33,17 @@ pub struct HttpClientError(pub String);
 #[derive(Debug)]
 pub struct ProcessError(pub ProcessOutput);
 
-#[cfg(feature = "hyper")]
-impl std::error::Error for BadHttpStatusError {}
+#[cfg(feature = "dist-client")]
+impl std::error::Error for DistClientError {}
 
 impl std::error::Error for HttpClientError {}
 
 impl std::error::Error for ProcessError {}
 
-#[cfg(feature = "hyper")]
-impl std::fmt::Display for BadHttpStatusError {
+#[cfg(feature = "dist-client")]
+impl std::fmt::Display for DistClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "didn't get a successful HTTP status, got `{}`", self.0)
+        write!(f, "distributed compilation failed: {}", self.0)
     }
 }
 

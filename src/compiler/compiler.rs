@@ -1122,7 +1122,7 @@ where
                              Increase `toolchain_cache_size` or decrease the toolchain archive size.",
                             ))
                         } else if !fallback_to_local {
-                            Err(e)
+                            Err(anyhow!(DistClientError(e)))
                         } else {
                             // `{:#}` prints the error and the causes in a single line.
                             warn!("[{out_pretty}]: Could not perform distributed compile: {e:#}");
@@ -1379,7 +1379,7 @@ where
                 //
                 // Fatal errors are not retryable.
                 Ok(RunJobResponse::FatalError { message, server_id }) => {
-                    error!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation job failed: {message}");
+                    error!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation failed: {message}");
                     break Err(anyhow!(message));
                 }
                 // Missing inputs (S3 cleared, Redis rebooted, etc.)
@@ -1411,7 +1411,7 @@ where
                 // Disk errors, build process killed, server shutdown, etc.
                 // Can be retried.
                 Ok(RunJobResponse::RetryableError { message, server_id }) => {
-                    debug!("[{out_pretty}, {job_id}, {server_id}]: {message:?}");
+                    debug!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation failed: {message:?}");
                     retry_or_bail!(anyhow!("{message:?}"));
                 }
                 // Other (e.g. client network, timeout, etc.) errors
