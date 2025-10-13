@@ -515,6 +515,7 @@ fn handle_compile_response<T>(
     exe: &Path,
     cmdline: Vec<OsString>,
     cwd: &Path,
+    fallback_to_local_compile: bool,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<i32>
@@ -533,16 +534,24 @@ where
                 Err(e) => {
                     match e.downcast_ref::<io::Error>() {
                         Some(io_e) if io_e.kind() == io::ErrorKind::UnexpectedEof => {
+                            if !fallback_to_local_compile {
+                                eprintln!("sccache: warning: The server looks like it shut down unexpectedly");
+                                return Ok(-1);
+                            }
                             eprintln!(
-                                "sccache: warning: The server looks like it shut down \
-                                 unexpectedly, compiling locally instead"
+                                "sccache: warning: The server looks like it shut down unexpectedly, \
+                                 compiling locally instead"
                             );
                         }
                         _ => {
                             //TODO: something better here?
                             if ignore_all_server_io_errors() {
+                                if !fallback_to_local_compile {
+                                    eprintln!("sccache: warning: error reading compile response from server");
+                                    return Ok(-1);
+                                }
                                 eprintln!(
-                                    "sccache: warning: error reading compile response from server \
+                                    "sccache: warning: error reading compile response from server, \
                                      compiling locally instead"
                                 );
                             } else {
@@ -600,6 +609,7 @@ pub fn do_compile<T>(
     cwd: &Path,
     path: Option<OsString>,
     env_vars: Vec<(OsString, OsString)>,
+    fallback_to_local_compile: bool,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<i32>
@@ -610,7 +620,16 @@ where
     let exe_path = which_in(exe, path, cwd)?;
     let res = request_compile(&mut conn, &exe_path, &cmdline, cwd, env_vars)?;
     handle_compile_response(
-        creator, runtime, &mut conn, res, &exe_path, cmdline, cwd, stdout, stderr,
+        creator,
+        runtime,
+        &mut conn,
+        res,
+        &exe_path,
+        cmdline,
+        cwd,
+        fallback_to_local_compile,
+        stdout,
+        stderr,
     )
 }
 
@@ -829,6 +848,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 &cwd,
                 env::var_os("PATH"),
                 env_vars,
+                config.dist.fallback_to_local_compile,
                 &mut io::stdout(),
                 &mut io::stderr(),
             );

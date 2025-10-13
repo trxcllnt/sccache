@@ -203,6 +203,7 @@ fn test_server_unsupported_compiler() {
         cwd,
         path,
         vec![],
+        true,
         &mut stdout,
         &mut stderr,
     );
@@ -277,6 +278,7 @@ fn test_server_compile() {
             cwd,
             path,
             vec![],
+            true,
             &mut stdout,
             &mut stderr
         )
