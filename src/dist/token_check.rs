@@ -64,7 +64,6 @@ impl ClientAuthCheck for EqCheck {
         if self.s == token {
             Ok(())
         } else {
-            tracing::warn!("User token {} != expected token {}", token, self.s);
             Err(ClientVisibleMsg::from_nonsensitive(
                 "Fixed token mismatch".to_owned(),
             ))
