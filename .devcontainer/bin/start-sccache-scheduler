@@ -12,10 +12,19 @@ ulimit -n "$(ulimit -Hn)"
 sudo rm -rf /tmp/sccache/* /tmp/{,.}sccache_*
 mkdir -p /tmp/sccache/{jobs,toolchains}
 
+if ! test -n "${RUST_BACKTRACE:+x}"; then
+    RUST_BACKTRACE="1"
+fi
+
+if ! test -n "${SCCACHE_LOG:+x}"; then
+    SCCACHE_LOG="celery=warn,sccache=info,tower_http=info,axum::rejection=trace"
+fi
+
 env AWS_PROFILE=none \
-    RUST_BACKTRACE="${RUST_BACKTRACE:-1}" \
+    RUST_LOG="${SCCACHE_LOG:-}" \
+    SCCACHE_LOG="${SCCACHE_LOG:-}" \
+    RUST_BACKTRACE="${RUST_BACKTRACE:-}" \
     SCCACHE_NO_DAEMON=1 \
     SCCACHE_DIST_OS=linux \
     SCCACHE_DIST_ARCH="$(dpkg --print-architecture)" \
-    SCCACHE_LOG="celery=warn,sccache=${SCCACHE_LOG:-info},tower_http=info,axum::rejection=trace" \
     "$(which sccache-dist)" scheduler --config .devcontainer/.config/sccache/scheduler.conf

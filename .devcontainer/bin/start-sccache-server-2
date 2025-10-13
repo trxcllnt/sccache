@@ -12,12 +12,21 @@ ulimit -n "$(ulimit -Hn)"
 sudo rm -rf /tmp/sccache/server-2
 sudo mkdir -p /tmp/sccache/server-2
 
+if ! test -n "${RUST_BACKTRACE:+x}"; then
+    RUST_BACKTRACE="1"
+fi
+
+if ! test -n "${SCCACHE_LOG:+x}"; then
+    SCCACHE_LOG="celery=warn,sccache=info"
+fi
+
 sudo --preserve-env=AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY \
     AWS_PROFILE=none \
-    RUST_BACKTRACE="${RUST_BACKTRACE:-1}" \
+    RUST_LOG="${SCCACHE_LOG:-}" \
+    SCCACHE_LOG="${SCCACHE_LOG:-}" \
+    RUST_BACKTRACE="${RUST_BACKTRACE:-}" \
     SCCACHE_NO_DAEMON=1 \
     SCCACHE_DIST_OS=linux \
     SCCACHE_DIST_ARCH="$(dpkg --print-architecture)" \
     SCCACHE_DIST_BUILDER_TYPE="${SCCACHE_REPO:+"docker"}" \
-    SCCACHE_LOG="celery=warn,sccache=${SCCACHE_LOG:-info}" \
     "$(which sccache-dist)" server --config .devcontainer/.config/sccache/server2.conf

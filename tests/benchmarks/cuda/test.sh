@@ -75,9 +75,7 @@ cd "$( cd "$( dirname "$(realpath -m "${BASH_SOURCE[0]}")" )" && pwd )";
 rm -rf build
 mkdir build/
 
-if ! command -v sccache >/dev/null 2>&1; then
-    export PATH="$(realpath -m "$(pwd)/../../../target/$(uname -m)-unknown-linux-musl/${BUILD_TYPE:-debug}"):$PATH"
-fi
+export PATH="$(realpath -m "$(pwd)/../../../target/$(uname -m)-unknown-linux-musl/${BUILD_TYPE:-debug}"):$PATH"
 
 time seq "$((1 - (STEP % 2)))" "$STEP" "$((ITERATIONS - (STEP % 2)))" | xargs -n1 -P"${JOBS}" bash -c "$(cat <<"EOF"
 CMD=(sccache nvcc
