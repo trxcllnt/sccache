@@ -34,7 +34,7 @@ use crate::{
         ServerService, Toolchain, ToolchainService,
     },
     errors::*,
-    util::{retry_with_jitter, AsyncMulticast, AsyncMulticastFn},
+    util::{retry_with_jitter, AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
 };
 
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
@@ -380,10 +380,9 @@ struct LoadToolchainFn {
 }
 
 #[async_trait]
-impl AsyncMulticastFn<'_, Toolchain, PathBuf> for LoadToolchainFn {
-    async fn call(&self, tc: Toolchain) -> (Toolchain, Result<PathBuf>) {
-        let res = self.toolchains.load_toolchain(&tc).await;
-        (tc, res)
+impl AsyncMulticastFunc<Toolchain, PathBuf> for LoadToolchainFn {
+    async fn call(&self, tc: &Toolchain) -> Result<PathBuf> {
+        self.toolchains.load_toolchain(tc).await
     }
 }
 

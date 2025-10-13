@@ -1303,17 +1303,22 @@ where
 }
 
 #[async_trait]
-pub trait AsyncMulticastFn<'a, K: Eq + Hash, V> {
-    async fn call(&self, args: K) -> (K, Result<V>);
+pub trait AsyncMulticastFunc<K: AsyncMulticastArgs, V> {
+    async fn call(&self, args: &K) -> Result<V>;
+}
+
+pub trait AsyncMulticastArgs {
+    type Key: Clone + Eq + Hash;
+    fn hash(&self) -> Self::Key;
 }
 
 #[derive(Clone)]
-pub struct AsyncMulticast<K: Eq + Hash, V> {
-    run_f: Arc<dyn for<'a> AsyncMulticastFn<'a, K, V> + Send + Sync>,
+pub struct AsyncMulticast<K: AsyncMulticastArgs, V> {
+    run_f: Arc<dyn for<'a> AsyncMulticastFunc<K, V> + Send + Sync>,
     state: Arc<
         Mutex<
             HashMap<
-                K,
+                K::Key,
                 tokio::sync::broadcast::Sender<std::result::Result<(K, V), Arc<anyhow::Error>>>,
             >,
         >,
@@ -1322,12 +1327,12 @@ pub struct AsyncMulticast<K: Eq + Hash, V> {
 
 impl<K, V> AsyncMulticast<K, V>
 where
-    K: Clone + std::fmt::Debug + Eq + Hash + Send + Sync + 'static,
+    K: AsyncMulticastArgs + Clone + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
 {
     pub fn new<F>(run_f: F) -> Self
     where
-        F: for<'a> AsyncMulticastFn<'a, K, V> + Send + Sync + 'static,
+        F: for<'a> AsyncMulticastFunc<K, V> + Send + Sync + 'static,
     {
         Self {
             run_f: Arc::new(run_f),
@@ -1335,18 +1340,23 @@ where
         }
     }
 
-    pub async fn call(&self, args: K) -> Result<(K, V)> {
+    pub async fn call(&self, args: K) -> Result<(K, V)>
+    where
+        K::Key: Send,
+    {
         // Lock state
         let mut state = self.state.lock().await;
+        // Compute the key
+        let hash = args.hash();
 
-        let mut recv = if let Some(sndr) = state.get(&args) {
+        let mut recv = if let Some(sndr) = state.get(&hash) {
             // Return shared broadcast receiver if pending
             sndr.subscribe()
         } else {
             // Create broadcast sender/receiver on first call
             let (sndr, recv) = tokio::sync::broadcast::channel(1);
 
-            state.insert(args.clone(), sndr);
+            state.insert(hash.clone(), sndr);
 
             // Run the function on a worker thread
             tokio::spawn({
@@ -1354,9 +1364,9 @@ where
                 let state = self.state.clone();
                 async move {
                     // Call the function
-                    let (args, res) = run_f.call(args).await;
+                    let res = run_f.call(&args).await;
                     // Remove the sender
-                    let sndr = state.lock().await.remove(&args);
+                    let sndr = state.lock().await.remove(&hash);
                     // Unwrap the result
                     let res = match res {
                         Ok(val) => Ok((args, val)),

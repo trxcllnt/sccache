@@ -800,7 +800,7 @@ mod client {
             RunJobResponse, SchedulerStatus, SubmitToolchainResult, Toolchain,
         },
         errors::*,
-        util::{new_reqwest_client, AsyncMulticast, AsyncMulticastFn},
+        util::{new_reqwest_client, AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
     };
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -823,9 +823,16 @@ mod client {
         client_toolchains: Arc<cache::ClientToolchains>,
     }
 
+    impl AsyncMulticastArgs for Toolchain {
+        type Key = String;
+        fn hash(&self) -> Self::Key {
+            self.archive_id.clone()
+        }
+    }
+
     #[async_trait]
-    impl AsyncMulticastFn<'_, Toolchain, SubmitToolchainResult> for SubmitToolchainFn {
-        async fn call(&self, tc: Toolchain) -> (Toolchain, Result<SubmitToolchainResult>) {
+    impl AsyncMulticastFunc<Toolchain, SubmitToolchainResult> for SubmitToolchainFn {
+        async fn call(&self, tc: &Toolchain) -> Result<SubmitToolchainResult> {
             let id = &tc.archive_id;
 
             debug!("Submitting toolchain {id:?}");
@@ -837,7 +844,7 @@ mod client {
                 client_toolchains,
             } = self;
 
-            let res = match client_toolchains.get_toolchain(&tc).await {
+            let res = match client_toolchains.get_toolchain(tc).await {
                 Err(e) => Err(e),
                 Ok(None) => Err(anyhow!("Couldn't find toolchain locally")),
                 Ok(Some(file)) => {
@@ -852,7 +859,7 @@ mod client {
                 }
             };
 
-            let res = match res {
+            match res {
                 Ok(dist::SubmitToolchainResult::Success) => {
                     debug!("Successfully submitted toolchain {id:?}");
                     res
@@ -862,9 +869,7 @@ mod client {
                     res
                 }
                 Err(err) => Err(err.context(format!("Could not submit toolchain {id:?}:"))),
-            };
-
-            (tc, res)
+            }
         }
     }
 

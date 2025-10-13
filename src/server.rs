@@ -24,7 +24,7 @@ use crate::dist;
 use crate::jobserver::Client;
 use crate::mock_command::{CommandCreatorSync, ProcessCommandCreator, ProcessOutput};
 use crate::protocol::{Compile, CompileFinished, CompileResponse, Request, Response};
-use crate::util::{self, AsyncMulticast, AsyncMulticastFn};
+use crate::util::{self, AsyncMulticast, AsyncMulticastFunc};
 #[cfg(feature = "dist-client")]
 use anyhow::Context as _;
 use async_trait::async_trait;
@@ -850,21 +850,39 @@ struct CompilerInfoFn<C: Send + Sync> {
 }
 
 #[async_trait]
-impl<C> AsyncMulticastFn<'_, Compile, Box<dyn Compiler<C>>> for CompilerInfoFn<C>
+impl<C> AsyncMulticastFunc<Compile, Box<dyn Compiler<C>>> for CompilerInfoFn<C>
 where
     C: CommandCreatorSync + Clone + Send + Sync,
 {
-    async fn call(&self, compile: Compile) -> (Compile, Result<Box<dyn Compiler<C>>>) {
-        let res = compiler_info(
+    async fn call(&self, compile: &Compile) -> Result<Box<dyn Compiler<C>>> {
+        compiler_info(
             &self.compiler_proxies,
             &self.compilers,
             &self.creator,
             &self.dist_client,
             self.rt.clone(),
-            &compile,
+            compile,
         )
-        .await;
-        (compile, res)
+        .await
+    }
+}
+
+impl util::AsyncMulticastArgs for Compile {
+    type Key = String;
+    fn hash(&self) -> String {
+        [self.exe.as_encoded_bytes(), self.cwd.as_encoded_bytes()]
+            .into_iter()
+            .chain(self.args.iter().map(|arg| arg.as_encoded_bytes()))
+            .chain(
+                self.env_vars
+                    .iter()
+                    .flat_map(|(key, val)| [key.as_encoded_bytes(), val.as_encoded_bytes()]),
+            )
+            .fold(util::Digest::new(), |mut m, b| {
+                m.update(b);
+                m
+            })
+            .finish()
     }
 }
 
