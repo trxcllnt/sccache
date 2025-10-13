@@ -19,7 +19,6 @@ use bytes::Buf;
 use flate2::read::ZlibDecoder as ZlibDecoderSync;
 use fs_err as fs;
 use futures::lock::Mutex;
-use futures::FutureExt;
 use itertools::Itertools;
 use libmount::Overlay;
 use sccache::dist::{BuildResult, BuilderIncoming, CompileCommand, OutputData};
@@ -415,11 +414,12 @@ impl OverlayBuilder {
                             })
                     };
 
-                    futures::select_biased! {
-                        output = completed.fuse() => {
+                    tokio::select! {
+                        biased;
+                        output = completed => {
                             Some(output.context("Failed to retrieve output from compile"))
                         },
-                        _ = cancelled_rx.fuse() => {
+                        _ = cancelled_rx => {
                             if let Err(err) = child.kill().await.context("Failed to kill child") {
                                 tracing::warn!("[perform_build({job_id_1})]: {err:?}");
                             }

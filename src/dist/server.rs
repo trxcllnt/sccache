@@ -16,7 +16,7 @@ use async_trait::async_trait;
 
 use bytes::Buf;
 use celery::{error::CeleryError, task::AsyncResult};
-use futures::{AsyncReadExt, FutureExt};
+use futures::AsyncReadExt;
 
 use std::{
     collections::HashMap,
@@ -278,6 +278,7 @@ impl Default for ServerMetrics {
 #[async_trait]
 pub trait ServerTasks: Send + Sync {
     fn app(&self) -> &Arc<celery::Celery>;
+    fn queues(&self) -> Vec<&str>;
 
     fn set_server(&self, server: Arc<dyn ServerService>) -> Result<()>;
 
@@ -296,6 +297,7 @@ pub trait ServerTasks: Send + Sync {
 
 #[derive(Clone)]
 pub struct ServerState {
+    pub alive: Arc<tokio::sync::watch::Sender<bool>>,
     pub id: String,
     pub jobs: Arc<std::sync::Mutex<HashMap<String, String>>>,
     pub job_queue: Arc<tokio::sync::Semaphore>,
@@ -305,9 +307,17 @@ pub struct ServerState {
     pub pre_fetch: usize,
 }
 
+impl ServerState {
+    pub fn is_alive(&self) -> bool {
+        *self.alive.borrow()
+    }
+}
+
 impl Default for ServerState {
     fn default() -> Self {
+        let (alive, _) = tokio::sync::watch::channel(true);
         Self {
+            alive: Arc::new(alive),
             id: Default::default(),
             job_queue: Arc::new(tokio::sync::Semaphore::new(1)),
             jobs: Default::default(),
@@ -387,216 +397,32 @@ impl AsyncMulticastFunc<Toolchain, PathBuf> for LoadToolchainFn {
 }
 
 #[derive(Clone)]
-pub struct Server {
+struct RunJobArgs {
+    job_id: String,
+    reply_to: String,
+    toolchain: Toolchain,
+    command: CompileCommand,
+    outputs: Vec<String>,
+}
+
+impl AsyncMulticastArgs for RunJobArgs {
+    type Key = String;
+    fn hash(&self) -> Self::Key {
+        self.job_id.clone()
+    }
+}
+
+struct RunJobFunc {
     builder: Arc<dyn BuilderIncoming>,
     jobs_storage: Arc<dyn Storage>,
     state: ServerState,
-    alive: tokio::sync::watch::Sender<bool>,
     tasks: Arc<dyn ServerTasks>,
     toolchains: AsyncMulticast<Toolchain, PathBuf>,
 }
 
-impl Server {
-    pub fn new(
-        builder: Arc<dyn BuilderIncoming>,
-        jobs_storage: Arc<dyn Storage>,
-        state: ServerState,
-        tasks: impl ServerTasks + 'static,
-        toolchains: impl ToolchainService + 'static,
-    ) -> Result<Arc<Self>> {
-        let (alive, _) = tokio::sync::watch::channel(true);
-
-        let this = Arc::new(Self {
-            builder,
-            jobs_storage,
-            state,
-            alive,
-            tasks: Arc::new(tasks),
-            toolchains: AsyncMulticast::new(LoadToolchainFn {
-                toolchains: Arc::new(toolchains),
-            }),
-        });
-
-        this.tasks.set_server(this.clone())?;
-
-        Ok(this)
-    }
-
-    fn is_alive(&self) -> bool {
-        *self.alive.borrow()
-    }
-
-    pub async fn start(&self, report_interval: Duration) -> Result<()> {
-        self.tasks.app().display_pretty().await;
-
-        tracing::info!(
-                "Server `{}` initialized to run {} parallel build job(s) and prefetch up to {} job(s) in the background",
-                self.state.id,
-                self.state.occupancy,
-                self.state.pre_fetch,
-            );
-
-        crate::util::daemonize()?;
-
-        // Start celery
-        let celery = async {
-            let res = self.tasks.app().consume().await;
-            tracing::info!("Celery shutdown");
-            res.map_err(|e| e.into())
-        };
-
-        // Install our own handlers so pending jobs can bail early and record
-        // server_terminated responses. This gives the client a chance to retry
-        // the job or build locally.
-        let sigint = async {
-            use tokio::signal::unix::{signal, SignalKind};
-            let mut sigint = signal(SignalKind::interrupt())?;
-            let mut sigterm = signal(SignalKind::terminate())?;
-            futures::select_biased! {
-                _ = sigint.recv().fuse() => {
-                    tracing::info!("Received SIGINT");
-                },
-                _ = sigterm.recv().fuse() => {
-                    tracing::info!("Received SIGTERM");
-                },
-            }
-            Ok(())
-        };
-
-        let status = self.status(report_interval);
-
-        // futures::select_biased! deterministically polls its futures in order,
-        // so register celery first and sigint second so this sigint handler
-        // doesn't override celery's internal sigint handler.
-        //
-        // This ensures celery progresses to "warm shutdown" mode, cancelling
-        // the queue consumers. This ensures the server doesn't attempt to pull
-        // more `run_job` messages from the queue while it is shutting down.
-        let celery = futures::select_biased! {
-            res = celery.fuse() => res,
-            res = sigint.fuse() => res,
-            // This should never resolve before either celery or sigint unless
-            // a catastrophic error occurs (tokio dies somehow?). Just polling
-            // it here so the task is cancelled once either of the above two
-            // futures complete first.
-            res = status.fuse() => res,
-        };
-
-        // Broadcast server is now shutting down.
-        self.alive.send_replace(false);
-
-        // Drain the jobs map before broadcasting the shutdown signal.
-        // This ensures the "Server terminated" response is written for all
-        // jobs active when SIGINT was received.
-        let jobs = self.state.jobs.lock().unwrap().drain().collect::<Vec<_>>();
-
-        tracing::info!("Begin graceful shutdown with {} pending job(s)", jobs.len());
-
-        let delay = Duration::from_secs(10);
-        tracing::info!("Waiting {}s for graceful shutdown", delay.as_secs());
-        let shutdown = tokio::time::timeout(delay, self.shutdown(jobs))
-            .await
-            .unwrap_or_else(|e| Err(e.into()));
-
-        celery
-            .and(shutdown)
-            .context("Server shutdown error")
-            .map(|_| tracing::info!("Server shutdown gracefully"))
-    }
-
-    async fn status(&self, interval: Duration) -> Result<()> {
-        tokio::spawn({
-            let this = self.clone();
-            async move {
-                let mut alive = this.alive.subscribe();
-                loop {
-                    futures::select_biased! {
-                        _ = alive.changed().fuse() => break,
-                        _ = this.send_status().fuse() => {}
-                    }
-
-                    futures::select_biased! {
-                        _ = alive.changed().fuse() => break,
-                        _ = tokio::time::sleep(interval).fuse() => {}
-                    }
-                }
-            }
-        })
-        .await
-        .map_err(anyhow::Error::new)
-    }
-
-    async fn shutdown(&self, jobs: Vec<(String, String)>) -> Result<()> {
-        let jobs_len = jobs.len();
-
-        // Kill build processes, remove containers, overlayfs dirs, etc.
-        let builder = async {
-            self.builder.shutdown().await;
-            tracing::info!("Killed {jobs_len} pending job(s)");
-        };
-
-        // Write "Server terminated" job responses and send the `job_finished` tasks
-        // back to each interested scheduler.
-        let replies = jobs.into_iter().map(|(job_id, reply_to)| async move {
-            tracing::info!("Sending server terminated response for job {job_id} to {reply_to}");
-            self.job_finished(
-                &job_id,
-                &reply_to,
-                &RunJobResponse::server_terminated(&self.state.id),
-            )
-            .await
-        });
-
-        let replies = async {
-            futures::future::join_all(replies).await;
-            tracing::info!("Reported server termination for {jobs_len} pending job(s)");
-        };
-
-        futures::future::join(builder, replies).await;
-
-        // Close broker connection.
-        let broker = self.tasks.app().close().await;
-        tracing::info!("Closed broker connection");
-
-        broker.context("Broker shutdown error")
-    }
-
+impl RunJobFunc {
     async fn send_status(&self) -> Result<()> {
-        self.tasks
-            .status_update(From::from(&self.state))
-            .await
-            .map_err(anyhow::Error::new)
-            .map(|_| ())?;
-        Ok(())
-    }
-
-    async fn load_job(
-        &self,
-        job_id: &str,
-        toolchain: Toolchain,
-    ) -> std::result::Result<(PathBuf, Vec<u8>), RunJobError> {
-        // Record load_job time
-        let _timer = self.state.metrics.load_job_timer();
-        let _loading = self.state.metrics.jobs_loading.increment();
-
-        // Broadcast status after accepting the job
-        self.send_status()
-            .await
-            .map_err(|_| RunJobError::MissingJobResult)?;
-
-        // Load and unpack the toolchain
-        let toolchain_dir = self
-            .get_toolchain_dir(job_id, toolchain)
-            .await
-            .map_err(|_| RunJobError::MissingToolchain)?;
-
-        // Load job inputs into memory
-        let inputs = self
-            .get_job_inputs(job_id)
-            .await
-            .map_err(|_| RunJobError::MissingJobInputs)?;
-
-        Ok((toolchain_dir, inputs))
+        send_status(self.tasks.as_ref(), &self.state).await
     }
 
     async fn get_toolchain_dir(&self, job_id: &str, toolchain: Toolchain) -> Result<PathBuf> {
@@ -608,7 +434,7 @@ impl Server {
             .map(|(_, res)| res)
             .map_err(|err| {
                 // Record toolchain errors
-                if self.is_alive() {
+                if self.state.is_alive() {
                     self.state.metrics.inc_toolchain_error_count();
                     tracing::warn!("[run_job({job_id})]: Error loading toolchain: {err:?}");
                 }
@@ -640,7 +466,7 @@ impl Server {
         .await
         .map_err(|err| {
             // Record get_job_inputs errors after retrying
-            if self.is_alive() {
+            if self.state.is_alive() {
                 self.state.metrics.inc_get_job_inputs_error_count();
                 tracing::warn!("[run_job({job_id})]: Error retrieving job inputs: {err:?}");
             }
@@ -663,7 +489,7 @@ impl Server {
             .await
             .map_err(|err| {
                 // Record run_build errors
-                if self.is_alive() {
+                if self.state.is_alive() {
                     self.state.metrics.inc_job_build_error_count();
                     tracing::warn!("[run_job({job_id})]: Build error: {err:?}");
                 }
@@ -671,35 +497,33 @@ impl Server {
             })
     }
 
-    async fn put_job_result(&self, job_id: &str, result: &RunJobResponse) -> Result<()> {
-        // Record put_job_result load time after retrying
-        let _timer = self.state.metrics.put_job_result_timer();
-        let result = bincode::serialize(result).map_err(|err| {
-            tracing::warn!("[put_job_result({job_id})]: Error serializing result: {err:?}");
-            err
-        })?;
-        retry_with_jitter(3, || async {
-            self.jobs_storage
-                .put_async_reader(
-                    &job_result_key(job_id),
-                    result.len() as u64,
-                    std::pin::pin!(futures::io::AllowStdIo::new(result.reader())),
-                )
-                .await
-                .map_err(|err| {
-                    tracing::warn!("[put_job_result({job_id})]: Error writing stream: {err:?}");
-                    RetryError::transient(err)
-                })
-        })
-        .await
-        .map_err(|err| {
-            // Record put_job_result errors after retrying
-            if self.is_alive() {
-                self.state.metrics.inc_put_job_result_error_count();
-                tracing::warn!("[run_job({job_id})]: Error storing job result: {err:?}");
-            }
-            err
-        })
+    async fn load_job(
+        &self,
+        job_id: &str,
+        toolchain: Toolchain,
+    ) -> std::result::Result<(PathBuf, Vec<u8>), RunJobError> {
+        // Record load_job time
+        let _timer = self.state.metrics.load_job_timer();
+        let _loading = self.state.metrics.jobs_loading.increment();
+
+        // Broadcast status after accepting the job
+        self.send_status()
+            .await
+            .map_err(|_| RunJobError::MissingJobResult)?;
+
+        // Load and unpack the toolchain
+        let toolchain_dir = self
+            .get_toolchain_dir(job_id, toolchain)
+            .await
+            .map_err(|_| RunJobError::MissingToolchain)?;
+
+        // Load job inputs into memory
+        let inputs = self
+            .get_job_inputs(job_id)
+            .await
+            .map_err(|_| RunJobError::MissingJobInputs)?;
+
+        Ok((toolchain_dir, inputs))
     }
 
     async fn load_job_and_run_build(
@@ -738,7 +562,7 @@ impl Server {
             .map(|result| {
                 // If the build failed because the server was terminated,
                 // report it as a server termination, not a failed build.
-                if !self.is_alive() {
+                if !self.state.is_alive() {
                     return RunJobResponse::server_terminated(&self.state.id);
                 }
                 if !result.output.success() && !result.output.exit() {
@@ -750,12 +574,259 @@ impl Server {
                 }
             })
             .map_err(|e| {
-                if self.is_alive() {
+                if self.state.is_alive() {
                     e.into()
                 } else {
                     RunJobError::server_terminated()
                 }
             })
+    }
+}
+
+#[async_trait]
+impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFunc {
+    async fn call(&self, args: &RunJobArgs) -> Result<RunJobResponse> {
+        let RunJobArgs {
+            job_id,
+            reply_to,
+            toolchain,
+            command,
+            outputs,
+        } = args;
+        if self.state.is_alive() {
+            self.load_job_and_run_build(
+                job_id,
+                reply_to,
+                toolchain.clone(),
+                command.clone(),
+                outputs.clone(),
+            )
+            .await
+        } else {
+            Err(RunJobError::server_terminated())
+        }
+        .map_err(|err| anyhow!(err))
+    }
+}
+
+#[derive(Clone)]
+pub struct Server {
+    builder: Arc<dyn BuilderIncoming>,
+    jobs_storage: Arc<dyn Storage>,
+    state: ServerState,
+    tasks: Arc<dyn ServerTasks>,
+    jobs: AsyncMulticast<RunJobArgs, RunJobResponse>,
+}
+
+impl Server {
+    pub fn new(
+        builder: Arc<dyn BuilderIncoming>,
+        jobs_storage: Arc<dyn Storage>,
+        state: ServerState,
+        tasks: impl ServerTasks + 'static,
+        toolchains: impl ToolchainService + 'static,
+    ) -> Result<Arc<Self>> {
+        let tasks = Arc::new(tasks);
+        let this = Arc::new(Self {
+            builder: builder.clone(),
+            jobs_storage: jobs_storage.clone(),
+            state: state.clone(),
+            tasks: tasks.clone(),
+            jobs: AsyncMulticast::new(RunJobFunc {
+                builder,
+                jobs_storage,
+                state,
+                tasks,
+                toolchains: AsyncMulticast::new(LoadToolchainFn {
+                    toolchains: Arc::new(toolchains),
+                }),
+            }),
+        });
+
+        this.tasks.set_server(this.clone())?;
+
+        Ok(this)
+    }
+
+    pub async fn start(&self, report_interval: Duration, shutdown_timeout: Duration) -> Result<()> {
+        self.tasks.app().display_pretty().await;
+
+        tracing::info!(
+                "Server `{}` initialized to run {} parallel build job(s) and prefetch up to {} job(s) in the background",
+                self.state.id,
+                self.state.occupancy,
+                self.state.pre_fetch,
+            );
+
+        crate::util::daemonize()?;
+
+        // Start celery
+        let celery = async {
+            let res = self.tasks.app().consume_from(&self.tasks.queues()).await;
+            tracing::info!("Celery shutdown");
+            res.context("Celery error")
+        };
+
+        // Install our own handlers so pending jobs can bail early and record
+        // server_terminated responses. This gives the client a chance to retry
+        // the job or build locally.
+        let sigint = async {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigint = signal(SignalKind::interrupt())?;
+            let mut sigterm = signal(SignalKind::terminate())?;
+            tokio::select! {
+                biased;
+                _ = sigint.recv() => {
+                    tracing::info!("Received SIGINT");
+                },
+                _ = sigterm.recv() => {
+                    tracing::info!("Received SIGTERM");
+                },
+            }
+            Ok(())
+        };
+
+        let status = self.status(report_interval);
+
+        // tokio::select! deterministically polls its futures in order, so
+        // register celery first and sigint second so this sigint handler
+        // doesn't override celery's internal sigint handler.
+        //
+        // This ensures celery progresses to "warm shutdown" mode, cancelling
+        // the queue consumers, and doesn't attempt to pull more messages from
+        // the queue while it is shutting down.
+        let shutdown_celery = tokio::select! {
+            biased;
+            res = celery => res,
+            res = sigint => res,
+            // This should never resolve before either celery or sigint unless
+            // a catastrophic error occurs (tokio dies somehow?). Just polling
+            // it here so the task is cancelled once either of the above two
+            // futures complete first.
+            res = status => res,
+        };
+
+        // Drain the jobs map before broadcasting the shutdown signal.
+        // This ensures the "Server terminated" response is written for all
+        // jobs active when SIGINT was received.
+        let jobs = self.state.jobs.lock().unwrap().drain().collect::<Vec<_>>();
+
+        // Broadcast server is now shutting down.
+        self.state.alive.send_replace(false);
+
+        tracing::info!(
+            "Waiting {}s for graceful shutdown",
+            shutdown_timeout.as_secs()
+        );
+
+        let shutdown_jobs = tokio::time::timeout(shutdown_timeout, async {
+            let jobs_label = if jobs.len() == 1 {
+                format!("{} pending job", jobs.len())
+            } else {
+                format!("{} pending jobs", jobs.len())
+            };
+
+            tracing::info!("Cancelling {jobs_label}");
+
+            // Kill build processes, remove containers, overlayfs dirs, etc.
+            let builder = async {
+                self.builder.shutdown().await;
+                tracing::info!("Cancelled {jobs_label}");
+                Ok(())
+            };
+
+            // Write "Server terminated" job responses and send the `job_finished` tasks
+            // back to each interested scheduler.
+            let replies = async {
+                let replies = jobs.into_iter().map(|(job_id, reply_to)| async move {
+                    tracing::info!(
+                        "Sending server terminated response for job {job_id} to {reply_to}"
+                    );
+                    self.job_finished(
+                        &job_id,
+                        &reply_to,
+                        &RunJobResponse::server_terminated(&self.state.id),
+                    )
+                    .await
+                });
+                futures::future::try_join_all(replies).await.map(|res| {
+                    tracing::info!("Reported server terminated for {jobs_label}");
+                    res
+                })
+            };
+
+            tokio::try_join!(builder, replies)
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.into()));
+
+        // Close broker connection.
+        let shutdown_broker = self.tasks.app().close().await.context("Broker error");
+        tracing::info!("Closed broker connection");
+
+        shutdown_celery
+            .and(shutdown_jobs)
+            .and(shutdown_broker)
+            .map(|_| tracing::info!("Server shutdown gracefully"))
+    }
+
+    async fn status(&self, interval: Duration) -> Result<()> {
+        tokio::spawn({
+            let this = self.clone();
+            async move {
+                let mut alive = this.state.alive.subscribe();
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = alive.changed() => break,
+                        _ = this.send_status() => {}
+                    }
+
+                    tokio::select! {
+                        biased;
+                        _ = alive.changed() => break,
+                        _ = tokio::time::sleep(interval) => {}
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(anyhow::Error::new)
+    }
+
+    async fn send_status(&self) -> Result<()> {
+        send_status(self.tasks.as_ref(), &self.state).await
+    }
+
+    async fn put_job_result(&self, job_id: &str, result: &RunJobResponse) -> Result<()> {
+        // Record put_job_result load time after retrying
+        let _timer = self.state.metrics.put_job_result_timer();
+        let result = bincode::serialize(result).map_err(|err| {
+            tracing::warn!("[put_job_result({job_id})]: Error serializing result: {err:?}");
+            err
+        })?;
+        retry_with_jitter(3, || async {
+            self.jobs_storage
+                .put_async_reader(
+                    &job_result_key(job_id),
+                    result.len() as u64,
+                    std::pin::pin!(futures::io::AllowStdIo::new(result.reader())),
+                )
+                .await
+                .map_err(|err| {
+                    tracing::warn!("[put_job_result({job_id})]: Error writing stream: {err:?}");
+                    RetryError::transient(err)
+                })
+        })
+        .await
+        .map_err(|err| {
+            // Record put_job_result errors after retrying
+            if self.state.is_alive() {
+                self.state.metrics.inc_put_job_result_error_count();
+                tracing::warn!("[run_job({job_id})]: Error storing job result: {err:?}");
+            }
+            err
+        })
     }
 
     async fn job_finished(&self, job_id: &str, reply_to: &str, res: &RunJobResponse) -> Result<()> {
@@ -781,13 +852,17 @@ impl ServerService for Server {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-    ) -> std::result::Result<RunJobResponse, RunJobError> {
-        if self.is_alive() {
-            self.load_job_and_run_build(job_id, reply_to, toolchain, command, outputs)
-                .await
-        } else {
-            Err(RunJobError::server_terminated())
-        }
+    ) -> Result<RunJobResponse> {
+        self.jobs
+            .call(RunJobArgs {
+                job_id: job_id.to_owned(),
+                reply_to: reply_to.to_owned(),
+                toolchain,
+                command,
+                outputs,
+            })
+            .await
+            .map(|(_, res)| res)
     }
 
     async fn on_failure(&self, job_id: &str, reply_to: &str, job_err: RunJobError) -> Result<()> {
@@ -840,4 +915,13 @@ impl ServerService for Server {
             Ok(())
         }
     }
+}
+
+async fn send_status(tasks: &dyn ServerTasks, state: &ServerState) -> Result<()> {
+    tasks
+        .status_update(From::from(state))
+        .await
+        .map_err(anyhow::Error::new)
+        .map(|_| ())?;
+    Ok(())
 }

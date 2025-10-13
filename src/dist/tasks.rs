@@ -30,8 +30,8 @@ use crate::{
     config::MessageBroker,
     dist::{
         scheduler::SchedulerTasks, scheduler_to_servers_queue, server::ServerTasks,
-        server_to_schedulers_queue, CompileCommand, RunJobError, RunJobResponse, SchedulerService,
-        ServerDetails, ServerService, Toolchain,
+        server_to_schedulers_queue, to_scheduler_queue, CompileCommand, RunJobError,
+        RunJobResponse, SchedulerService, ServerDetails, ServerService, Toolchain,
     },
     errors::*,
 };
@@ -59,10 +59,11 @@ const MESSAGE_BROKER_ERROR_TEXT: &str = "\
 pub struct Tasks {
     app: Arc<Celery>,
     job_time_limit: u32,
+    queues: Vec<String>,
 }
 
 impl Tasks {
-    pub async fn new(celery: celery::CeleryBuilder) -> Result<Self> {
+    pub async fn new(celery: celery::CeleryBuilder, queues: Vec<String>) -> Result<Self> {
         Ok(Self {
             job_time_limit: u32::MAX,
             app: Arc::new(celery.build().await.map_err(|err| {
@@ -72,20 +73,22 @@ impl Tasks {
                 };
                 anyhow!("{}\n\n{}", err_message, MESSAGE_BROKER_ERROR_TEXT)
             })?),
+            queues,
         })
     }
 
     pub async fn scheduler(
         app_name: &str,
-        default_queue: &str,
         prefetch_count: u16,
         message_broker: Option<MessageBroker>,
     ) -> Result<Self> {
+        let default_queue = to_scheduler_queue(app_name);
         let tasks = Self::new(
             Self::celery(app_name, prefetch_count, message_broker)?
                 // Instruct the broker to delete this queue when the scheduler disconnects
-                .broker_declare_exclusive_queue(default_queue)
-                .default_queue(default_queue),
+                .broker_declare_exclusive_queue(&default_queue)
+                .default_queue(&default_queue),
+            vec![default_queue, server_to_schedulers_queue()],
         )
         .await?;
 
@@ -98,12 +101,13 @@ impl Tasks {
 
     pub async fn server(
         app_name: &str,
-        default_queue: &str,
         prefetch_count: u16,
         message_broker: Option<MessageBroker>,
     ) -> Result<Self> {
+        let default_queue = scheduler_to_servers_queue();
         let tasks = Self::new(
-            Self::celery(app_name, prefetch_count, message_broker)?.default_queue(default_queue),
+            Self::celery(app_name, prefetch_count, message_broker)?.default_queue(&default_queue),
+            vec![default_queue],
         )
         .await?;
 
@@ -169,6 +173,10 @@ impl SchedulerTasks for Tasks {
         &self.app
     }
 
+    fn queues(&self) -> Vec<&str> {
+        self.queues.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+    }
+
     fn get_job_time_limit(&self) -> u32 {
         self.job_time_limit
     }
@@ -204,6 +212,10 @@ impl ServerTasks for Tasks {
 
     fn app(&self) -> &Arc<Celery> {
         &self.app
+    }
+
+    fn queues(&self) -> Vec<&str> {
+        self.queues.iter().map(|s| s.as_str()).collect::<Vec<_>>()
     }
 
     async fn status_update(
@@ -259,13 +271,11 @@ impl RunJob {
 
 impl RunJob {
     fn server(&self) -> Result<&Arc<dyn ServerService>> {
-        match SERVER.get() {
-            Some(server) => Ok(server),
-            None => {
-                tracing::error!("sccache-dist server is not initialized");
-                Err(anyhow!("sccache-dist server is not initialized"))
-            }
-        }
+        SERVER.get().ok_or_else(|| {
+            let err = anyhow!("sccache-dist server is not initialized");
+            tracing::error!("{err:?}");
+            err
+        })
     }
 }
 
@@ -318,20 +328,22 @@ impl Task for RunJob {
 
         self.server()
             .map(|server| server.run_job(&job_id, &reply_to, toolchain, command, outputs))
-            .unwrap_or_else(|err| futures::future::err(RunJobError::Retryable(err)).boxed())
+            .unwrap_or_else(|err| futures::future::err(err).boxed())
             .await
-            .map_err(|err| match err {
-                RunJobError::MissingJobInputs => {
-                    TaskError::ExpectedError("MissingJobInputs".into())
+            .map_err(|err| match err.downcast_ref::<RunJobError>() {
+                // Map all errors to TaskError::UnexpectedError to short-circuit celery's retry logic
+                Some(RunJobError::MissingJobInputs) => {
+                    TaskError::UnexpectedError("MissingJobInputs".into())
                 }
-                RunJobError::MissingToolchain => {
-                    TaskError::ExpectedError("MissingToolchain".into())
+                Some(RunJobError::MissingToolchain) => {
+                    TaskError::UnexpectedError("MissingToolchain".into())
                 }
-                RunJobError::MissingJobResult => {
-                    TaskError::ExpectedError("MissingJobResult".into())
+                Some(RunJobError::MissingJobResult) => {
+                    TaskError::UnexpectedError("MissingJobResult".into())
                 }
-                RunJobError::Retryable(e) => TaskError::ExpectedError(format!("{e:#}")),
-                RunJobError::Fatal(e) => TaskError::UnexpectedError(format!("{e:#}")),
+                // RunJobError::Fatal and RunJobError::Retryable errors
+                Some(err) => TaskError::UnexpectedError(format!("{err:#}")),
+                _ => TaskError::UnexpectedError(format!("{err:#}")),
             })
     }
 
@@ -342,15 +354,23 @@ impl Task for RunJob {
         let err = match err {
             // The client can choose to retry these or compile locally.
             // Matching strings because that's the only type in TaskError.
-            TaskError::ExpectedError(ref msg) => match msg.as_ref() {
-                "MissingJobInputs" => RunJobError::MissingJobInputs,
-                "MissingToolchain" => RunJobError::MissingToolchain,
-                "MissingJobResult" => RunJobError::MissingJobResult,
-                msg => anyhow!(msg.to_owned()).into(),
-            },
-            // We don't expect many unexpected/fatal errors to happen.
-            //
-            // Report task timeouts as a fatal error, since this means the
+            TaskError::UnexpectedError(ref msg) => {
+                match msg.as_ref() {
+                    "MissingJobInputs" => RunJobError::MissingJobInputs,
+                    "MissingToolchain" => RunJobError::MissingToolchain,
+                    "MissingJobResult" => RunJobError::MissingJobResult,
+                    msg => {
+                        if msg.starts_with("Retryable error: ") {
+                            RunJobError::Retryable(anyhow!("{msg}"))
+                        } else {
+                            // We don't expect many unexpected/fatal errors to happen.
+                            RunJobError::Fatal(anyhow!("{msg}"))
+                        }
+                    }
+                }
+            }
+            TaskError::ExpectedError(ref msg) => RunJobError::Retryable(anyhow!("{msg}")),
+            // Report task timeouts as a fatal errors, since this means the
             // compilation took longer than the scheduler's `job_time_limit`.
             //
             // In this case, retrying the compilation on a different server
@@ -358,11 +378,8 @@ impl Task for RunJob {
             // see their build fail and can either increase the job time limit,
             // or apply source optimizations so their files compile in a
             // reasonable amount of time.
-            TaskError::UnexpectedError(ref msg) => RunJobError::Fatal(anyhow!(msg.to_owned())),
             TaskError::TimeoutError => RunJobError::Fatal(anyhow!("Job {job_id} timed out")),
-            TaskError::Retry(_) => {
-                RunJobError::Fatal(anyhow!("Job {job_id} exceeded the retry limit"))
-            }
+            TaskError::Retry(_) => RunJobError::Fatal(anyhow!("Job {job_id} retries exceeded")),
         };
 
         if let Err(err) = self
@@ -382,7 +399,7 @@ impl Task for RunJob {
         if let Err(err) = self
             .server()
             .map(|server| server.on_success(job_id, reply_to, res).boxed())
-            .unwrap_or_else(|e| futures::future::err(e).boxed())
+            .unwrap_or_else(|err| futures::future::err(err).boxed())
             .await
         {
             tracing::error!("[run_job_on_success({job_id})]: Error reporting job success: {err:#}");
@@ -409,13 +426,11 @@ impl JobFinished {
 
 impl JobFinished {
     fn scheduler(&self) -> Result<&Arc<dyn SchedulerService>> {
-        match SCHEDULER.get() {
-            Some(scheduler) => Ok(scheduler),
-            None => {
-                tracing::error!("sccache-dist scheduler is not initialized");
-                Err(anyhow!("sccache-dist scheduler is not initialized"))
-            }
-        }
+        SCHEDULER.get().ok_or_else(|| {
+            let err = anyhow!("sccache-dist scheduler is not initialized");
+            tracing::error!("{err:?}");
+            err
+        })
     }
 }
 

@@ -30,6 +30,7 @@ use std::{
     cmp::Eq,
     collections::HashMap,
     ffi::{OsStr, OsString},
+    fmt::Debug,
     hash::{Hash, Hasher},
     io::prelude::*,
     path::{Path, PathBuf},
@@ -1151,6 +1152,7 @@ pub fn new_reqwest_client(config: Option<crate::config::DistNetworking>) -> reqw
     let connect_timeout = Duration::from_secs(config.connect_timeout);
 
     let builder = reqwest::Client::builder()
+        // .connection_verbose(true) // for debugging
         // HTTP/2
         .http2_adaptive_window(true)
         .http2_prior_knowledge() // force HTTP/2

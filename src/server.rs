@@ -772,12 +772,12 @@ impl<A: crate::net::Acceptor, C: CommandCreatorSync> SccacheServer<A, C> {
             }
         };
 
-        runtime.block_on(async {
-            futures::select! {
-                server = server.fuse() => server,
-                _res = sys_info.fuse() => Ok(()),
-                _res = shutdown.fuse() => Ok(()),
-                _res = shutdown_idle.fuse() => Ok::<_, io::Error>(()),
+        runtime.block_on(async move {
+            tokio::select! {
+                server = server => server,
+                _res = sys_info => Ok(()),
+                _res = shutdown => Ok(()),
+                _res = shutdown_idle => Ok::<_, io::Error>(()),
             }
         })?;
 

@@ -31,7 +31,7 @@ use crate::{
         Toolchain,
     },
     errors::*,
-    util::Digest,
+    util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
 };
 
 use std::{
@@ -41,7 +41,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::dist::{job_inputs_key, job_result_key, server_to_schedulers_queue, to_scheduler_queue};
+use crate::dist::{job_inputs_key, job_result_key};
 
 use crate::util::retry_with_jitter;
 
@@ -149,6 +149,7 @@ impl SchedulerMetrics {
 #[async_trait]
 pub trait SchedulerTasks: Send + Sync {
     fn app(&self) -> &Arc<celery::Celery>;
+    fn queues(&self) -> Vec<&str>;
 
     fn get_job_time_limit(&self) -> u32;
     fn set_job_time_limit(self, job_time_limit: u32) -> Self
@@ -175,15 +176,71 @@ struct ServerInfo {
     pub jobs: JobStats,
 }
 
+#[derive(Clone)]
+struct RunJobArgs {
+    job_id: String,
+    reply_to: String,
+    toolchain: Toolchain,
+    command: CompileCommand,
+    outputs: Vec<String>,
+}
+
+impl AsyncMulticastArgs for RunJobArgs {
+    type Key = String;
+    fn hash(&self) -> Self::Key {
+        self.job_id.clone()
+    }
+}
+
+struct RunJobFn {
+    jobs: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<RunJobResponse>>>>,
+    tasks: Arc<dyn SchedulerTasks>,
+}
+
+#[async_trait]
+impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFn {
+    async fn call(&self, args: &RunJobArgs) -> Result<RunJobResponse> {
+        let RunJobArgs {
+            job_id,
+            reply_to,
+            toolchain,
+            command,
+            outputs,
+        } = args;
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<RunJobResponse>();
+        self.jobs.lock().await.insert(job_id.to_owned(), tx);
+
+        let res = self
+            .tasks
+            .run_job(
+                job_id.to_owned(),
+                reply_to.clone(),
+                toolchain.clone(),
+                command.clone(),
+                outputs.clone(),
+            )
+            .await
+            .map_err(anyhow::Error::new);
+
+        if let Err(err) = res {
+            self.jobs.lock().await.remove(job_id);
+            Err(err)
+        } else {
+            rx.await.map_err(anyhow::Error::new)
+        }
+    }
+}
+
 pub struct Scheduler {
     jobs_storage: Arc<dyn Storage>,
     jobs: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<RunJobResponse>>>>,
     metrics: SchedulerMetrics,
-    queue_name: String,
     scheduler_id: String,
     servers: Arc<Mutex<HashMap<String, ServerInfo>>>,
     tasks: Arc<dyn SchedulerTasks>,
     toolchains: Arc<dyn Storage>,
+    run_job: AsyncMulticast<RunJobArgs, RunJobResponse>,
 }
 
 impl Scheduler {
@@ -194,15 +251,20 @@ impl Scheduler {
         tasks: impl SchedulerTasks + 'static,
         toolchains: Arc<dyn Storage>,
     ) -> Result<Arc<Self>> {
+        let tasks = Arc::new(tasks);
+        let jobs = Arc::new(Mutex::new(HashMap::new()));
         let this = Arc::new(Self {
             jobs_storage,
-            jobs: Arc::new(Mutex::new(HashMap::new())),
+            jobs: jobs.clone(),
             metrics,
-            queue_name: to_scheduler_queue(scheduler_id),
             scheduler_id: scheduler_id.to_owned(),
             servers: Arc::new(Mutex::new(HashMap::new())),
-            tasks: Arc::new(tasks),
+            tasks: tasks.clone(),
             toolchains,
+            run_job: AsyncMulticast::new(RunJobFn {
+                jobs: jobs.clone(),
+                tasks: tasks.clone(),
+            }),
         });
 
         this.tasks.set_scheduler(this.clone())?;
@@ -210,19 +272,79 @@ impl Scheduler {
         Ok(this)
     }
 
-    pub async fn start(&self) -> Result<()> {
-        self.tasks.app().display_pretty().await;
-        tracing::info!("Scheduler `{}` initialized", self.scheduler_id);
-        crate::util::daemonize()?;
-        self.tasks
-            .app()
-            .consume_from(&[&server_to_schedulers_queue()[..], self.queue_name.as_ref()])
-            .await
-            .map_err(|e| e.into())
-    }
+    pub async fn start(
+        &self,
+        handle: axum_server::Handle,
+        server: impl futures::Future<Output = Result<()>>,
+        shutdown_timeout: Duration,
+    ) -> Result<()> {
+        let celery = async {
+            let res = self.tasks.app().consume_from(&self.tasks.queues()).await;
+            tracing::info!("Celery shutdown");
+            res.context("Celery error")
+        };
 
-    pub async fn close(&self) -> Result<()> {
-        self.tasks.app().close().await.map_err(|e| e.into())
+        let sigint = async {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigint = signal(SignalKind::interrupt())?;
+            let mut sigterm = signal(SignalKind::terminate())?;
+            tokio::select! {
+                biased;
+                _ = sigint.recv() => {
+                    tracing::info!("Received SIGINT");
+                },
+                _ = sigterm.recv() => {
+                    tracing::info!("Received SIGTERM");
+                },
+            }
+            Ok(())
+        };
+
+        // Wait for Celery or sigint, then shutdown Axum and Celery
+        let shutdown_celery = async move {
+            // tokio::select! deterministically polls its futures in order, so
+            // register celery first and sigint second so this sigint handler
+            // doesn't override celery's internal sigint handler.
+            //
+            // This ensures celery progresses to "warm shutdown" mode, cancelling
+            // the queue consumers, and doesn't attempt to pull more messages
+            // from the queue while it is shutting down.
+            let res = tokio::select! {
+                biased;
+                res = celery => res,
+                res = sigint => res
+            };
+
+            tracing::info!(
+                "Waiting {}s for graceful shutdown",
+                shutdown_timeout.as_secs()
+            );
+
+            // Signal axum to shutdown
+            handle.graceful_shutdown(Some(shutdown_timeout));
+
+            res
+        };
+
+        // Wait for axum shutdown
+        let shutdown_server = async move { server.await.context("Server error") };
+
+        self.tasks.app().display_pretty().await;
+
+        tracing::info!("Scheduler `{}` initialized", self.scheduler_id);
+
+        crate::util::daemonize()?;
+
+        // Wait for celery and/or server shutdown
+        let shutdown_server = tokio::try_join!(shutdown_celery, shutdown_server);
+
+        // Close the broker connection
+        let shutdown_broker = self.tasks.app().close().await.context("Broker error");
+        tracing::info!("Closed broker connection");
+
+        shutdown_server
+            .and(shutdown_broker)
+            .map(|_| tracing::info!("Scheduler shutdown gracefully"))
     }
 
     fn prune_servers(servers: &mut HashMap<String, ServerInfo>) {
@@ -413,21 +535,7 @@ impl SchedulerService for Scheduler {
     }
 
     async fn new_job(&self, toolchain: Toolchain, inputs: Vec<u8>) -> Result<NewJobResponse> {
-        // Compute `job_id` as a hash of inputs + toolchain + uuid for maximum uniqueness
-        let (inputs, toolchain, job_id) = tokio::task::spawn_blocking(move || {
-            let mut digest = Digest::new();
-            let res = digest.update_from_reader_sync(inputs.reader());
-            // rustc can't infer the Error type without doing this...
-            #[allow(clippy::question_mark)]
-            if let Err(err) = res {
-                return Err(err);
-            }
-            digest.update(toolchain.archive_id.as_bytes());
-            digest.update(uuid::Uuid::new_v4().as_simple().to_string().as_bytes());
-            Ok((inputs, toolchain, digest.finish()))
-        })
-        .await??;
-
+        let job_id = uuid::Uuid::new_v4().as_simple().to_string();
         let (has_toolchain, has_inputs) = futures::future::join(
             async { Ok::<bool, anyhow::Error>(self.has_toolchain(&toolchain).await) },
             async {
@@ -506,27 +614,16 @@ impl SchedulerService for Scheduler {
             });
         }
 
-        let (tx, rx) = tokio::sync::oneshot::channel::<RunJobResponse>();
-        self.jobs.lock().await.insert(job_id.to_owned(), tx);
-
-        let res = self
-            .tasks
-            .run_job(
-                job_id.to_owned(),
-                self.queue_name.clone(),
+        self.run_job
+            .call(RunJobArgs {
+                job_id: job_id.to_owned(),
+                reply_to: self.tasks.app().default_queue.clone(),
                 toolchain,
                 command,
                 outputs,
-            )
+            })
             .await
-            .map_err(anyhow::Error::new);
-
-        if let Err(err) = res {
-            self.jobs.lock().await.remove(job_id);
-            Err(err)
-        } else {
-            rx.await.map_err(anyhow::Error::new)
-        }
+            .map(|(_, res)| res)
     }
 
     async fn has_job(&self, job_id: &str) -> bool {
@@ -556,7 +653,7 @@ impl SchedulerService for Scheduler {
                 .map_or_else(|_| false, |_| job_success);
             self.update_status(server, Some(job_success)).await
         } else {
-            Err(anyhow!("Not my job"))
+            Err(anyhow!("Unknown job {job_id:?}"))
         }
     }
 

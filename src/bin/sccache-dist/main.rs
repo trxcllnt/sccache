@@ -1,5 +1,3 @@
-use futures::FutureExt;
-
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +15,7 @@ use sccache::{
         self, env_info,
         metrics::Metrics,
         scheduler::{self, SchedulerMetrics, SchedulerTasks},
-        scheduler_to_servers_queue, server, tasks, to_scheduler_queue,
+        server, tasks,
         token_check::new_client_auth_check,
         BuilderIncoming, ServerToolchains,
     },
@@ -100,6 +98,7 @@ fn run(command: Command) -> Result<()> {
                     metrics,
                     public_addr,
                     scheduler_id,
+                    shutdown_timeout,
                     toolchains,
                 }) => {
                     let metrics = Metrics::new(
@@ -145,7 +144,6 @@ fn run(command: Command) -> Result<()> {
                         &scheduler_id,
                         tasks::Tasks::scheduler(
                             &scheduler_id,
-                            &to_scheduler_queue(&scheduler_id),
                             100 * num_cpus as u16,
                             message_broker,
                         )
@@ -154,19 +152,15 @@ fn run(command: Command) -> Result<()> {
                         toolchains_storage,
                     )?;
 
-                    let server = dist::http::Scheduler::new(scheduler.clone(), client_auth_check)
-                        .serve(public_addr, max_body_size, metrics);
+                    let (handle, server) = dist::http::Scheduler::new(
+                        scheduler.clone(),
+                        client_auth_check,
+                    )
+                    .serve(public_addr, max_body_size, metrics);
 
-                    let celery = scheduler.start();
-
-                    futures::select_biased! {
-                        res = celery.fuse() => res?,
-                        res = server.fuse() => res?,
-                    };
-
-                    scheduler.close().await?;
-
-                    Ok(())
+                    scheduler
+                        .start(handle, server, Duration::from_secs(shutdown_timeout))
+                        .await
                 }
 
                 Command::Server(server_config::Config {
@@ -179,6 +173,7 @@ fn run(command: Command) -> Result<()> {
                     max_per_core_prefetch,
                     metrics,
                     server_id,
+                    shutdown_timeout,
                     toolchain_cache_size,
                     toolchains,
                 }) => {
@@ -238,7 +233,6 @@ fn run(command: Command) -> Result<()> {
                         },
                         tasks::Tasks::server(
                             &server_id,
-                            &scheduler_to_servers_queue(),
                             (occupancy as u16).saturating_add(pre_fetch as u16),
                             message_broker,
                         )
@@ -253,7 +247,10 @@ fn run(command: Command) -> Result<()> {
 
                     // Report status every `heartbeat_interval_ms` milliseconds
                     server
-                        .start(Duration::from_millis(heartbeat_interval_ms))
+                        .start(
+                            Duration::from_millis(heartbeat_interval_ms),
+                            Duration::from_secs(shutdown_timeout),
+                        )
                         .await
                 }
             }

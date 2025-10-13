@@ -181,33 +181,34 @@ mod scheduler {
     use axum::{
         body::Bytes,
         extract::{
-            ConnectInfo, DefaultBodyLimit, Extension, FromRequest, FromRequestParts, MatchedPath,
-            Path, Request,
+            ConnectInfo, Extension, FromRequest, FromRequestParts, MatchedPath, Path, Request,
         },
-        http::{request::Parts, HeaderMap, Method, StatusCode, Uri},
+        http::{request::Parts, StatusCode},
         response::{IntoResponse, Response},
-        routing, RequestPartsExt, Router,
+        routing, RequestExt, RequestPartsExt, Router,
     };
 
     use axum_extra::{
-        headers::{authorization::Bearer, Authorization},
+        headers::{
+            authorization::Bearer, Authorization, ContentLength, ContentType, Header, HeaderValue,
+        },
         TypedHeader,
     };
 
-    use futures::TryStreamExt;
-
-    use hyper_util::rt::{TokioExecutor, TokioIo};
-
+    use futures::{TryFutureExt, TryStreamExt};
     use serde_json::json;
 
-    use std::{io, net::SocketAddr, str::FromStr, sync::Arc, time::Instant};
-
-    use tokio::{io::AsyncReadExt, net::TcpListener};
-    use tokio_util::{
-        compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt},
-        io::StreamReader,
+    use std::{
+        io,
+        net::SocketAddr,
+        str::FromStr,
+        sync::Arc,
+        time::{Duration, Instant},
     };
-    use tower::{Service, ServiceBuilder, ServiceExt};
+
+    use tokio::io::AsyncReadExt;
+    use tokio_util::{compat::TokioAsyncReadCompatExt, io::StreamReader};
+    use tower::ServiceBuilder;
     use tower_http::{
         request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
         sensitive_headers::{SetSensitiveRequestHeadersLayer, SetSensitiveResponseHeadersLayer},
@@ -215,218 +216,154 @@ mod scheduler {
     };
 
     use crate::dist::{
-        http::{bincode_deserialize, ClientAuthCheck},
+        http::{bincode_deserialize, bincode_serialize, ClientAuthCheck, ClientVisibleMsg},
         metrics::Metrics,
         RunJobRequest, SchedulerService, Toolchain,
     };
 
     use crate::errors::*;
 
-    fn get_header_value<'a>(headers: &'a HeaderMap, name: &'a str) -> Option<&'a str> {
-        if let Some(header) = headers.get(name) {
-            if let Ok(header) = header.to_str() {
-                return Some(header);
-            }
+    // Make our own error that wraps `anyhow::Error`.
+    struct AppError(anyhow::Error);
+
+    // Tell axum how to convert `AppError` into a response.
+    impl IntoResponse for AppError {
+        fn into_response(self) -> Response {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", self.0)).into_response()
         }
-        None
     }
 
-    fn get_content_length(headers: &HeaderMap) -> u64 {
-        Option::<&str>::None
-            .or(get_header_value(headers, "Content-Length"))
-            .or(get_header_value(headers, "content-length"))
-            .unwrap_or("0")
-            .parse()
-            .unwrap_or(0)
-    }
-
-    /// Return `content` as either a bincode or json encoded `Response` depending on the Accept header.
-    fn result_to_response<T>(
-        headers: HeaderMap,
-    ) -> impl FnOnce(T) -> std::result::Result<Response, Response>
+    // This enables using `?` on functions that return `Result<_, anyhow::Error>` to turn them into
+    // `Result<_, AppError>`. That way you don't need to do that manually.
+    impl<E> From<E> for AppError
     where
-        T: serde::Serialize,
+        E: Into<anyhow::Error>,
     {
-        move |content: T| {
-            let mut accept = headers
-                .get(http::header::ACCEPT)
-                .map_or_else(|| "/*", |h| h.to_str().unwrap_or("/*"))
-                .split(",")
-                .map(|s| s.trim())
-                .filter_map(|s| {
-                    let mut mimetype_and_quality = (String::new(), 1.0);
-                    if s.contains(";") {
-                        let mut parts = s.split(";");
-                        if let Some(mime) = parts.next() {
-                            mimetype_and_quality.0 = mime.to_owned();
-                        } else {
-                            return None;
-                        }
-                        if let Some(qual) = parts.next() {
-                            if let Some(qual) = qual.split("=").last() {
-                                if let Ok(qual) = qual.parse() {
-                                    mimetype_and_quality.1 = qual;
-                                }
-                            }
-                        }
-                    } else {
-                        mimetype_and_quality.0 = s.to_owned();
-                    }
-                    Some(mimetype_and_quality)
-                })
-                .collect::<Vec<_>>();
+        fn from(err: E) -> Self {
+            Self(err.into())
+        }
+    }
 
-            accept.sort_by(|(lhs, lhs_q), (rhs, rhs_q)| {
-                if rhs_q > lhs_q {
-                    return std::cmp::Ordering::Greater;
-                }
-                match (lhs.ends_with("/*"), rhs.ends_with("/*")) {
-                    (true, true) => std::cmp::Ordering::Equal,
-                    (true, false) => std::cmp::Ordering::Greater,
-                    (false, true) => std::cmp::Ordering::Less,
-                    (false, false) => std::cmp::Ordering::Equal,
-                }
-            });
+    #[derive(Clone, Debug, PartialEq)]
+    struct Accepted(pub Vec<String>);
 
-            for (mimetype, _) in accept {
+    impl Accepted {
+        pub async fn serialize<T>(&self, res: T) -> Result<Response>
+        where
+            T: serde::Serialize + Send + 'static,
+        {
+            let Self(mimetypes) = self;
+            for mimetype in mimetypes {
                 match mimetype.as_ref() {
                     "application/json" => {
-                        return Ok(axum::response::Json(json!(content)).into_response());
+                        return Ok(axum::response::Json(json!(res)).into_response());
                     }
                     "application/octet-stream" | "*/*" => {
-                        return match bincode::serialize(&content) {
-                            Ok(body) => Ok((StatusCode::OK, body).into_response()),
+                        return Ok(match bincode_serialize(res).await {
+                            Ok(body) => (StatusCode::OK, body),
                             Err(err) => {
                                 tracing::error!("Failed to serialize response body: {err:?}");
-                                Err((
+                                (
                                     StatusCode::INTERNAL_SERVER_ERROR,
-                                    format!("Failed to serialize response body: {err}")
+                                    format!("Failed to serialize response body: {err:#}")
                                         .into_bytes(),
                                 )
-                                    .into_response())
                             }
                         }
+                        .into_response())
                     }
                     _ => continue,
                 }
             }
 
-            tracing::error!("Request must accept application/json or application/octet-stream");
-            Err((
-                StatusCode::BAD_REQUEST,
-                "Request must accept application/json or application/octet-stream"
-                    .to_string()
-                    .into_bytes(),
-            )
-                .into_response())
+            let msg = "Request must accept application/json or application/octet-stream";
+            tracing::error!(msg);
+
+            Ok((StatusCode::BAD_REQUEST, msg.to_string().into_bytes()).into_response())
         }
     }
 
-    fn anyhow_to_response(
-        method: Method,
-        uri: Uri,
-    ) -> impl FnOnce(anyhow::Error) -> std::result::Result<Response, Response> {
-        move |err: anyhow::Error| {
-            tracing::error!("sccache: `{method} {uri}` failed with: {err:?}");
-            let msg = format!("sccache: `{method} {uri}` failed with: `{err}`");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, msg.into_bytes()).into_response())
-        }
-    }
+    #[derive(Clone, Debug, PartialEq)]
+    struct AcceptedMimeTypes(pub Accepted);
 
-    fn unwrap_infallible<T>(result: std::result::Result<T, std::convert::Infallible>) -> T {
-        match result {
-            Ok(value) => value,
-            Err(err) => match err {},
-        }
-    }
-
-    fn with_request_tracing(app: Router) -> Router {
-        // Mark these headers as sensitive so they don't show in logs
-        let headers_to_redact: Arc<[_]> = Arc::new([
-            http::header::AUTHORIZATION,
-            http::header::PROXY_AUTHORIZATION,
-            http::header::COOKIE,
-            http::header::SET_COOKIE,
-        ]);
-
-        let request_id_header_name = http::HeaderName::from_str(
-            &std::env::var("SCCACHE_DIST_REQUEST_ID_HEADER_NAME")
-                // tower_http::request_id::X_REQUEST_ID inlined here because it is not public
-                .unwrap_or("x-request-id".to_owned()),
-        )
-        .unwrap();
-
-        app.layer(
-            ServiceBuilder::new()
-                .layer(SetSensitiveRequestHeadersLayer::from_shared(Arc::clone(
-                    &headers_to_redact,
-                )))
-                .layer(SetRequestIdLayer::new(
-                    request_id_header_name,
-                    MakeRequestUuid,
-                ))
-                .layer(
-                    TraceLayer::new_for_http()
-                        .make_span_with(DefaultMakeSpan::new().include_headers(true))
-                        .on_response(DefaultOnResponse::new().include_headers(true)),
-                )
-                .layer(PropagateRequestIdLayer::x_request_id())
-                .layer(SetSensitiveResponseHeadersLayer::from_shared(
-                    headers_to_redact,
-                )),
-        )
-    }
-
-    fn with_metrics(app: Router, metrics: Metrics) -> Router {
-        let app = if let Some(path) = metrics.listen_path() {
-            app.route(
-                &path,
-                routing::get(move || std::future::ready(metrics.render())),
-            )
-        } else {
-            app
-        };
-
-        async fn record_metrics(req: Request, next: axum::middleware::Next) -> impl IntoResponse {
-            let start = Instant::now();
-            let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
-                matched_path.as_str().to_owned()
-            } else {
-                req.uri().path().to_owned()
-            };
-            let method = req.method().clone();
-
-            let response = next.run(req).await;
-
-            let latency = start.elapsed().as_secs_f64();
-            let status = response.status().as_u16().to_string();
-
-            let labels = [
-                ("method", method.to_string()),
-                ("path", path),
-                ("status", status),
-            ];
-
-            metrics::counter!("sccache::scheduler::http::request_count", &labels).increment(1);
-            metrics::histogram!("sccache::scheduler::http::request_time", &labels).record(latency);
-
-            response
+    impl Header for AcceptedMimeTypes {
+        fn name() -> &'static http::header::HeaderName {
+            &http::header::ACCEPT
         }
 
-        // Define this at the end so we also track metrics for the `/metrics` route
-        app.route_layer(axum::middleware::from_fn(record_metrics))
+        fn decode<'i, I: Iterator<Item = &'i HeaderValue>>(
+            values: &mut I,
+        ) -> std::result::Result<Self, axum_extra::headers::Error> {
+            use itertools::Itertools;
+
+            Ok(Self(Accepted(
+                values
+                    .flat_map(|value| {
+                        value
+                            .to_str()
+                            .unwrap_or("/*")
+                            .split(",")
+                            .map(|s| s.trim())
+                            .filter_map(|s| {
+                                let mimetype;
+                                let mut quality = 1.0;
+                                if s.contains(";") {
+                                    let mut parts = s.split(";");
+                                    if let Some(m) = parts.next() {
+                                        mimetype = m.to_owned();
+                                    } else {
+                                        return None;
+                                    }
+                                    if let Some(q) = parts.next() {
+                                        if let Some(q) = q.split("=").last() {
+                                            if let Ok(q) = q.parse() {
+                                                quality = q;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    mimetype = s.to_owned();
+                                }
+                                Some((mimetype, quality))
+                            })
+                    })
+                    .sorted_by(|(lhs, lhs_q), (rhs, rhs_q)| {
+                        if rhs_q > lhs_q {
+                            return std::cmp::Ordering::Greater;
+                        }
+                        match (lhs.ends_with("/*"), rhs.ends_with("/*")) {
+                            (true, true) => std::cmp::Ordering::Equal,
+                            (true, false) => std::cmp::Ordering::Greater,
+                            (false, true) => std::cmp::Ordering::Less,
+                            (false, false) => std::cmp::Ordering::Equal,
+                        }
+                    })
+                    .map(|(mimetype, _)| mimetype)
+                    .unique()
+                    .collect::<Vec<_>>(),
+            )))
+        }
+
+        fn encode<E: Extend<HeaderValue>>(&self, values: &mut E) {
+            let Self(Accepted(accepts)) = self;
+            values.extend(
+                accepts
+                    .iter()
+                    .filter_map(|s| HeaderValue::from_str(s.as_str()).ok()),
+            );
+        }
     }
 
     // Verify authenticated sccache clients
     #[allow(dead_code)]
-    struct AuthenticatedClient(SocketAddr);
+    struct RequireAuth(SocketAddr);
 
     #[async_trait]
-    impl<S> FromRequestParts<S> for AuthenticatedClient
+    impl<S> FromRequestParts<S> for RequireAuth
     where
         S: Send + Sync,
     {
-        type Rejection = StatusCode;
+        type Rejection = (StatusCode, String);
 
         async fn from_request_parts(
             parts: &mut Parts,
@@ -435,28 +372,35 @@ mod scheduler {
             let TypedHeader(Authorization(bearer)) = parts
                 .extract::<TypedHeader<Authorization<Bearer>>>()
                 .await
-                .map_err(|_| StatusCode::UNAUTHORIZED)?;
+                .map_err(|_| {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        "Missing authentication token".into(),
+                    )
+                })?;
 
             let ConnectInfo(remote_addr) = parts
                 .extract::<ConnectInfo<SocketAddr>>()
                 .await
-                .map_err(|_| StatusCode::BAD_REQUEST)?;
+                .map_err(|_| (StatusCode::BAD_REQUEST, "Bad request".into()))?;
 
             let Extension(this) = parts
                 .extract::<Extension<Arc<SchedulerState>>>()
                 .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                .map_err(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal server error".into(),
+                    )
+                })?;
 
             this.client_auth
                 .check(bearer.token())
                 .await
-                .map(|_| AuthenticatedClient(remote_addr))
-                .map_err(|err| {
-                    tracing::warn!(
-                        "[AuthenticatedClient({remote_addr})]: invalid client auth: {}",
-                        err.0
-                    );
-                    StatusCode::UNAUTHORIZED
+                .map(|_| RequireAuth(remote_addr))
+                .map_err(|ClientVisibleMsg(msg)| {
+                    tracing::warn!("[RequireAuth({remote_addr})]: Authentication failure: {msg}");
+                    (StatusCode::UNAUTHORIZED, msg)
                 })
         }
     }
@@ -470,25 +414,51 @@ mod scheduler {
         S: Send + Sync,
         T: serde::de::DeserializeOwned + Send + 'static,
     {
-        type Rejection = Response;
+        type Rejection = (StatusCode, String);
 
         async fn from_request(
-            req: Request,
+            mut req: Request,
             state: &S,
         ) -> std::result::Result<Self, Self::Rejection> {
-            let data = match get_header_value(req.headers(), "Content-Type") {
-                Some("application/octet-stream") => Bytes::from_request(req, state)
+            let TypedHeader(content_type) =
+                req.extract_parts::<TypedHeader<ContentType>>()
                     .await
-                    .map_err(IntoResponse::into_response)?
-                    .to_vec(),
-                _ => return Err((StatusCode::BAD_REQUEST, "Wrong content type").into_response()),
+                    .map_err(|_| (StatusCode::BAD_REQUEST, "Bad request".into()))?;
+
+            let data = if content_type == ContentType::octet_stream() {
+                Bytes::from_request(req, state)
+                    .await
+                    .map_err(|_| (StatusCode::BAD_REQUEST, "Bad request".into()))?
+                    .to_vec()
+            } else {
+                return Err((StatusCode::BAD_REQUEST, "Wrong content type".into()));
             };
 
             let data = bincode_deserialize::<T>(data)
                 .await
-                .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()).into_response())?;
+                .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
 
             Ok(Self(data))
+        }
+    }
+
+    struct RequestBodyTokioAsyncRead(Box<dyn tokio::io::AsyncRead + Send + Unpin>);
+
+    #[async_trait]
+    impl<S> FromRequest<S> for RequestBodyTokioAsyncRead
+    where
+        S: Send + Sync,
+    {
+        type Rejection = StatusCode;
+
+        async fn from_request(
+            req: Request,
+            _state: &S,
+        ) -> std::result::Result<Self, Self::Rejection> {
+            // Convert the request body into a `tokio::io::AsyncRead`
+            Ok(Self(Box::new(StreamReader::new(
+                req.into_body().into_data_stream().map_err(io::Error::other),
+            ))))
         }
     }
 
@@ -499,20 +469,19 @@ mod scheduler {
     where
         S: Send + Sync,
     {
-        type Rejection = Response;
+        type Rejection = StatusCode;
 
         async fn from_request(
             req: Request,
             _state: &S,
         ) -> std::result::Result<Self, Self::Rejection> {
-            // Convert the request body stream into an `AsyncRead`
-            let reader =
-                StreamReader::new(req.into_body().into_data_stream().map_err(io::Error::other))
-                    .compat();
+            let RequestBodyTokioAsyncRead(body) = req
+                .extract::<RequestBodyTokioAsyncRead, _>()
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-            Ok(Self(
-                Box::new(reader) as Box<dyn futures::AsyncRead + Send + Unpin>
-            ))
+            // Convert the request body into an `futures::AsyncRead`
+            Ok(Self(Box::new(body.compat())))
         }
     }
 
@@ -539,36 +508,74 @@ mod scheduler {
             }
         }
 
-        fn make_router() -> axum::Router {
+        fn metrics(app: Router, metrics: Metrics) -> Router {
+            let app = if let Some(path) = metrics.listen_path() {
+                app.route(
+                    &path,
+                    routing::get(move || std::future::ready(metrics.render())),
+                )
+            } else {
+                app
+            };
+
+            async fn record_metrics(
+                req: Request,
+                next: axum::middleware::Next,
+            ) -> impl IntoResponse {
+                let start = Instant::now();
+                let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
+                    matched_path.as_str().to_owned()
+                } else {
+                    req.uri().path().to_owned()
+                };
+                let method = req.method().clone();
+
+                let response = next.run(req).await;
+
+                let latency = start.elapsed().as_secs_f64();
+                let status = response.status().as_u16().to_string();
+
+                let labels = [
+                    ("method", method.to_string()),
+                    ("path", path),
+                    ("status", status),
+                ];
+
+                metrics::counter!("sccache::scheduler::http::request_count", &labels).increment(1);
+                metrics::histogram!("sccache::scheduler::http::request_time", &labels)
+                    .record(latency);
+
+                response
+            }
+
+            // Define this at the end so we also track metrics for the `/metrics` route
+            app.route_layer(axum::middleware::from_fn(record_metrics))
+        }
+
+        fn routes() -> axum::Router {
             Router::new()
                 .route(
                     "/api/v2/status",
                     routing::get(
-                        |// Authenticate the client bearer token first
-                         _: AuthenticatedClient,
-                         headers: HeaderMap,
-                         method: Method,
-                         uri: Uri,
-                         Extension(state): Extension<Arc<SchedulerState>>| async move {
-                            state.service.get_status().await.map_or_else(
-                                anyhow_to_response(method, uri),
-                                result_to_response(headers),
-                            )
+                        |TypedHeader(AcceptedMimeTypes(mime)),
+                         Extension::<Arc<SchedulerState>>(state)| async move {
+                            state
+                                .service
+                                .get_status()
+                                .and_then(|res| mime.serialize(res))
+                                .map_err(AppError)
+                                .await
                         },
                     ),
                 )
-
                 //
                 // TOOLCHAIN OPERATIONS
                 //
-
                 // HEAD
                 .route(
                     "/api/v2/toolchain/:archive_id",
                     routing::head(
-                        |// Authenticate the client bearer token first
-                         _: AuthenticatedClient,
-                         Extension(state): Extension<Arc<SchedulerState>>,
+                        |Extension::<Arc<SchedulerState>>(state),
                          Path(archive_id): Path<String>| async move {
                             if state.service.has_toolchain(&Toolchain { archive_id }).await {
                                 (StatusCode::OK).into_response()
@@ -582,25 +589,24 @@ mod scheduler {
                 .route(
                     "/api/v2/toolchain/:archive_id",
                     routing::put(
-                        |// Authenticate the client bearer token first
-                         _: AuthenticatedClient,
-                         headers: HeaderMap,
-                         method: Method,
-                         uri: Uri,
-                         Extension(state): Extension<Arc<SchedulerState>>,
+                        |TypedHeader(AcceptedMimeTypes(mime)),
+                         Extension::<Arc<SchedulerState>>(state),
                          Path(archive_id): Path<String>,
-                         RequestBodyAsyncRead(toolchain): RequestBodyAsyncRead| async move {
-                            let tc = Toolchain { archive_id };
-                            let src = std::pin::pin!(toolchain);
-                            let len = get_content_length(&headers);
+                         mut req: Request| async move {
+                            let TypedHeader(ContentLength(len)) = req
+                                .extract_parts::<TypedHeader<ContentLength>>()
+                                .await
+                                .unwrap_or(TypedHeader(ContentLength(0)));
+                            let RequestBodyAsyncRead(body) = req
+                                .extract::<RequestBodyAsyncRead, _>()
+                                .await
+                                .map_err(|_| AppError(anyhow!("")))?;
                             state
                                 .service
-                                .put_toolchain(&tc, len, src)
+                                .put_toolchain(&Toolchain { archive_id }, len, std::pin::pin!(body))
+                                .and_then(|res| mime.serialize(res))
+                                .map_err(AppError)
                                 .await
-                                .map_or_else(
-                                    anyhow_to_response(method, uri),
-                                    result_to_response(headers),
-                                )
                         },
                     ),
                 )
@@ -608,72 +614,68 @@ mod scheduler {
                 .route(
                     "/api/v2/toolchain/:archive_id",
                     routing::delete(
-                        |// Authenticate the client bearer token first
-                         _: AuthenticatedClient,
-                         headers: HeaderMap,
-                         method: Method,
-                         uri: Uri,
-                         Extension(state): Extension<Arc<SchedulerState>>,
+                        |TypedHeader(AcceptedMimeTypes(mime)),
+                         Extension::<Arc<SchedulerState>>(state),
                          Path(archive_id): Path<String>| async move {
                             state
                                 .service
                                 .del_toolchain(&Toolchain { archive_id })
+                                .and_then(|res| mime.serialize(res))
+                                .map_err(AppError)
                                 .await
-                                .map_or_else(
-                                    anyhow_to_response(method, uri),
-                                    result_to_response(headers),
-                                )
                         },
                     ),
                 )
-
                 //
                 // JOB OPERATIONS
                 //
-
                 // CREATE
                 .route(
                     "/api/v2/jobs/new",
                     routing::post(
-                        |// Authenticate the client bearer token first
-                         _: AuthenticatedClient,
-                         headers: HeaderMap,
-                         method: Method,
-                         uri: Uri,
-                         Extension(state): Extension<Arc<SchedulerState>>,
-                         RequestBodyAsyncRead(body): RequestBodyAsyncRead| async move {
-                            let mut body = Box::pin(body.compat());
-
-                            // Deserialize new job requests. First is the Toolchain
-                            // bincode, followed by the compressed inputs.
+                        |TypedHeader(AcceptedMimeTypes(mime)),
+                         Extension::<Arc<SchedulerState>>(state),
+                         RequestBodyTokioAsyncRead(mut body)| async move {
+                            // Deserialize new job requests.
+                            // The toolchain bincode is first, followed by the compressed inputs.
                             let (toolchain, inputs) = {
-                                let bincode_len = body.read_u32().await
-                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid bincode length".to_owned()))
-                                    .map_err(|e| e.into_response())? as u64;
+                                let bincode_len = body
+                                    .read_u32()
+                                    .await
+                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid length"))
+                                    .map_err(IntoResponse::into_response)?
+                                    as u64;
 
                                 let mut bincode_reader = body.take(bincode_len);
                                 let mut bincode = vec![];
-                                bincode_reader.read_to_end(&mut bincode).await
-                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid toolchain".to_owned()))
-                                    .map_err(|e| e.into_response())?;
+                                bincode_reader
+                                    .read_to_end(&mut bincode)
+                                    .await
+                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid toolchain"))
+                                    .map_err(IntoResponse::into_response)?;
 
-                                let toolchain = bincode_deserialize(bincode).await
-                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid toolchain".to_owned()))
-                                    .map_err(|e| e.into_response())?;
+                                let toolchain = bincode_deserialize(bincode)
+                                    .await
+                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid toolchain"))
+                                    .map_err(IntoResponse::into_response)?;
 
                                 let mut inputs_reader = bincode_reader.into_inner();
                                 let mut inputs = vec![];
-                                inputs_reader.read_to_end(&mut inputs).await
-                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job inputs".to_owned()))
-                                    .map_err(|e| e.into_response())?;
+                                inputs_reader
+                                    .read_to_end(&mut inputs)
+                                    .await
+                                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job inputs"))
+                                    .map_err(IntoResponse::into_response)?;
 
                                 (toolchain, inputs)
                             };
 
-                            state.service.new_job(toolchain, inputs).await.map_or_else(
-                                anyhow_to_response(method, uri),
-                                result_to_response(headers),
-                            )
+                            state
+                                .service
+                                .new_job(toolchain, inputs)
+                                .and_then(|res| mime.serialize(res))
+                                .map_err(|e| AppError(e).into_response())
+                                .await
                         },
                     ),
                 )
@@ -681,20 +683,26 @@ mod scheduler {
                 .route(
                     "/api/v2/job/:job_id",
                     routing::put(
-                        |// Authenticate the client bearer token first
-                         _: AuthenticatedClient,
-                         headers: HeaderMap,
-                         method: Method,
-                         uri: Uri,
-                         Extension(state): Extension<Arc<SchedulerState>>,
-                         Path(job_id): Path<String>,
-                         RequestBodyAsyncRead(inputs): RequestBodyAsyncRead| async move {
-                            let src = std::pin::pin!(inputs);
-                            let len = get_content_length(&headers);
-                            state.service.put_job(&job_id, len, src).await.map_or_else(
-                                anyhow_to_response(method, uri),
-                                result_to_response(headers),
-                            )
+                        |TypedHeader(AcceptedMimeTypes(mime)),
+                         Extension::<Arc<SchedulerState>>(state),
+                         Path::<String>(job_id),
+                         mut req: Request| async move {
+                            let TypedHeader(ContentLength(len)) = req
+                                .extract_parts::<TypedHeader<ContentLength>>()
+                                .await
+                                .unwrap_or(TypedHeader(ContentLength(0)));
+
+                            let RequestBodyAsyncRead(inputs) = req
+                                .extract::<RequestBodyAsyncRead, _>()
+                                .await
+                                .map_err(|_| AppError(anyhow!("")))?;
+
+                            state
+                                .service
+                                .put_job(&job_id, len, std::pin::pin!(inputs))
+                                .and_then(|res| mime.serialize(res))
+                                .map_err(AppError)
+                                .await
                         },
                     ),
                 )
@@ -702,18 +710,16 @@ mod scheduler {
                 .route(
                     "/api/v2/job/:job_id",
                     routing::post(
-                        |// Authenticate the client bearer token first
-                         _: AuthenticatedClient,
-                         headers: HeaderMap,
-                         method: Method,
-                         uri: Uri,
-                         Extension(state): Extension<Arc<SchedulerState>>,
-                         Path(job_id): Path<String>,
-                         Bincode(req): Bincode<RunJobRequest>| async move {
-                            state.service.run_job(&job_id, req).await.map_or_else(
-                                anyhow_to_response(method, uri),
-                                result_to_response(headers),
-                            )
+                        |TypedHeader(AcceptedMimeTypes(mime)),
+                         Extension::<Arc<SchedulerState>>(state),
+                         Path::<String>(job_id),
+                         Bincode(job): Bincode<RunJobRequest>| async move {
+                            state
+                                .service
+                                .run_job(&job_id, job)
+                                .and_then(|res| mime.serialize(res))
+                                .map_err(AppError)
+                                .await
                         },
                     ),
                 )
@@ -721,72 +727,107 @@ mod scheduler {
                 .route(
                     "/api/v2/job/:job_id",
                     routing::delete(
-                        |// Authenticate the client bearer token first
-                         _: AuthenticatedClient,
-                         headers: HeaderMap,
-                         method: Method,
-                         uri: Uri,
-                         Extension(state): Extension<Arc<SchedulerState>>,
-                         Path(job_id): Path<String>| async move {
-                            state.service.del_job(&job_id).await.map_or_else(
-                                anyhow_to_response(method, uri),
-                                result_to_response(headers),
-                            )
+                        |TypedHeader(AcceptedMimeTypes(mime)),
+                         Extension::<Arc<SchedulerState>>(state),
+                         Path::<String>(job_id)| async move {
+                            state
+                                .service
+                                .del_job(&job_id)
+                                .and_then(|res| mime.serialize(res))
+                                .map_err(AppError)
+                                .await
                         },
                     ),
                 )
+                .fallback((StatusCode::NOT_FOUND, "404"))
         }
 
-        pub async fn serve(
+        fn tracing(app: Router) -> Router {
+            // Mark these headers as sensitive so they don't show in logs
+            let headers_to_redact: Arc<[_]> = Arc::new([
+                http::header::AUTHORIZATION,
+                http::header::PROXY_AUTHORIZATION,
+                http::header::COOKIE,
+                http::header::SET_COOKIE,
+            ]);
+
+            let request_id_header_name = http::HeaderName::from_str(
+                &std::env::var("SCCACHE_DIST_REQUEST_ID_HEADER_NAME")
+                    // tower_http::request_id::X_REQUEST_ID inlined here because it is not public
+                    .unwrap_or("x-request-id".to_owned()),
+            )
+            .unwrap();
+
+            app.layer(
+                ServiceBuilder::new()
+                    .layer(SetSensitiveRequestHeadersLayer::from_shared(Arc::clone(
+                        &headers_to_redact,
+                    )))
+                    .layer(SetRequestIdLayer::new(
+                        request_id_header_name,
+                        MakeRequestUuid,
+                    ))
+                    .layer(
+                        TraceLayer::new_for_http()
+                            .make_span_with(DefaultMakeSpan::new().include_headers(true))
+                            .on_response(DefaultOnResponse::new().include_headers(true)),
+                    )
+                    .layer(PropagateRequestIdLayer::x_request_id())
+                    .layer(SetSensitiveResponseHeadersLayer::from_shared(
+                        headers_to_redact,
+                    )),
+            )
+        }
+
+        pub fn serve(
             self,
             addr: SocketAddr,
             max_body_size: usize,
             metrics: Metrics,
-        ) -> Result<()> {
-            let app = Self::make_router()
-                .fallback(|| async move { (StatusCode::NOT_FOUND, "404") })
-                .layer(DefaultBodyLimit::max(max_body_size))
-                .layer(Extension(self.state.clone()));
+        ) -> (
+            axum_server::Handle,
+            impl futures::Future<Output = Result<()>>,
+        ) {
+            let mut server = axum_server::bind(addr);
+            server
+                .http_builder()
+                .http2()
+                .adaptive_window(true)
+                .timer(hyper_util::rt::TokioTimer::new())
+                // TODO: Make these configurable
+                .keep_alive_interval(Duration::from_secs(20))
+                .keep_alive_timeout(Duration::from_secs(600));
 
-            let app = with_metrics(app, metrics);
+            let handle = axum_server::Handle::new();
+            let server = server
+                .handle(handle.clone())
+                .serve(
+                    Self::tracing(Self::metrics(Self::routes(), metrics))
+                        .route_layer(axum::middleware::from_fn(
+                            |req: Request, next: axum::middleware::Next| async move {
+                                let res = next.run(req).await;
+                                res
+                            },
+                        ))
+                        // Authenticate the client bearer token first
+                        .route_layer(axum::middleware::from_extractor::<RequireAuth>())
+                        // Limit request body size
+                        .layer(tower_http::limit::RequestBodyLimitLayer::new(max_body_size))
+                        .layer(Extension(self.state.clone()))
+                        .into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .map_err(|e| anyhow!(e));
 
-            let app = with_request_tracing(app);
-
-            let mut make_service = app.into_make_service_with_connect_info::<SocketAddr>();
-
-            let listener = TcpListener::bind(addr).await.unwrap();
-
-            tracing::info!("sccache: Scheduler listening for clients on {}", addr);
-
-            loop {
-                let (tcp_stream, remote_addr) = listener.accept().await.unwrap();
-                let tower_service = unwrap_infallible(make_service.call(remote_addr).await);
-
-                tokio::spawn(async move {
-                    // Hyper has its own `AsyncRead` and `AsyncWrite` traits and doesn't use tokio.
-                    // `TokioIo` converts between them.
-                    let tok_stream = TokioIo::new(tcp_stream);
-
-                    let hyper_service = hyper::service::service_fn(
-                        move |request: Request<hyper::body::Incoming>| {
-                            // Clone `tower_service` because hyper's `Service` uses `&self` whereas
-                            // tower's `Service` requires `&mut self`.
-                            tower_service.clone().oneshot(request)
-                        },
-                    );
-
-                    if let Err(err) =
-                        hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-                            .http2()
-                            .serve_connection(tok_stream, hyper_service)
-                            .await
-                    {
-                        // These seem... irrelevant?
-                        tracing::trace!("sccache: failed to serve connection: {err:#}");
-                    }
-                });
-            }
+            (handle, server)
         }
+    }
+}
+
+#[cfg(any(feature = "dist-client", feature = "dist-server"))]
+impl crate::util::AsyncMulticastArgs for crate::dist::Toolchain {
+    type Key = String;
+    fn hash(&self) -> Self::Key {
+        self.archive_id.clone()
     }
 }
 
@@ -800,7 +841,7 @@ mod client {
             RunJobResponse, SchedulerStatus, SubmitToolchainResult, Toolchain,
         },
         errors::*,
-        util::{new_reqwest_client, AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
+        util::{new_reqwest_client, AsyncMulticast, AsyncMulticastFunc},
     };
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -821,13 +862,6 @@ mod client {
         auth_token: String,
         scheduler_url: reqwest::Url,
         client_toolchains: Arc<cache::ClientToolchains>,
-    }
-
-    impl AsyncMulticastArgs for Toolchain {
-        type Key = String;
-        fn hash(&self) -> Self::Key {
-            self.archive_id.clone()
-        }
     }
 
     #[async_trait]

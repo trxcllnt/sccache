@@ -1493,6 +1493,7 @@ pub mod scheduler {
         pub metrics: MetricsConfigs,
         pub public_addr: SocketAddr,
         pub scheduler_id: Option<String>,
+        pub shutdown_timeout: Option<u64>,
         pub toolchains: CacheConfigs,
     }
 
@@ -1515,6 +1516,7 @@ pub mod scheduler {
                 metrics: Default::default(),
                 public_addr: SocketAddr::from_str("0.0.0.0:10500").unwrap(),
                 scheduler_id: None,
+                shutdown_timeout: Some(10),
                 toolchains: CacheConfigs {
                     disk: Some(DiskCacheConfig {
                         dir: default_disk_cache_dir().join("toolchains"),
@@ -1538,6 +1540,7 @@ pub mod scheduler {
         pub metrics: MetricsConfigs,
         pub public_addr: SocketAddr,
         pub scheduler_id: String,
+        pub shutdown_timeout: u64,
         pub toolchains: StorageConfig,
     }
 
@@ -1552,6 +1555,7 @@ pub mod scheduler {
                 metrics,
                 public_addr,
                 scheduler_id,
+                shutdown_timeout,
                 toolchains,
             } = conf_path
                 .map(|path| {
@@ -1593,6 +1597,11 @@ pub mod scheduler {
                 .or(scheduler_id)
                 .unwrap_or(uuid::Uuid::new_v4().as_simple().to_string());
 
+            let shutdown_timeout = number_from_env_var("SCCACHE_DIST_SHUTDOWN_TIMEOUT")
+                .transpose()?
+                .or(shutdown_timeout)
+                .unwrap_or(10);
+
             Ok(Self {
                 client_auth,
                 job_time_limit,
@@ -1602,6 +1611,7 @@ pub mod scheduler {
                 metrics,
                 public_addr,
                 scheduler_id,
+                shutdown_timeout,
                 toolchains: toolchains_storage.into(),
             })
         }
@@ -1622,6 +1632,7 @@ pub mod scheduler {
                 metrics: scheduler_config.metrics,
                 public_addr: scheduler_config.public_addr,
                 scheduler_id: Some(scheduler_config.scheduler_id),
+                shutdown_timeout: Some(scheduler_config.shutdown_timeout),
                 toolchains: scheduler_config.toolchains.into(),
             }
         }
@@ -1707,6 +1718,7 @@ pub mod server {
         pub message_broker: Option<MessageBroker>,
         pub metrics: MetricsConfigs,
         pub server_id: Option<String>,
+        pub shutdown_timeout: Option<u64>,
         pub toolchain_cache_size: Option<u64>,
         pub toolchains: CacheConfigs,
     }
@@ -1731,6 +1743,7 @@ pub mod server {
                 message_broker: None,
                 metrics: Default::default(),
                 server_id: None,
+                shutdown_timeout: Some(10),
                 toolchain_cache_size: None,
                 toolchains: CacheConfigs {
                     disk: Some(DiskCacheConfig {
@@ -1756,6 +1769,7 @@ pub mod server {
         pub message_broker: Option<MessageBroker>,
         pub metrics: MetricsConfigs,
         pub server_id: String,
+        pub shutdown_timeout: u64,
         pub toolchain_cache_size: u64,
         pub toolchains: StorageConfig,
     }
@@ -1772,6 +1786,7 @@ pub mod server {
                 max_per_core_prefetch,
                 metrics,
                 server_id,
+                shutdown_timeout,
                 toolchain_cache_size,
                 toolchains,
             } = conf_path
@@ -1879,6 +1894,11 @@ pub mod server {
                 .or(server_id)
                 .unwrap_or(uuid::Uuid::new_v4().as_simple().to_string());
 
+            let shutdown_timeout = number_from_env_var("SCCACHE_DIST_SHUTDOWN_TIMEOUT")
+                .transpose()?
+                .or(shutdown_timeout)
+                .unwrap_or(10);
+
             let toolchain_cache_size = number_from_env_var("SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE")
                 .transpose()?
                 .or(toolchain_cache_size)
@@ -1894,6 +1914,7 @@ pub mod server {
                 message_broker,
                 metrics,
                 server_id,
+                shutdown_timeout,
                 toolchain_cache_size,
                 toolchains: toolchains_storage.into(),
             })
@@ -1916,6 +1937,7 @@ pub mod server {
                 message_broker: server_config.message_broker,
                 metrics: server_config.metrics,
                 server_id: Some(server_config.server_id),
+                shutdown_timeout: Some(server_config.shutdown_timeout),
                 toolchain_cache_size: Some(server_config.toolchain_cache_size),
                 toolchains: server_config.toolchains.into(),
             }

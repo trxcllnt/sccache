@@ -16,12 +16,15 @@ use async_trait::async_trait;
 #[cfg(feature = "dist-server")]
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
-use std::fmt;
-use std::path::{Path, PathBuf};
 #[cfg(feature = "dist-server")]
 use std::pin::Pin;
-use std::time::Duration;
+
+use std::{
+    ffi::OsString,
+    fmt,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use crate::errors::*;
 use crate::mock_command::ProcessOutput;
@@ -543,13 +546,13 @@ pub enum RunJobError {
     Retryable(Error),
 }
 
-impl std::fmt::Display for RunJobError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for RunJobError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Fatal(e) => write!(f, "Fatal error: {e:?}"),
             Self::MissingJobInputs => write!(f, "Missing job inputs"),
             Self::MissingJobResult => write!(f, "Missing job result"),
-            Self::MissingToolchain => write!(f, "Missing tool chain"),
+            Self::MissingToolchain => write!(f, "Missing toolchain"),
             Self::Retryable(e) => write!(f, "Retryable error: {e:?}"),
         }
     }
@@ -732,7 +735,7 @@ pub trait ServerService: Send + Sync {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-    ) -> std::result::Result<RunJobResponse, RunJobError>;
+    ) -> Result<RunJobResponse>;
 
     async fn on_failure(&self, job_id: &str, reply_to: &str, err: RunJobError) -> Result<()>;
     async fn on_success(&self, job_id: &str, reply_to: &str, res: &RunJobResponse) -> Result<()>;
