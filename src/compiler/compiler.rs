@@ -1363,13 +1363,9 @@ where
                 dist_output_paths.clone(),
             );
 
-            debug!("[{out_pretty}, {job_id}]: Job started");
-
             service.increment_active_compilations();
             let run_job = run_job.await;
             service.decrement_active_compilations();
-
-            debug!("[{out_pretty}, {job_id}]: Job responded");
 
             let (build_result, server_id) = match run_job {
                 // Job completed, regardless of whether compilation succeeded or failed
