@@ -793,6 +793,7 @@ mod scheduler {
                 .http_builder()
                 .http2()
                 .adaptive_window(true)
+                .max_concurrent_streams(None)
                 .timer(hyper_util::rt::TokioTimer::new())
                 // TODO: Make these configurable
                 .keep_alive_interval(Duration::from_secs(20))
