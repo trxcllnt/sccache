@@ -1146,44 +1146,53 @@ pub fn daemonize() -> Result<()> {
 }
 
 #[cfg(any(feature = "dist-server", feature = "dist-client"))]
-pub fn new_reqwest_client(config: Option<crate::config::DistNetworking>) -> reqwest::Client {
-    let config = config.unwrap_or_default();
-    let request_timeout = Duration::from_secs(config.request_timeout);
-    let connect_timeout = Duration::from_secs(config.connect_timeout);
-    let keepalive_timeout = Duration::from_secs(config.keepalive.timeout);
-    let keepalive_interval = Duration::from_secs(config.keepalive.interval);
-    let keepalive = config.keepalive.enabled;
-
+pub fn new_reqwest_client<'a, C>(config: C) -> reqwest::Client
+where
+    C: Into<Option<&'a crate::config::DistNetworking>>,
+{
     let builder = reqwest::Client::builder()
         // HTTP/2
         .http2_adaptive_window(true)
-        .http2_prior_knowledge() // Prefer HTTP/2
-        // Timeouts
-        .timeout(request_timeout)
-        .connect_timeout(connect_timeout)
-        // Keepalive
-        .http2_keep_alive_timeout(keepalive_timeout)
-        .tcp_keepalive_retries(keepalive.then_some(3))
-        .tcp_keepalive(keepalive.then_some(keepalive_timeout))
-        .tcp_keepalive_interval(keepalive.then_some(keepalive_interval))
-        .http2_keep_alive_interval(keepalive.then_some(keepalive_interval));
+        // Prefer HTTP/2
+        .http2_prior_knowledge();
 
-    #[cfg(target_os = "linux")]
-    let builder = builder.tcp_user_timeout(keepalive.then_some(keepalive_timeout));
+    let builder = if let Some(config) = config.into() {
+        let request_timeout = Duration::from_secs(config.request_timeout);
+        let connect_timeout = Duration::from_secs(config.connect_timeout);
+        let keepalive_timeout = Duration::from_secs(config.keepalive.timeout);
+        let keepalive_interval = Duration::from_secs(config.keepalive.interval);
+        let keepalive = config.keepalive.enabled;
 
-    // Connection pool
-    let builder = if config.connection_pool {
-        // This has to be at least as long as `request_timeout`, otherwise
-        // reqwest will close idle connections before build jobs are done.
-        //
-        // Users should set their load balancer's idle timeout to the same
-        // value as `request_timeout` (AWS's ALB default is 60s).
-        builder.pool_idle_timeout(request_timeout)
+        let builder = builder
+            // Timeouts
+            .timeout(request_timeout)
+            .connect_timeout(connect_timeout)
+            // Keepalive
+            .http2_keep_alive_timeout(keepalive_timeout)
+            .tcp_keepalive_retries(keepalive.then_some(3))
+            .tcp_keepalive(keepalive.then_some(keepalive_timeout))
+            .tcp_keepalive_interval(keepalive.then_some(keepalive_interval))
+            .http2_keep_alive_interval(keepalive.then_some(keepalive_interval));
+
+        #[cfg(target_os = "linux")]
+        let builder = builder.tcp_user_timeout(keepalive.then_some(keepalive_timeout));
+
+        // Connection pool
+        if config.connection_pool {
+            // This has to be at least as long as `request_timeout`, otherwise
+            // reqwest will close idle connections before build jobs are done.
+            //
+            // Users should set their load balancer's idle timeout to the same
+            // value as `request_timeout` (AWS's ALB default is 60s).
+            builder.pool_idle_timeout(request_timeout)
+        } else {
+            // Disable connection pool
+            builder
+                .pool_max_idle_per_host(0)
+                .pool_idle_timeout(Duration::from_secs(0))
+        }
     } else {
-        // Disable connection pool
         builder
-            .pool_max_idle_per_host(0)
-            .pool_idle_timeout(Duration::from_secs(0))
     };
 
     builder

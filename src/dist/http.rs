@@ -859,7 +859,7 @@ mod client {
     use super::{bincode_serialize, urls};
 
     struct SubmitToolchainFn {
-        client: Arc<reqwest::Client>,
+        client: Arc<ReqwestClients>,
         auth_token: String,
         scheduler_url: reqwest::Url,
         client_toolchains: Arc<cache::ClientToolchains>,
@@ -908,9 +908,64 @@ mod client {
         }
     }
 
+    struct ReqwestClients {
+        clients: Vec<reqwest::Client>,
+        index: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ReqwestClients {
+        fn new(net: &config::DistNetworking) -> Self {
+            Self {
+                #[cfg(test)]
+                clients: vec![new_reqwest_client(net)],
+                #[cfg(not(test))]
+                clients: (0..(crate::util::num_cpus() / 2).clamp(1, 8))
+                    .map(|_| new_reqwest_client(net))
+                    .collect::<Vec<_>>(),
+                index: Default::default(),
+            }
+        }
+
+        fn next(&self) -> &reqwest::Client {
+            use std::sync::atomic::Ordering::SeqCst;
+            &self.clients[self
+                .index
+                .fetch_update(SeqCst, SeqCst, |i| Some((i + 1) % self.clients.len()))
+                .unwrap_or(0)]
+        }
+
+        fn delete<U>(&self, url: U) -> reqwest::RequestBuilder
+        where
+            U: reqwest::IntoUrl,
+        {
+            self.next().delete(url)
+        }
+
+        fn get<U>(&self, url: U) -> reqwest::RequestBuilder
+        where
+            U: reqwest::IntoUrl,
+        {
+            self.next().get(url)
+        }
+
+        fn post<U>(&self, url: U) -> reqwest::RequestBuilder
+        where
+            U: reqwest::IntoUrl,
+        {
+            self.next().post(url)
+        }
+
+        fn put<U>(&self, url: U) -> reqwest::RequestBuilder
+        where
+            U: reqwest::IntoUrl,
+        {
+            self.next().put(url)
+        }
+    }
+
     pub struct Client {
         auth_token: String,
-        client: Arc<reqwest::Client>,
+        client: Arc<ReqwestClients>,
         fallback_to_local_compile: bool,
         max_retries: f64,
         rewrite_includes_only: bool,
@@ -932,7 +987,7 @@ mod client {
             rewrite_includes_only: bool,
             net: &config::DistNetworking,
         ) -> Result<Self> {
-            let client = Arc::new(new_reqwest_client(Some(net.clone())));
+            let client = Arc::new(ReqwestClients::new(net));
             let client_toolchains = Arc::new(
                 cache::ClientToolchains::new(cache_dir, cache_size, toolchain_configs)
                     .context("failed to initialise client toolchains")?,
