@@ -331,19 +331,18 @@ impl Task for RunJob {
             .unwrap_or_else(|err| futures::future::err(err).boxed())
             .await
             .map_err(|err| match err.downcast_ref::<RunJobError>() {
-                // Map all errors to TaskError::UnexpectedError to short-circuit celery's retry logic
                 Some(RunJobError::MissingJobInputs) => {
-                    TaskError::UnexpectedError("MissingJobInputs".into())
+                    TaskError::ExpectedError("MissingJobInputs".into())
                 }
                 Some(RunJobError::MissingToolchain) => {
-                    TaskError::UnexpectedError("MissingToolchain".into())
+                    TaskError::ExpectedError("MissingToolchain".into())
                 }
                 Some(RunJobError::MissingJobResult) => {
-                    TaskError::UnexpectedError("MissingJobResult".into())
+                    TaskError::ExpectedError("MissingJobResult".into())
                 }
                 // RunJobError::Fatal and RunJobError::Retryable errors
-                Some(err) => TaskError::UnexpectedError(err.to_string()),
-                _ => TaskError::UnexpectedError(err.to_string()),
+                Some(err) => TaskError::ExpectedError(err.to_string()),
+                _ => TaskError::ExpectedError(err.to_string()),
             })
     }
 
@@ -354,23 +353,13 @@ impl Task for RunJob {
         let err = match err {
             // The client can choose to retry these or compile locally.
             // Matching strings because that's the only type in TaskError.
-            TaskError::UnexpectedError(msg) => {
-                match msg.as_ref() {
-                    "MissingJobInputs" => RunJobError::MissingJobInputs,
-                    "MissingToolchain" => RunJobError::MissingToolchain,
-                    "MissingJobResult" => RunJobError::MissingJobResult,
-                    msg => {
-                        if msg.starts_with("Fatal error: ") {
-                            // We don't expect many unexpected/fatal errors to happen...
-                            tracing::warn!("[run_job_on_failure({job_id})]: {msg}");
-                            RunJobError::Fatal(anyhow!(msg.to_owned()))
-                        } else {
-                            RunJobError::Retryable(anyhow!(msg.to_owned()))
-                        }
-                    }
-                }
-            }
-            TaskError::ExpectedError(msg) => RunJobError::Retryable(anyhow!(msg.to_owned())),
+            TaskError::ExpectedError(msg) => match msg.as_ref() {
+                "MissingJobInputs" => RunJobError::MissingJobInputs,
+                "MissingToolchain" => RunJobError::MissingToolchain,
+                "MissingJobResult" => RunJobError::MissingJobResult,
+                msg => RunJobError::Retryable(anyhow!(msg.to_owned())),
+            },
+            TaskError::UnexpectedError(msg) => RunJobError::Retryable(anyhow!(msg.to_owned())),
             // Report task timeouts as a fatal errors, since this means the
             // compilation took longer than the scheduler's `job_time_limit`.
             //
