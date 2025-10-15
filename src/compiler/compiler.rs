@@ -1337,7 +1337,11 @@ where
             }
 
             if !has_toolchain {
-                match dist_client.put_toolchain(dist_toolchain.clone()).await {
+                match dist_client
+                    .put_toolchain(dist_toolchain.clone())
+                    .await
+                    .map_err(|e| e.context("Could not submit toolchain"))
+                {
                     Ok(dist::SubmitToolchainResult::Success) => {
                         has_toolchain = true;
                     }
@@ -1359,15 +1363,19 @@ where
                 dist_output_paths.clone(),
             );
 
+            debug!("[{out_pretty}, {job_id}]: Job started");
+
             service.increment_active_compilations();
             let run_job = run_job.await;
             service.decrement_active_compilations();
+
+            debug!("[{out_pretty}, {job_id}]: Job responded");
 
             let (build_result, server_id) = match run_job {
                 // Job completed, regardless of whether compilation succeeded or failed
                 Ok(RunJobResponse::Complete { result, server_id }) => (result, server_id),
                 // Job failed with an unrecoverable fatal error. These should be rare, since
-                // There aren't many cases where we want to explicitly fail the build without
+                // there aren't many cases where we want to explicitly fail the build without
                 // allowing the client to retry.
                 //
                 // The most likely source of these errors are when the compilation took longer
@@ -1379,8 +1387,14 @@ where
                 //
                 // Fatal errors are not retryable.
                 Ok(RunJobResponse::FatalError { message, server_id }) => {
-                    error!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation failed: {message}");
+                    error!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation failed (fatal): {message}");
                     break Err(anyhow!(message));
+                }
+                // Disk errors, build process killed, server shutdown, etc.
+                // Can be retried.
+                Ok(RunJobResponse::RetryableError { message, server_id }) => {
+                    debug!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation failed (retryable): {message:?}");
+                    retry_or_bail!(anyhow!("{message:?}"));
                 }
                 // Missing inputs (S3 cleared, Redis rebooted, etc.)
                 // Can be retried.
@@ -1407,12 +1421,6 @@ where
                         "[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job result"
                     );
                     retry_or_bail!(anyhow!("Missing distributed compilation job result"));
-                }
-                // Disk errors, build process killed, server shutdown, etc.
-                // Can be retried.
-                Ok(RunJobResponse::RetryableError { message, server_id }) => {
-                    debug!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation failed: {message:?}");
-                    retry_or_bail!(anyhow!("{message:?}"));
                 }
                 // Other (e.g. client network, timeout, etc.) errors
                 // Can be retried.
