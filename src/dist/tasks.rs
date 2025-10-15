@@ -342,8 +342,8 @@ impl Task for RunJob {
                     TaskError::UnexpectedError("MissingJobResult".into())
                 }
                 // RunJobError::Fatal and RunJobError::Retryable errors
-                Some(err) => TaskError::UnexpectedError(format!("{err:#}")),
-                _ => TaskError::UnexpectedError(format!("{err:#}")),
+                Some(err) => TaskError::UnexpectedError(err.to_string()),
+                _ => TaskError::UnexpectedError(err.to_string()),
             })
     }
 
@@ -354,22 +354,23 @@ impl Task for RunJob {
         let err = match err {
             // The client can choose to retry these or compile locally.
             // Matching strings because that's the only type in TaskError.
-            TaskError::UnexpectedError(ref msg) => {
+            TaskError::UnexpectedError(msg) => {
                 match msg.as_ref() {
                     "MissingJobInputs" => RunJobError::MissingJobInputs,
                     "MissingToolchain" => RunJobError::MissingToolchain,
                     "MissingJobResult" => RunJobError::MissingJobResult,
                     msg => {
-                        if msg.starts_with("Retryable error: ") {
-                            RunJobError::Retryable(anyhow!("{msg}"))
+                        if msg.starts_with("Fatal error: ") {
+                            // We don't expect many unexpected/fatal errors to happen...
+                            tracing::warn!("[run_job_on_failure({job_id})]: {msg}");
+                            RunJobError::Fatal(anyhow!(msg.to_owned()))
                         } else {
-                            // We don't expect many unexpected/fatal errors to happen.
-                            RunJobError::Fatal(anyhow!("{msg}"))
+                            RunJobError::Retryable(anyhow!(msg.to_owned()))
                         }
                     }
                 }
             }
-            TaskError::ExpectedError(ref msg) => RunJobError::Retryable(anyhow!("{msg}")),
+            TaskError::ExpectedError(msg) => RunJobError::Retryable(anyhow!(msg.to_owned())),
             // Report task timeouts as a fatal errors, since this means the
             // compilation took longer than the scheduler's `job_time_limit`.
             //
