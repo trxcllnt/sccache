@@ -677,8 +677,8 @@ impl Default for DistNetworking {
             // Users should set their load balancer's idle timeout to match or
             // exceed this value.
             request_timeout: 600,
-            // Default to not using reqwest's connection pool
-            connection_pool: false,
+            // Default to using reqwest's HTTP/2 connection pool
+            connection_pool: true,
             keepalive: Default::default(),
         }
     }
@@ -712,9 +712,9 @@ impl DistNetworkingKeepalive {
 impl Default for DistNetworkingKeepalive {
     fn default() -> Self {
         Self {
-            enabled: false,
-            timeout: 60,
-            interval: 20,
+            enabled: true,
+            timeout: 15,
+            interval: 15,
         }
     }
 }
