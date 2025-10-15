@@ -1150,57 +1150,38 @@ pub fn new_reqwest_client(config: Option<crate::config::DistNetworking>) -> reqw
     let config = config.unwrap_or_default();
     let request_timeout = Duration::from_secs(config.request_timeout);
     let connect_timeout = Duration::from_secs(config.connect_timeout);
+    let keepalive_timeout = Duration::from_secs(config.keepalive.timeout);
+    let keepalive_interval = Duration::from_secs(config.keepalive.interval);
+    let keepalive = config.keepalive.enabled;
 
     let builder = reqwest::Client::builder()
-        // .connection_verbose(true) // for debugging
         // HTTP/2
         .http2_adaptive_window(true)
-        .http2_prior_knowledge() // force HTTP/2
+        .http2_keep_alive_while_idle(true)
+        .http2_prior_knowledge() // Prefer HTTP/2
         // Timeouts
         .timeout(request_timeout)
-        .connect_timeout(connect_timeout);
+        .connect_timeout(connect_timeout)
+        // Keepalive
+        .http2_keep_alive_timeout(keepalive_timeout)
+        .tcp_keepalive_retries(keepalive.then_some(3))
+        .tcp_keepalive(keepalive.then_some(keepalive_timeout))
+        .tcp_keepalive_interval(keepalive.then_some(keepalive_interval))
+        .http2_keep_alive_interval(keepalive.then_some(keepalive_interval));
+
+    #[cfg(target_os = "linux")]
+    let builder = builder.tcp_user_timeout(keepalive.then_some(keepalive_timeout));
 
     // Connection pool
-    let builder = if config.connection_pool {
-        // This has to be at least as long as `request_timeout`, otherwise
-        // reqwest will close idle connections before build jobs are done.
-        //
-        // Users should set their load balancer's idle timeout to the same
-        // value as `request_timeout` (AWS's ALB default is 60s).
-        builder.pool_idle_timeout(request_timeout)
-    } else {
+    let builder = if !config.connection_pool {
         // Disable connection pool
-        builder.pool_max_idle_per_host(0)
-    };
-
-    // keepalive
-    let builder = if config.keepalive.enabled {
-        let builder = if config.keepalive.timeout > 0 {
-            let timeout = Duration::from_secs(config.keepalive.timeout);
-            let builder = builder.tcp_keepalive(timeout);
-            #[cfg(target_os = "linux")]
-            let builder = builder.tcp_user_timeout(timeout);
-            builder.http2_keep_alive_timeout(timeout)
-        } else {
-            builder
-        };
-
-        if config.keepalive.interval > 0 {
-            let interval = Duration::from_secs(config.keepalive.interval);
-            builder
-                .http2_keep_alive_while_idle(true)
-                .tcp_keepalive_interval(interval)
-                .http2_keep_alive_interval(interval)
-        } else {
-            builder
-        }
+        builder
+            .pool_max_idle_per_host(0)
+            .pool_idle_timeout(Duration::from_secs(0))
+    } else if keepalive {
+        builder.pool_idle_timeout(keepalive_timeout * 3)
     } else {
-        let mut headers = http::HeaderMap::new();
-        headers.insert(
-            http::header::CONNECTION,
-            http::HeaderValue::from_static("close"),
-        );
-        builder.default_headers(headers)
+        builder
     };
 
     builder

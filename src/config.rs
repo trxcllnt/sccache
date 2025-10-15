@@ -672,7 +672,7 @@ impl Default for DistNetworking {
     fn default() -> Self {
         Self {
             // Default timeout for connections to an sccache-dist server
-            connect_timeout: 5,
+            connect_timeout: 30,
             // Default timeout for compile requests to an sccache-dist server.
             // Users should set their load balancer's idle timeout to match or
             // exceed this value.
