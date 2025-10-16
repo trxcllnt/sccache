@@ -1210,17 +1210,19 @@ where
             // and we don't want to OOM the server during parallel builds.
             let job_inputs = try_or_cleanup!(crate::util::normal_tempfile());
 
-            try_or_cleanup!(inputs_packager
-                .write_inputs(
-                    &mut path_transformer,
-                    crate::dist::pkg::InputsCompressor::new(flate2::write::ZlibEncoder::new(
-                        try_or_cleanup!(job_inputs.reopen()),
-                        // Optimize for size since bandwidth costs more than client CPU cycles
-                        flate2::Compression::best(),
-                    )),
-                )
-                .await
-                .context("Could not write inputs for compilation"));
+            try_or_cleanup!(
+                inputs_packager
+                    .write_inputs(
+                        &mut path_transformer,
+                        crate::dist::pkg::InputsCompressor::new(flate2::write::ZlibEncoder::new(
+                            try_or_cleanup!(job_inputs.reopen()),
+                            // Optimize for size since bandwidth costs more than client CPU cycles
+                            flate2::Compression::best(),
+                        )),
+                    )
+                    .await
+                    .context("Could not write inputs for compilation")
+            );
 
             job_inputs
         };
@@ -1383,13 +1385,17 @@ where
                 //
                 // Fatal errors are not retryable.
                 Ok(RunJobResponse::FatalError { message, server_id }) => {
-                    error!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation failed (fatal): {message}");
+                    error!(
+                        "[{out_pretty}, {job_id}, {server_id}]: Distributed compilation failed (fatal): {message}"
+                    );
                     break Err(anyhow!(message));
                 }
                 // Disk errors, build process killed, server shutdown, etc.
                 // Can be retried.
                 Ok(RunJobResponse::RetryableError { message, server_id }) => {
-                    debug!("[{out_pretty}, {job_id}, {server_id}]: Distributed compilation failed (retryable): {message:?}");
+                    debug!(
+                        "[{out_pretty}, {job_id}, {server_id}]: Distributed compilation failed (retryable): {message:?}"
+                    );
                     retry_or_bail!(anyhow!("{message:?}"));
                 }
                 // Missing inputs (S3 cleared, Redis rebooted, etc.)
@@ -1397,7 +1403,9 @@ where
                 Ok(RunJobResponse::MissingJobInputs { server_id }) => {
                     // If we retry, send the inputs again
                     has_inputs = false;
-                    debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job inputs");
+                    debug!(
+                        "[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job inputs"
+                    );
                     retry_or_bail!(anyhow!("Missing distributed compilation job inputs"));
                 }
                 // Missing toolchain (S3 cleared, Redis rebooted, etc.)
@@ -1405,7 +1413,9 @@ where
                 Ok(RunJobResponse::MissingToolchain { server_id }) => {
                     // If we retry, send the toolchain again
                     has_toolchain = false;
-                    debug!("[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job toolchain");
+                    debug!(
+                        "[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job toolchain"
+                    );
                     retry_or_bail!(anyhow!("Missing distributed compilation job toolchain"));
                 }
                 // Missing result (S3 cleared, Redis rebooted, etc.),
@@ -2151,8 +2161,8 @@ use self::ArgData::PassThrough as Detect_PassThrough;
 //  gcc is expected to exist on the PATH. So if gcc doesn't exist
 //  compiler detection fails if we don't pass along the ccbin arg
 counted_array!(static ARGS: [ArgInfo<ArgData>; _] = [
-    take_arg!("--compiler-bindir", OsString, CanBeSeparated('='), Detect_PassThrough),
-    take_arg!("-ccbin", OsString, CanBeSeparated('='), Detect_PassThrough),
+    take_arg!("--compiler-bindir", OsString, CanBeSeparated(b'='), Detect_PassThrough),
+    take_arg!("-ccbin", OsString, CanBeSeparated(b'='), Detect_PassThrough),
 ]);
 
 pub fn compiler_info_args(arguments: &[OsString]) -> Vec<OsString> {
@@ -2760,32 +2770,36 @@ LLVM version: 6.0",
         let creator = new_creator();
         next_command(&creator, Ok(MockChild::new(exit_status(1), "", "no -vV")));
         populate_rustc_command_mock(&creator, &f);
-        assert!(detect_compiler(
-            creator,
-            &rustc,
-            f.tempdir.path(),
-            &[OsString::from("not-rustc")],
-            &[(OsString::from("CARGO"), OsString::from("CARGO"))],
-            pool,
-            None,
-        )
-        .wait()
-        .is_err());
+        assert!(
+            detect_compiler(
+                creator,
+                &rustc,
+                f.tempdir.path(),
+                &[OsString::from("not-rustc")],
+                &[(OsString::from("CARGO"), OsString::from("CARGO"))],
+                pool,
+                None,
+            )
+            .wait()
+            .is_err()
+        );
 
         // Test we detect rustc if the CARGO env is not defined
         let creator = new_creator();
         populate_rustc_command_mock(&creator, &f);
-        assert!(detect_compiler(
-            creator,
-            &rustc,
-            f.tempdir.path(),
-            &[OsString::from("rustc")],
-            &[],
-            pool,
-            None,
-        )
-        .wait()
-        .is_ok());
+        assert!(
+            detect_compiler(
+                creator,
+                &rustc,
+                f.tempdir.path(),
+                &[OsString::from("rustc")],
+                &[],
+                pool,
+                None,
+            )
+            .wait()
+            .is_ok()
+        );
     }
 
     #[test]
@@ -2819,17 +2833,19 @@ LLVM version: 6.0",
             &creator,
             Ok(MockChild::new(exit_status(0), "something", "")),
         );
-        assert!(detect_compiler(
-            creator,
-            "/foo/bar".as_ref(),
-            f.tempdir.path(),
-            &[],
-            &[],
-            pool,
-            None
-        )
-        .wait()
-        .is_err());
+        assert!(
+            detect_compiler(
+                creator,
+                "/foo/bar".as_ref(),
+                f.tempdir.path(),
+                &[],
+                &[],
+                pool,
+                None
+            )
+            .wait()
+            .is_err()
+        );
     }
 
     #[test]
@@ -2841,17 +2857,19 @@ LLVM version: 6.0",
         let pool = runtime.handle();
         next_command(&creator, Ok(MockChild::new(exit_status(1), "", "no -vV")));
         next_command(&creator, Ok(MockChild::new(exit_status(1), "", "")));
-        assert!(detect_compiler(
-            creator,
-            "/foo/bar".as_ref(),
-            f.tempdir.path(),
-            &[],
-            &[],
-            pool,
-            None
-        )
-        .wait()
-        .is_err());
+        assert!(
+            detect_compiler(
+                creator,
+                "/foo/bar".as_ref(),
+                f.tempdir.path(),
+                &[],
+                &[],
+                pool,
+                None
+            )
+            .wait()
+            .is_err()
+        );
     }
 
     #[test_case(true ; "with preprocessor cache")]
@@ -3866,11 +3884,11 @@ mod test_dist {
         self, CompileCommand, NewJobResponse, OutputData, RunJobResponse, SchedulerStatus,
         SubmitToolchainResult, Toolchain,
     };
-    use crate::dist::{pkg, BuildResult};
+    use crate::dist::{BuildResult, pkg};
     use crate::mock_command::ProcessOutput;
     use async_trait::async_trait;
     use std::path::{Path, PathBuf};
-    use std::sync::{atomic::AtomicBool, Arc};
+    use std::sync::{Arc, atomic::AtomicBool};
     use std::time::Duration;
 
     use crate::errors::*;
@@ -4013,9 +4031,11 @@ mod test_dist {
     #[async_trait]
     impl dist::Client for ErrorSubmitToolchainClient {
         async fn new_job(&self, tc: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
-            assert!(!self
-                .has_started
-                .swap(true, std::sync::atomic::Ordering::SeqCst));
+            assert!(
+                !self
+                    .has_started
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+            );
             assert_eq!(self.tc, tc);
 
             Ok(NewJobResponse {
@@ -4089,9 +4109,11 @@ mod test_dist {
     #[async_trait]
     impl dist::Client for ErrorRunJobClient {
         async fn new_job(&self, tc: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
-            assert!(!self
-                .has_started
-                .swap(true, std::sync::atomic::Ordering::SeqCst));
+            assert!(
+                !self
+                    .has_started
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+            );
             assert_eq!(self.tc, tc);
 
             Ok(NewJobResponse {
@@ -4178,9 +4200,11 @@ mod test_dist {
     #[async_trait]
     impl dist::Client for OneshotClient {
         async fn new_job(&self, tc: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
-            assert!(!self
-                .has_started
-                .swap(true, std::sync::atomic::Ordering::SeqCst));
+            assert!(
+                !self
+                    .has_started
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+            );
             assert_eq!(self.tc, tc);
             Ok(NewJobResponse {
                 has_inputs: true,

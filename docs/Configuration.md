@@ -21,7 +21,12 @@ token = "secrettoken"
 
 
 #[cache.azure]
-# does not work as it appears
+# Azure Storage connection string (see <https://docs.azure.cn/en-us/storage/common/storage-configure-connection-string>)
+connection_string = "BlobEndpoint=https://example.blob.core.windows.net/;SharedAccessSignature=..."
+# Name of container
+container = "my_container_name"
+# Optional string to prepend to each blob storage key
+key_prefix = ""
 
 [cache.disk]
 dir = "/tmp/.cache/sccache"
@@ -133,6 +138,7 @@ configuration variables
   - For example, in `10`, it have about 0.9x size with about 1.6x time than default `3` (tested with compiling sccache code)
   - This option will only applied to newly compressed cache and don't affect existing cache.
   - If you want to be apply to all cache, you should reset cache and make new cache.
+* `SCCACHE_LOG_MILLIS` when set (to any value), enables millisecond precision timestamps in log output instead of the default second precision.
 
 ### dist
 * `SCCACHE_DIST_CONNECT_TIMEOUT` timeout in seconds for connections to an sccache-dist server. Default is `5`.
@@ -199,6 +205,8 @@ The full url appears then as `redis://user:passwd@1.2.3.4:6379/?db=1`.
 #### azure
 
 * `SCCACHE_AZURE_CONNECTION_STRING`
+* `SCCACHE_AZURE_BLOB_CONTAINER`
+* `SCCACHE_AZURE_KEY_PREFIX`
 
 #### gha
 

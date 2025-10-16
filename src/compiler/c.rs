@@ -15,13 +15,13 @@
 use crate::{
     cache::{FileObjectSource, PreprocessorCacheModeConfig, Storage},
     compiler::{
-        preprocessor_cache::preprocessor_cache_entry_hash_key, Cacheable, ColorMode, Compilation,
-        CompileCommand, CompileCommandImpl, Compiler, CompilerArguments, CompilerHasher,
-        CompilerKind, HashResult, Language,
+        Cacheable, ColorMode, Compilation, CompileCommand, CompileCommandImpl, Compiler,
+        CompilerArguments, CompilerHasher, CompilerKind, HashResult, Language,
+        preprocessor_cache::preprocessor_cache_entry_hash_key,
     },
     dist,
     mock_command::{CommandCreatorSync, ProcessOutput},
-    util::{hash_all, Digest, HashToDigest, TimeMacroFinder},
+    util::{Digest, HashToDigest, TimeMacroFinder, hash_all},
 };
 
 #[cfg(feature = "dist-client")]
@@ -47,8 +47,8 @@ use tempfile::TempPath;
 
 use crate::errors::*;
 
-use super::preprocessor_cache::PreprocessorCacheEntry;
 use super::CacheControl;
+use super::preprocessor_cache::PreprocessorCacheEntry;
 
 /// A generic implementation of the `Compiler` trait for C/C++ compilers.
 #[derive(Clone)]
@@ -522,7 +522,9 @@ where
                 if updated {
                     // Time macros have been found, we need to update
                     // the preprocessor cache entry. See [`PreprocessorCacheEntry::result_matches`].
-                    debug!("[{out_pretty}]: Preprocessor cache updated because of time macros: {preprocessor_key}");
+                    debug!(
+                        "[{out_pretty}]: Preprocessor cache updated because of time macros: {preprocessor_key}"
+                    );
 
                     if let Err(e) = storage
                         .put_preprocessor_cache_entry(&preprocessor_key, preprocessor_cache_entry)
@@ -1364,7 +1366,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                 };
 
                 let (contents, dirs, mut files): (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) = {
-                    use futures::{future, io::BufReader, AsyncBufReadExt, TryStreamExt};
+                    use futures::{AsyncBufReadExt, TryStreamExt, future, io::BufReader};
                     use std::process::Stdio;
                     use tokio_util::compat::TokioAsyncReadCompatExt;
 

@@ -21,11 +21,11 @@ use crate::compiler::c::{
     ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
 };
 use crate::compiler::{
-    gcc, Cacheable, ColorMode, CompileCommandImpl, CompilerArguments, Language,
-    SingleCompileCommand,
+    Cacheable, ColorMode, CompileCommandImpl, CompilerArguments, Language, SingleCompileCommand,
+    gcc,
 };
 use crate::mock_command::{CommandCreatorSync, RunCommand};
-use crate::util::{run_input_output, temp_path, OsStrExt};
+use crate::util::{OsStrExt, run_input_output, temp_path};
 use crate::{counted_array, dist};
 use crate::{debug_if_trace, errors::*};
 use async_trait::async_trait;
@@ -163,13 +163,13 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!(
         "-Xmake-dependency-savefile",
         PathBuf,
-        Concatenated('='),
+        Concatenated(b'='),
         DepArgumentPath
     ),
     take_arg!(
         "-Xmake-dependency-target",
         OsString,
-        Concatenated('='),
+        Concatenated(b'='),
         DepArgument
     ),
     flag!("-c", DoCompilation),
@@ -641,8 +641,8 @@ impl Iterator for ExpandAtArgs<'_> {
 #[cfg(test)]
 mod test {
     use super::{
-        dist, fs, generate_compile_commands, parse_arguments, Language, OsString, ParsedArguments,
-        ARGS,
+        ARGS, Language, OsString, ParsedArguments, dist, fs, generate_compile_commands,
+        parse_arguments,
     };
     use crate::compiler::c::ArtifactDescriptor;
     use crate::compiler::*;

@@ -20,6 +20,9 @@ pub use self::{
     server::{ClientAuthCheck, ClientVisibleMsg},
 };
 
+#[cfg(any(feature = "dist-client", feature = "dist-server"))]
+pub use self::common::bincode_req_fut;
+
 pub use self::common::{bincode_deserialize, bincode_serialize};
 
 mod common {
@@ -179,20 +182,21 @@ mod scheduler {
     use async_trait::async_trait;
 
     use axum::{
+        RequestExt, RequestPartsExt, Router,
         body::Bytes,
         extract::{
             ConnectInfo, Extension, FromRequest, FromRequestParts, MatchedPath, Path, Request,
         },
-        http::{request::Parts, StatusCode},
+        http::{StatusCode, request::Parts},
         response::{IntoResponse, Response},
-        routing, RequestExt, RequestPartsExt, Router,
+        routing,
     };
 
     use axum_extra::{
-        headers::{
-            authorization::Bearer, Authorization, ContentLength, ContentType, Header, HeaderValue,
-        },
         TypedHeader,
+        headers::{
+            Authorization, ContentLength, ContentType, Header, HeaderValue, authorization::Bearer,
+        },
     };
 
     use futures::{TryFutureExt, TryStreamExt};
@@ -216,9 +220,9 @@ mod scheduler {
     };
 
     use crate::dist::{
-        http::{bincode_deserialize, bincode_serialize, ClientAuthCheck, ClientVisibleMsg},
-        metrics::Metrics,
         RunJobRequest, SchedulerService, Toolchain,
+        http::{ClientAuthCheck, ClientVisibleMsg, bincode_deserialize, bincode_serialize},
+        metrics::Metrics,
     };
 
     use crate::errors::*;
@@ -270,7 +274,7 @@ mod scheduler {
                                 )
                             }
                         }
-                        .into_response())
+                        .into_response());
                     }
                     _ => continue,
                 }
@@ -804,12 +808,6 @@ mod scheduler {
                 .handle(handle.clone())
                 .serve(
                     Self::tracing(Self::metrics(Self::routes(), metrics))
-                        .route_layer(axum::middleware::from_fn(
-                            |req: Request, next: axum::middleware::Next| async move {
-                                let res = next.run(req).await;
-                                res
-                            },
-                        ))
                         // Authenticate the client bearer token first
                         .route_layer(axum::middleware::from_extractor::<RequireAuth>())
                         // Limit request body size
@@ -838,11 +836,11 @@ mod client {
     use crate::{
         config,
         dist::{
-            self, pkg::ToolchainPackager, CompileCommand, NewJobResponse, RunJobRequest,
-            RunJobResponse, SchedulerStatus, SubmitToolchainResult, Toolchain,
+            self, CompileCommand, NewJobResponse, RunJobRequest, RunJobResponse, SchedulerStatus,
+            SubmitToolchainResult, Toolchain, pkg::ToolchainPackager,
         },
         errors::*,
-        util::{new_reqwest_client, AsyncMulticast, AsyncMulticastFunc},
+        util::{AsyncMulticast, AsyncMulticastFunc, new_reqwest_client},
     };
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -855,7 +853,7 @@ mod client {
     use reqwest::Body;
     use std::path::{Path, PathBuf};
 
-    use super::common::{bincode_req_fut, ReqwestRequestBuilderExt};
+    use super::common::{ReqwestRequestBuilderExt, bincode_req_fut};
     use super::{bincode_serialize, urls};
 
     struct SubmitToolchainFn {

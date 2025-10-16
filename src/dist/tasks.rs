@@ -15,11 +15,11 @@
 use async_trait::async_trait;
 
 use celery::{
+    Celery,
     error::CeleryError,
     prelude::*,
     protocol::MessageContentType,
     task::{AsyncResult, Request, Signature, Task, TaskOptions},
-    Celery,
 };
 
 use futures::FutureExt;
@@ -29,9 +29,9 @@ use std::{boxed::Box, sync::Arc};
 use crate::{
     config::MessageBroker,
     dist::{
-        scheduler::SchedulerTasks, scheduler_to_servers_queue, server::ServerTasks,
-        server_to_schedulers_queue, to_scheduler_queue, CompileCommand, RunJobError,
-        RunJobResponse, SchedulerService, ServerDetails, ServerService, Toolchain,
+        CompileCommand, RunJobError, RunJobResponse, SchedulerService, ServerDetails,
+        ServerService, Toolchain, scheduler::SchedulerTasks, scheduler_to_servers_queue,
+        server::ServerTasks, server_to_schedulers_queue, to_scheduler_queue,
     },
     errors::*,
 };

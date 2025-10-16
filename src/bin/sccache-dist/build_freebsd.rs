@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use async_compression::futures::bufread::ZlibDecoder as ZlibDecoderAsync;
 use async_trait::async_trait;
 use bytes::Buf;
@@ -20,7 +20,7 @@ use futures::lock::Mutex;
 use itertools::Itertools;
 use sccache::dist::{BuildResult, BuilderIncoming, CompileCommand, OutputData};
 use sccache::mock_command::ProcessOutput;
-use std::collections::{hash_map, HashMap};
+use std::collections::{HashMap, hash_map};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
@@ -235,7 +235,9 @@ impl PotBuilder {
         if let Err(e) = Self::clean_container(cid).await {
             tracing::info!("[finish_container({job_id})]: Failed to clean container {cid}: {e}");
             if let Err(e) = pot_rm(cid, pot_cmd).await {
-                tracing::warn!("[finish_container({job_id})]: Failed to remove container {cid} after failed clean: {e}");
+                tracing::warn!(
+                    "[finish_container({job_id})]: Failed to remove container {cid} after failed clean: {e}"
+                );
             }
             return;
         }
@@ -249,7 +251,9 @@ impl PotBuilder {
             tracing::debug!("[finish_container({job_id})]: Reclaimed container {cid}");
             entry.push(cid.to_owned())
         } else {
-            tracing::warn!("[finish_container({job_id})]: Was ready to reclaim container {cid} but toolchain went missing");
+            tracing::warn!(
+                "[finish_container({job_id})]: Was ready to reclaim container {cid} but toolchain went missing"
+            );
             if let Err(e) = pot_rm(cid, pot_cmd).await {
                 tracing::warn!(
                     "[finish_container({job_id})]: Failed to remove container {cid}: {e}"

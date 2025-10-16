@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use anyhow::{anyhow, bail, Context, Error};
+pub use anyhow::{Context, Error, anyhow, bail};
 
 use crate::mock_command::ProcessOutput;
 

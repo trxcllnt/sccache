@@ -18,7 +18,7 @@ use blake3::Hasher as blake3_Hasher;
 use byteorder::{BigEndian, ByteOrder};
 use fs::File;
 use fs_err as fs;
-use futures::{lock::Mutex, AsyncRead, AsyncReadExt};
+use futures::{AsyncRead, AsyncReadExt, lock::Mutex};
 use object::read::{
     archive::ArchiveFile,
     macho::{FatArch, MachOFatFile32, MachOFatFile64},
@@ -41,8 +41,8 @@ use std::{
     time::{self, Duration, SystemTime},
 };
 use tempfile::TempPath;
-use tokio_retry2::strategy::FibonacciBackoff;
 use tokio_retry2::Retry;
+use tokio_retry2::strategy::FibonacciBackoff;
 
 use crate::errors::*;
 
@@ -730,22 +730,14 @@ impl OsStrExt for OsStr {
         let p = OsStr::new(s).as_encoded_bytes();
         let s = self.as_encoded_bytes();
         let (m, n) = (s.len(), p.len());
-        if m < n {
-            false
-        } else {
-            p == &s[m - n..]
-        }
+        if m < n { false } else { p == &s[m - n..] }
     }
 
     fn starts_with(&self, s: &str) -> bool {
         let p = OsStr::new(s).as_encoded_bytes();
         let s = self.as_encoded_bytes();
         let (m, n) = (s.len(), p.len());
-        if m < n {
-            false
-        } else {
-            p == &s[0..n]
-        }
+        if m < n { false } else { p == &s[0..n] }
     }
 
     fn split_prefix(&self, s: &str) -> Option<OsString> {
@@ -800,7 +792,7 @@ pub fn decode_path(bytes: &[u8]) -> std::io::Result<PathBuf> {
 
 #[cfg(windows)]
 pub fn wide_char_to_multi_byte(wide_char_str: &[u16]) -> std::io::Result<Vec<u8>> {
-    use windows_sys::Win32::Globalization::{WideCharToMultiByte, CP_OEMCP};
+    use windows_sys::Win32::Globalization::{CP_OEMCP, WideCharToMultiByte};
 
     let codepage = CP_OEMCP;
     let flags = 0;

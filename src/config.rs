@@ -20,8 +20,8 @@ use once_cell::sync::Lazy;
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 use serde::ser::Serializer;
 use serde::{
-    de::{DeserializeOwned, Deserializer},
     Deserialize, Serialize,
+    de::{self, DeserializeOwned, Deserializer},
 };
 #[cfg(test)]
 use serial_test::serial;
@@ -70,8 +70,50 @@ fn default_toolchain_cache_size() -> u64 {
     TEN_GIGS
 }
 
+struct StringOrU64Visitor;
+
+impl de::Visitor<'_> for StringOrU64Visitor {
+    type Value = u64;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a string with size suffix (like '20G') or a u64")
+    }
+
+    fn visit_str<E>(self, value: &str) -> StdResult<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        parse_size(value).ok_or_else(|| E::custom(format!("Invalid size value: {}", value)))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> StdResult<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(value)
+    }
+
+    fn visit_i64<E>(self, value: i64) -> StdResult<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        if value < 0 {
+            Err(E::custom("negative values not supported"))
+        } else {
+            Ok(value as u64)
+        }
+    }
+}
+
+fn deserialize_size_from_str<'de, D>(deserializer: D) -> StdResult<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(StringOrU64Visitor)
+}
+
 pub fn parse_size(val: &str) -> Option<u64> {
-    let multiplier = match val.chars().last() {
+    let multiplier = match val.chars().last().map(|v| v.to_ascii_uppercase()) {
         Some('K') => 1024,
         Some('M') => 1024 * 1024,
         Some('G') => 1024 * 1024 * 1024,
@@ -153,7 +195,7 @@ pub struct AzureCacheConfig {
 #[serde(default)]
 pub struct DiskCacheConfig {
     pub dir: PathBuf,
-    // TODO: use deserialize_with to allow human-readable sizes in toml
+    #[serde(deserialize_with = "deserialize_size_from_str")]
     pub size: u64,
     pub preprocessor_cache_mode: PreprocessorCacheModeConfig,
     pub rw_mode: CacheModeConfig,
@@ -735,6 +777,7 @@ pub struct DistConfig {
     #[cfg(not(any(feature = "dist-client", feature = "dist-server")))]
     pub scheduler_url: Option<String>,
     pub toolchains: Vec<DistToolchainConfig>,
+    #[serde(deserialize_with = "deserialize_size_from_str")]
     pub toolchain_cache_size: u64,
 }
 
@@ -1455,9 +1498,9 @@ pub mod scheduler {
     use serde::{Deserialize, Serialize};
 
     use super::{
-        config_from_env, default_disk_cache_dir, default_disk_cache_size, number_from_env_var,
-        try_read_config_file, CacheConfigs, CacheModeConfig, DiskCacheConfig, MessageBroker,
-        MetricsConfigs, StorageConfig,
+        CacheConfigs, CacheModeConfig, DiskCacheConfig, MessageBroker, MetricsConfigs,
+        StorageConfig, config_from_env, default_disk_cache_dir, default_disk_cache_size,
+        number_from_env_var, try_read_config_file,
     };
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1642,9 +1685,9 @@ pub mod scheduler {
 #[cfg(feature = "dist-server")]
 pub mod server {
     use super::{
-        config_from_env, default_disk_cache_dir, default_disk_cache_size, number_from_env_var,
-        try_read_config_file, CacheConfigs, CacheModeConfig, DiskCacheConfig, MessageBroker,
-        MetricsConfigs, PrometheusMetricsConfig, StorageConfig,
+        CacheConfigs, CacheModeConfig, DiskCacheConfig, MessageBroker, MetricsConfigs,
+        PrometheusMetricsConfig, StorageConfig, config_from_env, default_disk_cache_dir,
+        default_disk_cache_size, number_from_env_var, try_read_config_file,
     };
     use serde::{Deserialize, Serialize};
     use std::env;
@@ -1804,7 +1847,9 @@ pub mod server {
                 .unwrap_or_default();
 
             if let Some(PrometheusMetricsConfig::ListenPath { .. }) = metrics.prometheus {
-                return Err(anyhow!("Invalid config `metrics.prometheus.type=\"path\"`. Choose `type = \"addr\"` or `type = \"push\"`"));
+                return Err(anyhow!(
+                    "Invalid config `metrics.prometheus.type=\"path\"`. Choose `type = \"addr\"` or `type = \"push\"`"
+                ));
             }
 
             let builder = if let Ok(builder_type) = env::var("SCCACHE_DIST_BUILDER_TYPE") {
@@ -1951,6 +1996,7 @@ fn test_parse_size() {
     assert_eq!(None, parse_size("bogus value"));
     assert_eq!(Some(100), parse_size("100"));
     assert_eq!(Some(2048), parse_size("2K"));
+    assert_eq!(Some(2048), parse_size("2k"));
     assert_eq!(Some(10 * 1024 * 1024), parse_size("10M"));
     assert_eq!(Some(TEN_GIGS), parse_size("10G"));
     assert_eq!(Some(1024 * TEN_GIGS), parse_size("10T"));
@@ -2037,17 +2083,21 @@ fn config_overrides() {
 #[serial]
 #[cfg(feature = "s3")]
 fn test_s3_no_credentials_conflict() {
-    env::set_var("SCCACHE_S3_NO_CREDENTIALS", "true");
-    env::set_var("SCCACHE_BUCKET", "my-bucket");
-    env::set_var("AWS_ACCESS_KEY_ID", "aws-access-key-id");
-    env::set_var("AWS_SECRET_ACCESS_KEY", "aws-secret-access-key");
+    unsafe {
+        env::set_var("SCCACHE_S3_NO_CREDENTIALS", "true");
+        env::set_var("SCCACHE_BUCKET", "my-bucket");
+        env::set_var("AWS_ACCESS_KEY_ID", "aws-access-key-id");
+        env::set_var("AWS_SECRET_ACCESS_KEY", "aws-secret-access-key");
+    }
 
     let cfg = config_from_env("SCCACHE_");
 
-    env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
-    env::remove_var("SCCACHE_BUCKET");
-    env::remove_var("AWS_ACCESS_KEY_ID");
-    env::remove_var("AWS_SECRET_ACCESS_KEY");
+    unsafe {
+        env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
+        env::remove_var("SCCACHE_BUCKET");
+        env::remove_var("AWS_ACCESS_KEY_ID");
+        env::remove_var("AWS_SECRET_ACCESS_KEY");
+    }
 
     let error = cfg.unwrap_err();
     assert_eq!(
@@ -2059,13 +2109,17 @@ fn test_s3_no_credentials_conflict() {
 #[test]
 #[serial]
 fn test_s3_no_credentials_invalid() {
-    env::set_var("SCCACHE_S3_NO_CREDENTIALS", "yes");
-    env::set_var("SCCACHE_BUCKET", "my-bucket");
+    unsafe {
+        env::set_var("SCCACHE_S3_NO_CREDENTIALS", "yes");
+        env::set_var("SCCACHE_BUCKET", "my-bucket");
+    }
 
     let cfg = config_from_env("SCCACHE_");
 
-    env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
-    env::remove_var("SCCACHE_BUCKET");
+    unsafe {
+        env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
+        env::remove_var("SCCACHE_BUCKET");
+    }
 
     let error = cfg.unwrap_err();
     assert_eq!(
@@ -2077,13 +2131,17 @@ fn test_s3_no_credentials_invalid() {
 #[test]
 #[serial]
 fn test_s3_no_credentials_valid_true() {
-    env::set_var("SCCACHE_S3_NO_CREDENTIALS", "true");
-    env::set_var("SCCACHE_BUCKET", "my-bucket");
+    unsafe {
+        env::set_var("SCCACHE_S3_NO_CREDENTIALS", "true");
+        env::set_var("SCCACHE_BUCKET", "my-bucket");
+    }
 
     let cfg = config_from_env("SCCACHE_");
 
-    env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
-    env::remove_var("SCCACHE_BUCKET");
+    unsafe {
+        env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
+        env::remove_var("SCCACHE_BUCKET");
+    }
 
     let env_cfg = cfg.unwrap();
     match env_cfg.cache.s3 {
@@ -2102,13 +2160,17 @@ fn test_s3_no_credentials_valid_true() {
 #[test]
 #[serial]
 fn test_s3_no_credentials_valid_false() {
-    env::set_var("SCCACHE_S3_NO_CREDENTIALS", "false");
-    env::set_var("SCCACHE_BUCKET", "my-bucket");
+    unsafe {
+        env::set_var("SCCACHE_S3_NO_CREDENTIALS", "false");
+        env::set_var("SCCACHE_BUCKET", "my-bucket");
+    }
 
     let cfg = config_from_env("SCCACHE_");
 
-    env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
-    env::remove_var("SCCACHE_BUCKET");
+    unsafe {
+        env::remove_var("SCCACHE_S3_NO_CREDENTIALS");
+        env::remove_var("SCCACHE_BUCKET");
+    }
 
     let env_cfg = cfg.unwrap();
     match env_cfg.cache.s3 {
@@ -2128,16 +2190,20 @@ fn test_s3_no_credentials_valid_false() {
 #[serial]
 #[cfg(feature = "gcs")]
 fn test_gcs_service_account() {
-    env::set_var("SCCACHE_S3_NO_CREDENTIALS", "false");
-    env::set_var("SCCACHE_GCS_BUCKET", "my-bucket");
-    env::set_var("SCCACHE_GCS_SERVICE_ACCOUNT", "my@example.com");
-    env::set_var("SCCACHE_GCS_RW_MODE", "READ_WRITE");
+    unsafe {
+        env::set_var("SCCACHE_S3_NO_CREDENTIALS", "false");
+        env::set_var("SCCACHE_GCS_BUCKET", "my-bucket");
+        env::set_var("SCCACHE_GCS_SERVICE_ACCOUNT", "my@example.com");
+        env::set_var("SCCACHE_GCS_RW_MODE", "READ_WRITE");
+    }
 
     let cfg = config_from_env("SCCACHE_");
 
-    env::remove_var("SCCACHE_GCS_BUCKET");
-    env::remove_var("SCCACHE_GCS_SERVICE_ACCOUNT");
-    env::remove_var("SCCACHE_GCS_RW_MODE");
+    unsafe {
+        env::remove_var("SCCACHE_GCS_BUCKET");
+        env::remove_var("SCCACHE_GCS_SERVICE_ACCOUNT");
+        env::remove_var("SCCACHE_GCS_RW_MODE");
+    }
 
     let env_cfg = cfg.unwrap();
     match env_cfg.cache.gcs {
@@ -2393,4 +2459,34 @@ fn server_toml_parse() {
             ..Default::default()
         }
     )
+}
+
+#[test]
+fn human_units_parse() {
+    const CONFIG_STR: &str = r#"
+[dist]
+toolchain_cache_size = "5g"
+
+[cache.disk]
+size = "7g"
+"#;
+
+    let file_config: FileConfig = toml::from_str(CONFIG_STR).expect("Is valid toml.");
+    assert_eq!(
+        file_config,
+        FileConfig {
+            cache: CacheConfigs {
+                disk: Some(DiskCacheConfig {
+                    size: 7 * 1024 * 1024 * 1024,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            dist: DistConfig {
+                toolchain_cache_size: 5 * 1024 * 1024 * 1024,
+                ..Default::default()
+            },
+            server_startup_timeout_ms: None,
+        }
+    );
 }

@@ -14,14 +14,15 @@
 
 use crate::compiler::CompileCommandImpl;
 use crate::mock_command::{CommandCreatorSync, RunCommand};
-use crate::util::{decode_path, run_input_output, OsStrExt};
+use crate::util::{OsStrExt, decode_path, run_input_output};
 use crate::{
     compiler::{
+        Cacheable, ColorMode, CompilerArguments, Language, SingleCompileCommand,
         args::*,
         c::{
             ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
         },
-        clang, Cacheable, ColorMode, CompilerArguments, Language, SingleCompileCommand,
+        clang,
     },
     util::temp_path,
 };
@@ -273,7 +274,7 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("-U", OsString, CanBeSeparated, PassThrough),
     take_arg!("-V", OsString, Separated, PassThrough),
     flag!("-Werror=pedantic", PedanticFlag),
-    take_arg!("-Wp", OsString, Concatenated(','), PreprocessorArgument),
+    take_arg!("-Wp", OsString, Concatenated(b','), PreprocessorArgument),
     flag!("-Wpedantic", PedanticFlag),
     take_arg!("-Xassembler", OsString, Separated, PassThrough),
     take_arg!("-Xlinker", OsString, Separated, PassThrough),
@@ -282,7 +283,7 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("-aux-info", OsString, Separated, PassThrough),
     take_arg!("-b", OsString, Separated, PassThrough),
     flag!("-c", DoCompilation),
-    take_arg!("-fdiagnostics-color", OsString, Concatenated('='), DiagnosticsColor),
+    take_arg!("-fdiagnostics-color", OsString, Concatenated(b'='), DiagnosticsColor),
     flag!("-fno-diagnostics-color", NoDiagnosticsColorFlag),
     flag!("-fno-profile-generate", TooHardFlag),
     flag!("-fno-profile-use", TooHardFlag),
@@ -317,9 +318,9 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     flag!("-pedantic-errors", PedanticFlag),
     flag!("-remap", PreprocessorArgumentFlag),
     flag!("-save-temps", TooHardFlag),
-    take_arg!("-specs", PathBuf, Concatenated('='), ExtraHashFile),
-    take_arg!("-std", OsString, Concatenated('='), Standard),
-    take_arg!("-stdlib", OsString, Concatenated('='), PreprocessorArgument),
+    take_arg!("-specs", PathBuf, Concatenated(b'='), ExtraHashFile),
+    take_arg!("-std", OsString, Concatenated(b'='), Standard),
+    take_arg!("-stdlib", OsString, Concatenated(b'='), PreprocessorArgument),
     flag!("-trigraphs", PreprocessorArgumentFlag),
     take_arg!("-u", OsString, CanBeSeparated, PassThrough),
     take_arg!("-x", OsString, CanBeSeparated, Language),
@@ -586,9 +587,10 @@ where
             | Some(Output(_))
             | Some(TooHardFlag)
             | Some(XClang(_))
-            | Some(TooHard(_)) => cannot_cache!(arg
-                .flag_str()
-                .unwrap_or("Can't handle complex arguments through clang",)),
+            | Some(TooHard(_)) => cannot_cache!(
+                arg.flag_str()
+                    .unwrap_or("Can't handle complex arguments through clang",)
+            ),
             Some(NotCompilationFlag) | None => match arg {
                 Argument::Raw(_) if follows_plugin_arg => &mut common_args,
                 Argument::Raw(flag) => cannot_cache!(
@@ -1855,8 +1857,9 @@ mod test {
 
     #[test]
     fn test_parse_arguments_explicit_dep_target() {
-        let args =
-            stringvec!["-c", "foo.c", "-MT", "depfile", "-fabc", "-MF", "foo.o.d", "-o", "foo.o"];
+        let args = stringvec![
+            "-c", "foo.c", "-MT", "depfile", "-fabc", "-MF", "foo.o.d", "-o", "foo.o"
+        ];
         let ParsedArguments {
             input,
             language,
@@ -2185,7 +2188,9 @@ mod test {
 
     #[test]
     fn test_parse_arguments_dep_target_needed() {
-        let args = stringvec!["-c", "foo.c", "-fabc", "-MF", "foo.o.d", "-o", "foo.o", "-MD"];
+        let args = stringvec![
+            "-c", "foo.c", "-fabc", "-MF", "foo.o.d", "-o", "foo.o", "-MD"
+        ];
         let ParsedArguments {
             input,
             language,
@@ -2394,7 +2399,9 @@ mod test {
 
         with_var("SCCACHE_CACHE_MULTIARCH", Some("1"), || {
             match parse_arguments_(
-                stringvec!["-arch", "arm64", "-arch", "arm64", "-o", "foo.o", "-c", "foo.cpp"],
+                stringvec![
+                    "-arch", "arm64", "-arch", "arm64", "-o", "foo.o", "-c", "foo.cpp"
+                ],
                 false,
             ) {
                 CompilerArguments::Ok(_) => {}

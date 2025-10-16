@@ -1,9 +1,9 @@
 use crate::{
-    config::{scheduler::ClientAuth, INSECURE_DIST_CLIENT_TOKEN},
+    config::{INSECURE_DIST_CLIENT_TOKEN, scheduler::ClientAuth},
     dist::http::{ClientAuthCheck, ClientVisibleMsg},
-    util::{new_reqwest_client, BASE64_URL_SAFE_ENGINE},
+    util::{BASE64_URL_SAFE_ENGINE, new_reqwest_client},
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use base64::Engine;
 use futures::lock::Mutex;

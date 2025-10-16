@@ -1030,7 +1030,7 @@ struct StorageBuilder {
     fallback_cache: DiskCacheConfig,
     max_concurrent_requests: Option<usize>,
     preprocessor_cache_mode_config: Option<PreprocessorCacheModeConfig>,
-    watch_paths: Vec<String>,
+    watch_paths: Vec<PathBuf>,
 }
 
 impl StorageBuilder {
@@ -1068,7 +1068,7 @@ impl StorageBuilder {
         }
     }
 
-    pub fn watch_paths<P: ToOwned<Owned = Vec<String>>>(self, paths: P) -> Self {
+    pub fn watch_paths<P: ToOwned<Owned = Vec<PathBuf>>>(self, paths: P) -> Self {
         Self {
             watch_paths: paths.to_owned(),
             ..self
@@ -1090,7 +1090,9 @@ impl StorageBuilder {
             let size = fallback_cache.size;
             let rw_mode = fallback_cache.rw_mode.into();
             let preprocessor_cache_mode = fallback_cache.preprocessor_cache_mode;
-            debug!("Init disk cache with dir={dir:?}, size={size}, rw_mode={rw_mode:?}, preprocessor_cache_mode={preprocessor_cache_mode:?})");
+            debug!(
+                "Init disk cache with dir={dir:?}, size={size}, rw_mode={rw_mode:?}, preprocessor_cache_mode={preprocessor_cache_mode:?})"
+            );
             Arc::new(DiskCache::new(dir, size, rw_mode))
         };
 
@@ -1109,7 +1111,7 @@ impl StorageBuilder {
         };
 
         let create_storage = move || {
-            use futures::{future, FutureExt, TryFutureExt};
+            use futures::{FutureExt, TryFutureExt, future};
             future::ready(create_storage())
                 .and_then(|storage| async {
                     storage.check().await.map(|mode| match mode {
@@ -1277,7 +1279,7 @@ impl From<config::RedisCacheConfig> for StorageBuilder {
         } = config;
         Self::default().create_storage(move || {
             match (&endpoint, &cluster_endpoints, &url) {
-                (Some(ref url), None, None) => {
+                (Some(url), None, None) => {
                     debug!("Init redis single-node cache with url {url}");
                     RedisCache::build_single(
                         url,
@@ -1288,7 +1290,7 @@ impl From<config::RedisCacheConfig> for StorageBuilder {
                         ttl,
                     )
                 }
-                (None, Some(ref urls), None) => {
+                (None, Some(urls), None) => {
                     debug!("Init redis cluster cache with urls {urls}");
                     RedisCache::build_cluster(
                         urls,
@@ -1299,7 +1301,7 @@ impl From<config::RedisCacheConfig> for StorageBuilder {
                         ttl,
                     )
                 }
-                (None, None, Some(ref url)) => {
+                (None, None, Some(url)) => {
                     warn!("Init redis single-node cache from deprecated API with url {url}");
                     if username.is_some() || password.is_some() || db != crate::config::DEFAULT_REDIS_DB {
                         bail!("`username`, `password` and `db` has no effect when `url` is set. Please use `endpoint` or `cluster_endpoints` for new API accessing");
@@ -1347,8 +1349,15 @@ impl From<config::S3CacheConfig> for StorageBuilder {
         })
         .preprocessor_cache_mode_config(preprocessor_cache_mode)
         .watch_paths({
-            let cfg = reqsign::AwsConfig::default().from_profile().from_env();
-            vec![cfg.config_file.clone(), cfg.shared_credentials_file.clone()]
+            let ctx = reqsign::default_context();
+            [
+                ctx.env_var("AWS_CONFIG_FILE").unwrap_or_else(|| "~/.aws/config".into()),
+                ctx.env_var("AWS_SHARED_CREDENTIALS_FILE").unwrap_or_else(|| "~/.aws/credentials".into()),
+            ]
+            .iter()
+            .filter_map(|s| ctx.expand_home_dir(s))
+            .map(PathBuf::from)
+            .collect::<Vec<_>>()
         })
     }
 }

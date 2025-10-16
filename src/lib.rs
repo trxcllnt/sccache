@@ -92,6 +92,7 @@ pub fn main() {
 }
 
 fn init_logging(is_server: bool) {
+    use crate::errors::*;
     //
     // If starting the server, first check if SCCACHE_SERVER_LOG is set
     //
@@ -102,20 +103,30 @@ fn init_logging(is_server: bool) {
     // in their `make -j` stderr output, but does want to see the server
     // logs redirected to $SCCACHE_ERROR_LOG.
     //
-    if !is_server
-        || env::var(SERVER_LOG_ENV).is_err()
-        || env_logger::Builder::from_env(SERVER_LOG_ENV)
-            .try_init()
-            .is_err()
-    {
+    [
+        is_server.then_some(SERVER_LOG_ENV),
         // Both client and server will use SCCACHE_LOG if SCCACHE_SERVER_LOG is unset
-        if env::var(LOGGING_ENV).is_ok() {
-            match env_logger::Builder::from_env(LOGGING_ENV).try_init() {
-                Ok(_) => (),
-                Err(e) => panic!("Failed to initialize logging: {e:?}"),
-            }
+        Some(LOGGING_ENV),
+    ]
+    .iter()
+    .filter_map(|name| name.filter(|name| env::var(name).is_ok()))
+    .map(|name| {
+        let mut builder = env_logger::Builder::from_env(name);
+        // Enable millisecond precision timestamps if SCCACHE_LOG_MILLIS is set
+        if env::var("SCCACHE_LOG_MILLIS").is_ok() {
+            builder.format_timestamp_millis();
         }
-    }
+        builder.try_init().context("Failed to initialize logger")
+    })
+    .reduce(|acc, res| acc.or(res))
+    .unwrap_or(Err(anyhow!(
+        "Both SCCACHE_SERVER_LOG and SCCACHE_LOG are unset"
+    )))
+    .unwrap_or_else(|err| {
+        env_logger::init();
+        info!("{err:?}");
+        info!("Using default logger");
+    });
 }
 
 pub fn compiler_version(exe: &std::path::Path) -> crate::errors::Result<String> {

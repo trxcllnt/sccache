@@ -15,7 +15,7 @@
 use std::{
     net::SocketAddr,
     str::FromStr,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{Arc, atomic::AtomicU64},
     time::{Duration, Instant},
 };
 

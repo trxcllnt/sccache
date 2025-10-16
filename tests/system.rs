@@ -26,8 +26,9 @@ use assert_cmd::prelude::*;
 use fs::File;
 use fs_err as fs;
 use harness::{
-    client::{sccache_client_cfg, SccacheClient},
-    find_compilers, find_cuda_compilers, write_json_cfg, write_source, Compiler,
+    Compiler,
+    client::{SccacheClient, sccache_client_cfg},
+    find_compilers, find_cuda_compilers, write_json_cfg, write_source,
 };
 use log::Level::Trace;
 use once_cell::sync::Lazy;
@@ -38,11 +39,14 @@ use sccache::{
     compiler::{CCompilerKind, CompilerKind, Language},
     server::{ServerInfo, ServerStats},
 };
+use serial_test::serial;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, format};
 use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::str;
@@ -814,9 +818,11 @@ fn test_nvcc_cuda_compiles(
             .assert()
             .success();
 
-        assert!(fs::metadata(tempdir.join(output))
-            .map(|m| m.len() > 0)
-            .unwrap());
+        assert!(
+            fs::metadata(tempdir.join(output))
+                .map(|m| m.len() > 0)
+                .unwrap()
+        );
 
         fs::remove_file(tempdir.join(output)).unwrap();
 
@@ -2821,8 +2827,7 @@ fn make_sccache_client(
     let client = SccacheClient::new(
         &tempdir_path.join("sccache-cfg.json"),
         &sccache_cached_cfg_path,
-    )
-    .start();
+    );
 
     (maybe_tempdir, tempdir_path, client)
 }
@@ -2833,7 +2838,7 @@ fn make_sccache_client(
 // are not run.
 #[test_case(true ; "with preprocessor cache")]
 #[test_case(false ; "without preprocessor cache")]
-#[cfg(any(unix, target_env = "msvc"))]
+#[cfg(any(unix, windows))]
 fn test_sccache_command(preprocessor_cache_mode: bool) {
     let _ = env_logger::try_init();
     let compilers = find_compilers();
@@ -2843,6 +2848,7 @@ fn test_sccache_command(preprocessor_cache_mode: bool) {
 
     // Create and start the sccache client
     let (_tempdir, tempdir_path, client) = make_sccache_client(preprocessor_cache_mode);
+    let client = client.start();
 
     for compiler in compilers {
         run_sccache_command_tests(&client, compiler, &tempdir_path, preprocessor_cache_mode);
@@ -2885,7 +2891,7 @@ macro_rules! test_cuda_sccache_command {
                         // Create and start the sccache client
                         let (_tempdir, tempdir_path, client) = make_sccache_client(preprocessor_cache_mode);
                         [<run_sccache_ $cuda_compiler _cuda_command_tests>](
-                            &client,
+                            &client.start(),
                             &cuda_compiler,
                             &host_compiler,
                             &tempdir_path,
@@ -2901,28 +2907,75 @@ macro_rules! test_cuda_sccache_command {
 }
 
 // Linux
-#[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+#[cfg(target_os = "linux")]
 test_cuda_sccache_command!(nvcc, gcc, "nvcc", "gcc");
-#[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+#[cfg(target_os = "linux")]
 test_cuda_sccache_command!(nvcc, clang, "nvcc", "clang++");
-#[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+#[cfg(target_os = "linux")]
 test_cuda_sccache_command!(nvcc, nvcxx, "nvcc", "nvc++");
-#[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+#[cfg(target_os = "linux")]
 test_cuda_sccache_command!(clang, clang, "clang++", "clang++");
 
 // Windows
-#[cfg(target_env = "msvc")]
+#[cfg(target_os = "windows")]
 test_cuda_sccache_command!(nvcc, cl, "nvcc", "cl");
 
 #[test_case(true ; "with preprocessor cache")]
 #[test_case(false ; "without preprocessor cache")]
-#[cfg(any(unix, target_env = "msvc"))]
+#[cfg(any(unix, target_os = "windows"))]
 fn test_hip_sccache_command(preprocessor_cache_mode: bool) {
     let _ = env_logger::try_init();
 
     if let Some(compiler) = find_hip_compiler() {
         // Create and start the sccache client
         let (_tempdir, tempdir_path, client) = make_sccache_client(preprocessor_cache_mode);
-        run_sccache_hip_command_tests(&client, compiler, &tempdir_path);
+        run_sccache_hip_command_tests(&client.start(), compiler, &tempdir_path);
+    }
+}
+
+// Test that invoking (e.g.) a symlink called "gcc" to "sccache" results in sccache invoking gcc
+#[test]
+#[serial]
+#[cfg(unix)]
+fn test_symlinked_exe() {
+    let compilers = find_compilers();
+    if compilers.is_empty() {
+        warn!("No compilers found, skipping test");
+        return;
+    }
+
+    let (_tempdir, tempdir_path, client) = make_sccache_client(true);
+
+    let get_version = |compiler: &mut Command| {
+        compiler
+            .arg("--version")
+            .current_dir(&tempdir_path)
+            .output()
+            .unwrap()
+            .stdout
+    };
+
+    let mut cmd = client.cmd();
+    let sccache_path = cmd.get_program().to_os_string();
+    let sccache_version = get_version(&mut cmd);
+
+    for compiler in compilers {
+        trace!(
+            "Testing sccache symlink to {} ({:?})",
+            compiler.name, compiler.exe
+        );
+        let compiler_version =
+            get_version(Command::new(&compiler.exe).envs(compiler.env_vars.clone()));
+        assert_ne!(compiler_version, sccache_version);
+
+        let exe_filename = Path::new(&compiler.exe).file_name().unwrap();
+        let sccache_compiler_alias = tempdir_path.as_path().join(exe_filename);
+        unix_fs::symlink(&sccache_path, &sccache_compiler_alias).unwrap();
+
+        let compiler_alias_version =
+            get_version(Command::new(&sccache_compiler_alias).envs(compiler.env_vars));
+        assert_eq!(compiler_version, compiler_alias_version);
+
+        fs::remove_file(&sccache_compiler_alias).unwrap();
     }
 }

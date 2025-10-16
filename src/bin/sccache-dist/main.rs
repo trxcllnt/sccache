@@ -12,12 +12,11 @@ use sccache::{
     cache::cache::storage_from_config,
     config::{scheduler as scheduler_config, server as server_config, server::BuilderType},
     dist::{
-        self, env_info,
+        self, BuilderIncoming, ServerToolchains, env_info,
         metrics::Metrics,
         scheduler::{self, SchedulerMetrics, SchedulerTasks},
         server, tasks,
         token_check::new_client_auth_check,
-        BuilderIncoming, ServerToolchains,
     },
     errors::*,
 };

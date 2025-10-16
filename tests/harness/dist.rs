@@ -1,20 +1,21 @@
 use bytes::Buf;
 use fs_err as fs;
+use futures::{StreamExt, TryStreamExt};
 use itertools::Itertools;
 use std::{
     collections::HashMap,
     env,
     io::{BufRead, Write},
-    net::{self, SocketAddr},
+    net::SocketAddr,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Command, Stdio},
     str,
     sync::{
-        atomic::{AtomicU16, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
+        atomic::{AtomicU16, AtomicU64, Ordering},
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use nix::{
@@ -27,16 +28,17 @@ use nix::{
 
 use sccache::{
     config::{
-        scheduler::ClientAuth, scheduler::Config as SchedulerConfig, server::BuilderType,
-        server::Config as ServerConfig, CacheType, DiskCacheConfig, FileConfig, HTTPUrl,
-        MessageBroker, RedisCacheConfig, StorageConfig, INSECURE_DIST_CLIENT_TOKEN,
+        CacheType, DiskCacheConfig, FileConfig, HTTPUrl, INSECURE_DIST_CLIENT_TOKEN, MessageBroker,
+        RedisCacheConfig, StorageConfig, scheduler::ClientAuth,
+        scheduler::Config as SchedulerConfig, server::BuilderType, server::Config as ServerConfig,
     },
-    dist::{http::urls::scheduler_status as scheduler_status_url, SchedulerStatus},
+    dist::{SchedulerStatus, http::urls::scheduler_status as scheduler_status_url},
+    errors::*,
 };
 
 use uuid::Uuid;
 
-use super::{client::SccacheClient, prune_command, write_json_cfg, TC_CACHE_SIZE};
+use super::{TC_CACHE_SIZE, check_output, client::SccacheClient, prune_command, write_json_cfg};
 
 const CONTAINER_NAME_PREFIX: &str = "sccache_dist";
 const CONTAINER_EXTERNAL_PATH: &str = "/sccache/external";
@@ -114,7 +116,10 @@ impl DistSystemGlobals {
                     .write_all(DIST_DOCKERFILE.as_bytes())
                     .unwrap();
 
-                check_output(&cmd.wait_with_output().unwrap());
+                cmd.wait_with_output()
+                    .map_err(Into::into)
+                    .and_then(check_output)
+                    .expect("docker build success");
 
                 Mutex::new(Some(DistSystemGlobals::new()))
             })
@@ -156,7 +161,7 @@ impl DistSystemGlobals {
             ..
         } = &message_broker;
 
-        let output = Command::new("docker")
+        Command::new("docker")
             .args([
                 "run",
                 "--name",
@@ -167,9 +172,9 @@ impl DistSystemGlobals {
                 image,
             ])
             .output()
-            .unwrap();
-
-        check_output(&output);
+            .map_err(Into::into)
+            .and_then(check_output)
+            .expect("docker run success");
 
         DistHandle::MessageBroker(MessageBrokerHandle {
             broker: message_broker,
@@ -403,20 +408,94 @@ pub struct ServerHandle {
 }
 
 impl SchedulerHandle {
+    pub fn id(&self) -> &str {
+        self.handle.id()
+    }
+    pub fn name(&self) -> &str {
+        self.handle.name()
+    }
+    pub fn config<P: AsRef<Path>>(&self, root: P) -> Result<SchedulerConfig> {
+        SchedulerConfig::load(self.config_path(root).into())
+    }
+    pub fn config_file<P: AsRef<Path>>(&self, root: P, cfg: SchedulerConfig) -> Result<()> {
+        let mut f = fs::File::create(self.config_path(root))?;
+        let buf = serde_json::to_vec(&cfg.into_file())?;
+        f.write_all(&buf).map_err(Into::into)
+    }
+    pub fn config_path<P: AsRef<Path>>(&self, root: P) -> PathBuf {
+        root.as_ref().join(format!("{}-cfg.json", self.id()))
+    }
+    pub fn jobs_dir<P: AsRef<Path>>(&self, root: P) -> Result<PathBuf> {
+        self.config(root.as_ref())
+            .map(|cfg| cfg.jobs.fallback.dir)
+            .and_then(|jobs_path| {
+                jobs_path
+                    .strip_prefix(CONTAINER_EXTERNAL_PATH)
+                    .map(|p| root.as_ref().join(p))
+                    .map_err(Into::into)
+            })
+    }
+    pub fn toolchains_dir<P: AsRef<Path>>(&self, root: P) -> Result<PathBuf> {
+        self.config(root.as_ref())
+            .map(|cfg| cfg.toolchains.fallback.dir)
+            .and_then(|toolchains_path| {
+                toolchains_path
+                    .strip_prefix(CONTAINER_EXTERNAL_PATH)
+                    .map(|p| root.as_ref().join(p))
+                    .map_err(Into::into)
+            })
+    }
     pub fn url(&self) -> HTTPUrl {
         let url = format!("http://127.0.0.1:{}", self.port);
         HTTPUrl::from_url(reqwest::Url::parse(&url).unwrap())
     }
-    pub fn status(&self) -> SchedulerStatus {
-        let req = reqwest::blocking::Client::builder()
-            .build()
-            .unwrap()
+    pub async fn status(&self) -> Result<SchedulerStatus> {
+        let req = reqwest::Client::builder()
+            .build()?
             .get(scheduler_status_url(&self.url().to_url()))
             .header(http::header::ACCEPT, "application/octet-stream")
             .bearer_auth(INSECURE_DIST_CLIENT_TOKEN);
-        let res = req.send().unwrap();
-        assert!(res.status().is_success());
-        bincode::deserialize_from(res).unwrap()
+        sccache::dist::http::bincode_req_fut(req).await
+    }
+}
+
+impl ServerHandle {
+    pub fn id(&self) -> &str {
+        self.handle.id()
+    }
+    pub fn name(&self) -> &str {
+        self.handle.name()
+    }
+    pub fn config<P: AsRef<Path>>(&self, root: P) -> Result<ServerConfig> {
+        ServerConfig::load(self.config_path(root).into())
+    }
+    pub fn config_file<P: AsRef<Path>>(&self, root: P, cfg: ServerConfig) -> Result<()> {
+        let mut f = fs::File::create(self.config_path(root))?;
+        let buf = serde_json::to_vec(&cfg.into_file())?;
+        f.write_all(&buf).map_err(Into::into)
+    }
+    pub fn config_path<P: AsRef<Path>>(&self, root: P) -> PathBuf {
+        root.as_ref().join(format!("{}-cfg.json", self.id()))
+    }
+    pub fn jobs_dir<P: AsRef<Path>>(&self, root: P) -> Result<PathBuf> {
+        self.config(root.as_ref())
+            .map(|cfg| cfg.jobs.fallback.dir)
+            .and_then(|jobs_path| {
+                jobs_path
+                    .strip_prefix(CONTAINER_EXTERNAL_PATH)
+                    .map(|p| root.as_ref().join(p))
+                    .map_err(Into::into)
+            })
+    }
+    pub fn toolchains_dir<P: AsRef<Path>>(&self, root: P) -> Result<PathBuf> {
+        self.config(root.as_ref())
+            .map(|cfg| cfg.toolchains.fallback.dir)
+            .and_then(|toolchains_path| {
+                toolchains_path
+                    .strip_prefix(CONTAINER_EXTERNAL_PATH)
+                    .map(|p| root.as_ref().join(p))
+                    .map_err(Into::into)
+            })
     }
 }
 
@@ -442,6 +521,19 @@ pub enum ResourceHandle {
 }
 
 impl ResourceHandle {
+    pub fn id(&self) -> &str {
+        match self {
+            ResourceHandle::Container { id, .. } => id,
+            ResourceHandle::Process { id, .. } => id,
+        }
+    }
+    pub fn name(&self) -> &str {
+        match self {
+            ResourceHandle::Container { cid, .. } => cid,
+            ResourceHandle::Process { id, .. } => id,
+        }
+    }
+
     fn destroy(&self, globals: &Arc<DistSystemGlobals>, log_outputs: bool) {
         let resource_key = globals.resource_key();
 
@@ -469,53 +561,67 @@ impl ResourceHandle {
 
         match self {
             ResourceHandle::Container { id, cid } => {
-                log_err!(Command::new("docker")
-                    .args(["logs", cid])
-                    .output()
-                    .map(|o| {
-                        if log_outputs {
-                            globals.teardown_success(resource_key, cid, o);
-                        }
-                    })
-                    .map_err(|e| (id, format!("[{id}, {cid})]: {e:?}"))));
-                log_err!(Command::new("docker")
-                    .args(["kill", cid])
-                    .output()
-                    .map(|_| ())
-                    .map_err(|e| (id, format!("[{id}, {cid})]: {e:?}"))));
+                log_err!(
+                    Command::new("docker")
+                        .args(["logs", cid])
+                        .output()
+                        .map(|o| {
+                            if log_outputs {
+                                globals.teardown_success(resource_key, cid, o);
+                            }
+                        })
+                        .map_err(|e| (id, format!("[{id}, {cid})]: {e:?}")))
+                );
+                log_err!(
+                    Command::new("docker")
+                        .args(["kill", cid])
+                        .output()
+                        .map(|_| ())
+                        .map_err(|e| (id, format!("[{id}, {cid})]: {e:?}")))
+                );
                 // If you want containers to hang around (e.g. for debugging), comment out these lines
-                log_err!(Command::new("docker")
-                    .args(["rm", "-f", cid])
-                    .output()
-                    .map(|_| ())
-                    .map_err(|e| (id, format!("[{id}, {cid})]: {e:?}"))));
+                log_err!(
+                    Command::new("docker")
+                        .args(["rm", "-f", cid])
+                        .output()
+                        .map(|_| ())
+                        .map_err(|e| (id, format!("[{id}, {cid})]: {e:?}")))
+                );
             }
             ResourceHandle::Process { id, pid } => {
-                log_err!(nix::sys::signal::kill(*pid, Signal::SIGINT)
-                    .map_err(|e| (id, format!("[{id}, {pid})]: {e:?}"))));
+                log_err!(
+                    nix::sys::signal::kill(*pid, Signal::SIGINT)
+                        .map_err(|e| (id, format!("[{id}, {pid})]: {e:?}")))
+                );
                 thread::sleep(Duration::from_secs(5));
                 // Default to trying to kill again, e.g. if there was an error waiting on the pid
                 let mut killagain = true;
-                log_err!(nix::sys::wait::waitpid(*pid, Some(WaitPidFlag::WNOHANG))
-                    .map(|ws| {
-                        if ws != WaitStatus::StillAlive {
-                            killagain = false;
-                        }
-                    })
-                    .map_err(|e| (id, format!("[{id}, {pid})]: {e:?}"))));
+                log_err!(
+                    nix::sys::wait::waitpid(*pid, Some(WaitPidFlag::WNOHANG))
+                        .map(|ws| {
+                            if ws != WaitStatus::StillAlive {
+                                killagain = false;
+                            }
+                        })
+                        .map_err(|e| (id, format!("[{id}, {pid})]: {e:?}")))
+                );
                 if killagain {
                     eprintln!("[{id}, {pid})]: process ignored SIGINT, trying SIGKILL");
-                    log_err!(nix::sys::signal::kill(*pid, Signal::SIGKILL)
-                        .map_err(|e| (id, format!("[{id}, {pid})]: {e:?}"))));
-                    log_err!(nix::sys::wait::waitpid(*pid, Some(WaitPidFlag::WNOHANG))
-                        .map_err(|e| e.to_string())
-                        .and_then(|ws| if ws == WaitStatus::StillAlive {
-                            eprintln!("[{id}, {pid})]: process still alive after SIGKILL");
-                            Err("process still alive after SIGKILL".into())
-                        } else {
-                            Ok(())
-                        })
-                        .map_err(|e| (id, format!("[{id}, {pid})]: {e}"))));
+                    log_err!(
+                        nix::sys::signal::kill(*pid, Signal::SIGKILL)
+                            .map_err(|e| (id, format!("[{id}, {pid})]: {e:?}")))
+                    );
+                    log_err!(
+                        nix::sys::wait::waitpid(*pid, Some(WaitPidFlag::WNOHANG))
+                            .map_err(|e| e.to_string())
+                            .and_then(|ws| if ws == WaitStatus::StillAlive {
+                                eprintln!("[{id}, {pid})]: process still alive after SIGKILL");
+                                Err("process still alive after SIGKILL".into())
+                            } else {
+                                Ok(())
+                            })
+                            .map_err(|e| (id, format!("[{id}, {pid})]: {e}")))
+                    );
                 }
             }
         }
@@ -628,10 +734,10 @@ impl DistSystemBuilder {
         }
     }
 
-    pub fn build(self) -> DistSystem {
+    pub async fn build(self) -> Result<DistSystem> {
         let name = &self.dist_system_name;
         let mut system = DistSystem::new(name);
-        let message_broker = self.message_broker.unwrap();
+        let message_broker = self.message_broker.expect("Message broker exists");
 
         fn storage_cfg(suffix: &str, redis: &DistMessageBroker) -> StorageConfig {
             StorageConfig {
@@ -660,7 +766,7 @@ impl DistSystemBuilder {
             if let Some(redis) = self.scheduler_toolchains_redis_storage.as_ref() {
                 cfg.toolchains = storage_cfg("toolchains", redis);
             }
-            system.add_scheduler(cfg);
+            system.add_scheduler(cfg).await?;
         }
 
         for i in 0..self.server_count {
@@ -674,10 +780,10 @@ impl DistSystemBuilder {
             if let Some(redis) = self.server_toolchains_redis_storage.as_ref() {
                 cfg.toolchains = storage_cfg("toolchains", redis);
             }
-            system.add_server(cfg);
+            system.add_server(cfg).await?;
         }
 
-        system
+        Ok(system)
     }
 }
 
@@ -747,32 +853,39 @@ impl DistSystem {
         sccache_scheduler_cfg(message_broker)
     }
 
-    pub fn add_scheduler(&mut self, scheduler_cfg: SchedulerConfig) -> &mut Self {
+    pub async fn add_scheduler(&mut self, scheduler_cfg: SchedulerConfig) -> Result<&mut Self> {
         let scheduler_id = scheduler_cfg.scheduler_id.clone();
         let scheduler_port = scheduler_cfg.public_addr.port();
         let container_name = name_with_uuid(&scheduler_id);
-        let cfg_file_name = format!("{scheduler_id}-cfg.json");
 
-        for path in [
-            &scheduler_cfg.jobs.fallback.dir,
-            &scheduler_cfg.toolchains.fallback.dir,
-        ] {
-            if let Ok(path) = path.strip_prefix(CONTAINER_EXTERNAL_PATH) {
-                fs::create_dir_all(self.dist_dir().join(path)).unwrap();
-            }
-        }
+        let scheduler = SchedulerHandle {
+            port: scheduler_port,
+            globals: DistSystemGlobals::get(),
+            handle: ResourceHandle::Container {
+                id: scheduler_id,
+                cid: container_name,
+            },
+        };
 
-        fs::File::create(self.dist_dir().join(&cfg_file_name))
-            .unwrap()
-            .write_all(&serde_json::to_vec(&scheduler_cfg.into_file()).unwrap())
-            .unwrap();
+        let dist_dir = self.dist_dir();
+
+        scheduler.config_file(dist_dir, scheduler_cfg).unwrap();
+
+        [
+            scheduler.jobs_dir(dist_dir),
+            scheduler.toolchains_dir(dist_dir),
+        ]
+        .into_iter()
+        .filter_map(|p| p.ok())
+        .flat_map(fs::create_dir_all)
+        .for_each(drop);
 
         // Create the scheduler
-        let output = Command::new("docker")
+        tokio::process::Command::new("docker")
             .args([
                 "run",
                 "--name",
-                &container_name,
+                scheduler.name(),
                 "-e",
                 "SCCACHE_NO_DAEMON=1",
                 "-e",
@@ -788,12 +901,14 @@ impl DistSystem {
                 "--restart",
                 "always",
                 "-v",
-                &format!("{}:/sccache-dist:z", self.sccache_dist.to_str().unwrap()),
+                &format!(
+                    "{exe}:/sccache-dist:z",
+                    exe = self.sccache_dist.as_path().display()
+                ),
                 "-v",
                 &format!(
-                    "{}:{}:z",
-                    self.dist_dir().to_str().unwrap(),
-                    CONTAINER_EXTERNAL_PATH
+                    "{src}:{CONTAINER_EXTERNAL_PATH}:z",
+                    src = dist_dir.display()
                 ),
                 "-d",
                 DIST_IMAGE,
@@ -802,82 +917,73 @@ impl DistSystem {
                 &format!(
                     r#"
                         set -o errexit &&
-                        exec /sccache-dist scheduler --config {cfg}
+                        exec /sccache-dist scheduler --config {cfg:?}
                     "#,
-                    cfg = Path::new(CONTAINER_EXTERNAL_PATH)
-                        .join(&cfg_file_name)
-                        .to_str()
-                        .unwrap()
+                    cfg = scheduler.config_path(CONTAINER_EXTERNAL_PATH)
                 ),
             ])
             .output()
-            .unwrap();
+            .await
+            .map_err(Into::into)
+            .and_then(check_output)?;
 
-        check_output(&output);
-
-        self.handles.push(DistHandle::Scheduler(SchedulerHandle {
-            port: scheduler_port,
-            globals: DistSystemGlobals::get(),
-            handle: ResourceHandle::Container {
-                id: scheduler_id,
-                cid: container_name,
-            },
-        }));
+        self.handles.push(DistHandle::Scheduler(scheduler));
 
         let scheduler = self.schedulers().into_iter().last().unwrap();
 
-        wait_for_http(
-            scheduler.url(),
-            Duration::from_millis(1000),
-            MAX_STARTUP_WAIT,
-        );
-
-        wait_for(
-            || {
-                let status = scheduler.status();
-                if matches!(status, SchedulerStatus { .. }) {
-                    Ok(())
-                } else {
-                    Err(format!("{status:?}"))
+        tokio::time::timeout(MAX_STARTUP_WAIT, async {
+            loop {
+                let status = scheduler.status().await;
+                if matches!(status, Ok(SchedulerStatus { .. })) {
+                    break;
                 }
-            },
-            Duration::from_millis(1000),
-            MAX_STARTUP_WAIT,
-        );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "Timeout waiting for scheduler {scheduler_id:?}",
+                scheduler_id = scheduler.id()
+            )
+        })?;
 
-        self
+        Ok(self)
     }
 
     pub fn server_cfg(&self, message_broker: &MessageBroker) -> ServerConfig {
         sccache_server_cfg(message_broker)
     }
 
-    pub fn add_server(&mut self, server_cfg: ServerConfig) -> &mut Self {
+    pub async fn add_server(&mut self, server_cfg: ServerConfig) -> Result<&mut Self> {
         let server_id = server_cfg.server_id.clone();
         let container_name = name_with_uuid(&server_id);
-        let cfg_file_name = format!("{server_id}-cfg.json");
 
-        for path in [
-            &server_cfg.jobs.fallback.dir,
-            &server_cfg.toolchains.fallback.dir,
-        ] {
-            if let Ok(path) = path.strip_prefix(CONTAINER_EXTERNAL_PATH) {
-                fs::create_dir_all(self.dist_dir().join(path)).unwrap();
-            }
-        }
+        let server = ServerHandle {
+            globals: DistSystemGlobals::get(),
+            handle: ResourceHandle::Container {
+                id: server_id,
+                cid: container_name,
+            },
+        };
 
-        fs::File::create(self.dist_dir().join(&cfg_file_name))
-            .unwrap()
-            .write_all(&serde_json::to_vec(&server_cfg.into_file()).unwrap())
-            .unwrap();
+        let dist_dir = self.dist_dir();
 
-        let output = Command::new("docker")
+        server.config_file(dist_dir, server_cfg).unwrap();
+
+        [server.jobs_dir(dist_dir), server.toolchains_dir(dist_dir)]
+            .into_iter()
+            .filter_map(|p| p.ok())
+            .flat_map(fs::create_dir_all)
+            .for_each(drop);
+
+        tokio::process::Command::new("docker")
             .args([
                 "run",
                 // Important for the bubblewrap builder
                 "--privileged",
                 "--name",
-                &container_name,
+                server.name(),
                 "-e",
                 "SCCACHE_NO_DAEMON=1",
                 "-e",
@@ -902,12 +1008,14 @@ impl DistSystem {
                 "--restart",
                 "always",
                 "-v",
-                &format!("{}:/sccache-dist:z", self.sccache_dist.to_str().unwrap()),
+                &format!(
+                    "{exe}:/sccache-dist:z",
+                    exe = self.sccache_dist.as_path().display()
+                ),
                 "-v",
                 &format!(
-                    "{}:{}:z",
-                    self.dist_dir().to_str().unwrap(),
-                    CONTAINER_EXTERNAL_PATH
+                    "{src}:{CONTAINER_EXTERNAL_PATH}:z",
+                    src = dist_dir.display()
                 ),
                 "-d",
                 DIST_IMAGE,
@@ -916,30 +1024,22 @@ impl DistSystem {
                 &format!(
                     r#"
                     set -o errexit &&
-                    exec /sccache-dist server --config {cfg}
+                    exec /sccache-dist server --config {cfg:?}
                 "#,
-                    cfg = Path::new(CONTAINER_EXTERNAL_PATH)
-                        .join(&cfg_file_name)
-                        .to_str()
-                        .unwrap()
+                    cfg = server.config_path(CONTAINER_EXTERNAL_PATH)
                 ),
             ])
             .output()
-            .unwrap();
+            .await
+            .map_err(Into::into)
+            .and_then(check_output)?;
 
-        check_output(&output);
+        self.handles.push(DistHandle::Server(server));
 
-        self.handles.push(DistHandle::Server(ServerHandle {
-            globals: DistSystemGlobals::get(),
-            handle: ResourceHandle::Container {
-                id: server_id,
-                cid: container_name,
-            },
-        }));
+        self.wait_server_ready(self.servers().into_iter().last().unwrap())
+            .await?;
 
-        self.wait_server_ready(self.servers().into_iter().last().unwrap());
-
-        self
+        Ok(self)
     }
 
     fn schedulers(&self) -> impl IntoIterator<Item = &SchedulerHandle> {
@@ -962,55 +1062,70 @@ impl DistSystem {
         })
     }
 
-    pub fn scheduler(&self, scheduler_index: usize) -> Option<&SchedulerHandle> {
-        self.schedulers().into_iter().nth(scheduler_index)
+    pub fn scheduler(&self, scheduler_index: usize) -> Result<&SchedulerHandle> {
+        self.schedulers()
+            .into_iter()
+            .nth(scheduler_index)
+            .ok_or_else(|| anyhow!("Scheduler {scheduler_index} doesn't exist"))
     }
 
-    pub fn server(&self, server_index: usize) -> Option<&ServerHandle> {
-        self.servers().into_iter().nth(server_index)
+    pub fn server(&self, server_index: usize) -> Result<&ServerHandle> {
+        self.servers()
+            .into_iter()
+            .nth(server_index)
+            .ok_or_else(|| anyhow!("Server {server_index} doesn't exist"))
     }
 
-    pub fn restart_server(&self, server: &ServerHandle) {
+    pub async fn restart_server(&self, server: &ServerHandle) -> Result<()> {
         match server.handle {
-            ResourceHandle::Container { ref cid, .. } => {
-                let output = Command::new("docker")
-                    .args(["restart", cid])
-                    .output()
-                    .unwrap();
-                check_output(&output);
-            }
+            ResourceHandle::Container { ref cid, .. } => tokio::process::Command::new("docker")
+                .args(["restart", cid])
+                .output()
+                .await
+                .map_err(Into::into)
+                .and_then(check_output)?,
             ResourceHandle::Process { .. } => {
                 // TODO: pretty easy, just no need yet
-                panic!("restart not yet implemented for pids")
+                bail!("restart not yet implemented for pids")
             }
         }
-        self.wait_server_ready(server)
+        self.wait_server_ready(server).await
     }
 
-    pub fn wait_server_ready(&self, server: &ServerHandle) {
-        let server_id = match server.handle {
-            ResourceHandle::Container { ref id, .. } => id,
-            ResourceHandle::Process { ref id, .. } => id,
-        };
-        wait_for(
-            || {
-                let statuses = self
-                    .schedulers()
-                    .into_iter()
-                    .map(|scheduler| scheduler.status())
-                    .collect::<Vec<_>>();
-                if statuses
-                    .iter()
-                    .any(|status| status.servers.iter().any(|server| &server.id == server_id))
-                {
-                    Ok(())
-                } else {
-                    Err(format!("{statuses:?}"))
+    pub async fn wait_server_ready(&self, server: &ServerHandle) -> Result<()> {
+        tokio::time::timeout(MAX_STARTUP_WAIT, async {
+            loop {
+                use futures::{future::ready, stream::iter};
+
+                let found = iter(self.schedulers())
+                    .then(|scheduler| scheduler.status())
+                    .map_ok(|sched| iter(sched.servers).map(Result::Ok))
+                    .try_flatten()
+                    .try_any(|serv| ready(serv.id == server.id()))
+                    .await?;
+
+                if found {
+                    break;
                 }
-            },
-            Duration::from_millis(1000),
-            MAX_STARTUP_WAIT,
-        );
+
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Ok(())
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "Timeout waiting for server {server_id:?}",
+                server_id = server.id()
+            )
+        })?
+    }
+
+    pub fn count_server_toolchains(&self, server: &ServerHandle) -> Result<usize> {
+        server
+            .toolchains_dir(self.dist_dir())
+            .and_then(|dir| fs::read_dir(dir).map_err(Into::into))
+            .map(|dir| dir.count())
     }
 }
 
@@ -1021,44 +1136,4 @@ fn name_with_uuid(name: &str) -> String {
         name,
         Uuid::new_v4().simple()
     )
-}
-
-fn check_output(output: &Output) {
-    if !output.status.success() {
-        println!("{}\n\n[BEGIN STDOUT]\n===========\n{}\n===========\n[FIN STDOUT]\n\n[BEGIN STDERR]\n===========\n{}\n===========\n[FIN STDERR]\n\n",
-            output.status, String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-        panic!()
-    }
-}
-
-fn wait_for_http(url: HTTPUrl, interval: Duration, max_wait: Duration) {
-    // TODO: after upgrading to reqwest >= 0.9, use 'danger_accept_invalid_certs' and stick with that rather than tcp
-    wait_for(
-        || {
-            let url = url.to_url();
-            let url = url.socket_addrs(|| None).unwrap();
-            match net::TcpStream::connect(url.as_slice()) {
-                Ok(_) => Ok(()),
-                Err(e) => Err(e.to_string()),
-            }
-        },
-        interval,
-        max_wait,
-    )
-}
-
-fn wait_for<F: Fn() -> Result<(), String>>(f: F, interval: Duration, max_wait: Duration) {
-    let start = Instant::now();
-    let mut lasterr;
-    loop {
-        match tokio::task::block_in_place(&f) {
-            Ok(()) => return,
-            Err(e) => lasterr = e,
-        }
-        if start.elapsed() > max_wait {
-            break;
-        }
-        thread::sleep(interval)
-    }
-    panic!("wait timed out, last error result: {lasterr}")
 }

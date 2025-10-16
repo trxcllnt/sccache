@@ -15,7 +15,7 @@
 
 use std::{env, ffi::OsString, path::PathBuf, str::FromStr};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use clap::{Arg, Command as ClapCommand, ValueEnum};
 use sccache::config;
 use syslog::Facility;

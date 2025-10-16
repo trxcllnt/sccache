@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{anyhow, bail, Context, Error, Result};
+use anyhow::{Context, Error, Result, anyhow, bail};
 use async_compression::futures::bufread::ZlibDecoder as ZlibDecoderAsync;
 use async_trait::async_trait;
 use bytes::Buf;
@@ -160,8 +160,11 @@ impl OverlayBuilder {
                     }
                 }
                 (_, _) => {
-                    bail!("Unexpected version format running {:?}: got {:?}, expected \"bubblewrap x.x.x\"",
-                          bubblewrap, out);
+                    bail!(
+                        "Unexpected version format running {:?}: got {:?}, expected \"bubblewrap x.x.x\"",
+                        bubblewrap,
+                        out
+                    );
                 }
             }
         } else {
@@ -464,7 +467,9 @@ impl OverlayBuilder {
                             },
                             Err(e) => {
                                 if e.kind() == io::ErrorKind::NotFound {
-                                    tracing::debug!("[perform_build({job_id})]: Missing output path host={abspath:?}, overlay={path:?}")
+                                    tracing::debug!(
+                                        "[perform_build({job_id})]: Missing output path host={abspath:?}, overlay={path:?}"
+                                    )
                                 } else {
                                     return Err(
                                         Error::from(e).context("Failed to open output file")
@@ -821,15 +826,15 @@ impl DockerBuilder {
                             Ok(output) => outputs.push((path.clone(), output)),
                             Err(err) => {
                                 tracing::error!(
-                                "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, container={path:?}: {err}"
-                            )
+                                    "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, container={path:?}: {err}"
+                                )
                             }
                         },
                         Err(e) => {
                             if e.kind() == io::ErrorKind::NotFound {
                                 tracing::debug!(
-                                "[perform_build({job_id})]: Missing output path host={abspath:?}, container={path:?}"
-                            )
+                                    "[perform_build({job_id})]: Missing output path host={abspath:?}, container={path:?}"
+                                )
                             } else {
                                 return Err(Error::from(e).context("Failed to open output file"));
                             }

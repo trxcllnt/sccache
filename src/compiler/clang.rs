@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use crate::compiler::{
+    Cacheable, CompileCommandImpl, CompilerArguments,
     args::*,
     c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput},
     gcc::{self, ArgData::*},
-    Cacheable, CompileCommandImpl, CompilerArguments,
 };
 use crate::mock_command::CommandCreatorSync;
 use crate::{counted_array, dist};
@@ -190,10 +190,10 @@ impl CCompilerImpl for Clang {
 }
 
 counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
-    take_arg!("--dependent-lib", OsString, Concatenated('='), PassThrough),
-    take_arg!("--hip-device-lib-path", PathBuf, Concatenated('='), PassThroughPath),
-    take_arg!("--hip-path", PathBuf, Concatenated('='), PassThroughPath),
-    take_arg!("--rocm-path", PathBuf, Concatenated('='), PassThroughPath),
+    take_arg!("--dependent-lib", OsString, Concatenated(b'='), PassThrough),
+    take_arg!("--hip-device-lib-path", PathBuf, Concatenated(b'='), PassThroughPath),
+    take_arg!("--hip-path", PathBuf, Concatenated(b'='), PassThroughPath),
+    take_arg!("--rocm-path", PathBuf, Concatenated(b'='), PassThroughPath),
     take_arg!("--serialize-diagnostics", OsString, Separated, PassThrough),
     take_arg!("--target", OsString, Separated, PassThrough),
     // Note: for clang we must override the dep options from gcc.rs with `CanBeSeparated`.
@@ -206,28 +206,28 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     flag!("-Wno-unused-parameter", PassThroughFlag),
     take_arg!("-Xclang", OsString, Separated, XClang),
     take_arg!("-add-plugin", OsString, Separated, PassThrough),
-    take_arg!("-debug-info-kind", OsString, Concatenated('='), PassThrough),
+    take_arg!("-debug-info-kind", OsString, Concatenated(b'='), PassThrough),
     take_arg!("-dependency-file", PathBuf, Separated, DepArgumentPath),
     flag!("-emit-pch", PassThroughFlag),
     flag!("-fcolor-diagnostics", DiagnosticsColorFlag),
     flag!("-fcuda-allow-variadic-functions", PassThroughFlag),
     flag!("-fcxx-modules", TooHardFlag),
     take_arg!("-fdebug-compilation-dir", OsString, Separated, PassThrough),
-    take_arg!("-fembed-offload-object", PathBuf, Concatenated('='), ExtraHashFile),
+    take_arg!("-fembed-offload-object", PathBuf, Concatenated(b'='), ExtraHashFile),
     flag!("-fgpu-rdc", PassThroughFlag),
     flag!("-fmodules", TooHardFlag),
     flag!("-fno-color-diagnostics", NoDiagnosticsColorFlag),
     flag!("-fno-pch-timestamp", PassThroughFlag),
     flag!("-fno-profile-instr-generate", TooHardFlag),
     flag!("-fno-profile-instr-use", TooHardFlag),
-    take_arg!("-fplugin", PathBuf, CanBeConcatenated('='), ExtraHashFile),
+    take_arg!("-fplugin", PathBuf, CanBeConcatenated(b'='), ExtraHashFile),
     flag!("-fprofile-instr-generate", ProfileGenerate),
     // Note: the PathBuf argument is optional
-    take_arg!("-fprofile-instr-use", PathBuf, Concatenated('='), ClangProfileUse),
+    take_arg!("-fprofile-instr-use", PathBuf, Concatenated(b'='), ClangProfileUse),
     // Note: this overrides the -fprofile-use option in gcc.rs.
-    take_arg!("-fprofile-use", PathBuf, Concatenated('='), ClangProfileUse),
-    take_arg!("-fsanitize-blacklist", PathBuf, Concatenated('='), ExtraHashFile),
-    take_arg!("-fsanitize-ignorelist", PathBuf, Concatenated('='), ExtraHashFile),
+    take_arg!("-fprofile-use", PathBuf, Concatenated(b'='), ClangProfileUse),
+    take_arg!("-fsanitize-blacklist", PathBuf, Concatenated(b'='), ExtraHashFile),
+    take_arg!("-fsanitize-ignorelist", PathBuf, Concatenated(b'='), ExtraHashFile),
     flag!("-fuse-ctor-homing", PassThroughFlag),
     take_arg!("-gcc-toolchain", OsString, Separated, PassThrough),
     flag!("-gcodeview", PassThroughFlag),
@@ -237,7 +237,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("-mllvm", OsString, Separated, PassThrough),
     flag!("-mrelax-all", PassThroughFlag),
     flag!("-no-opaque-pointers", PreprocessorArgumentFlag),
-    take_arg!("-plugin-arg", OsString, Concatenated('-'), PassThrough),
+    take_arg!("-plugin-arg", OsString, Concatenated(b'-'), PassThrough),
     take_arg!("-target", OsString, Separated, PassThrough),
     flag!("-verify", PreprocessorArgumentFlag),
     take_arg!("/winsysroot", PathBuf, CanBeSeparated, PassThroughPath),
@@ -267,7 +267,7 @@ pub(crate) fn resolve_profile_use_path(arg: &Path, cwd: &Path) -> PathBuf {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::compiler::{c::ArtifactDescriptor, gcc, ColorMode, CompileCommandImpl, Language};
+    use crate::compiler::{ColorMode, CompileCommandImpl, Language, c::ArtifactDescriptor, gcc};
     use crate::mock_command::*;
     use crate::server;
     use crate::test::mock_storage::MockStorage;

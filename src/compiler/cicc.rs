@@ -16,8 +16,8 @@
 use crate::compiler::c::{
     ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
 };
-use crate::compiler::{args::*, CompileCommandImpl};
 use crate::compiler::{Cacheable, CompilerArguments, Language, SingleCompileCommand};
+use crate::compiler::{CompileCommandImpl, args::*};
 use crate::{counted_array, dist, util::OsStrExt};
 
 use crate::mock_command::CommandCreatorSync;

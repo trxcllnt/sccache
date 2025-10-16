@@ -13,7 +13,7 @@ use std::io;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 
-use filetime::{set_file_times, FileTime};
+use filetime::{FileTime, set_file_times};
 pub use lru_cache::{LruCache, Meter};
 use tempfile::{NamedTempFile, TempDir};
 use walkdir::WalkDir;
@@ -138,7 +138,7 @@ impl fmt::Display for Error {
         match self {
             Error::FileTooLarge => write!(f, "File too large"),
             Error::FileNotInCache => write!(f, "File not in cache"),
-            Error::Io(ref e) => write!(f, "{e}"),
+            Error::Io(e) => write!(f, "{}", e),
         }
     }
 }
@@ -148,7 +148,7 @@ impl StdError for Error {
         match self {
             Error::FileTooLarge => None,
             Error::FileNotInCache => None,
-            Error::Io(ref e) => Some(e),
+            Error::Io(e) => Some(e),
         }
     }
 }
@@ -269,7 +269,9 @@ impl LruDiskCache {
                     error!("LruDiskCache: Error removing temporary entry {path:?}:\n{e:?}")
                 });
             } else if !self.can_store(size) {
-                warn!("LruDiskCache: Deleting entry that is too large for the cache at max_size={size}b: {path:?}");
+                warn!(
+                    "LruDiskCache: Deleting entry that is too large for the cache at max_size={size}b: {path:?}"
+                );
                 remove_entry_from_disk(&path).unwrap_or_else(|e| {
                     error!("LruDiskCache: Error removing entry {path:?}:\n{e:?}")
                 });
@@ -603,9 +605,9 @@ impl LruDiskCache {
 #[cfg(test)]
 mod tests {
     use super::fs::{self, File};
-    use super::{get_all_entries, normalize_key, Error, LruDiskCache, LruDiskCacheAddEntry};
+    use super::{Error, LruDiskCache, LruDiskCacheAddEntry, get_all_entries, normalize_key};
 
-    use filetime::{set_file_times, FileTime};
+    use filetime::{FileTime, set_file_times};
     use std::io::{self, Read, Write};
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;

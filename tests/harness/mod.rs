@@ -12,12 +12,29 @@ use std::{
 use serde::Serialize;
 use which::{which, which_in};
 
+use sccache::{errors::*, mock_command::ProcessOutput};
+
 pub mod client;
 
 #[cfg(feature = "dist-server")]
 pub mod dist;
 
 pub const TC_CACHE_SIZE: u64 = 2 * 1024 * 1024 * 1024; // 2GiB
+
+pub fn check_output<O: Into<ProcessOutput>>(output: O) -> Result<()> {
+    let output = output.into();
+    if !output.success() {
+        eprintln!(
+            "{}\n\n[BEGIN STDOUT]\n===========\n{}\n===========\n[FIN STDOUT]\n\n[BEGIN STDERR]\n===========\n{}\n===========\n[FIN STDERR]\n\n",
+            output.desc(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Err(anyhow!("{}", output.desc()))
+    } else {
+        Ok(())
+    }
+}
 
 pub fn init_cargo(path: &Path, cargo_name: &str) -> PathBuf {
     let cargo_path = path.join(cargo_name);
@@ -142,10 +159,24 @@ pub fn find_compilers() -> Vec<Compiler> {
 
 pub fn find_cuda_compilers() -> Vec<Compiler> {
     let cwd = env::current_dir().unwrap();
+
+    let candidates = match env::var_os("NOTEST_CUDA_COMPILERS") {
+        Some(nc) => {
+            let ncs = nc.into_string().unwrap();
+            let not_candidates = ncs.split(':').collect::<Vec<_>>();
+            CUDA_COMPILERS
+                .iter()
+                .filter(|&c| !not_candidates.contains(c))
+                .collect::<Vec<_>>()
+        }
+        None => CUDA_COMPILERS.iter().collect::<Vec<_>>(),
+    };
+
     // CUDA compilers like clang don't come with all of the components for compilation.
     // To consider a machine to have any cuda compilers we rely on the existence of `nvcc`
-    let compilers = match which("nvcc") {
-        Ok(_) => CUDA_COMPILERS
+
+    match which("nvcc") {
+        Ok(_) => candidates
             .iter()
             .filter_map(|c| {
                 which_in(c, env::var_os("PATH"), &cwd)
@@ -165,6 +196,5 @@ pub fn find_cuda_compilers() -> Vec<Compiler> {
             );
             vec![]
         }
-    };
-    compilers
+    }
 }

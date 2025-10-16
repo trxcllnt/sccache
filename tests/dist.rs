@@ -1,6 +1,5 @@
 #![cfg(all(feature = "dist-client", feature = "dist-server"))]
 
-extern crate assert_cmd;
 #[macro_use]
 extern crate log;
 extern crate sccache;
@@ -8,17 +7,17 @@ extern crate serde_json;
 
 mod harness;
 
-use assert_cmd::prelude::*;
 use paste::paste;
-use sccache::config::HTTPUrl;
+use sccache::{config::HTTPUrl, errors::*};
 use std::path::Path;
 use std::process::Output;
 use test_case::test_case;
 
 use harness::{
+    Compiler, check_output,
     client::SccacheClient,
-    dist::{cargo_command, DistSystem},
-    find_compilers, find_cuda_compilers, init_cargo, write_source, Compiler,
+    dist::{DistSystem, cargo_command},
+    find_compilers, find_cuda_compilers, init_cargo, write_source,
 };
 
 // In case of panics, this command will destroy any dangling containers:
@@ -27,12 +26,15 @@ use harness::{
 // TODO:
 // * Test each builder (docker and overlay for Linux, pot for freebsd)
 
-fn cc_compile(client: &SccacheClient, tmpdir: &Path) {
+async fn cc_compile(client: &SccacheClient, tmpdir: &Path) -> Result<()> {
     let source_file = "x.c";
     let obj_file = "x.o";
-    write_source(tmpdir, source_file, "#if !defined(SCCACHE_TEST_DEFINE)\n#error SCCACHE_TEST_DEFINE is not defined\n#endif\nint x() { return 5; }");
-    client
-        .cmd()
+    write_source(
+        tmpdir,
+        source_file,
+        "#if !defined(SCCACHE_TEST_DEFINE)\n#error SCCACHE_TEST_DEFINE is not defined\n#endif\nint x() { return 5; }",
+    );
+    tokio::process::Command::from(client.cmd())
         .args([
             std::env::var("CC")
                 .unwrap_or_else(|_| "gcc".to_string())
@@ -45,21 +47,27 @@ fn cc_compile(client: &SccacheClient, tmpdir: &Path) {
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
         .env("TOKIO_WORKER_THREADS", "2")
-        .assert()
-        .success();
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(Into::into)
+        .and_then(check_output)
 }
 
-fn nvcc_compile(
+async fn nvcc_compile(
     client: &SccacheClient,
     cuda_compiler: &Compiler,
     host_compiler: &Compiler,
     tmpdir: &Path,
-) {
+) -> Result<()> {
     let source_file = "x.cu";
     let obj_file = "x.cu.o";
-    write_source(tmpdir, source_file, "#if !defined(SCCACHE_TEST_DEFINE)\n#error SCCACHE_TEST_DEFINE is not defined\n#endif\n__global__ void x(int* out) { out[0] = 5; }");
-    client
-        .cmd()
+    write_source(
+        tmpdir,
+        source_file,
+        "#if !defined(SCCACHE_TEST_DEFINE)\n#error SCCACHE_TEST_DEFINE is not defined\n#endif\n__global__ void x(int* out) { out[0] = 5; }",
+    );
+    tokio::process::Command::from(client.cmd())
         .arg(&cuda_compiler.exe)
         .arg(format!("-ccbin={}", host_compiler.exe.to_string_lossy()))
         .arg("-allow-unsupported-compiler")
@@ -69,11 +77,14 @@ fn nvcc_compile(
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
         .env("TOKIO_WORKER_THREADS", "2")
-        .assert()
-        .success();
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(Into::into)
+        .and_then(check_output)
 }
 
-fn stdpar_compile(client: &SccacheClient, compiler: &Compiler, tmpdir: &Path) {
+async fn stdpar_compile(client: &SccacheClient, compiler: &Compiler, tmpdir: &Path) -> Result<()> {
     let source_file = "x.cpp";
     let obj_file = "x.cpp.o";
     write_source(
@@ -106,8 +117,7 @@ fn stdpar_compile(client: &SccacheClient, compiler: &Compiler, tmpdir: &Path) {
           assert(sum == (42 * N) + 100);
         }"#,
     );
-    client
-        .cmd()
+    tokio::process::Command::from(client.cmd())
         .arg(&compiler.exe)
         .args(["-c", "-x", "cpp", "-DSCCACHE_TEST_DEFINE", "-stdpar=gpu"])
         .arg(tmpdir.join(source_file))
@@ -115,11 +125,14 @@ fn stdpar_compile(client: &SccacheClient, compiler: &Compiler, tmpdir: &Path) {
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
         .env("TOKIO_WORKER_THREADS", "2")
-        .assert()
-        .success();
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(Into::into)
+        .and_then(check_output)
 }
 
-fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Output {
+async fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Result<Output> {
     let cargo_name = "sccache-dist-test";
     let cargo_path = init_cargo(tmpdir, cargo_name);
 
@@ -144,7 +157,7 @@ fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Output {
 }"#,
     );
 
-    cargo_command()
+    tokio::process::Command::from(cargo_command())
         .current_dir(cargo_path)
         .args(["build", "--release", "--jobs", "1"])
         .envs(
@@ -157,8 +170,10 @@ fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Output {
         .env("CARGO_TARGET_DIR", "target")
         .env("RUST_BACKTRACE", "1")
         .env("TOKIO_WORKER_THREADS", "2")
+        .kill_on_drop(true)
         .output()
-        .unwrap()
+        .await
+        .map_err(Into::into)
 }
 
 pub fn dist_test_sccache_client_cfg(
@@ -178,31 +193,34 @@ pub fn dist_test_sccache_client_cfg(
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_dist_cargo_build(message_broker: &str) {
+async fn test_dist_cargo_build(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cargo_build_{message_broker}");
     let system = DistSystem::builder()
         .with_name(&test_name)
         .with_scheduler()
         .with_server()
         .with_message_broker(message_broker)
-        .build();
+        .build()
+        .await?;
 
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
-        system.scheduler(0).unwrap().url(),
+        system.scheduler(0)?.url(),
         false,
     ));
 
-    let output = rust_compile(&client, system.data_dir());
+    let output = rust_compile(&client, system.data_dir()).await?;
 
     // Ensure sccache ignores inherited jobservers in CARGO_MAKEFLAGS
-    assert!(!String::from_utf8_lossy(&output.stderr)
-        .contains("warning: failed to connect to jobserver from environment variable"));
+    assert!(
+        !String::from_utf8_lossy(&output.stderr)
+            .contains("warning: failed to connect to jobserver from environment variable")
+    );
 
     // Assert compilation succeeded
-    output.assert().success();
+    check_output(output)?;
 
-    let stats = client.stats().unwrap();
+    let stats = client.stats()?;
     assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
     assert_eq!(0, stats.dist_errors);
     // check >= 5 because cargo >=1.82 does additional requests with -vV
@@ -210,43 +228,86 @@ async fn test_dist_cargo_build(message_broker: &str) {
     assert_eq!(1, stats.requests_executed);
     assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
+
+    Ok(())
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_dist_cpp_disk_storage(message_broker: &str) {
+async fn test_dist_cpp_disk_storage(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cpp_disk_storage_{message_broker}");
     let system = DistSystem::builder()
         .with_name(&test_name)
         .with_scheduler()
         .with_server()
         .with_message_broker(message_broker)
-        .build();
+        .build()
+        .await?;
 
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
-        system.scheduler(0).unwrap().url(),
+        system.scheduler(0)?.url(),
         false,
     ));
 
-    cc_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir()).await?;
 
-    let stats = client.stats().unwrap();
+    let stats = client.stats()?;
     assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
     assert_eq!(0, stats.dist_errors);
     assert_eq!(1, stats.compile_requests);
     assert_eq!(1, stats.requests_executed);
     assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
+
+    Ok(())
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_dist_cpp_cloud_storage(message_broker: &str) {
+async fn test_dist_cpp_toolchain(message_broker: &str) -> Result<()> {
+    let test_name = format!("test_dist_cpp_toolchain_{message_broker}");
+    let system = DistSystem::builder()
+        .with_name(&test_name)
+        .with_scheduler()
+        .with_server()
+        .with_message_broker(message_broker)
+        .build()
+        .await?;
+
+    // Run twice to verify toolchain is only uploaded once
+    for _ in 0..2 {
+        let client = system.new_client(&dist_test_sccache_client_cfg(
+            system.data_dir(),
+            system.scheduler(0)?.url(),
+            false,
+        ));
+
+        cc_compile(&client, system.data_dir()).await?;
+
+        let stats = client.stats()?;
+        assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
+        assert_eq!(0, stats.dist_errors);
+        assert_eq!(1, stats.compile_requests);
+        assert_eq!(1, stats.requests_executed);
+        assert_eq!(1, stats.compilations);
+        assert_eq!(0, stats.cache_hits.all());
+
+        assert_eq!(system.count_server_toolchains(system.server(0)?)?, 1);
+    }
+
+    Ok(())
+}
+
+#[cfg_attr(not(feature = "dist-tests"), ignore)]
+#[test_case("rabbitmq" ; "with rabbitmq")]
+#[test_case("redis" ; "with redis")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_dist_cpp_cloud_storage(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cpp_cloud_storage_{message_broker}");
     let system = DistSystem::builder()
         .with_name(&test_name)
@@ -254,30 +315,33 @@ async fn test_dist_cpp_cloud_storage(message_broker: &str) {
         .with_server()
         .with_message_broker(message_broker)
         .with_redis_storage()
-        .build();
+        .build()
+        .await?;
 
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
-        system.scheduler(0).unwrap().url(),
+        system.scheduler(0)?.url(),
         false,
     ));
 
-    cc_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir()).await?;
 
-    let stats = client.stats().unwrap();
+    let stats = client.stats()?;
     assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
     assert_eq!(0, stats.dist_errors);
     assert_eq!(1, stats.compile_requests);
     assert_eq!(1, stats.requests_executed);
     assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
+
+    Ok(())
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_dist_cpp_server_restart(message_broker: &str) {
+async fn test_dist_cpp_server_restart(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cpp_server_restart_{message_broker}");
     let system = DistSystem::builder()
         .with_name(&test_name)
@@ -285,34 +349,37 @@ async fn test_dist_cpp_server_restart(message_broker: &str) {
         .with_server()
         .with_message_broker(message_broker)
         .with_redis_storage()
-        .build();
+        .build()
+        .await?;
 
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
-        system.scheduler(0).unwrap().url(),
+        system.scheduler(0)?.url(),
         false,
     ));
 
-    cc_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir()).await?;
 
-    system.restart_server(system.server(0).unwrap());
+    system.restart_server(system.server(0)?).await?;
 
-    cc_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir()).await?;
 
-    let stats = client.stats().unwrap();
+    let stats = client.stats()?;
     assert_eq!(2, stats.dist_compiles.values().sum::<usize>());
     assert_eq!(0, stats.dist_errors);
     assert_eq!(2, stats.compile_requests);
     assert_eq!(2, stats.requests_executed);
     assert_eq!(2, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
+
+    Ok(())
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_dist_cpp_no_server_times_out(message_broker: &str) {
+async fn test_dist_cpp_no_server_times_out(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cpp_no_server_times_out_{message_broker}");
     let system = DistSystem::builder()
         .with_name(&test_name)
@@ -320,30 +387,33 @@ async fn test_dist_cpp_no_server_times_out(message_broker: &str) {
         .with_message_broker(message_broker)
         .with_job_time_limit(10)
         .with_redis_storage()
-        .build();
+        .build()
+        .await?;
 
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
-        system.scheduler(0).unwrap().url(),
+        system.scheduler(0)?.url(),
         false,
     ));
 
-    cc_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir()).await?;
 
-    let stats = client.stats().unwrap();
+    let stats = client.stats()?;
     assert_eq!(0, stats.dist_compiles.values().sum::<usize>());
     assert_eq!(1, stats.dist_errors);
     assert_eq!(1, stats.compile_requests);
     assert_eq!(1, stats.requests_executed);
     assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
+
+    Ok(())
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_dist_cpp_two_servers(message_broker: &str) {
+async fn test_dist_cpp_two_servers(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cpp_two_servers_{message_broker}");
     let system = DistSystem::builder()
         .with_name(&test_name)
@@ -352,41 +422,38 @@ async fn test_dist_cpp_two_servers(message_broker: &str) {
         .with_server()
         .with_message_broker(message_broker)
         .with_redis_storage()
-        .build();
+        .build()
+        .await?;
 
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
-        system.scheduler(0).unwrap().url(),
+        system.scheduler(0)?.url(),
         false,
     ));
 
-    let compile_cpp = || {
-        let client = client.clone();
-        let tmpdir = system.data_dir().to_owned();
-        move || cc_compile(&client, &tmpdir)
-    };
-
     let _ = tokio::try_join!(
-        tokio::task::spawn_blocking(compile_cpp()),
-        tokio::task::spawn_blocking(compile_cpp()),
-        tokio::task::spawn_blocking(compile_cpp()),
-        tokio::task::spawn_blocking(compile_cpp()),
+        cc_compile(&client, system.data_dir()),
+        cc_compile(&client, system.data_dir()),
+        cc_compile(&client, system.data_dir()),
+        cc_compile(&client, system.data_dir()),
     );
 
-    let stats = client.stats().unwrap();
+    let stats = client.stats()?;
     assert_eq!(4, stats.dist_compiles.values().sum::<usize>());
     assert_eq!(0, stats.dist_errors);
     assert_eq!(4, stats.compile_requests);
     assert_eq!(4, stats.requests_executed);
     assert_eq!(4, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
+
+    Ok(())
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_dist_cpp_errors_on_job_load_failures(message_broker: &str) {
+async fn test_dist_cpp_errors_on_job_load_failures(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cpp_errors_on_job_load_failures_{message_broker}");
     let system = DistSystem::builder()
         .with_name(&test_name)
@@ -395,30 +462,33 @@ async fn test_dist_cpp_errors_on_job_load_failures(message_broker: &str) {
         .with_message_broker(message_broker)
         // Scheduler stores jobs in redis, but Server is loading from disk
         .with_scheduler_jobs_redis_storage()
-        .build();
+        .build()
+        .await?;
 
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
-        system.scheduler(0).unwrap().url(),
+        system.scheduler(0)?.url(),
         false,
     ));
 
-    cc_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir()).await?;
 
-    let stats = client.stats().unwrap();
+    let stats = client.stats()?;
     assert_eq!(0, stats.dist_compiles.values().sum::<usize>());
     assert_eq!(1, stats.dist_errors);
     assert_eq!(1, stats.compile_requests);
     assert_eq!(1, stats.requests_executed);
     assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
+
+    Ok(())
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_dist_cpp_errors_on_toolchain_load_failures(message_broker: &str) {
+async fn test_dist_cpp_errors_on_toolchain_load_failures(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cpp_errors_on_toolchain_load_failures_{message_broker}");
     let system = DistSystem::builder()
         .with_name(&test_name)
@@ -427,52 +497,56 @@ async fn test_dist_cpp_errors_on_toolchain_load_failures(message_broker: &str) {
         .with_message_broker(message_broker)
         // Scheduler stores toolchains in redis, but Server is loading from disk
         .with_scheduler_toolchains_redis_storage()
-        .build();
+        .build()
+        .await?;
 
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
-        system.scheduler(0).unwrap().url(),
+        system.scheduler(0)?.url(),
         false,
     ));
 
-    cc_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir()).await?;
 
-    let stats = client.stats().unwrap();
+    let stats = client.stats()?;
     assert_eq!(0, stats.dist_compiles.values().sum::<usize>());
     assert_eq!(1, stats.dist_errors);
     assert_eq!(1, stats.compile_requests);
     assert_eq!(1, stats.requests_executed);
     assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
+
+    Ok(())
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_dist_preprocesspr_cache_bug_2173(message_broker: &str) {
+async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Result<()> {
     // Bug 2173: preprocessor cache hit but main cache miss - because using the preprocessor cache
     // means not doing regular preprocessing, there was no preprocessed translation unit to send
     // out for distributed compilation, so an empty u8 array was compiled - which "worked", but
     // the object file *was* the result of compiling an empty file.
 
-    let test_name = format!("test_dist_preprocesspr_cache_bug_2173_{message_broker}");
+    let test_name = format!("test_dist_cpp_preprocesspr_cache_bug_2173_{message_broker}");
     let system = DistSystem::builder()
         .with_name(&test_name)
         .with_scheduler()
         .with_server()
         .with_message_broker(message_broker)
-        .build();
+        .build()
+        .await?;
 
     let mut config =
-        dist_test_sccache_client_cfg(system.data_dir(), system.scheduler(0).unwrap().url(), true);
+        dist_test_sccache_client_cfg(system.data_dir(), system.scheduler(0)?.url(), true);
     config.cache.disk.as_mut().unwrap().size = 10_000_000; // enough for one tiny object file
 
     let client = system.new_client(&config);
 
-    cc_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir()).await?;
 
-    let stats = client.stats().unwrap();
+    let stats = client.stats()?;
     assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
     assert_eq!(0, stats.dist_errors);
     assert_eq!(1, stats.compile_requests);
@@ -483,7 +557,7 @@ async fn test_dist_preprocesspr_cache_bug_2173(message_broker: &str) {
 
     let obj_file = "x.o";
     let obj_path = system.data_dir().join(obj_file);
-    let data_a = std::fs::read(&obj_path).unwrap();
+    let data_a = std::fs::read(&obj_path)?;
     let cache_path = config.cache.disk.unwrap().dir;
 
     // Don't touch the preprocessor cache - and check that it exists
@@ -499,9 +573,9 @@ async fn test_dist_preprocesspr_cache_bug_2173(message_broker: &str) {
     });
     assert_eq!(delete_count, 1, "Did the disk cache format change?");
 
-    cc_compile(&client, system.data_dir());
+    cc_compile(&client, system.data_dir()).await?;
 
-    let stats = client.stats().unwrap();
+    let stats = client.stats()?;
     assert_eq!(2, stats.dist_compiles.values().sum::<usize>());
     assert_eq!(0, stats.dist_errors);
     assert_eq!(2, stats.compile_requests);
@@ -513,9 +587,11 @@ async fn test_dist_preprocesspr_cache_bug_2173(message_broker: &str) {
     // Check that this gave the same result (i.e. that it didn't compile a completely empty file).
     // It would be nice to check directly that the object file contains the symbol for the x() function
     // from cc_compile(), but that seems pretty involved and this happens to work...
-    let data_b = std::fs::read(&obj_path).unwrap();
+    let data_b = std::fs::read(&obj_path)?;
 
     assert_eq!(data_a, data_b);
+
+    Ok(())
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
@@ -523,7 +599,7 @@ async fn test_dist_cuda_compiles(
     cuda_compiler: &Compiler,
     host_compiler: &Compiler,
     message_broker: &str,
-) {
+) -> Result<()> {
     let test_name = format!(
         "test_dist_cuda_compiles_{}_{}_{message_broker}",
         cuda_compiler.name.trim_end_matches('+'),
@@ -534,27 +610,30 @@ async fn test_dist_cuda_compiles(
         .with_scheduler()
         .with_server()
         .with_message_broker(message_broker)
-        .build();
+        .build()
+        .await?;
 
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
-        system.scheduler(0).unwrap().url(),
+        system.scheduler(0)?.url(),
         false,
     ));
 
-    nvcc_compile(&client, cuda_compiler, host_compiler, system.data_dir());
+    nvcc_compile(&client, cuda_compiler, host_compiler, system.data_dir()).await?;
 
-    let stats = client.stats().unwrap();
+    let stats = client.stats()?;
     assert_eq!(4, stats.dist_compiles.values().sum::<usize>());
     assert_eq!(0, stats.dist_errors);
     assert_eq!(1, stats.compile_requests);
     assert_eq!(5, stats.requests_executed);
     assert_eq!(5, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
+
+    Ok(())
 }
 
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
-async fn test_dist_stdpar_compiles(compiler: &Compiler, message_broker: &str) {
+async fn test_dist_stdpar_compiles(compiler: &Compiler, message_broker: &str) -> Result<()> {
     let test_name = format!(
         "test_dist_stdpar_compiles_{}_{message_broker}",
         compiler.name.trim_end_matches('+')
@@ -564,23 +643,26 @@ async fn test_dist_stdpar_compiles(compiler: &Compiler, message_broker: &str) {
         .with_scheduler()
         .with_server()
         .with_message_broker(message_broker)
-        .build();
+        .build()
+        .await?;
 
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
-        system.scheduler(0).unwrap().url(),
+        system.scheduler(0)?.url(),
         false,
     ));
 
-    stdpar_compile(&client, compiler, system.data_dir());
+    stdpar_compile(&client, compiler, system.data_dir()).await?;
 
-    let stats = client.stats().unwrap();
+    let stats = client.stats()?;
     assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
     assert_eq!(0, stats.dist_errors);
     assert_eq!(1, stats.compile_requests);
     assert_eq!(1, stats.requests_executed);
     assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
+
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -591,24 +673,25 @@ macro_rules! test_dist_if_compiler_available {
             #[test_case("rabbitmq" ; "with rabbitmq")]
             #[test_case("redis" ; "with redis")]
             #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-            async fn [<test_dist_ $name _compiles_ $compiler>] (message_broker: &str) {
+            async fn [<test_dist_ $name _compiles_ $compiler>] (message_broker: &str) -> Result<()> {
                 let _ = env_logger::try_init();
                 let compilers = find_compilers();
                 if let Some(compiler) = compilers.iter().find(|c| c.name == $compiler_name) {
-                    [<test_dist_ $name _compiles>](
+                    return [<test_dist_ $name _compiles>](
                         &compiler,
                         message_broker,
                     ).await
                 }
+                Ok(())
             }
         }
     };
 }
 
 // Linux
-#[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+#[cfg(target_os = "linux")]
 test_dist_if_compiler_available!(stdpar, nvcxx, "nvc++");
-#[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+#[cfg(target_os = "linux")]
 test_dist_if_compiler_available!(stdpar, mpicxx, "mpic++");
 
 #[cfg(not(target_os = "macos"))]
@@ -619,32 +702,33 @@ macro_rules! test_dist_if_cuda_compiler_available {
             #[test_case("rabbitmq" ; "with rabbitmq")]
             #[test_case("redis" ; "with redis")]
             #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-            async fn [<test_dist_cuda_compiles_ $cuda_compiler _ $host_compiler>] (message_broker: &str) {
+            async fn [<test_dist_cuda_compiles_ $cuda_compiler _ $host_compiler>] (message_broker: &str) -> Result<()> {
                 let _ = env_logger::try_init();
                 let cuda_compilers = find_cuda_compilers();
                 if let Some(cuda_compiler) = cuda_compilers.iter().find(|c| c.name == $cuda_compiler_name) {
                     let host_compilers = find_compilers();
                     if let Some(host_compiler) = host_compilers.iter().find(|c| c.name == $host_compiler_name) {
-                        test_dist_cuda_compiles(
+                        return test_dist_cuda_compiles(
                             &cuda_compiler,
                             &host_compiler,
                             message_broker,
                         ).await
                     }
                 }
+                Ok(())
             }
         }
     };
 }
 
 // Linux
-#[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+#[cfg(target_os = "linux")]
 test_dist_if_cuda_compiler_available!(nvcc, gcc, "nvcc", "gcc");
-#[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+#[cfg(target_os = "linux")]
 test_dist_if_cuda_compiler_available!(nvcc, clang, "nvcc", "clang++");
-#[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+#[cfg(target_os = "linux")]
 test_dist_if_cuda_compiler_available!(nvcc, nvcxx, "nvcc", "nvc++");
 
 // Clang-CUDA cannot dist-compile
-// #[cfg(all(unix, not(target_os = "macos"), not(target_env = "msvc")))]
+// #[cfg(target_os = "linux")]
 // test_dist_if_cuda_compiler_available!(clang, clang, "clang++", "clang++");

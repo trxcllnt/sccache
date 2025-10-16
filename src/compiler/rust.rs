@@ -15,9 +15,9 @@
 use crate::cache::{FileObjectSource, Storage};
 use crate::compiler::args::*;
 use crate::compiler::{
-    c::ArtifactDescriptor, Cacheable, ColorMode, Compilation, CompileCommand, Compiler,
-    CompilerArguments, CompilerCommand, CompilerHasher, CompilerKind, CompilerProxy, HashResult,
-    Language, SingleCompileCommand,
+    Cacheable, ColorMode, Compilation, CompileCommand, Compiler, CompilerArguments,
+    CompilerCommand, CompilerHasher, CompilerKind, CompilerProxy, HashResult, Language,
+    SingleCompileCommand, c::ArtifactDescriptor,
 };
 #[cfg(feature = "dist-client")]
 use crate::compiler::{DistPackagers, OutputsRewriter};
@@ -26,7 +26,7 @@ use crate::dist::pkg::{self, InputsWriter};
 #[cfg(feature = "dist-client")]
 use crate::lru_disk_cache::{LruCache, Meter};
 use crate::mock_command::{CommandCreatorSync, RunCommand};
-use crate::util::{fmt_duration_as_secs, hash_all, hash_all_archives, run_input_output, Digest};
+use crate::util::{Digest, fmt_duration_as_secs, hash_all, hash_all_archives, run_input_output};
 use crate::util::{HashToDigest, OsStrExt};
 use crate::{counted_array, debug_if_trace, dist};
 use async_trait::async_trait;
@@ -471,7 +471,10 @@ impl Rust {
             let rlib_dep_reader = match rlib_dep_reader {
                 Ok(r) => Some(Arc::new(r)),
                 Err(e) => {
-                    warn!("Failed to initialise RlibDepDecoder, distributed compiles will be inefficient: {}", e);
+                    warn!(
+                        "Failed to initialise RlibDepDecoder, distributed compiles will be inefficient: {}",
+                        e
+                    );
                     None
                 }
             };
@@ -1027,31 +1030,32 @@ use super::CacheControl;
 // These are taken from https://github.com/rust-lang/rust/blob/b671c32ddc8c36d50866428d83b7716233356721/src/librustc/session/config.rs#L1186
 counted_array!(static ARGS: [ArgInfo<ArgData>; _] = [
     flag!("-", TooHardFlag),
-    take_arg!("--allow", OsString, CanBeSeparated('='), PassThrough),
-    take_arg!("--cap-lints", OsString, CanBeSeparated('='), PassThrough),
-    take_arg!("--cfg", OsString, CanBeSeparated('='), PassThrough),
-    take_arg!("--check-cfg", OsString, CanBeSeparated('='), PassThrough),
-    take_arg!("--codegen", ArgCodegen, CanBeSeparated('='), CodeGen),
-    take_arg!("--color", String, CanBeSeparated('='), Color),
-    take_arg!("--crate-name", String, CanBeSeparated('='), CrateName),
-    take_arg!("--crate-type", ArgCrateTypes, CanBeSeparated('='), CrateType),
-    take_arg!("--deny", OsString, CanBeSeparated('='), PassThrough),
-    take_arg!("--emit", String, CanBeSeparated('='), Emit),
-    take_arg!("--error-format", OsString, CanBeSeparated('='), PassThrough),
-    take_arg!("--explain", OsString, CanBeSeparated('='), NotCompilation),
-    take_arg!("--extern", ArgExtern, CanBeSeparated('='), Extern),
-    take_arg!("--forbid", OsString, CanBeSeparated('='), PassThrough),
+    take_arg!("--allow", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("--cap-lints", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("--cfg", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("--check-cfg", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("--codegen", ArgCodegen, CanBeSeparated(b'='), CodeGen),
+    take_arg!("--color", String, CanBeSeparated(b'='), Color),
+    take_arg!("--crate-name", String, CanBeSeparated(b'='), CrateName),
+    take_arg!("--crate-type", ArgCrateTypes, CanBeSeparated(b'='), CrateType),
+    take_arg!("--deny", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("--diagnostic-width", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("--emit", String, CanBeSeparated(b'='), Emit),
+    take_arg!("--error-format", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("--explain", OsString, CanBeSeparated(b'='), NotCompilation),
+    take_arg!("--extern", ArgExtern, CanBeSeparated(b'='), Extern),
+    take_arg!("--forbid", OsString, CanBeSeparated(b'='), PassThrough),
     flag!("--help", NotCompilationFlag),
-    take_arg!("--json", String, CanBeSeparated('='), Json),
-    take_arg!("--out-dir", PathBuf, CanBeSeparated('='), OutDir),
-    take_arg!("--pretty", OsString, CanBeSeparated('='), NotCompilation),
-    take_arg!("--print", OsString, CanBeSeparated('='), NotCompilation),
-    take_arg!("--remap-path-prefix", OsString, CanBeSeparated('='), PassThrough),
-    take_arg!("--sysroot", PathBuf, CanBeSeparated('='), TooHardPath),
-    take_arg!("--target", ArgTarget, CanBeSeparated('='), Target),
-    take_arg!("--unpretty", OsString, CanBeSeparated('='), NotCompilation),
+    take_arg!("--json", String, CanBeSeparated(b'='), Json),
+    take_arg!("--out-dir", PathBuf, CanBeSeparated(b'='), OutDir),
+    take_arg!("--pretty", OsString, CanBeSeparated(b'='), NotCompilation),
+    take_arg!("--print", OsString, CanBeSeparated(b'='), NotCompilation),
+    take_arg!("--remap-path-prefix", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("--sysroot", PathBuf, CanBeSeparated(b'='), TooHardPath),
+    take_arg!("--target", ArgTarget, CanBeSeparated(b'='), Target),
+    take_arg!("--unpretty", OsString, CanBeSeparated(b'='), NotCompilation),
     flag!("--version", NotCompilationFlag),
-    take_arg!("--warn", OsString, CanBeSeparated('='), PassThrough),
+    take_arg!("--warn", OsString, CanBeSeparated(b'='), PassThrough),
     take_arg!("-A", OsString, CanBeSeparated, PassThrough),
     take_arg!("-C", ArgCodegen, CanBeSeparated, CodeGen),
     take_arg!("-D", OsString, CanBeSeparated, PassThrough),
@@ -1086,14 +1090,14 @@ fn parse_arguments(arguments: &[OsString], cwd: &Path) -> CompilerArguments<Pars
     let mut gcno = false;
     let mut target_json = None;
 
-    for arg in ArgsIter::new(arguments.iter().cloned(), &ARGS[..]) {
+    for (idx, arg) in ArgsIter::new(arguments.iter().cloned(), &ARGS[..]).enumerate() {
         let arg = try_or_cannot_cache!(arg, "argument parse");
         match arg.get_data() {
             Some(TooHardFlag) | Some(TooHardPath(_)) => {
                 cannot_cache!(arg.flag_str().expect("Can't be Argument::Raw/UnknownFlag",))
             }
             Some(NotCompilationFlag) | Some(NotCompilation(_)) => {
-                return CompilerArguments::NotCompilation
+                return CompilerArguments::NotCompilation;
             }
             Some(LinkLibrary(ArgLinkLibrary { kind, name })) => {
                 if kind == "static" {
@@ -1178,9 +1182,21 @@ fn parse_arguments(arguments: &[OsString], cwd: &Path) -> CompilerArguments<Pars
             None => {
                 match arg {
                     Argument::Raw(ref val) => {
+                        if idx == 0 {
+                            if let Some(value) = val.to_str() {
+                                if value == "rustc" {
+                                    // If the first argument is rustc, it's likely called via clippy-driver,
+                                    // so it's not actually an input file, which means we should discount it.
+                                    continue;
+                                }
+                            }
+                        }
                         if input.is_some() {
                             // Can't cache compilations with multiple inputs.
-                            cannot_cache!("multiple input files");
+                            cannot_cache!(
+                                "multiple input files",
+                                format!("prev = {input:?}, next = {arg:?}")
+                            );
                         }
                         input = Some(val.clone());
                     }
@@ -1446,11 +1462,16 @@ where
             let (mut sortables, rest): (Vec<_>, Vec<_>) = os_string_arguments
                 .iter()
                 // We exclude a few arguments from the hash:
-                //   -L, --extern, --out-dir
+                //   -L, --extern, --out-dir, --diagnostic-width
                 // These contain paths which aren't relevant to the output, and the compiler inputs
                 // in those paths (rlibs and static libs used in the compilation) are used as hash
                 // inputs below.
-                .filter(|&(arg, _)| !(arg == "--extern" || arg == "-L" || arg == "--out-dir"))
+                .filter(|&(arg, _)| {
+                    !(arg == "--extern"
+                        || arg == "-L"
+                        || arg == "--out-dir"
+                        || arg == "--diagnostic-width")
+                })
                 // We also exclude `--target` if it specifies a path to a .json file. The file content
                 // is used as hash input below.
                 // If `--target` specifies a string, it continues to be hashed as part of the arguments.
@@ -1494,7 +1515,7 @@ where
             .iter()
             // Filter out RUSTC_COLOR since we control color usage with command line flags.
             // rustc reports an error when both are present.
-            .filter(|(ref k, _)| k != "RUSTC_COLOR")
+            .filter(|(k, _)| k != "RUSTC_COLOR")
             .cloned()
             .collect();
         env_vars.sort();
@@ -1856,8 +1877,7 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
         } = *{ self };
         trace!(
             "Dist inputs: inputs={:?} crate_link_paths={:?}",
-            inputs,
-            crate_link_paths
+            inputs, crate_link_paths
         );
 
         let inputs_packager = Box::new(RustInputsPackager {
@@ -3094,6 +3114,36 @@ LLVM version: 15.0.2
     }
 
     #[test]
+    fn test_parse_arguments_multiple_inputs() {
+        fails!(
+            "huh.rs",
+            "--emit",
+            "link",
+            "foo.rs",
+            "--out-dir",
+            "out",
+            "--crate-name",
+            "foo",
+            "--crate-type",
+            "lib"
+        );
+
+        // Having `rustc` as the first argument is indicative of clippy
+        parses!(
+            "rustc",
+            "--emit",
+            "link",
+            "foo.rs",
+            "--out-dir",
+            "out",
+            "--crate-name",
+            "foo",
+            "--crate-type",
+            "lib"
+        );
+    }
+
+    #[test]
     fn test_get_compiler_outputs() {
         let creator = new_creator();
         next_command(
@@ -3116,15 +3166,17 @@ LLVM version: 15.0.2
     fn test_get_compiler_outputs_fail() {
         let creator = new_creator();
         next_command(&creator, Ok(MockChild::new(exit_status(1), "", "error")));
-        assert!(get_compiler_outputs(
-            &creator,
-            "rustc".as_ref(),
-            ovec!("a", "b"),
-            "cwd".as_ref(),
-            &[]
-        )
-        .wait()
-        .is_err());
+        assert!(
+            get_compiler_outputs(
+                &creator,
+                "rustc".as_ref(),
+                ovec!("a", "b"),
+                "cwd".as_ref(),
+                &[]
+            )
+            .wait()
+            .is_err()
+        );
     }
 
     #[test]
@@ -3720,6 +3772,7 @@ proc_macro false
                     "foo.rs",
                     "--out-dir",
                     "out",
+                    "--diagnostic-width=1",
                     "--extern",
                     "a=1",
                     "--crate-name",

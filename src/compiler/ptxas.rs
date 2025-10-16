@@ -15,8 +15,8 @@
 
 use crate::compiler::c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput};
 use crate::compiler::cicc;
-use crate::compiler::{args::*, CompileCommandImpl};
 use crate::compiler::{Cacheable, CompilerArguments, Language};
+use crate::compiler::{CompileCommandImpl, args::*};
 use crate::{counted_array, dist};
 
 use crate::mock_command::CommandCreatorSync;
@@ -119,7 +119,7 @@ counted_array!(pub static ARGS: [ArgInfo<cicc::ArgData>; _] = [
     flag!("--return-at-end", PassThroughFlag),
     take_arg!("--split-compile", OsString, CanBeSeparated, Unhashed),
     take_arg!("--split-compile=", OsString, Concatenated, Unhashed),
-    take_arg!("-arch", OsString, CanBeSeparated('='), PassThrough),
+    take_arg!("-arch", OsString, CanBeSeparated(b'='), PassThrough),
     flag!("-g", PassThroughFlag),
     take_arg!("-m", OsString, Concatenated, PassThrough),
     take_arg!("-o", PathBuf, Separated, Output),

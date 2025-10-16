@@ -17,18 +17,17 @@ use async_trait::async_trait;
 use bytes::Buf;
 use celery::{error::CeleryError, task::AsyncResult};
 
-use futures::{lock::Mutex, AsyncReadExt};
+use futures::{AsyncReadExt, lock::Mutex};
 use tokio_retry2::RetryError;
 
 use crate::{
     cache::Storage,
     dist::{
-        self,
+        self, CompileCommand, JobStats, NewJobResponse, RunJobRequest, RunJobResponse,
+        SchedulerService, SchedulerStatus, ServerDetails, ServerStats, ServerStatus,
+        SubmitToolchainResult, Toolchain,
         http::bincode_deserialize,
         metrics::{CountRecorder, Metrics, TimeRecorder},
-        CompileCommand, JobStats, NewJobResponse, RunJobRequest, RunJobResponse, SchedulerService,
-        SchedulerStatus, ServerDetails, ServerStats, ServerStatus, SubmitToolchainResult,
-        Toolchain,
     },
     errors::*,
     util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
@@ -285,7 +284,7 @@ impl Scheduler {
         };
 
         let sigint = async {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
             let mut sigint = signal(SignalKind::interrupt())?;
             let mut sigterm = signal(SignalKind::terminate())?;
             tokio::select! {
@@ -585,10 +584,10 @@ impl SchedulerService for Scheduler {
         if self.has_job_result(job_id).await {
             match self.get_job_result(job_id).await {
                 Ok(RunJobResponse::FatalError { message, server_id }) => {
-                    return Ok(RunJobResponse::FatalError { message, server_id })
+                    return Ok(RunJobResponse::FatalError { message, server_id });
                 }
                 Ok(RunJobResponse::Complete { result, server_id }) => {
-                    return Ok(RunJobResponse::Complete { result, server_id })
+                    return Ok(RunJobResponse::Complete { result, server_id });
                 }
                 // All others, delete the bad result and retry run_job
                 _ => {

@@ -37,8 +37,8 @@ use crate::{
     cache::PreprocessorCacheModeConfig,
     errors::*,
     util::{
-        decode_path, encode_path, Digest, HashToDigest, MetadataCtimeExt, TimeMacroFinder,
-        Timestamp,
+        Digest, HashToDigest, MetadataCtimeExt, TimeMacroFinder, Timestamp, decode_path,
+        encode_path,
     },
 };
 
@@ -170,10 +170,14 @@ impl PreprocessorCacheEntry {
                         vacant.insert(includes);
                     }
                 };
-                debug!("Added result key {result_key:?} to preprocessor cache entry {preprocessor_key:?}");
+                debug!(
+                    "Added result key {result_key:?} to preprocessor cache entry {preprocessor_key:?}"
+                );
             }
             Err(e) => {
-                debug!("Could not add result key {result_key:?} to preprocessor cache entry {preprocessor_key:?}: {e}");
+                debug!(
+                    "Could not add result key {result_key:?} to preprocessor cache entry {preprocessor_key:?}: {e}"
+                );
             }
         }
     }

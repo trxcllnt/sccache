@@ -174,9 +174,8 @@ impl CommandChild for Child {
 
     async fn wait(self) -> io::Result<ExitStatus> {
         let Child { mut inner, token } = self;
-        inner.wait().await.map(|ret| {
+        inner.wait().await.inspect(|_ret| {
             drop(token);
-            ret
         })
     }
 
@@ -583,7 +582,10 @@ impl CommandCreator for MockCommandCreator {
     }
 
     fn new_command<S: AsRef<OsStr>>(&mut self, program: S) -> MockCommand {
-        assert!(!self.children.is_empty(), "Too many calls to MockCommandCreator::new_command, or not enough to MockCommandCreator::new_command_spawns!");
+        assert!(
+            !self.children.is_empty(),
+            "Too many calls to MockCommandCreator::new_command, or not enough to MockCommandCreator::new_command_spawns!"
+        );
         //TODO: assert value of program
         MockCommand {
             child: Some(self.children.remove(0)),
@@ -669,23 +671,34 @@ impl From<std::process::Output> for ProcessOutput {
         let signal = status.signal();
 
         let status = if let Some(code) = status.code() {
+            let desc = signal
+                // Use ExitStatus's fmt::Display implementation if signal is Some()
+                .map(|_| format!("{status}"))
+                .unwrap_or_default();
             ProcessStatus::Exit {
                 flag: code as i64,
-                desc: signal
-                    // Use ExitStatus's fmt::Display implementation if signal is Some()
-                    .map(|_| format!("{status}"))
+                desc: if desc.is_empty() {
                     // Otherwise, just print the exit code
-                    .unwrap_or_else(|| format!("status: (exit {code})")),
+                    format!("exit: (code {code})")
+                } else {
+                    desc
+                },
             }
         } else if let Some(signal) = signal {
+            let desc = format!("{status}");
             ProcessStatus::Term {
                 flag: signal as i64,
-                desc: format!("{status}"),
+                desc: if desc.is_empty() {
+                    format!("killed: (signal {signal})")
+                } else {
+                    desc
+                },
             }
         } else {
+            let desc = format!("{status}");
             ProcessStatus::Died {
                 flag: -1,
-                desc: format!("{status}"),
+                desc: if desc.is_empty() { "died".into() } else { desc },
             }
         };
 
@@ -746,24 +759,24 @@ pub enum ProcessStatus {
 impl ProcessStatus {
     pub fn code(&self) -> Option<i64> {
         match self {
-            ProcessStatus::Exit { ref flag, .. } => Some(*flag),
+            ProcessStatus::Exit { flag, .. } => Some(*flag),
             _ => None,
         }
     }
 
     pub fn signal(&self) -> Option<i64> {
         match self {
-            ProcessStatus::Term { ref flag, .. } => Some(*flag),
-            ProcessStatus::Died { ref flag, .. } => Some(*flag),
+            ProcessStatus::Term { flag, .. } => Some(*flag),
+            ProcessStatus::Died { flag, .. } => Some(*flag),
             _ => None,
         }
     }
 
     pub fn desc(&self) -> String {
         match self {
-            ProcessStatus::Exit { ref desc, .. } => desc.clone(),
-            ProcessStatus::Term { ref desc, .. } => desc.clone(),
-            ProcessStatus::Died { ref desc, .. } => desc.clone(),
+            ProcessStatus::Exit { desc, .. } => desc.clone(),
+            ProcessStatus::Term { desc, .. } => desc.clone(),
+            ProcessStatus::Died { desc, .. } => desc.clone(),
         }
     }
 

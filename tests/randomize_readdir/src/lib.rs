@@ -213,9 +213,15 @@ fn init() {
     });
 }
 
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// Opens a directory stream for reading.
+///
+/// # Safety
+///
+/// This function is unsafe because:
+/// - `dirname` must be a valid pointer to a null-terminated C string
+/// - The caller is responsible for eventually closing the returned directory stream with `closedir`
 #[no_mangle]
-pub extern "C" fn opendir(dirname: *const c_char) -> *mut DIR {
+pub unsafe extern "C" fn opendir(dirname: *const c_char) -> *mut DIR {
     let state = STATE.wait();
     let dirp = unsafe { (state.opendir)(dirname) };
 
@@ -256,9 +262,15 @@ pub extern "C" fn readdir64(dirp: *mut DIR) -> *mut dirent64 {
     STATE.wait().wrapped_readdir64(dirp)
 }
 
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// Closes a directory stream.
+///
+/// # Safety
+///
+/// This function is unsafe because:
+/// - `dirp` must be a valid pointer to a directory stream previously opened by `opendir`
+/// - The directory stream must not be used after calling this function
 #[no_mangle]
-pub extern "C" fn closedir(dirp: *mut DIR) -> c_int {
+pub unsafe extern "C" fn closedir(dirp: *mut DIR) -> c_int {
     info!("{:p}: closing handle", dirp);
 
     let state = STATE.wait();

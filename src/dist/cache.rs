@@ -6,7 +6,7 @@ pub use self::server::ServerToolchains;
 #[cfg(feature = "dist-client")]
 mod client {
 
-    use anyhow::{bail, Context, Error, Result};
+    use anyhow::{Context, Error, Result, bail};
     use fs_err as fs;
     use futures::lock::Mutex;
     use std::collections::{HashMap, HashSet};
@@ -14,8 +14,8 @@ mod client {
     use std::path::{Path, PathBuf};
 
     use crate::config;
-    use crate::dist::pkg::ToolchainPackager;
     use crate::dist::Toolchain;
+    use crate::dist::pkg::ToolchainPackager;
     use crate::lru_disk_cache::Error as LruError;
     use crate::lru_disk_cache::LruDiskCache;
     use crate::util::Digest;
@@ -442,14 +442,16 @@ mod client {
             )
             .unwrap();
 
-            assert!(client_toolchains
-                .put_toolchain(
-                    "/my/compiler".as_ref(),
-                    "weak_key",
-                    PanicToolchainPackager::new()
-                )
-                .await
-                .is_err());
+            assert!(
+                client_toolchains
+                    .put_toolchain(
+                        "/my/compiler".as_ref(),
+                        "weak_key",
+                        PanicToolchainPackager::new()
+                    )
+                    .await
+                    .is_err()
+            );
         }
 
         #[test]
@@ -486,7 +488,7 @@ mod server {
     use async_compression::futures::bufread::GzipDecoder;
     use async_trait::async_trait;
 
-    use futures::{io::BufReader, StreamExt};
+    use futures::{StreamExt, io::BufReader};
     use tokio_retry2::RetryError;
 
     use std::ffi::OsStr;
@@ -494,7 +496,7 @@ mod server {
     use std::sync::Arc;
 
     use crate::cache::disk::DiskCache;
-    use crate::cache::{cache, Storage};
+    use crate::cache::{Storage, cache};
     use crate::dist::metrics::{Metrics, TimeRecorder};
     use crate::dist::{Toolchain, ToolchainService};
     use crate::errors::*;

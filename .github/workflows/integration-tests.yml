@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -52,7 +52,7 @@ jobs:
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -61,7 +61,7 @@ jobs:
         with:
           toolchain: "stable"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
@@ -107,7 +107,7 @@ jobs:
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -116,7 +116,7 @@ jobs:
         with:
           toolchain: "stable"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
@@ -171,7 +171,7 @@ jobs:
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -183,7 +183,7 @@ jobs:
         with:
           toolchain: "stable"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
@@ -231,7 +231,7 @@ jobs:
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -246,7 +246,7 @@ jobs:
         with:
           toolchain: "stable"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
@@ -286,12 +286,12 @@ jobs:
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
       - name: Configure Cache Env
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
@@ -302,7 +302,7 @@ jobs:
         with:
           toolchain: "stable"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
@@ -355,7 +355,7 @@ jobs:
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -364,7 +364,7 @@ jobs:
         with:
           toolchain: "stable"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
@@ -417,7 +417,7 @@ jobs:
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -426,7 +426,7 @@ jobs:
         with:
           toolchain: "stable"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
@@ -468,7 +468,7 @@ jobs:
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -486,7 +486,7 @@ jobs:
         with:
           toolchain: "stable"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
@@ -527,7 +527,7 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
 
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -607,12 +607,12 @@ jobs:
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
       - name: Configure Cache Env
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
@@ -624,7 +624,7 @@ jobs:
           chmod +x llvm.sh
           sudo ./llvm.sh "${LLVM_VERSION}"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
@@ -674,7 +674,7 @@ jobs:
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -686,7 +686,7 @@ jobs:
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
 
       # - name: Configure ROCm Env
-      #   uses: actions/github-script@v7
+      #   uses: actions/github-script@v8
       #   with:
       #     script: |
       #       core.exportVariable('ROCM_PATH', process.env.ROCM_PATH || '');
@@ -709,7 +709,7 @@ jobs:
         run: |
           cargo build -p randomize_readdir
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
@@ -775,18 +775,18 @@ jobs:
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
       - name: Configure Cache Env
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
@@ -830,18 +830,18 @@ jobs:
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
       - name: Configure Cache Env
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
@@ -896,18 +896,18 @@ jobs:
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
       - name: Configure Cache Env
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
@@ -956,33 +956,29 @@ jobs:
         with:
           name: cmake
 
-  # The test cargo "cargo build -Zprofile"
-  rust-test-Z-profile:
+  # Test sccache with modern LLVM-based code coverage
+  rust-test-coverage:
     runs-on: ubuntu-24.04
     needs: build
 
     env:
       RUSTC_WRAPPER: /home/runner/.cargo/bin/sccache
       CARGO_INCREMENTAL: "0"
-      RUSTFLAGS: "-Ccodegen-units=1 -Copt-level=0 -Clink-dead-code -Coverflow-checks=off -Zpanic_abort_tests -Cpanic=abort -Zprofile"
-      RUSTDOCFLAGS: "-Cpanic=abort"
-      # The last nightly rust that still support "-Zprofile"
-      #
-      # See https://github.com/rust-lang/rust/pull/131829
-      RUST_TEST_TOOLCHAIN: nightly-2024-11-01
+      RUSTFLAGS: "-Cinstrument-coverage"
+      LLVM_PROFILE_FILE: "coverage-%p-%m.profraw"
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
       - name: Install rust
         uses: ./.github/actions/rust-toolchain
         with:
-          toolchain: ${{ env.RUST_TEST_TOOLCHAIN }}
+          toolchain: "stable"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
@@ -991,14 +987,14 @@ jobs:
         run: chmod +x ${SCCACHE_PATH}
 
       - name: "Coverage test #1"
-        run: cargo +${{ env.RUST_TEST_TOOLCHAIN }} clean && cargo +${{ env.RUST_TEST_TOOLCHAIN }} build
+        run: cargo clean && cargo build
 
       - name: Output
         run: |
           ${SCCACHE_PATH} --show-adv-stats
 
       - name: "Coverage test #2"
-        run: cargo +${{ env.RUST_TEST_TOOLCHAIN }} clean && cargo +${{ env.RUST_TEST_TOOLCHAIN }} build
+        run: cargo clean && cargo build
 
       - name: Output
         run: |
@@ -1021,7 +1017,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: integration-tests
           path: /home/runner/.cargo/bin/
@@ -1029,7 +1025,7 @@ jobs:
         run: chmod +x ${SCCACHE_PATH}
 
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -1083,7 +1079,7 @@ jobs:
       SCCACHE_PATH: target/debug/sccache
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 

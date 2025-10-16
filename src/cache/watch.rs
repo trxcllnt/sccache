@@ -13,9 +13,8 @@
 use async_trait::async_trait;
 use notify_debouncer_full as notify;
 use notify_debouncer_full::{
-    new_debouncer,
+    DebounceEventResult, RecommendedCache, new_debouncer,
     notify::{RecommendedWatcher, RecursiveMode},
-    DebounceEventResult, RecommendedCache,
 };
 use std::{ffi::OsString, future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
@@ -31,7 +30,7 @@ pub struct WatchStorage {
 }
 
 impl WatchStorage {
-    pub async fn from<T>(create: T, paths: &[String]) -> Result<Arc<dyn Storage>>
+    pub async fn from<T>(create: T, paths: &[PathBuf]) -> Result<Arc<dyn Storage>>
     where
         T: Fn() -> Pin<Box<dyn Future<Output = Result<Arc<dyn Storage>>> + Send>> + Send + 'static,
     {
@@ -41,22 +40,21 @@ impl WatchStorage {
             trace!("No paths to watch, returning storage");
             return Ok(storage);
         }
-        let pp_config = storage.preprocessor_cache_mode_config();
+        let preprocessor_cache_mode_config = storage.preprocessor_cache_mode_config();
         let storage = Arc::new(futures::lock::Mutex::new(storage));
         let watcher = Self::watch(create, storage.clone(), paths)?;
         Ok(Arc::new(Self {
-            preprocessor_cache_mode_config: pp_config,
+            preprocessor_cache_mode_config,
             storage,
             watcher,
         }))
     }
 
-    fn dirs_and_paths(paths: &[String]) -> Vec<(PathBuf, Vec<OsString>)> {
+    fn dirs_and_paths(paths: &[PathBuf]) -> Vec<(PathBuf, Vec<OsString>)> {
         trace!("Filtering for {paths:?}");
         use itertools::Itertools;
         paths
             .iter()
-            .filter_map(|p| expand_homedir(p).map(PathBuf::from))
             .filter_map(|p| {
                 p.parent()
                     .filter(|dir| dir.exists())
@@ -116,8 +114,8 @@ impl WatchStorage {
 
         tokio::spawn(async move {
             use notify_debouncer_full::notify::{
-                event::{AccessKind, AccessMode, CreateKind, ModifyKind},
                 EventKind,
+                event::{AccessKind, AccessMode, CreateKind, ModifyKind},
             };
 
             while let Some(res) = rx.recv().await {
@@ -261,13 +259,5 @@ impl Storage for WatchStorage {
             .await
             .put_preprocessor_cache_entry(key, preprocessor_cache_entry)
             .await
-    }
-}
-
-fn expand_homedir(path: &str) -> Option<String> {
-    if !path.starts_with("~/") && !path.starts_with("~\\") {
-        Some(path.to_string())
-    } else {
-        home::home_dir().map(|home| path.replace('~', &home.to_string_lossy()))
     }
 }

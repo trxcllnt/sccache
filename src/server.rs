@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.SCCACHE_MAX_FRAME_LENGTH
 
-use crate::cache::{storage_from_config, Storage};
+use crate::cache::{Storage, storage_from_config};
 use crate::compiler::{
-    compiler_info_args, get_compiler_info, CacheControl, CompileResult, Compiler,
-    CompilerArguments, CompilerHasher, CompilerKind, CompilerProxy, DistType, Language, MissType,
+    CacheControl, CompileResult, Compiler, CompilerArguments, CompilerHasher, CompilerKind,
+    CompilerProxy, DistType, Language, MissType, compiler_info_args, get_compiler_info,
 };
 #[cfg(feature = "dist-client")]
 use crate::config;
@@ -28,18 +28,20 @@ use crate::util::{self, AsyncMulticast, AsyncMulticastFunc};
 #[cfg(feature = "dist-client")]
 use anyhow::Context as _;
 use async_trait::async_trait;
-use bytes::{buf::BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut, buf::BufMut};
 use filetime::FileTime;
 use fs::metadata;
 use fs_err as fs;
 use futures::{
-    channel::mpsc, future, stream, FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt,
+    FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt, channel::mpsc, future, stream,
 };
 use number_prefix::NumberPrefix;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "dist-client")]
 use std::mem;
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(target_os = "android")]
+use std::os::android::net::SocketAddrExt;
+#[cfg(target_os = "linux")]
 use std::os::linux::net::SocketAddrExt;
 use std::sync::atomic::AtomicU64;
 #[cfg(feature = "dist-client")]
@@ -62,10 +64,10 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     runtime::Runtime,
     sync::{Mutex, RwLock},
-    time::{self, sleep, Sleep},
+    time::{self, Sleep, sleep},
 };
 use tokio_serde::Framed;
-use tokio_util::codec::{length_delimited, LengthDelimitedCodec};
+use tokio_util::codec::{LengthDelimitedCodec, length_delimited};
 use tower::Service;
 
 use crate::errors::*;
@@ -164,7 +166,9 @@ impl DistClientContainer {
     #[cfg(not(feature = "dist-client"))]
     fn new(config: &Config, _: &tokio::runtime::Handle) -> Self {
         if config.dist.scheduler_url.is_some() {
-            warn!("Scheduler address configured but dist feature disabled, disabling distributed sccache")
+            warn!(
+                "Scheduler address configured but dist feature disabled, disabling distributed sccache"
+            )
         }
         Self {}
     }
@@ -249,7 +253,7 @@ impl DistClientContainer {
                 return DistInfo::NotConnected(
                     cfg.scheduler_url.clone(),
                     "enabled, auth not configured".to_string(),
-                )
+                );
             }
             DistClientState::RetryCreateAt(cfg, time) => {
                 return DistInfo::NotConnected(
@@ -258,7 +262,7 @@ impl DistClientContainer {
                         "enabled, not connected, will retry in {:.1}s",
                         time.duration_since(Instant::now()).as_secs_f32()
                     ),
-                )
+                );
             }
             DistClientState::Some(cfg, client) => (Arc::clone(client), cfg.scheduler_url.clone()),
         };
@@ -355,8 +359,10 @@ impl DistClientContainer {
                         Self::get_cached_config_auth_token(auth_url)
                     }
                 };
-                let auth_token = try_or_fail_with_message!(auth_token
-                    .context("could not load client auth token, run |sccache --dist-auth|"));
+                let auth_token = try_or_fail_with_message!(
+                    auth_token
+                        .context("could not load client auth token, run |sccache --dist-auth|")
+                );
                 let dist_client = dist::http::Client::new(
                     url,
                     &config.cache_dir.join("client"),
@@ -382,7 +388,9 @@ impl DistClientContainer {
                         DistClientState::Some(Box::new(config), Arc::new(dist_client))
                     }
                     Err(_) => {
-                        warn!("Scheduler address configured, but could not communicate with scheduler");
+                        warn!(
+                            "Scheduler address configured, but could not communicate with scheduler"
+                        );
                         DistClientState::RetryCreateAt(
                             Box::new(config),
                             Instant::now() + DIST_CLIENT_RECREATE_TIMEOUT,
@@ -483,7 +491,7 @@ pub fn start_server(config: &Config, addr: &crate::net::SocketAddr) -> Result<()
         Err(err)
     })?;
 
-    let res = (|| -> io::Result<_> {
+    let res: io::Result<(crate::net::SocketAddr, Box<dyn FnOnce(_) -> io::Result<()>>)> = (|| {
         match addr {
             crate::net::SocketAddr::Net(addr) => {
                 trace!("binding TCP {addr}");
@@ -558,7 +566,7 @@ pub fn start_server(config: &Config, addr: &crate::net::SocketAddr) -> Result<()
                     addr: addr.to_string(),
                 },
             )?;
-            run(future::pending::<()>())?;
+            run(future::pending::<()>()).map_err(anyhow::Error::from)?;
             Ok(())
         }
         Err(e) => {
@@ -568,8 +576,7 @@ pub fn start_server(config: &Config, addr: &crate::net::SocketAddr) -> Result<()
             } else if cfg!(windows) && Some(10013) == e.raw_os_error() {
                 // 10013 is the "WSAEACCES" error, which can occur if the requested port
                 // has been allocated for other purposes, such as winNAT or Hyper-V.
-                let windows_help_message =
-                    "A Windows port exclusion is blocking use of the configured port.\nTry setting SCCACHE_SERVER_PORT to a new value.";
+                let windows_help_message = "A Windows port exclusion is blocking use of the configured port.\nTry setting SCCACHE_SERVER_PORT to a new value.";
                 let reason: String = format!("{windows_help_message}\n{e}");
                 notify_server_startup(&notify, ServerStartup::Err { reason })?;
             } else {
@@ -1102,8 +1109,8 @@ fn init_sysinfo() -> sysinfo::System {
     )
 }
 
-use futures::future::Either;
 use futures::TryStreamExt;
+use futures::future::Either;
 
 impl<C> SccacheService<C>
 where
@@ -1511,7 +1518,6 @@ where
 
         self.rt
             .spawn(async move {
-
                 let result = match me.dist_client.get_client().await {
                     Ok(client) => {
                         std::panic::AssertUnwindSafe(hasher
@@ -1526,8 +1532,7 @@ where
                                 env_vars,
                                 cache_control,
                                 me.rt.clone(),
-                            )
-                        )
+                        ))
                         .catch_unwind()
                         .await
                         .map_err(|e| {
@@ -1539,13 +1544,15 @@ where
                             let thread = std::thread::current();
                             let thread_name = thread.name().unwrap_or("unnamed");
                             if let Some((file, line, column)) = PANIC_LOCATION.with(|l| l.take()) {
-                                anyhow!("thread '{thread_name}' panicked at {file}:{line}:{column}: {panic}")
+                                anyhow!(
+                                    "thread '{thread_name}' panicked at {file}:{line}:{column}: {panic}"
+                                )
                             } else {
                                 anyhow!("thread '{thread_name}' panicked: {panic}")
                             }
                         })
                         .and_then(std::convert::identity)
-                    }
+                    },
                     Err(e) => Err(e),
                 };
 
@@ -1559,7 +1566,6 @@ where
 
                 match result {
                     Ok((compiled, output)) => {
-
                         let mut dist_type = DistType::NoDist;
 
                         match compiled {
@@ -1845,9 +1851,7 @@ where
             if let Some(proxy) = proxy {
                 trace!(
                     "Inserting new path proxy {:?} @ {:?} -> {:?}",
-                    &path,
-                    &cwd,
-                    resolved_compiler_path
+                    &path, &cwd, resolved_compiler_path
                 );
                 compiler_proxies
                     .write()
@@ -2218,10 +2222,18 @@ impl ServerStats {
                 stat_width = stat_width + suffix_len
             ));
         }
+        // Compare values. If equal, compare keys to have a fully deterministic order.
+        let sort_func =
+            |(k1, v1): &(&String, &usize), (k2, v2): &(&String, &usize)| match v1.cmp(v2).reverse()
+            {
+                std::cmp::Ordering::Equal => k1.cmp(k2),
+                other => other,
+            };
+
         if !self.not_cached.is_empty() {
             writer.write("\nNon-cacheable reasons:");
             let mut counts: Vec<_> = self.not_cached.iter().collect();
-            counts.sort_by(|(_, c1), (_, c2)| c1.cmp(c2).reverse());
+            counts.sort_by(sort_func);
             for (reason, count) in counts {
                 writer.write(&format!("{reason:<name_width$} {count:>stat_width$}",));
             }
@@ -2236,10 +2248,18 @@ impl ServerStats {
         name_width: usize,
         stat_width: usize,
     ) {
+        // Compare values. If equal, compare keys to have a fully deterministic order.
+        let sort_func =
+            |(k1, v1): &(&String, &usize), (k2, v2): &(&String, &usize)| match v1.cmp(v2).reverse()
+            {
+                std::cmp::Ordering::Equal => k1.cmp(k2),
+                other => other,
+            };
+
         if !self.dist_compiles.is_empty() {
             writer.write("\nSuccessful distributed compiles");
             let mut counts: Vec<_> = self.dist_compiles.iter().collect();
-            counts.sort_by(|(_, c1), (_, c2)| c1.cmp(c2).reverse());
+            counts.sort_by(sort_func);
             for (reason, count) in counts {
                 writer.write(&format!(
                     "  {:<name_width$} {:>stat_width$}",
@@ -2737,5 +2757,34 @@ mod tests {
         assert!(output.contains("Cache hits rate (c/c++ [clang])   100.00 %"));
         assert!(output.contains("Cache hits rate (cuda)              0.00 %"));
         assert!(output.contains("Cache hits rate (rust)             33.33 %"));
+    }
+
+    // Test that 2 servers with the same hits will always be printed in the same order.
+    // This test will **randomly** (not consistently) fail in case of a regression, due to HashMap iteration behaviour.
+    #[test]
+    fn test_print_deterministic_hits() {
+        // Test a bunch of time to make the test fail often enough
+        for _ in 0..5 {
+            let mut stats = ServerStats::default();
+            stats.dist_compiles.insert("server1".to_string(), 10);
+            stats.dist_compiles.insert("server2".to_string(), 10);
+
+            let mut writer = StringWriter::new();
+            let (name_width, stat_width) = stats.print(&mut writer, true, false);
+            stats.print_dist(&mut writer, name_width, stat_width);
+
+            // Check that the order is deterministic
+            let output = writer.get_output();
+            let lines: Vec<&str> = output.lines().collect();
+            let find_s1 = lines
+                .iter()
+                .position(|line| line.contains("server1"))
+                .unwrap();
+            let find_s2 = lines
+                .iter()
+                .position(|line| line.contains("server2"))
+                .unwrap();
+            assert!(find_s1 < find_s2);
+        }
     }
 }

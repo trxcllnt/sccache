@@ -21,20 +21,19 @@ use futures::AsyncReadExt;
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{Arc, atomic::AtomicU64},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
     cache::Storage,
     dist::{
-        self, job_inputs_key, job_result_key,
+        self, BuildResult, BuilderIncoming, CompileCommand, RunJobError, RunJobResponse,
+        ServerDetails, ServerService, Toolchain, ToolchainService, job_inputs_key, job_result_key,
         metrics::{CountRecorder, GaugeRecorder, Metrics, TimeRecorder},
-        BuildResult, BuilderIncoming, CompileCommand, RunJobError, RunJobResponse, ServerDetails,
-        ServerService, Toolchain, ToolchainService,
     },
     errors::*,
-    util::{retry_with_jitter, AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
+    util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc, retry_with_jitter},
 };
 
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
@@ -80,10 +79,10 @@ impl ServerMetrics {
             "The number of accepted jobs for which this server is loading inputs and toolchains."
         );
         metrics::describe_gauge!(
-                JOB_PENDING_COUNT,
-                metrics::Unit::Count,
-                "The number of accepted jobs that are fully loaded and queued to run/are currently running."
-            );
+            JOB_PENDING_COUNT,
+            metrics::Unit::Count,
+            "The number of accepted jobs that are fully loaded and queued to run/are currently running."
+        );
         metrics::describe_histogram!(
             CPU_USAGE_RATIO,
             metrics::Unit::Percent,
@@ -652,11 +651,11 @@ impl Server {
         self.tasks.app().display_pretty().await;
 
         tracing::info!(
-                "Server `{}` initialized to run {} parallel build job(s) and prefetch up to {} job(s) in the background",
-                self.state.id,
-                self.state.occupancy,
-                self.state.pre_fetch,
-            );
+            "Server `{}` initialized to run {} parallel build job(s) and prefetch up to {} job(s) in the background",
+            self.state.id,
+            self.state.occupancy,
+            self.state.pre_fetch,
+        );
 
         crate::util::daemonize()?;
 
@@ -671,7 +670,7 @@ impl Server {
         // server_terminated responses. This gives the client a chance to retry
         // the job or build locally.
         let sigint = async {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
             let mut sigint = signal(SignalKind::interrupt())?;
             let mut sigterm = signal(SignalKind::terminate())?;
             tokio::select! {
@@ -749,10 +748,11 @@ impl Server {
                     )
                     .await
                 });
-                futures::future::try_join_all(replies).await.map(|res| {
-                    tracing::info!("Reported server terminated for {jobs_label}");
-                    res
-                })
+                futures::future::try_join_all(replies)
+                    .await
+                    .inspect(|_res| {
+                        tracing::info!("Reported server terminated for {jobs_label}");
+                    })
             };
 
             tokio::try_join!(builder, replies)

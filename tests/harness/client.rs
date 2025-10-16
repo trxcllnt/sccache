@@ -10,13 +10,13 @@ use std::{
 
 use sccache::{
     config::{
-        try_read_config_file, CacheConfigs, DiskCacheConfig, DistConfig, FileConfig,
-        PreprocessorCacheModeConfig,
+        CacheConfigs, DiskCacheConfig, DistConfig, FileConfig, PreprocessorCacheModeConfig,
+        try_read_config_file,
     },
     server::{ServerInfo, ServerStats},
 };
 
-use super::{prune_command, TC_CACHE_SIZE};
+use super::{TC_CACHE_SIZE, prune_command};
 
 pub fn sccache_client_cfg(tmpdir: &Path, preprocessor_cache_mode: bool) -> FileConfig {
     let cache_relpath = "client-cache";
@@ -191,6 +191,24 @@ impl SccacheClient {
         })();
         println!("clear_disk_cache: {:?}", disk_cache.dir);
         fs::remove_dir_all(&disk_cache.dir)?;
+        Ok(())
+    }
+
+    pub fn clear_toolchains_cache(&self) -> sccache::errors::Result<()> {
+        let dist_config = (|| {
+            if let Some(cfg_path_idx) = self.envvars.iter().position(|(k, _)| k == "SCCACHE_CONF") {
+                if let Some((_, cfg_path)) = self.envvars.get(cfg_path_idx) {
+                    if let Ok(Some(cfg)) =
+                        try_read_config_file::<FileConfig>(&PathBuf::from(cfg_path))
+                    {
+                        return cfg.dist;
+                    }
+                }
+            }
+            DistConfig::default()
+        })();
+        println!("clear_toolchains_cache: {:?}", dist_config.cache_dir);
+        fs::remove_dir_all(&dist_config.cache_dir)?;
         Ok(())
     }
 }
