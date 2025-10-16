@@ -10,6 +10,7 @@ env:
   ACTIONS_CACHE_SERVICE_V2: on
   SCCACHE_ERROR_LOG: "/tmp/sccache.log"
   SCCACHE_SERVER_LOG: "sccache=trace"
+  RUSTFLAGS: "--cfg tokio_unstable"
 
 jobs:
   build:
@@ -26,10 +27,7 @@ jobs:
           toolchain: "stable"
 
       - name: Build
-        env:
-          RUSTFLAGS: "--cfg tokio_uring"
-        run: |
-          cargo build --all-features
+        run: cargo build --all-features
 
       - uses: actions/upload-artifact@v4
         with:
@@ -964,7 +962,7 @@ jobs:
     env:
       RUSTC_WRAPPER: /home/runner/.cargo/bin/sccache
       CARGO_INCREMENTAL: "0"
-      RUSTFLAGS: "-Cinstrument-coverage"
+      RUSTFLAGS: "-Cinstrument-coverage --cfg tokio_unstable"
       LLVM_PROFILE_FILE: "coverage-%p-%m.profraw"
 
     steps:
