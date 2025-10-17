@@ -86,19 +86,19 @@ jobs:
           - os: ubuntu-22.04
             # Oldest supported version, keep in sync with README.md
             rustc: "1.85.0"
-            cuda: "12.9"
-            extra_desc: dist-tests cuda12.9
+            cuda: "13.0"
+            extra_desc: dist-tests cuda13.0
             extra_args: --no-default-features --features=dist-tests test_dist_
           - os: ubuntu-22.04
             rustc: stable
-            cuda: "12.9"
-            extra_desc: dist-tests cuda12.9
+            cuda: "13.0"
+            extra_desc: dist-tests cuda13.0
             extra_args: --no-default-features --features=dist-tests test_dist_
           - os: ubuntu-22.04
             rustc: nightly
             allow_failure: true
-            cuda: "12.9"
-            extra_desc: dist-tests cuda12.9
+            cuda: "13.0"
+            extra_desc: dist-tests cuda13.0
             extra_args: --no-default-features --features=dist-tests,unstable test_dist_
           - os: ubuntu-22.04
             rustc: stable
