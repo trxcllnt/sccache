@@ -5,7 +5,6 @@ env:
   # Don't colorize logs
   NO_COLOR: 1
   RUST_BACKTRACE: full
-  RUST_LOG: "sccache=trace"
   SCCACHE_PATH: /home/runner/.cargo/bin/sccache
   ACTIONS_CACHE_SERVICE_V2: on
   SCCACHE_ERROR_LOG: "/tmp/sccache.log"

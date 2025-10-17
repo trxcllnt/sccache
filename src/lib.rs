@@ -92,7 +92,6 @@ pub fn main() {
 }
 
 fn init_logging(is_server: bool) {
-    use crate::errors::*;
     //
     // If starting the server, first check if SCCACHE_SERVER_LOG is set
     //
@@ -103,30 +102,19 @@ fn init_logging(is_server: bool) {
     // in their `make -j` stderr output, but does want to see the server
     // logs redirected to $SCCACHE_ERROR_LOG.
     //
-    [
-        is_server.then_some(SERVER_LOG_ENV),
-        // Both client and server will use SCCACHE_LOG if SCCACHE_SERVER_LOG is unset
-        Some(LOGGING_ENV),
-    ]
-    .iter()
-    .filter_map(|name| name.filter(|name| env::var(name).is_ok()))
-    .map(|name| {
-        let mut builder = env_logger::Builder::from_env(name);
-        // Enable millisecond precision timestamps if SCCACHE_LOG_MILLIS is set
-        if env::var("SCCACHE_LOG_MILLIS").is_ok() {
-            builder.format_timestamp_millis();
-        }
-        builder.try_init().context("Failed to initialize logger")
-    })
-    .reduce(|acc, res| acc.or(res))
-    .unwrap_or(Err(anyhow!(
-        "Both SCCACHE_SERVER_LOG and SCCACHE_LOG are unset"
-    )))
-    .unwrap_or_else(|err| {
-        env_logger::init();
-        info!("{err:?}");
-        info!("Using default logger");
-    });
+    [is_server.then_some(SERVER_LOG_ENV), Some(LOGGING_ENV)]
+        .into_iter()
+        .filter_map(|var| var.filter(|var| env::var(var).is_ok()))
+        .map(|env| {
+            let mut builder = env_logger::Builder::from_env(env);
+            // Enable millisecond precision timestamps if SCCACHE_LOG_MILLIS is set
+            if env::var("SCCACHE_LOG_MILLIS").is_ok() {
+                builder.format_timestamp_millis();
+            }
+            builder.try_init()
+        })
+        .take_while(|res| res.is_err())
+        .for_each(drop);
 }
 
 pub fn compiler_version(exe: &std::path::Path) -> crate::errors::Result<String> {
