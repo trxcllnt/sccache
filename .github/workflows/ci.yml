@@ -227,13 +227,19 @@ jobs:
           echo '[env]
           LLVM_PROFILE_FILE = { value = "target/debug/coverage/default-%p-%8m.profraw", relative = true }' >> .cargo/config.toml
 
-      - id: toolchain-cache
+      - name: Create sccache-dist toolchain cache key
         if: ${{ contains(matrix.extra_desc, 'dist-tests') }}
-        name: Setup sccache-dist toolchain caches
+        run: |
+          echo "TOOLCHAIN_CACHE_KEY=${{github.run_id}}-${{github.run_attempt}}-$RANDOM" | tee -a "$GITHUB_ENV"
+
+      - name: Setup sccache-dist toolchain caches
+        if: ${{ contains(matrix.extra_desc, 'dist-tests') }}
         uses: actions/cache@v4
         with:
           path: /tmp/sccache_dist/*/data/toolchains/client/**/*
-          key: toolchain-cache-${{ matrix.os }}-${{ matrix.rustc || 'stable' }}-${{ matrix.cuda }}
+          key: toolchain-cache-${{ matrix.os }}-${{ matrix.rustc || 'stable' }}-${{ matrix.cuda }}-${{ env.TOOLCHAIN_CACHE_KEY }}
+          restore-keys: |
+            toolchain-cache-${{ matrix.os }}-${{ matrix.rustc || 'stable' }}-${{ matrix.cuda }}
 
       - name: Execute tests
         run: cargo test --locked --all-targets ${{ matrix.extra_args }}
