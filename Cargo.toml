@@ -117,9 +117,8 @@ sysinfo = "0.33"
 tar = "0.4.44"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
-tokio-retry2 = { version = "0.5", features = ["jitter"] }
 tokio-serde = "0.8"
-tokio-util = { version = "0.7", features = ["codec", "compat", "io", "rt"] }
+tokio-util = { version = "0.7", features = ["codec", "compat", "io"] }
 toml = "0.8"
 tower = { version = "0.4", features = ["util"] }
 url = { version = "2", optional = true }
@@ -152,6 +151,7 @@ nix = { version = "0.28.0", optional = true, features = [
   "process",
 ] }
 syslog = { version = "6", optional = true }
+tokio-retry2 = { version = "0.5", features = ["jitter"] }
 tower-http = { version = "0.6", features = [
   "limit",
   "request-id",
@@ -183,10 +183,6 @@ daemonize = "0.5"
 [target.'cfg(not(target_os = "freebsd"))'.dependencies.libmount]
 optional = true
 version = "0.1.15"
-
-[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies.tokio]
-features = ["full", "io-uring"]
-version = "1"
 
 [target.'cfg(windows)'.dependencies.windows-sys]
 features = [

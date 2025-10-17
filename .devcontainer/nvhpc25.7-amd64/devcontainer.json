@@ -57,7 +57,7 @@
     "SCCACHE_DIR": "/opt/sccache/.devcontainer/.cache/sccache",
     "SCCACHE_REPO": "${localWorkspaceFolder}",
     "SCCACHE_SERVER_PORT": "4225",
-    "RUSTFLAGS": "--cfg tokio_unstable",
+    "RUSTFLAGS": "--cfg tokio_uring",
     "XDG_CACHE_HOME": "/opt/sccache/.devcontainer/.cache",
     "XDG_CONFIG_HOME": "/opt/sccache/.devcontainer/.config"
   },

@@ -28,8 +28,6 @@ jobs:
             os: ubuntu-latest
           - component: clippy
             cargo_cmd: clippy --locked --all-targets -- -D warnings -A unknown-lints -A clippy::type_complexity -A clippy::new-without-default
-    env:
-      RUSTFLAGS: "--cfg tokio_unstable"
     steps:
       - name: Clone repository
         uses: actions/checkout@v5
@@ -53,8 +51,6 @@ jobs:
     strategy:
       matrix:
         feature: [ azure, gcs, gha, memcached, redis, s3, webdav ]
-    env:
-      RUSTFLAGS: "--cfg tokio_unstable"
     steps:
       - name: Clone repository
         uses: actions/checkout@v5
@@ -244,7 +240,7 @@ jobs:
         env:
           CARGO_INCREMENTAL: "0"
           RUSTC_WRAPPER: ""
-          RUSTFLAGS: "--cfg tokio_unstable -Cinstrument-coverage -Ccodegen-units=1 -Copt-level=0 -Coverflow-checks=off"
+          RUSTFLAGS: "--cfg tokio_uring -Cinstrument-coverage -Ccodegen-units=1 -Copt-level=0 -Coverflow-checks=off"
 
       - name: Upload failure
         if: failure()
@@ -295,7 +291,7 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
             container: '{"image": "messense/rust-musl-cross:x86_64-musl"}'
-            rustflags: "--cfg tokio_unstable"
+            rustflags: "--cfg tokio_uring"
           - os: ubuntu-22.04
             target: s390x-unknown-linux-musl
             container: '{"image": "messense/rust-musl-cross:s390x-musl"}'
@@ -305,17 +301,17 @@ jobs:
             extra_args: --no-default-features --features=dist-server
             target: x86_64-unknown-linux-musl
             container: '{"image": "messense/rust-musl-cross:x86_64-musl"}'
-            rustflags: "--cfg tokio_unstable"
+            rustflags: "--cfg tokio_uring"
           - os: ubuntu-22.04
             target: aarch64-unknown-linux-musl
             container: '{"image": "messense/rust-musl-cross:aarch64-musl"}'
-            rustflags: "--cfg tokio_unstable"
+            rustflags: "--cfg tokio_uring"
           - os: ubuntu-22.04
             binary: sccache-dist
             extra_args: --no-default-features --features=dist-server
             target: aarch64-unknown-linux-musl
             container: '{"image": "messense/rust-musl-cross:aarch64-musl"}'
-            rustflags: "--cfg tokio_unstable"
+            rustflags: "--cfg tokio_uring"
           - os: ubuntu-22.04
             target: armv7-unknown-linux-musleabi
             container: '{"image": "messense/rust-musl-cross:armv7-musleabi"}'
