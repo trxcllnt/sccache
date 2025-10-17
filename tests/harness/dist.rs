@@ -103,7 +103,10 @@ impl DistSystemGlobals {
                 // Make sure the docker image is available, building it if necessary.
                 // This is here (and not below) so that it only happens once.
                 let mut cmd = Command::new("docker")
-                    .args(["build", "-q", "-t", DIST_IMAGE, "-"])
+                    .arg("build")
+                    .arg("-q")
+                    .args(["-t", DIST_IMAGE])
+                    .arg("-")
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
@@ -162,15 +165,11 @@ impl DistSystemGlobals {
         } = &message_broker;
 
         Command::new("docker")
-            .args([
-                "run",
-                "--name",
-                &container_name,
-                "-p",
-                &format!("{host_port}:{container_port}"),
-                "-d",
-                image,
-            ])
+            .arg("run")
+            .args(["--name", &container_name])
+            .args(["-p", &format!("{host_port}:{container_port}")])
+            .arg("-d")
+            .arg(image)
             .output()
             .map_err(Into::into)
             .and_then(check_output)
@@ -337,7 +336,7 @@ impl DistMessageBroker {
                 let path = format!("amqp://127.0.0.1:{host_port}//");
                 Self {
                     config: MessageBroker::AMQP(path.clone()),
-                    image: "rabbitmq:4".into(),
+                    image: "rabbitmq:latest".into(),
                     container_port: 5672,
                     host_port,
                     url: path,
@@ -664,80 +663,62 @@ impl DistSystemBuilder {
         }
     }
 
-    pub fn with_name(self, name: &str) -> Self {
-        Self {
-            dist_system_name: name.to_owned(),
-            ..self
-        }
+    pub fn with_name(&mut self, name: &str) -> &mut Self {
+        self.dist_system_name = name.to_owned();
+        self
     }
 
-    pub fn with_scheduler(self) -> Self {
-        Self {
-            scheduler_count: self.scheduler_count + 1,
-            ..self
-        }
+    pub fn with_scheduler(&mut self) -> &mut Self {
+        self.scheduler_count += 1;
+        self
     }
 
-    pub fn with_server(self) -> Self {
-        Self {
-            server_count: self.server_count + 1,
-            ..self
-        }
+    pub fn with_server(&mut self) -> &mut Self {
+        self.server_count += 1;
+        self
     }
 
-    pub fn with_job_time_limit(self, job_time_limit: u32) -> Self {
-        Self {
-            job_time_limit: Some(job_time_limit),
-            ..self
-        }
+    pub fn with_job_time_limit(&mut self, job_time_limit: u32) -> &mut Self {
+        self.job_time_limit = Some(job_time_limit);
+        self
     }
 
-    pub fn with_message_broker(self, message_broker: &str) -> Self {
-        Self {
-            message_broker: self.globals.message_broker(message_broker),
-            ..self
-        }
+    pub fn with_message_broker(&mut self, message_broker: &str) -> &mut Self {
+        self.message_broker = self.globals.message_broker(message_broker);
+        self
     }
 
-    pub fn with_redis_storage(self) -> Self {
+    pub fn with_redis_storage(&mut self) -> &mut Self {
         self.with_scheduler_jobs_redis_storage()
             .with_scheduler_toolchains_redis_storage()
             .with_server_jobs_redis_storage()
             .with_server_toolchains_redis_storage()
     }
 
-    pub fn with_scheduler_jobs_redis_storage(self) -> Self {
-        Self {
-            scheduler_jobs_redis_storage: self.globals.redis(),
-            ..self
-        }
+    pub fn with_scheduler_jobs_redis_storage(&mut self) -> &mut Self {
+        self.scheduler_jobs_redis_storage = self.globals.redis();
+        self
     }
 
-    pub fn with_scheduler_toolchains_redis_storage(self) -> Self {
-        Self {
-            scheduler_toolchains_redis_storage: self.globals.redis(),
-            ..self
-        }
+    pub fn with_scheduler_toolchains_redis_storage(&mut self) -> &mut Self {
+        self.scheduler_toolchains_redis_storage = self.globals.redis();
+        self
     }
 
-    pub fn with_server_jobs_redis_storage(self) -> Self {
-        Self {
-            server_jobs_redis_storage: self.globals.redis(),
-            ..self
-        }
+    pub fn with_server_jobs_redis_storage(&mut self) -> &mut Self {
+        self.server_jobs_redis_storage = self.globals.redis();
+        self
     }
 
-    pub fn with_server_toolchains_redis_storage(self) -> Self {
-        Self {
-            server_toolchains_redis_storage: self.globals.redis(),
-            ..self
-        }
+    pub fn with_server_toolchains_redis_storage(&mut self) -> &mut Self {
+        self.server_toolchains_redis_storage = self.globals.redis();
+        self
     }
 
-    pub async fn build(self) -> Result<DistSystem> {
+    pub async fn build(&mut self) -> Result<DistSystem> {
         let name = &self.dist_system_name;
         let mut system = DistSystem::new(name);
-        let message_broker = self.message_broker.expect("Message broker exists");
+        let message_broker = self.message_broker.as_ref().expect("Message broker exists");
 
         fn storage_cfg(suffix: &str, redis: &DistMessageBroker) -> StorageConfig {
             StorageConfig {
@@ -787,13 +768,20 @@ impl DistSystemBuilder {
     }
 }
 
+impl Drop for DistSystemBuilder {
+    fn drop(&mut self) {
+        self.globals.destroy();
+    }
+}
+
 pub struct DistSystem {
     name: String,
     handles: Vec<DistHandle>,
     #[allow(dead_code)]
-    data_temp_dir: Option<tempfile::TempDir>,
+    root_dir: PathBuf,
     data_dir: PathBuf,
-    dist_dir: PathBuf,
+    dist_dir: (PathBuf, Option<tempfile::TempDir>),
+    test_dir: (PathBuf, Option<tempfile::TempDir>),
     sccache_dist: PathBuf,
 }
 
@@ -803,28 +791,41 @@ impl DistSystem {
     }
 
     fn new(name: &str) -> Self {
-        let tempdir = tempfile::Builder::new()
-            .prefix(&format!("sccache_dist_{name}"))
-            .tempdir()
+        let root_dir = std::env::temp_dir().join("sccache_dist").join(name);
+        let data_dir = root_dir.join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        let dist_dir = tempfile::Builder::new()
+            .prefix("dist_")
+            .tempdir_in(&root_dir)
             .unwrap();
 
-        // Persist the tempdir if SCCACHE_DEBUG is defined
-        let (data_dir, data_temp_dir) = if env::var("SCCACHE_DEBUG").is_ok() {
-            (tempdir.keep(), None)
+        // Persist the dist dir if SCCACHE_DEBUG is defined
+        let (dist_dir_path, dist_dir) = if env::var("SCCACHE_DEBUG").is_ok() {
+            (dist_dir.keep(), None)
         } else {
-            (tempdir.path().to_path_buf(), Some(tempdir))
+            (dist_dir.path().to_path_buf(), Some(dist_dir))
         };
 
-        let dist_dir = data_dir.join("distsystem");
-        fs::create_dir_all(&dist_dir).unwrap();
+        let test_dir = tempfile::Builder::new()
+            .prefix("test_")
+            .tempdir_in(&root_dir)
+            .unwrap();
+
+        // Persist the test dir if SCCACHE_DEBUG is defined
+        let (test_dir_path, test_dir) = if env::var("SCCACHE_DEBUG").is_ok() {
+            (test_dir.keep(), None)
+        } else {
+            (test_dir.path().to_path_buf(), Some(test_dir))
+        };
 
         Self {
             name: name.to_owned(),
             handles: vec![],
+            root_dir,
             data_dir,
-            data_temp_dir,
-            dist_dir,
-            // globals,
+            dist_dir: (dist_dir_path, dist_dir),
+            test_dir: (test_dir_path, test_dir),
             sccache_dist: sccache_dist_path(),
         }
     }
@@ -834,7 +835,11 @@ impl DistSystem {
     }
 
     pub fn dist_dir(&self) -> &Path {
-        self.dist_dir.as_path()
+        self.dist_dir.0.as_path()
+    }
+
+    pub fn test_dir(&self) -> &Path {
+        self.test_dir.0.as_path()
     }
 
     pub fn new_client(&self, client_config: &FileConfig) -> Arc<SccacheClient> {
@@ -869,7 +874,7 @@ impl DistSystem {
 
         let dist_dir = self.dist_dir();
 
-        scheduler.config_file(dist_dir, scheduler_cfg).unwrap();
+        scheduler.config_file(dist_dir, scheduler_cfg)?;
 
         [
             scheduler.jobs_dir(dist_dir),
@@ -882,44 +887,42 @@ impl DistSystem {
 
         // Create the scheduler
         tokio::process::Command::new("docker")
+            .arg("run")
+            .args(["--name", scheduler.name()])
+            .args(["-e", "SCCACHE_NO_DAEMON=1"])
             .args([
-                "run",
-                "--name",
-                scheduler.name(),
                 "-e",
-                "SCCACHE_NO_DAEMON=1",
-                "-e",
-                "SCCACHE_LOG=sccache=info,tower_http=debug,axum::rejection=trace",
+                "SCCACHE_LOG=sccache=debug,tower_http=debug,axum::rejection=trace",
+            ])
+            .args([
                 "-e",
                 &format!("SCCACHE_DIST_DEPLOYMENT_NAME={}", &self.name),
-                "-e",
-                "RUST_BACKTRACE=1",
-                "-e",
-                "TOKIO_WORKER_THREADS=2",
-                "--network",
-                "host",
-                "--restart",
-                "always",
+            ])
+            .args(["-e", "RUST_BACKTRACE=1"])
+            .args(["--network", "host"])
+            .args(["--restart", "always"])
+            .args([
                 "-v",
                 &format!(
                     "{exe}:/sccache-dist:z",
                     exe = self.sccache_dist.as_path().display()
                 ),
+            ])
+            .args([
                 "-v",
                 &format!(
                     "{src}:{CONTAINER_EXTERNAL_PATH}:z",
                     src = dist_dir.display()
                 ),
-                "-d",
-                DIST_IMAGE,
+            ])
+            .arg("-d")
+            .arg(DIST_IMAGE)
+            .args([
                 "bash",
                 "-c",
-                &format!(
-                    r#"
-                        set -o errexit &&
-                        exec /sccache-dist scheduler --config {cfg:?}
-                    "#,
-                    cfg = scheduler.config_path(CONTAINER_EXTERNAL_PATH)
+                &sccache_dist_docker_run_script(
+                    "scheduler",
+                    scheduler.config_path(CONTAINER_EXTERNAL_PATH),
                 ),
             ])
             .output()
@@ -969,7 +972,7 @@ impl DistSystem {
 
         let dist_dir = self.dist_dir();
 
-        server.config_file(dist_dir, server_cfg).unwrap();
+        server.config_file(dist_dir, server_cfg)?;
 
         [server.jobs_dir(dist_dir), server.toolchains_dir(dist_dir)]
             .into_iter()
@@ -978,14 +981,12 @@ impl DistSystem {
             .for_each(drop);
 
         tokio::process::Command::new("docker")
+            .arg("run")
+            // Important for the bubblewrap builder
+            .arg("--privileged")
+            .args(["--name", server.name()])
+            .args(["-e", "SCCACHE_NO_DAEMON=1"])
             .args([
-                "run",
-                // Important for the bubblewrap builder
-                "--privileged",
-                "--name",
-                server.name(),
-                "-e",
-                "SCCACHE_NO_DAEMON=1",
                 "-e",
                 &format!(
                     "SCCACHE_LOG={}",
@@ -997,36 +998,36 @@ impl DistSystem {
                     .or(env::var("SCCACHE_LOG").as_deref())
                     .unwrap_or("sccache=debug") // default to debug
                 ),
+            ])
+            .args([
                 "-e",
                 &format!("SCCACHE_DIST_DEPLOYMENT_NAME={}", &self.name),
-                "-e",
-                "RUST_BACKTRACE=1",
-                "-e",
-                "TOKIO_WORKER_THREADS=2",
-                "--network",
-                "host",
-                "--restart",
-                "always",
+            ])
+            .args(["-e", "RUST_BACKTRACE=1"])
+            .args(["--network", "host"])
+            .args(["--restart", "always"])
+            .args([
                 "-v",
                 &format!(
                     "{exe}:/sccache-dist:z",
                     exe = self.sccache_dist.as_path().display()
                 ),
+            ])
+            .args([
                 "-v",
                 &format!(
                     "{src}:{CONTAINER_EXTERNAL_PATH}:z",
                     src = dist_dir.display()
                 ),
-                "-d",
-                DIST_IMAGE,
+            ])
+            .arg("-d")
+            .arg(DIST_IMAGE)
+            .args([
                 "bash",
                 "-c",
-                &format!(
-                    r#"
-                    set -o errexit &&
-                    exec /sccache-dist server --config {cfg:?}
-                "#,
-                    cfg = server.config_path(CONTAINER_EXTERNAL_PATH)
+                &sccache_dist_docker_run_script(
+                    "server",
+                    server.config_path(CONTAINER_EXTERNAL_PATH),
                 ),
             ])
             .output()
@@ -1105,12 +1106,11 @@ impl DistSystem {
                     .await?;
 
                 if found {
-                    break;
+                    break Ok(());
                 }
 
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            Ok(())
         })
         .await
         .with_context(|| {
@@ -1135,5 +1135,22 @@ fn name_with_uuid(name: &str) -> String {
         CONTAINER_NAME_PREFIX,
         name,
         Uuid::new_v4().simple()
+    )
+}
+
+fn sccache_dist_docker_run_script<P: AsRef<Path>>(dist_type: &str, config_path: P) -> String {
+    format!(
+        // umask 000 so files created under the CONTAINER_EXTERNAL_PATH
+        // bind mount by the root user in the container are writable.
+        //
+        // This ensures the scheduler and servers can share these dirs,
+        // but the tempfile parent dirs (created on the host) are still
+        // cleaned up when the TempDir instances are dropped.
+        r#"
+            set -o errexit;
+            umask 000;
+            exec /sccache-dist {dist_type} --config {cfg:?}
+        "#,
+        cfg = config_path.as_ref()
     )
 }

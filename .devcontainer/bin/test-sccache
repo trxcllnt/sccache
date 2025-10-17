@@ -5,7 +5,8 @@ cd "$( cd "$( dirname "$(realpath -m "${BASH_SOURCE[0]}")" )" && pwd )/../.."
 cd "${SCCACHE_REPO:-$(pwd)}"
 
 sudo pkill -9 sccache || true
-sudo rm -rf /tmp/{,.}sccache_*
+
+sudo rm -rf /tmp/.sccache_temp /tmp/sccache_dist/*/{dist,test}*
 
 RUST_BACKTRACE="${RUST_BACKTRACE:-1}" \
 CC="$(which gcc || which clang || which nvc)" \

@@ -18,7 +18,7 @@
   "runArgs": [
     "--rm",
     "--name",
-    "${localEnv:USER:anon}-${localWorkspaceFolderBasename}-nvhpc25.7-amd64",
+    "${localEnv:USER:anon}-${localWorkspaceFolderBasename}-nvhpc25.9-amd64",
     "--network",
     "host",
     "--platform",

@@ -86,16 +86,19 @@ jobs:
           - os: ubuntu-22.04
             # Oldest supported version, keep in sync with README.md
             rustc: "1.85.0"
-            extra_desc: dist-tests
+            cuda: "12.9"
+            extra_desc: dist-tests cuda12.9
             extra_args: --no-default-features --features=dist-tests test_dist_
           - os: ubuntu-22.04
             rustc: stable
-            extra_desc: dist-tests
+            cuda: "12.9"
+            extra_desc: dist-tests cuda12.9
             extra_args: --no-default-features --features=dist-tests test_dist_
           - os: ubuntu-22.04
             rustc: nightly
             allow_failure: true
-            extra_desc: dist-tests
+            cuda: "12.9"
+            extra_desc: dist-tests cuda12.9
             extra_args: --no-default-features --features=dist-tests,unstable test_dist_
           - os: ubuntu-22.04
             rustc: stable
@@ -227,6 +230,14 @@ jobs:
           mkdir -p .cargo
           echo '[env]
           LLVM_PROFILE_FILE = { value = "target/debug/coverage/default-%p-%8m.profraw", relative = true }' >> .cargo/config.toml
+
+      - id: toolchain-cache
+        if: ${{ contains(matrix.extra_desc, 'dist-tests') }}
+        name: Setup sccache-dist toolchain caches
+        uses: actions/cache@v4
+        with:
+          path: /tmp/sccache_dist/*/data/toolchains/client/**/*
+          key: toolchain-cache-${{ matrix.os }}-${{ matrix.rustc || 'stable' }}-${{ matrix.cuda }}
 
       - name: Execute tests
         run: cargo test --locked --all-targets ${{ matrix.extra_args }}

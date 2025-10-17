@@ -18,14 +18,14 @@ use sccache::{
 
 use super::{TC_CACHE_SIZE, prune_command};
 
-pub fn sccache_client_cfg(tmpdir: &Path, preprocessor_cache_mode: bool) -> FileConfig {
-    let cache_relpath = "client-cache";
-    let dist_cache_relpath = "client-dist-cache";
-    fs::create_dir_all(tmpdir.join(cache_relpath)).unwrap();
-    fs::create_dir_all(tmpdir.join(dist_cache_relpath)).unwrap();
+pub fn sccache_client_cfg(data_dir: &Path, preprocessor_cache_mode: bool) -> FileConfig {
+    let disk_cache_dir = data_dir.join("cache");
+    let toolchains_dir = data_dir.join("toolchains");
+    fs::create_dir_all(&disk_cache_dir).unwrap();
+    fs::create_dir_all(&toolchains_dir).unwrap();
 
     let disk_cache = DiskCacheConfig {
-        dir: tmpdir.join(cache_relpath),
+        dir: disk_cache_dir,
         preprocessor_cache_mode: PreprocessorCacheModeConfig {
             use_preprocessor_cache_mode: preprocessor_cache_mode,
             ..Default::default()
@@ -47,7 +47,7 @@ pub fn sccache_client_cfg(tmpdir: &Path, preprocessor_cache_mode: bool) -> FileC
         dist: DistConfig {
             auth: Default::default(), // dangerously_insecure
             scheduler_url: None,
-            cache_dir: tmpdir.join(dist_cache_relpath),
+            cache_dir: toolchains_dir,
             toolchains: vec![],
             toolchain_cache_size: TC_CACHE_SIZE,
             rewrite_includes_only: false, // TODO

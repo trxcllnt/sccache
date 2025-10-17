@@ -205,7 +205,7 @@ async fn test_dist_cargo_build(message_broker: &str) -> Result<()> {
         false,
     ));
 
-    let output = rust_compile(&client, system.data_dir()).await?;
+    let output = rust_compile(&client, system.test_dir()).await?;
 
     // Ensure sccache ignores inherited jobservers in CARGO_MAKEFLAGS
     assert!(
@@ -248,7 +248,7 @@ async fn test_dist_cpp_disk_storage(message_broker: &str) -> Result<()> {
         false,
     ));
 
-    cc_compile(&client, system.data_dir()).await?;
+    cc_compile(&client, system.test_dir()).await?;
 
     let stats = client.stats()?;
     assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
@@ -283,7 +283,7 @@ async fn test_dist_cpp_toolchain(message_broker: &str) -> Result<()> {
             false,
         ));
 
-        cc_compile(&client, system.data_dir()).await?;
+        cc_compile(&client, system.test_dir()).await?;
 
         let stats = client.stats()?;
         assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
@@ -320,7 +320,7 @@ async fn test_dist_cpp_cloud_storage(message_broker: &str) -> Result<()> {
         false,
     ));
 
-    cc_compile(&client, system.data_dir()).await?;
+    cc_compile(&client, system.test_dir()).await?;
 
     let stats = client.stats()?;
     assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
@@ -354,11 +354,11 @@ async fn test_dist_cpp_server_restart(message_broker: &str) -> Result<()> {
         false,
     ));
 
-    cc_compile(&client, system.data_dir()).await?;
+    cc_compile(&client, system.test_dir()).await?;
 
     system.restart_server(system.server(0)?).await?;
 
-    cc_compile(&client, system.data_dir()).await?;
+    cc_compile(&client, system.test_dir()).await?;
 
     let stats = client.stats()?;
     assert_eq!(2, stats.dist_compiles.values().sum::<usize>());
@@ -392,7 +392,7 @@ async fn test_dist_cpp_no_server_times_out(message_broker: &str) -> Result<()> {
         false,
     ));
 
-    cc_compile(&client, system.data_dir()).await?;
+    cc_compile(&client, system.test_dir()).await?;
 
     let stats = client.stats()?;
     assert_eq!(0, stats.dist_compiles.values().sum::<usize>());
@@ -428,10 +428,10 @@ async fn test_dist_cpp_two_servers(message_broker: &str) -> Result<()> {
     ));
 
     let _ = tokio::try_join!(
-        cc_compile(&client, system.data_dir()),
-        cc_compile(&client, system.data_dir()),
-        cc_compile(&client, system.data_dir()),
-        cc_compile(&client, system.data_dir()),
+        cc_compile(&client, system.test_dir()),
+        cc_compile(&client, system.test_dir()),
+        cc_compile(&client, system.test_dir()),
+        cc_compile(&client, system.test_dir()),
     );
 
     let stats = client.stats()?;
@@ -467,7 +467,7 @@ async fn test_dist_cpp_errors_on_job_load_failures(message_broker: &str) -> Resu
         false,
     ));
 
-    cc_compile(&client, system.data_dir()).await?;
+    cc_compile(&client, system.test_dir()).await?;
 
     let stats = client.stats()?;
     assert_eq!(0, stats.dist_compiles.values().sum::<usize>());
@@ -502,7 +502,7 @@ async fn test_dist_cpp_errors_on_toolchain_load_failures(message_broker: &str) -
         false,
     ));
 
-    cc_compile(&client, system.data_dir()).await?;
+    cc_compile(&client, system.test_dir()).await?;
 
     let stats = client.stats()?;
     assert_eq!(0, stats.dist_compiles.values().sum::<usize>());
@@ -540,7 +540,9 @@ async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Resu
 
     let client = system.new_client(&config);
 
-    cc_compile(&client, system.data_dir()).await?;
+    client.clear_disk_cache()?;
+
+    cc_compile(&client, system.test_dir()).await?;
 
     let stats = client.stats()?;
     assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
@@ -552,7 +554,7 @@ async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Resu
     assert_eq!(0, stats.preprocessor_cache_hits.all());
 
     let obj_file = "x.o";
-    let obj_path = system.data_dir().join(obj_file);
+    let obj_path = system.test_dir().join(obj_file);
     let data_a = std::fs::read(&obj_path)?;
     let cache_path = config.cache.disk.unwrap().dir;
 
@@ -569,7 +571,7 @@ async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Resu
     });
     assert_eq!(delete_count, 1, "Did the disk cache format change?");
 
-    cc_compile(&client, system.data_dir()).await?;
+    cc_compile(&client, system.test_dir()).await?;
 
     let stats = client.stats()?;
     assert_eq!(2, stats.dist_compiles.values().sum::<usize>());
@@ -615,7 +617,7 @@ async fn test_dist_cuda_compiles(
         false,
     ));
 
-    nvcc_compile(&client, cuda_compiler, host_compiler, system.data_dir()).await?;
+    nvcc_compile(&client, cuda_compiler, host_compiler, system.test_dir()).await?;
 
     let stats = client.stats()?;
     assert_eq!(4, stats.dist_compiles.values().sum::<usize>());
@@ -648,7 +650,7 @@ async fn test_dist_stdpar_compiles(compiler: &Compiler, message_broker: &str) ->
         false,
     ));
 
-    stdpar_compile(&client, compiler, system.data_dir()).await?;
+    stdpar_compile(&client, compiler, system.test_dir()).await?;
 
     let stats = client.stats()?;
     assert_eq!(1, stats.dist_compiles.values().sum::<usize>());

@@ -1,4 +1,7 @@
 FROM ubuntu:latest
-RUN apt-get update && \
-    apt-get install -y libcap2 bubblewrap && \
-    apt-get clean
+
+RUN apt update \
+ && DEBIAN_FRONTEND=noninteractive \
+    apt install -y --no-install-recommends libcap2 bubblewrap \
+ && apt clean \
+ && rm -rf /tmp/* /var/tmp/* /var/cache/apt/* /var/lib/apt/lists/*

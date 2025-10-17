@@ -24,12 +24,19 @@ pub const TC_CACHE_SIZE: u64 = 2 * 1024 * 1024 * 1024; // 2GiB
 pub fn check_output<O: Into<ProcessOutput>>(output: O) -> Result<()> {
     let output = output.into();
     if !output.success() {
-        eprintln!(
-            "{}\n\n[BEGIN STDOUT]\n===========\n{}\n===========\n[FIN STDOUT]\n\n[BEGIN STDERR]\n===========\n{}\n===========\n[FIN STDERR]\n\n",
-            output.desc(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        eprintln!("{}", output.desc());
+        if !output.stdout.is_empty() {
+            eprintln!(
+                "\n\n[BEGIN STDOUT]\n===========\n{}\n===========\n[FIN STDOUT]",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+        if !output.stderr.is_empty() {
+            eprintln!(
+                "\n\n[BEGIN STDERR]\n===========\n{}\n===========\n[FIN STDERR]",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         Err(anyhow!("{}", output.desc()))
     } else {
         Ok(())
