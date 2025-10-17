@@ -46,7 +46,6 @@ async fn cc_compile(client: &SccacheClient, tmpdir: &Path) -> Result<()> {
         .arg("-o")
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
-        .env("TOKIO_WORKER_THREADS", "2")
         .kill_on_drop(true)
         .output()
         .await
@@ -76,7 +75,6 @@ async fn nvcc_compile(
         .arg("-o")
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
-        .env("TOKIO_WORKER_THREADS", "2")
         .kill_on_drop(true)
         .output()
         .await
@@ -124,7 +122,6 @@ async fn stdpar_compile(client: &SccacheClient, compiler: &Compiler, tmpdir: &Pa
         .arg("-o")
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
-        .env("TOKIO_WORKER_THREADS", "2")
         .kill_on_drop(true)
         .output()
         .await
@@ -169,7 +166,6 @@ async fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Result<Output> {
         .env("RUSTC_WRAPPER", &client.path)
         .env("CARGO_TARGET_DIR", "target")
         .env("RUST_BACKTRACE", "1")
-        .env("TOKIO_WORKER_THREADS", "2")
         .kill_on_drop(true)
         .output()
         .await
@@ -192,7 +188,7 @@ pub fn dist_test_sccache_client_cfg(
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_dist_cargo_build(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cargo_build_{message_broker}");
     let system = DistSystem::builder()
@@ -235,7 +231,7 @@ async fn test_dist_cargo_build(message_broker: &str) -> Result<()> {
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_dist_cpp_disk_storage(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cpp_disk_storage_{message_broker}");
     let system = DistSystem::builder()
@@ -268,7 +264,7 @@ async fn test_dist_cpp_disk_storage(message_broker: &str) -> Result<()> {
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_dist_cpp_toolchain(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cpp_toolchain_{message_broker}");
     let system = DistSystem::builder()
@@ -306,7 +302,7 @@ async fn test_dist_cpp_toolchain(message_broker: &str) -> Result<()> {
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_dist_cpp_cloud_storage(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cpp_cloud_storage_{message_broker}");
     let system = DistSystem::builder()
@@ -340,7 +336,7 @@ async fn test_dist_cpp_cloud_storage(message_broker: &str) -> Result<()> {
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_dist_cpp_server_restart(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cpp_server_restart_{message_broker}");
     let system = DistSystem::builder()
@@ -378,7 +374,7 @@ async fn test_dist_cpp_server_restart(message_broker: &str) -> Result<()> {
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_dist_cpp_no_server_times_out(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cpp_no_server_times_out_{message_broker}");
     let system = DistSystem::builder()
@@ -452,7 +448,7 @@ async fn test_dist_cpp_two_servers(message_broker: &str) -> Result<()> {
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_dist_cpp_errors_on_job_load_failures(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cpp_errors_on_job_load_failures_{message_broker}");
     let system = DistSystem::builder()
@@ -487,7 +483,7 @@ async fn test_dist_cpp_errors_on_job_load_failures(message_broker: &str) -> Resu
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_dist_cpp_errors_on_toolchain_load_failures(message_broker: &str) -> Result<()> {
     let test_name = format!("test_dist_cpp_errors_on_toolchain_load_failures_{message_broker}");
     let system = DistSystem::builder()
@@ -522,7 +518,7 @@ async fn test_dist_cpp_errors_on_toolchain_load_failures(message_broker: &str) -
 #[cfg_attr(not(feature = "dist-tests"), ignore)]
 #[test_case("rabbitmq" ; "with rabbitmq")]
 #[test_case("redis" ; "with redis")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Result<()> {
     // Bug 2173: preprocessor cache hit but main cache miss - because using the preprocessor cache
     // means not doing regular preprocessing, there was no preprocessed translation unit to send
@@ -672,7 +668,7 @@ macro_rules! test_dist_if_compiler_available {
             #[cfg_attr(not(feature = "dist-tests"), ignore)]
             #[test_case("rabbitmq" ; "with rabbitmq")]
             #[test_case("redis" ; "with redis")]
-            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+            #[tokio::test(flavor = "multi_thread")]
             async fn [<test_dist_ $name _compiles_ $compiler>] (message_broker: &str) -> Result<()> {
                 let _ = env_logger::try_init();
                 let compilers = find_compilers();
@@ -701,7 +697,7 @@ macro_rules! test_dist_if_cuda_compiler_available {
             #[cfg_attr(not(feature = "dist-tests"), ignore)]
             #[test_case("rabbitmq" ; "with rabbitmq")]
             #[test_case("redis" ; "with redis")]
-            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+            #[tokio::test(flavor = "multi_thread")]
             async fn [<test_dist_cuda_compiles_ $cuda_compiler _ $host_compiler>] (message_broker: &str) -> Result<()> {
                 let _ = env_logger::try_init();
                 let cuda_compilers = find_cuda_compilers();
