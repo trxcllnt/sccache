@@ -2785,7 +2785,6 @@ fn find_hip_compiler() -> Option<Compiler> {
                 name: "clang",
                 exe: clang_path.as_path().into(),
                 env_vars,
-                version: clang_path.as_path().into(),
             });
         }
     }
@@ -2797,7 +2796,6 @@ fn find_hip_compiler() -> Option<Compiler> {
                 name: "hip",
                 exe: clang_path.as_path().into(),
                 env_vars,
-                version: clang_path.as_path().into(),
             });
         }
     }

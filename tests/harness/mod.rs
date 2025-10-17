@@ -73,8 +73,6 @@ pub struct Compiler {
     pub exe: OsString,
     #[allow(dead_code)]
     pub env_vars: Vec<(OsString, OsString)>,
-    #[allow(dead_code)]
-    pub version: OsString,
 }
 
 #[allow(dead_code)]
@@ -83,9 +81,8 @@ static COMPILER_VERSION_RE: Lazy<Regex> =
 
 impl Compiler {
     #[allow(dead_code)]
-    pub fn version(&self) -> sccache::errors::Result<String> {
+    pub fn version(&self) -> Result<String> {
         use sccache::compiler_version;
-        use sccache::errors::*;
 
         let exe = Path::new(&self.exe);
         let ver = compiler_version(exe)?;
@@ -135,7 +132,6 @@ pub fn find_compilers() -> Vec<Compiler> {
                     name: c,
                     exe: full_path.as_path().into(),
                     env_vars: vec![],
-                    version: full_path.as_path().into(),
                 })
         })
         .collect::<Vec<_>>()
@@ -153,7 +149,6 @@ pub fn find_compilers() -> Vec<Compiler> {
         name: "cl",
         exe: tool.path().into(),
         env_vars: tool.env().to_vec(),
-        version: tool.path().into(),
     }]
 }
 
@@ -185,7 +180,6 @@ pub fn find_cuda_compilers() -> Vec<Compiler> {
                         name: c,
                         exe: full_path.as_path().into(),
                         env_vars: vec![],
-                        version: full_path.as_path().into(),
                     })
             })
             .collect::<Vec<_>>(),
