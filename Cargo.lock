@@ -2841,9 +2841,9 @@ checksum = "3fdb12b2476b595f9358c5161aa467c2438859caa136dec86c26fdd2efe17b92"
 
 [[package]]
 name = "opendal"
-version = "0.54.1"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42afda58fa2cf50914402d132cc1caacff116a85d10c72ab2082bb7c50021754"
+checksum = "ffb9838d0575c6dbaf3fcec7255af8d5771996d4af900bbb6fa9a314dec00a1a"
 dependencies = [
  "anyhow",
  "backon",
@@ -2861,8 +2861,8 @@ dependencies = [
  "md-5",
  "percent-encoding",
  "prost",
- "quick-xml 0.38.3",
- "redis 0.32.7",
+ "quick-xml",
+ "redis 0.29.5",
  "reqsign 0.16.5",
  "reqwest 0.12.23",
  "serde",
@@ -3315,16 +3315,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quick-xml"
-version = "0.38.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42a232e7487fc2ef313d96dde7948e7a3c05101870d8985e4fd8d26aedd27b89"
-dependencies = [
- "memchr",
- "serde",
-]
-
-[[package]]
 name = "quinn"
 version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3549,14 +3539,13 @@ dependencies = [
 
 [[package]]
 name = "redis"
-version = "0.32.7"
+version = "0.29.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "014cc767fefab6a3e798ca45112bccad9c6e0e218fbd49720042716c73cfef44"
+checksum = "1bc42f3a12fd4408ce64d8efef67048a924e543bd35c6591c0447fda9054695f"
 dependencies = [
  "arc-swap",
  "backon",
  "bytes",
- "cfg-if 1.0.0",
  "combine",
  "crc16",
  "futures-channel",
@@ -3572,7 +3561,7 @@ dependencies = [
  "rustls-native-certs 0.8.0",
  "ryu",
  "sha1_smol",
- "socket2 0.6.0",
+ "socket2 0.5.5",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -3706,7 +3695,7 @@ dependencies = [
  "log",
  "once_cell",
  "percent-encoding",
- "quick-xml 0.37.5",
+ "quick-xml",
  "rand 0.8.5",
  "reqwest 0.12.23",
  "rsa",
@@ -3724,33 +3713,10 @@ version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9a80170eaab619a5dfa6428b0596c0cb85734bfa36b717a764a16abc3456a7b"
 dependencies = [
- "reqsign-aws-v4",
  "reqsign-command-execute-tokio",
  "reqsign-core",
  "reqsign-file-read-tokio",
  "reqsign-http-send-reqwest",
-]
-
-[[package]]
-name = "reqsign-aws-v4"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c50993dfb45a89b82dba66b2251984baad70e1b3c502db980f077f095615a26e"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "form_urlencoded",
- "http 1.1.0",
- "log",
- "percent-encoding",
- "quick-xml 0.38.3",
- "reqsign-core",
- "rust-ini",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sha1",
 ]
 
 [[package]]
@@ -4218,7 +4184,6 @@ dependencies = [
  "fs-err 2.11.0",
  "futures",
  "gzp",
- "home",
  "http 1.1.0",
  "http-body-util",
  "hyper 1.6.0",

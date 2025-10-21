@@ -50,7 +50,6 @@ futures = "0.3"
 gzp = { version = "0.11.3", default-features = false, features = [
   "deflate_rust",
 ] }
-home = { version = "0.5", optional = true }
 http = "1.0"
 http-body-util = { version = "0.1", optional = true }
 hyper = { version = "1.1", optional = true, features = [
@@ -214,8 +213,8 @@ memcached = ["opendal/services-memcached"]
 native-zlib = []
 oss = ["opendal/services-oss", "reqsign", "reqwest"]
 redis = ["url", "opendal/services-redis"]
-s3 = ["opendal/services-s3", "reqsign/aws", "reqwest", "watcher"]
-watcher = ["home", "notify-debouncer-full"]
+s3 = ["opendal/services-s3", "reqsign", "reqwest", "watcher"]
+watcher = ["notify-debouncer-full"]
 webdav = ["opendal/services-webdav", "reqwest"]
 # Enable features that will build a vendored version of openssl and
 # statically linked with it, instead of linking against the system-wide openssl
