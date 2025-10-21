@@ -1185,6 +1185,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
             for (from_path, to_path) in symlinks.iter() {
                 let mut header = tar::Header::new_gnu();
                 header.set_size(0);
+                header.set_mtime(0);
                 header.set_entry_type(tar::EntryType::Symlink);
                 // Leave `to_path` as absolute, assuming the tar will
                 // be used in a chroot-like environment.
