@@ -19,7 +19,11 @@ elif test "$1" = --; then
     set -- test_dist_ "$@"
 fi
 
-RUST_BACKTRACE="${RUST_BACKTRACE:-1}" \
+if ! test -n "${RUST_BACKTRACE:+x}"; then
+    RUST_BACKTRACE="1"
+fi
+
+RUST_BACKTRACE="${RUST_BACKTRACE:-}" \
 CC="$(which gcc || which clang || which nvc)" \
 CXX="$(which g++ || which clang++ || which nvc++)" \
 CUDAHOSTCXX="$(which g++ || which clang++ || which nvc++)" \
