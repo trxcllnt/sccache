@@ -730,6 +730,7 @@ impl CompileCommandImpl for NvccCompileCommand {
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
+        active: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
@@ -748,21 +749,9 @@ impl CompileCommandImpl for NvccCompileCommand {
             ..
         } = self;
 
-        macro_rules! try_or_cleanup {
-            ($res:expr) => {{
-                match $res {
-                    Ok(res) => res,
-                    Err(err) => {
-                        service.decrement_pending_compilations();
-                        return Err(err.into());
-                    }
-                }
-            }};
-        }
+        let pending = service.increment_pending_compilations();
 
-        service.increment_pending_compilations();
-
-        let (mut nvcc_internal_files, nvcc_subcommand_groups) = try_or_cleanup!(
+        let (mut nvcc_internal_files, nvcc_subcommand_groups) =
             group_nvcc_subcommands_by_compilation_stage(
                 creator,
                 executable,
@@ -775,14 +764,13 @@ impl CompileCommandImpl for NvccCompileCommand {
                 host_compiler,
                 output_path,
             )
-            .await
-        );
+            .await?;
 
-        service.decrement_pending_compilations();
-        service.decrement_active_compilations();
+        drop(pending);
+        drop(active);
 
         let maybe_keep_temps_then_clean = || async move {
-            service.increment_active_compilations();
+            let _active = service.increment_active_compilations();
             // Move and/or delete nvcc's internal files.
             //
             // If the caller passed `-keep` or `-keep-dir`, copy the internal
@@ -1926,24 +1914,18 @@ where
                     ..
                 } = &cmd;
 
-                service.increment_pending_compilations();
-
                 let args = dist::strings_to_osstrings(args);
+                let pending = service.increment_pending_compilations();
 
                 match service.compiler_info(exe, cwd, &args, env_vars).await {
-                    Err(err) => {
-                        service.decrement_pending_compilations();
-                        error_to_output(err)
-                    }
+                    Err(err) => error_to_output(err),
                     Ok(compiler) => match compiler.parse_arguments(&args, cwd, env_vars) {
                         CompilerArguments::NotCompilation => {
-                            service.decrement_pending_compilations();
                             run_nvcc_subcommand(creator, output_path, cmd)
                                 .await
                                 .unwrap_or_else(error_to_output)
                         }
                         CompilerArguments::CannotCache(why, extra_info) => {
-                            service.decrement_pending_compilations();
                             error_to_output(extra_info.map_or_else(
                                 || anyhow!("Cannot cache({}): {:?} {:?}", why, exe, args),
                                 |desc| {
@@ -1953,7 +1935,14 @@ where
                         }
                         CompilerArguments::Ok(hasher) => service
                             .clone()
-                            .start_compile_task(compiler, hasher, args, cmd.cwd, cmd.env_vars)
+                            .start_compile_task(
+                                compiler,
+                                hasher,
+                                args,
+                                cmd.cwd,
+                                cmd.env_vars,
+                                pending,
+                            )
                             .await
                             .map_or_else(error_to_output, result_to_output),
                     },

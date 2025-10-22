@@ -891,6 +891,54 @@ impl util::AsyncMulticastArgs for Compile {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct SccacheGauge {
+    value: Arc<AtomicU64>,
+}
+
+impl SccacheGauge {
+    pub fn increment(&self) -> SccacheGaugeIncrement {
+        let value = self.value.clone();
+        value.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        SccacheGaugeIncrement { value }
+    }
+
+    pub fn increment_if<F>(&self, mut f: F) -> std::result::Result<SccacheGaugeIncrement, u64>
+    where
+        F: FnMut(u64) -> bool,
+    {
+        let value = self.value.clone();
+        value
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |pending_compilations| {
+                    if f(pending_compilations) {
+                        Some(pending_compilations + 1)
+                    } else {
+                        None
+                    }
+                },
+            )
+            .map(|_| SccacheGaugeIncrement { value })
+    }
+
+    pub fn value(&self) -> u64 {
+        self.value.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct SccacheGaugeIncrement {
+    value: Arc<AtomicU64>,
+}
+
+impl Drop for SccacheGaugeIncrement {
+    fn drop(&mut self) {
+        self.value.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Service implementation for sccache
 #[derive(Clone)]
 pub struct SccacheService<C>
@@ -912,13 +960,13 @@ where
     /// Limits the number of concurrent pending compilations
     pending_compilations_limit: u64,
     /// The count of currently queued compile requests.
-    queued_compilations: Arc<AtomicU64>,
+    queued_compilations: Arc<SccacheGauge>,
     /// The count of currently pending compile requests.
-    pending_compilations: Arc<AtomicU64>,
+    pending_compilations: Arc<SccacheGauge>,
     /// The count of currently active cache lookups.
-    pending_cache_lookups: Arc<AtomicU64>,
+    pending_cache_lookups: Arc<SccacheGauge>,
     /// The count of currently active compile requests.
-    active_compilations: Arc<AtomicU64>,
+    active_compilations: Arc<SccacheGauge>,
 
     /// Ensures asynchronous compiler_info lookups for the same compiler
     /// execute once and are cached
@@ -955,63 +1003,35 @@ where
     C: Send,
 {
     pub fn active_compilations(&self) -> u64 {
-        self.active_compilations
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.active_compilations.value()
     }
 
-    pub fn increment_active_compilations(&self) {
-        self.active_compilations
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn decrement_active_compilations(&self) {
-        self.active_compilations
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    pub fn increment_active_compilations(&self) -> SccacheGaugeIncrement {
+        self.active_compilations.increment()
     }
 
     pub fn queued_compilations(&self) -> u64 {
-        self.queued_compilations
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.queued_compilations.value()
     }
 
-    pub fn increment_queued_compilations(&self) {
-        self.queued_compilations
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn decrement_queued_compilations(&self) {
-        self.queued_compilations
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    pub fn increment_queued_compilations(&self) -> SccacheGaugeIncrement {
+        self.queued_compilations.increment()
     }
 
     pub fn pending_cache_lookups(&self) -> u64 {
-        self.pending_cache_lookups
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.pending_cache_lookups.value()
     }
 
-    pub fn increment_pending_cache_lookups(&self) {
-        self.pending_cache_lookups
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn decrement_pending_cache_lookups(&self) {
-        self.pending_cache_lookups
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    pub fn increment_pending_cache_lookups(&self) -> SccacheGaugeIncrement {
+        self.pending_cache_lookups.increment()
     }
 
     pub fn pending_compilations(&self) -> u64 {
-        self.pending_compilations
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.pending_compilations.value()
     }
 
-    pub fn increment_pending_compilations(&self) {
-        self.pending_compilations
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn decrement_pending_compilations(&self) {
-        self.pending_compilations
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    pub fn increment_pending_compilations(&self) -> SccacheGaugeIncrement {
+        self.pending_compilations.increment()
     }
 }
 
@@ -1341,8 +1361,8 @@ where
     /// the initial information and an optional body which will eventually
     /// contain the results of the compilation.
     async fn handle_compile(&self, mut compile: Compile) -> SccacheResponse {
-        if cfg!(not(feature = "dist-client")) {
-            self.increment_pending_compilations();
+        let pending = if cfg!(not(feature = "dist-client")) {
+            self.increment_pending_compilations()
         } else {
             // Limit the number of concurrent compile requests that are in the
             // pre-compilation stage to `self.num_cpus`.
@@ -1393,21 +1413,20 @@ where
             // It's unlikely the CUDA subcompilation will land exactly on a timeout
             // boundary and be scheduled after the next outer compile request. But
             // even if a few sometimes do, most won't, which is good enough.
-            self.increment_queued_compilations();
+            let _queued = self.increment_queued_compilations();
             loop {
-                match self.pending_compilations.fetch_update(
-                    std::sync::atomic::Ordering::SeqCst,
-                    std::sync::atomic::Ordering::SeqCst,
-                    |pending_compilations| {
-                        if pending_compilations >= self.pending_compilations_limit {
-                            None
-                        } else {
-                            Some(pending_compilations + 1)
-                        }
-                    },
-                ) {
-                    Ok(_) => {
-                        break;
+                match self
+                    .pending_compilations
+                    .increment_if(|pending_compilations| {
+                        pending_compilations < self.pending_compilations_limit
+                        // if pending_compilations >= self.pending_compilations_limit {
+                        //     None
+                        // } else {
+                        //     Some(pending_compilations + 1)
+                        // }
+                    }) {
+                    Ok(pending) => {
+                        break pending;
                     }
                     Err(_) => {
                         // Make this configurable?
@@ -1417,20 +1436,25 @@ where
                     }
                 }
             }
-            self.decrement_queued_compilations();
-        }
+        };
 
         let args = compile.args;
         compile.args = compiler_info_args(&args);
 
         match self.compiler_info_queue.call(compile).await {
             Ok((compile, compiler)) => {
-                self.check_compile(compiler, args, compile.cwd.into(), compile.env_vars)
-                    .await
+                self.check_compile(
+                    compiler,
+                    args,
+                    compile.cwd.into(),
+                    compile.env_vars,
+                    pending,
+                )
+                .await
             }
             Err(err) => {
                 warn!("handle_compile: Unsupported compiler: {err}");
-                self.decrement_pending_compilations();
+                drop(pending);
                 let mut stats = self.stats.lock().await;
                 stats.requests_unsupported_compiler += 1;
                 Message::WithoutBody(Response::Compile(CompileResponse::UnsupportedCompiler(
@@ -1469,13 +1493,14 @@ where
         cmd: Vec<OsString>,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
+        pending: SccacheGaugeIncrement,
     ) -> SccacheResponse {
         // Check that we can handle this compiler with the provided commandline.
         match compiler.parse_arguments(&cmd, &cwd, &env_vars) {
             CompilerArguments::Ok(hasher) => {
                 let body = self
                     .clone()
-                    .start_compile_task(compiler, hasher, cmd, cwd, env_vars)
+                    .start_compile_task(compiler, hasher, cmd, cwd, env_vars, pending)
                     .and_then(|res| async { Ok(Response::CompileFinished(res)) })
                     .boxed();
 
@@ -1490,14 +1515,12 @@ where
                 } else {
                     debug!("parse_arguments: CannotCache({}): {:?}", why, cmd)
                 }
-                self.decrement_pending_compilations();
                 let mut stats = self.stats.lock().await;
                 stats.requests_not_cacheable += 1;
                 *stats.not_cached.entry(why.to_string()).or_insert(0) += 1;
             }
             CompilerArguments::NotCompilation => {
                 debug!("parse_arguments: NotCompilation: {:?}", cmd);
-                self.decrement_pending_compilations();
                 self.stats.lock().await.requests_not_compile += 1;
             }
         }
@@ -1516,6 +1539,7 @@ where
         arguments: Vec<OsString>,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
+        pending: SccacheGaugeIncrement,
     ) -> Result<CompileFinished> {
         self.stats.lock().await.requests_executed += 1;
 
@@ -1553,6 +1577,7 @@ where
                             env_vars,
                             cache_control,
                             me.rt.clone(),
+                            pending,
                     ))
                     .catch_unwind()
                     .await

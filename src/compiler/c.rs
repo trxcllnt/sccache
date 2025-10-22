@@ -940,8 +940,9 @@ where
         &self,
         service: &crate::server::SccacheService<T>,
         creator: &T,
+        active: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput> {
-        let out = self.cmd.execute(service, creator).await?;
+        let out = self.cmd.execute(service, creator, active).await?;
         // Ensure the dependency file exists
         self.compilation.generate_dependencies(creator).await?;
         Ok(out)

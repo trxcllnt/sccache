@@ -90,6 +90,7 @@ where
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
+        active: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput>;
 
     fn get_executable(&self) -> PathBuf;
@@ -149,8 +150,9 @@ where
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
+        active: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput> {
-        self.cmd.execute(service, creator).await
+        self.cmd.execute(service, creator, active).await
     }
 
     fn box_clone(&self) -> Box<dyn CompileCommand<T>> {
@@ -169,6 +171,7 @@ pub trait CompileCommandImpl: Send + Sync + Clone + 'static {
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
+        active: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync;
@@ -218,6 +221,7 @@ impl CompileCommandImpl for SingleCompileCommand {
         &self,
         _service: &server::SccacheService<T>,
         creator: &T,
+        _active: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
@@ -539,6 +543,7 @@ where
         env_vars: Vec<(OsString, OsString)>,
         cache_control: CacheControl,
         runtime: tokio::runtime::Handle,
+        pending: crate::server::SccacheGaugeIncrement,
     ) -> Result<(CompileResult, ProcessOutput)> {
         let out_pretty = self.output_pretty().into_owned();
         // [<file>] get_cached_or_compile: "/path/to/exe <args...>"
@@ -588,7 +593,7 @@ where
         );
 
         // Decrement pending_compilations as soon as we're done preprocessing
-        service.decrement_pending_compilations();
+        drop(pending);
 
         if let Err(e) = hash_result {
             return match e.downcast::<ProcessError>() {
@@ -830,11 +835,10 @@ where
                 Ok(CacheLookupResult::Miss(MissType::ForcedRecache))
             }
             _ => {
-                let lookup = CacheLookup::new(self, start, timeout, storage);
-                self.sccache_service.increment_pending_cache_lookups();
-                let lookup = lookup.into_result().await;
-                self.sccache_service.decrement_pending_cache_lookups();
-                lookup
+                let _pending = self.sccache_service.increment_pending_cache_lookups();
+                CacheLookup::new(self, start, timeout, storage)
+                    .into_result()
+                    .await
             }
         }
     }
@@ -1049,7 +1053,7 @@ where
         let Self {
             command_creator,
             hash_key,
-            sccache_service,
+            sccache_service: service,
             ..
         } = self;
 
@@ -1061,7 +1065,11 @@ where
         } = self.local;
 
         compile_cmd
-            .execute(sccache_service, command_creator)
+            .execute(
+                service,
+                command_creator,
+                service.increment_active_compilations(),
+            )
             .await
             .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o))
     }
@@ -1092,15 +1100,14 @@ where
         } = self.local;
 
         match self.dist {
-            None => {
-                service.increment_active_compilations();
-                let res = compile_cmd
-                    .execute(service, command_creator)
-                    .await
-                    .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o));
-                service.decrement_active_compilations();
-                res
-            }
+            None => compile_cmd
+                .execute(
+                    service,
+                    command_creator,
+                    service.increment_active_compilations(),
+                )
+                .await
+                .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o)),
             Some(dist) => {
                 let executable = compile_cmd.get_executable();
                 let fallback_to_local = dist.dist_client.fallback_to_local_compile();
@@ -1126,13 +1133,14 @@ where
                         } else {
                             // `{:#}` prints the error and the causes in a single line.
                             warn!("[{out_pretty}]: Could not perform distributed compile: {e:#}");
-                            service.increment_active_compilations();
-                            let res = compile_cmd
-                                .execute(service, command_creator)
+                            compile_cmd
+                                .execute(
+                                    service,
+                                    command_creator,
+                                    service.increment_active_compilations(),
+                                )
                                 .await
-                                .map(move |o| (hash_key, outputs, cacheable, DistType::Error, o));
-                            service.decrement_active_compilations();
-                            res
+                                .map(move |o| (hash_key, outputs, cacheable, DistType::Error, o))
                         }
                     }
                 }
@@ -1188,46 +1196,43 @@ where
                 match $res {
                     Ok(res) => res,
                     Err(err) => {
-                        service.decrement_pending_compilations();
                         return Err(err.into());
                     }
                 }
             }};
         }
 
-        service.increment_pending_compilations();
+        let pending = service.increment_pending_compilations();
 
         // Ensure the dependency file exists
-        try_or_cleanup!(compilation.generate_dependencies(creator).await);
+        compilation.generate_dependencies(creator).await?;
 
         let (inputs_packager, toolchain_packager, outputs_rewriter) =
-            try_or_cleanup!(compilation.into_dist_packagers());
+            compilation.into_dist_packagers()?;
 
         let job_inputs = {
             trace!("[{out_pretty}]: Serializing dist inputs");
 
             // Write the job inputs to a tempfile because they can be huge
             // and we don't want to OOM the server during parallel builds.
-            let job_inputs = try_or_cleanup!(crate::util::normal_tempfile());
+            let job_inputs = crate::util::normal_tempfile()?;
 
-            try_or_cleanup!(
-                inputs_packager
-                    .write_inputs(
-                        &mut path_transformer,
-                        crate::dist::pkg::InputsCompressor::new(flate2::write::ZlibEncoder::new(
-                            try_or_cleanup!(job_inputs.reopen()),
-                            // Optimize for size since bandwidth costs more than client CPU cycles
-                            flate2::Compression::best(),
-                        )),
-                    )
-                    .await
-                    .context("Could not write inputs for compilation")
-            );
+            inputs_packager
+                .write_inputs(
+                    &mut path_transformer,
+                    crate::dist::pkg::InputsCompressor::new(flate2::write::ZlibEncoder::new(
+                        try_or_cleanup!(job_inputs.reopen()),
+                        // Optimize for size since bandwidth costs more than client CPU cycles
+                        flate2::Compression::best(),
+                    )),
+                )
+                .await
+                .context("Could not write inputs for compilation")?;
 
             job_inputs
         };
 
-        service.decrement_pending_compilations();
+        drop(pending);
 
         trace!("[{out_pretty}]: Identifying dist toolchain for {executable:?}");
 
@@ -1365,9 +1370,9 @@ where
                 dist_output_paths.clone(),
             );
 
-            service.increment_active_compilations();
+            let active = service.increment_active_compilations();
             let run_job = run_job.await;
-            service.decrement_active_compilations();
+            drop(active);
 
             let (build_result, server_id) = match run_job {
                 // Job completed, regardless of whether compilation succeeded or failed
@@ -3044,6 +3049,7 @@ LLVM version: 6.0",
     #[test_case(false ; "without preprocessor cache")]
     fn test_compiler_get_cached_or_compile(preprocessor_cache_mode: bool) {
         drop(env_logger::try_init());
+        let pending = crate::server::SccacheGauge::default();
         let creator = new_creator();
         let f = TestFixture::new();
         let gcc = f.mk_bin("gcc").unwrap();
@@ -3129,6 +3135,7 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool.clone(),
+                        pending.increment(),
                     )
                     .await
             })
@@ -3168,6 +3175,7 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool,
+                        pending.increment(),
                     )
                     .await
             })
@@ -3185,6 +3193,7 @@ LLVM version: 6.0",
     #[cfg(feature = "dist-client")]
     fn test_compiler_get_cached_or_compile_dist(preprocessor_cache_mode: bool) {
         drop(env_logger::try_init());
+        let pending = crate::server::SccacheGauge::default();
         let creator = new_creator();
         let f = TestFixture::new();
         let gcc = f.mk_bin("gcc").unwrap();
@@ -3271,6 +3280,7 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool.clone(),
+                        pending.increment(),
                     )
                     .await
             })
@@ -3310,6 +3320,7 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool,
+                        pending.increment(),
                     )
                     .await
             })
@@ -3328,6 +3339,7 @@ LLVM version: 6.0",
     #[test_case(false ; "without preprocessor cache")]
     fn test_compiler_get_cached_or_compile_cache_error(preprocessor_cache_mode: bool) {
         drop(env_logger::try_init());
+        let pending = crate::server::SccacheGauge::default();
         let creator = new_creator();
         let f = TestFixture::new();
         let gcc = f.mk_bin("gcc").unwrap();
@@ -3402,6 +3414,7 @@ LLVM version: 6.0",
                 vec![],
                 CacheControl::Default,
                 pool,
+                pending.increment(),
             ))
             .unwrap();
         // Ensure that the object file was created.
@@ -3424,6 +3437,7 @@ LLVM version: 6.0",
     /// Test that cache read timing is recorded.
     fn test_compiler_get_cached_or_compile_cache_get_timing(preprocessor_cache_mode: bool) {
         drop(env_logger::try_init());
+        let pending = crate::server::SccacheGauge::default();
         let creator = new_creator();
         let f = TestFixture::new();
         let gcc = f.mk_bin("gcc").unwrap();
@@ -3501,6 +3515,7 @@ LLVM version: 6.0",
                 vec![],
                 CacheControl::Default,
                 pool,
+                pending.increment(),
             ))
             .unwrap();
         match cached {
@@ -3515,6 +3530,7 @@ LLVM version: 6.0",
     #[test_case(false ; "without preprocessor cache")]
     fn test_compiler_get_cached_or_compile_force_recache(preprocessor_cache_mode: bool) {
         drop(env_logger::try_init());
+        let pending = crate::server::SccacheGauge::default();
         let creator = new_creator();
         let f = TestFixture::new();
         let gcc = f.mk_bin("gcc").unwrap();
@@ -3603,6 +3619,7 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool.clone(),
+                        pending.increment(),
                     )
                     .await
             })
@@ -3633,6 +3650,7 @@ LLVM version: 6.0",
                 vec![],
                 CacheControl::ForceRecache,
                 pool,
+                pending.increment(),
             )
             .wait()
             .unwrap();
@@ -3654,6 +3672,7 @@ LLVM version: 6.0",
     #[test_case(false ; "without preprocessor cache")]
     fn test_compiler_get_cached_or_compile_preprocessor_error(preprocessor_cache_mode: bool) {
         drop(env_logger::try_init());
+        let pending = crate::server::SccacheGauge::default();
         let creator = new_creator();
         let f = TestFixture::new();
         let gcc = f.mk_bin("gcc").unwrap();
@@ -3734,6 +3753,7 @@ LLVM version: 6.0",
                         vec![],
                         CacheControl::Default,
                         pool,
+                        pending.increment(),
                     )
                     .await
             })
@@ -3752,6 +3772,7 @@ LLVM version: 6.0",
     #[cfg(feature = "dist-client")]
     fn test_compiler_get_cached_or_compile_dist_error(preprocessor_cache_mode: bool) {
         drop(env_logger::try_init());
+        let pending = crate::server::SccacheGauge::default();
         let creator = new_creator();
         let f = TestFixture::new();
         let gcc = f.mk_bin("gcc").unwrap();
@@ -3858,6 +3879,7 @@ LLVM version: 6.0",
                     vec![],
                     CacheControl::ForceRecache,
                     pool.clone(),
+                    pending.increment(),
                 )
                 .wait()
                 .expect("Does not error if storage put fails. qed");

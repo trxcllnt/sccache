@@ -962,6 +962,7 @@ mod test {
 
     #[test]
     fn test_compile_simple() {
+        let active = crate::server::SccacheGauge::default();
         let creator = new_creator();
         let f = TestFixture::new();
         let parsed_args = ParsedArguments {
@@ -1000,7 +1001,9 @@ mod test {
             &[],
         )
         .unwrap();
-        let _ = command.execute(&service, &creator).wait();
+        let _ = command
+            .execute(&service, &creator, active.increment())
+            .wait();
         assert_eq!(Cacheable::Yes, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());
