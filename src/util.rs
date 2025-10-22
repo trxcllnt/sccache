@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::mock_command::{CommandChild, ProcessOutput, RunCommand};
+use crate::{
+    mock_command::{CommandChild, ProcessOutput, RunCommand},
+    util,
+};
 use async_trait::async_trait;
 use blake3::Hasher as blake3_Hasher;
 use byteorder::{BigEndian, ByteOrder};
@@ -81,7 +84,7 @@ impl Digest {
 
     /// Calculate the BLAKE3 digest of the contents of `path`.
     pub async fn reader<R: AsyncRead + Send + 'static>(reader: R) -> Result<String> {
-        tokio::spawn(async move {
+        util::spawn(async move {
             let mut digest = Digest::new();
             let reader = std::pin::pin!(reader);
             digest.update_from_reader(reader).await?;
@@ -1190,6 +1193,25 @@ where
     builder
         .build()
         .expect("http client must build with success")
+}
+
+pub fn spawn<F>(future: F) -> tokio_util::task::AbortOnDropHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio_util::task::AbortOnDropHandle::new(tokio::spawn(future))
+}
+
+pub fn spawn_on<F>(
+    handle: &tokio::runtime::Handle,
+    future: F,
+) -> tokio_util::task::AbortOnDropHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio_util::task::AbortOnDropHandle::new(handle.spawn(future))
 }
 
 fn unhex(b: u8) -> std::io::Result<u8> {

@@ -15,7 +15,7 @@ use tokio::runtime::Runtime;
 use url::Url;
 use uuid::Uuid;
 
-use crate::errors::*;
+use crate::{errors::*, util};
 
 // These (arbitrary) ports need to be registered as valid redirect urls in the oauth provider you're using
 pub const VALID_PORTS: &[u16] = &[12731, 32492, 56909];
@@ -537,7 +537,7 @@ pub fn get_token_oauth2_code_grant_pkce(
     let port = server.local_addr().port();
 
     let _guard = runtime.enter();
-    let handle = runtime.spawn(async move {
+    let handle = util::spawn_on(runtime.handle(), async move {
         server.serve(code_grant_pkce::serve).await.unwrap();
     });
     let redirect_uri = format!("http://localhost:{port}/redirect");
@@ -587,7 +587,7 @@ pub fn get_token_oauth2_implicit(client_id: &str, mut auth_url: Url) -> Result<S
     let mut server = runtime.block_on(async move { try_bind().await })?;
     let port = server.local_addr().port();
     let _guard = runtime.enter();
-    let handle = runtime.spawn(async move {
+    let handle = util::spawn_on(runtime.handle(), async move {
         server.serve(implicit::serve).await.unwrap();
     });
 
