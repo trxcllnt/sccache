@@ -1258,7 +1258,7 @@ impl From<config::MemcachedCacheConfig> for StorageBuilder {
                 .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
                 .map_err(|err| anyhow!("create memcached cache failed: {err:?}"))
             })
-            .max_concurrent_requests(10)
+            .max_concurrent_requests(9)
             .preprocessor_cache_mode_config(preprocessor_cache_mode)
     }
 }
@@ -1314,7 +1314,7 @@ impl From<config::RedisCacheConfig> for StorageBuilder {
             .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
             .map_err(|err| anyhow!("create redis cache failed: {err:?}"))
         })
-        .max_concurrent_requests(10)
+        .max_concurrent_requests(9)
         .preprocessor_cache_mode_config(preprocessor_cache_mode)
     }
 }
