@@ -1247,6 +1247,44 @@ pub fn generate_compile_commands(
 
                     arguments.extend(dist::osstrings_to_strings(&parsed_args.common_args)?);
 
+                    // Escape hatch to work around compiler bugs when compiling preprocessed input.
+                    // Sometimes code that doesn't warn in fused preprocess-compile mode does warn
+                    // when dist-compiling the preprocessed file. That means local compiles will
+                    // succeed, but the remote compile will warn (and then fail with `-Werror`).
+                    //
+                    // Since we can't predict all the warnings this may apply to, allow users to
+                    // provide their own list like so:
+                    // ```
+                    // SCCACHE_DIST_DISABLE_WARNINGS=warning-1;warning-2
+                    // ```
+                    let warnings_to_ignore = if let Some(warnings) = env_vars
+                        .iter()
+                        .find(|(k, _)| k == "SCCACHE_DIST_DISABLE_WARNINGS")
+                        .and_then(|(_, p)| p.to_str())
+                    {
+                        warnings
+                            .split(";")
+                            .filter(|warning| !warning.is_empty())
+                            .collect::<Vec<_>>()
+                    } else {
+                        match kind {
+                            CCompilerKind::Gcc => {
+                                vec!["range-loop-construct"]
+                            }
+                            CCompilerKind::Clang => {
+                                vec!["logical-op-parentheses", "reserved-user-defined-literal"]
+                            }
+                            _ => vec![],
+                        }
+                    };
+
+                    arguments.extend_from_slice(
+                        &warnings_to_ignore
+                            .into_iter()
+                            .map(|warning| format!("-Wno-{warning}"))
+                            .collect::<Vec<_>>(),
+                    );
+
                     arguments.extend_from_slice(
                         &[
                             parsed_args.compilation_flag.clone().into_string().ok()?,
