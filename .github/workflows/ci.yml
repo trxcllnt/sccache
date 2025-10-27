@@ -471,13 +471,17 @@ jobs:
 
       - name: Create release
         run: |
-          sudo apt-get update && sudo apt-get install -y hub
+          files=()
           tag_name=${GITHUB_REF#refs/tags/}
           for f in sccache-*.tar.gz* sccache-*.zip*; do
               if [[ -f "$f" ]]; then
-                files="$files -a $f";
+                files+=("$f");
               fi
           done
-          hub release create -d -m $tag_name $files $tag_name
+          gh release create "$tag_name" \
+            --fail-on-no-commits \
+            --notes-from-tag \
+            --verify-tag \
+            "${files[@]}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
