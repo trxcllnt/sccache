@@ -706,6 +706,11 @@ pub fn run_command(cmd: Command) -> Result<i32> {
         }
         Command::StartServer => {
             trace!("Command::StartServer");
+            info!(
+                "Starting {sccache} v{version}",
+                sccache = env!("CARGO_PKG_NAME"),
+                version = env!("CARGO_PKG_VERSION")
+            );
             println!("sccache: Starting the server...");
             let startup =
                 run_server_process(startup_timeout).context("failed to start server process")?;
