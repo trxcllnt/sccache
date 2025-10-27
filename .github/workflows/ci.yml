@@ -237,9 +237,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/sccache_dist/*/data/toolchains/client/**/*
-          key: toolchain-cache-${{ matrix.os }}-${{ matrix.rustc || 'stable' }}-${{ matrix.cuda }}-${{ env.TOOLCHAIN_CACHE_KEY }}
+          key: toolchain-cache-${{ matrix.os }}-cuda${{ matrix.cuda }}-${{ env.TOOLCHAIN_CACHE_KEY }}
           restore-keys: |
-            toolchain-cache-${{ matrix.os }}-${{ matrix.rustc || 'stable' }}-${{ matrix.cuda }}
+            toolchain-cache-${{ matrix.os }}-cuda${{ matrix.cuda }}
 
       - name: Execute tests
         run: cargo test --locked --all-targets ${{ matrix.extra_args }}
