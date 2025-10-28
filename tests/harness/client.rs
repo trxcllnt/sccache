@@ -70,7 +70,10 @@ impl SccacheClient {
         let path = assert_cmd::cargo::cargo_bin("sccache");
         let port = CLIENT_PORT.fetch_add(1, Ordering::SeqCst);
 
-        let mut envvars = vec![("SCCACHE_SERVER_PORT".into(), port.to_string().into())];
+        let mut envvars = vec![
+            ("SCCACHE_SERVER_PORT".into(), port.to_string().into()),
+            ("TOKIO_WORKER_THREADS".into(), "2".into()),
+        ];
 
         // Send daemon logs to a file if SCCACHE_DEBUG is defined
         if env::var("SCCACHE_DEBUG").is_ok() {
