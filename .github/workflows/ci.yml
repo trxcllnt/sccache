@@ -94,16 +94,16 @@ jobs:
             # Oldest supported version, keep in sync with README.md
             rustc: "1.85.0"
             extra_desc: cargo dist-tests
-            extra_args: --no-default-features --features=dist-tests test_dist_cargo_ -- --test-threads 1
+            extra_args: --no-default-features --features=dist-tests test_dist_cargo_
           - os: ubuntu-22.04
             rustc: stable
             extra_desc: cargo dist-tests
-            extra_args: --no-default-features --features=dist-tests test_dist_cargo_ -- --test-threads 1
+            extra_args: --no-default-features --features=dist-tests test_dist_cargo_
           - os: ubuntu-22.04
             rustc: nightly
             allow_failure: true
             extra_desc: cargo dist-tests
-            extra_args: --no-default-features --features=dist-tests,unstable test_dist_cargo_ -- --test-threads 1
+            extra_args: --no-default-features --features=dist-tests,unstable test_dist_cargo_
           - os: ubuntu-22.04
             rustc: stable
             extra_desc: dist-server
