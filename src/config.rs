@@ -687,8 +687,8 @@ impl Default for DistAuth {
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct DistNetworking {
-    pub connect_timeout: u64,
-    pub request_timeout: u64,
+    pub connect_timeout: u32,
+    pub request_timeout: u32,
     pub connection_pool: bool,
     pub keepalive: DistNetworkingKeepalive,
 }

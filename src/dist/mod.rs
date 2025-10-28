@@ -796,6 +796,7 @@ pub trait Client: Send + Sync {
     ) -> Result<(Toolchain, Option<(String, PathBuf)>)>;
     fn fallback_to_local_compile(&self) -> bool;
     fn max_retries(&self) -> f64;
+    fn request_timeout(&self) -> u32;
     fn rewrite_includes_only(&self) -> bool;
     async fn get_custom_toolchain(&self, exe: &Path) -> Option<PathBuf>;
 }

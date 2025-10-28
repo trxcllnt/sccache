@@ -1320,7 +1320,7 @@ where
                         trace!("[{out_pretty}, {}]: Received job allocation", res.job_id);
                         has_inputs = res.has_inputs;
                         has_toolchain = res.has_toolchain;
-                        job = Some((res.job_id, res.timeout));
+                        job = Some((res.job_id, res.timeout.min(dist_client.request_timeout())));
                         continue;
                     }
                     // Maybe retry network errors
@@ -3963,6 +3963,9 @@ mod test_dist {
         fn max_retries(&self) -> f64 {
             0f64
         }
+        fn request_timeout(&self) -> u32 {
+            300
+        }
         fn rewrite_includes_only(&self) -> bool {
             false
         }
@@ -4025,6 +4028,9 @@ mod test_dist {
         }
         fn max_retries(&self) -> f64 {
             0f64
+        }
+        fn request_timeout(&self) -> u32 {
+            300
         }
         fn rewrite_includes_only(&self) -> bool {
             false
@@ -4103,6 +4109,9 @@ mod test_dist {
         }
         fn max_retries(&self) -> f64 {
             0f64
+        }
+        fn request_timeout(&self) -> u32 {
+            300
         }
         fn rewrite_includes_only(&self) -> bool {
             false
@@ -4191,6 +4200,9 @@ mod test_dist {
         }
         fn max_retries(&self) -> f64 {
             0f64
+        }
+        fn request_timeout(&self) -> u32 {
+            300
         }
         fn rewrite_includes_only(&self) -> bool {
             false
@@ -4298,6 +4310,9 @@ mod test_dist {
         }
         fn max_retries(&self) -> f64 {
             0f64
+        }
+        fn request_timeout(&self) -> u32 {
+            300
         }
         fn rewrite_includes_only(&self) -> bool {
             false

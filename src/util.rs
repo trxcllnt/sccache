@@ -1152,8 +1152,8 @@ where
         .http2_prior_knowledge();
 
     let builder = if let Some(config) = config.into() {
-        let request_timeout = Duration::from_secs(config.request_timeout);
-        let connect_timeout = Duration::from_secs(config.connect_timeout);
+        let request_timeout = Duration::from_secs(config.request_timeout as u64);
+        let connect_timeout = Duration::from_secs(config.connect_timeout as u64);
         let keepalive_timeout = Duration::from_secs(config.keepalive.timeout);
         let keepalive_interval = Duration::from_secs(config.keepalive.interval);
         let keepalive = config.keepalive.enabled;

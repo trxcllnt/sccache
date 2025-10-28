@@ -966,6 +966,7 @@ mod client {
         client: Arc<ReqwestClients>,
         fallback_to_local_compile: bool,
         max_retries: f64,
+        request_timeout: u32,
         rewrite_includes_only: bool,
         scheduler_url: reqwest::Url,
         submit_toolchain_reqs: AsyncMulticast<Toolchain, SubmitToolchainResult>,
@@ -985,6 +986,7 @@ mod client {
             rewrite_includes_only: bool,
             net: &config::DistNetworking,
         ) -> Result<Self> {
+            let request_timeout = net.request_timeout;
             let client = Arc::new(ReqwestClients::new(net));
             let client_toolchains = Arc::new(
                 cache::ClientToolchains::new(cache_dir, cache_size, toolchain_configs)
@@ -1003,6 +1005,7 @@ mod client {
                 client,
                 fallback_to_local_compile,
                 max_retries,
+                request_timeout,
                 rewrite_includes_only,
                 scheduler_url: scheduler_url.clone(),
                 submit_toolchain_reqs,
@@ -1125,6 +1128,10 @@ mod client {
 
         fn max_retries(&self) -> f64 {
             self.max_retries
+        }
+
+        fn request_timeout(&self) -> u32 {
+            self.request_timeout
         }
 
         fn rewrite_includes_only(&self) -> bool {
