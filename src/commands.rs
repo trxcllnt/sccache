@@ -702,16 +702,20 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 // We aren't asking for a log file
                 daemonize()?;
             }
+            info!(
+                "Starting {sccache} v{version} server",
+                sccache = env!("CARGO_PKG_NAME"),
+                version = env!("CARGO_PKG_VERSION")
+            );
             server::start_server(config, &get_addr())?;
         }
         Command::StartServer => {
             trace!("Command::StartServer");
-            info!(
-                "Starting {sccache} v{version}",
+            println!(
+                "sccache: Starting {sccache} v{version}...",
                 sccache = env!("CARGO_PKG_NAME"),
                 version = env!("CARGO_PKG_VERSION")
             );
-            println!("sccache: Starting the server...");
             let startup =
                 run_server_process(startup_timeout).context("failed to start server process")?;
             match startup {
