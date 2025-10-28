@@ -158,19 +158,19 @@ jobs:
             rustc: "1.85.0"
             extra_args: --no-fail-fast
             notest_cuda_compilers: clang++
-            extra_desc: cuda12.9
+            extra_desc: windows cuda12.9
           - os: windows-2025
             cuda: "12.9"
             rustc: nightly
             allow_failure: true
             extra_args: --features=unstable
             notest_cuda_compilers: clang++
-            extra_desc: cuda12.9
+            extra_desc: windows cuda12.9
           - os: windows-2025
             cuda: "12.9"
             rustc: beta
             notest_cuda_compilers: clang++
-            extra_desc: cuda12.9
+            extra_desc: windows cuda12.9
             no_coverage: true
     env:
       RUST_BACKTRACE: 1
