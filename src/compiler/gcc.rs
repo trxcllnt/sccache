@@ -1268,9 +1268,12 @@ pub fn generate_compile_commands(
                             .collect::<Vec<_>>()
                     } else {
                         match kind {
-                            CCompilerKind::Gcc => {
-                                vec!["range-loop-construct"]
-                            }
+                            CCompilerKind::Gcc => match parsed_args.language {
+                                Language::Cxx | Language::ObjectiveC => {
+                                    vec!["range-loop-construct"]
+                                }
+                                _ => vec![],
+                            },
                             CCompilerKind::Clang => {
                                 vec!["logical-op-parentheses", "reserved-user-defined-literal"]
                             }
