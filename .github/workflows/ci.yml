@@ -71,7 +71,7 @@ jobs:
 
   test:
     needs: [checks]
-    name: test ${{ matrix.os }} rust ${{ matrix.rustc || 'stable' }} ${{ matrix.extra_desc }}
+    name: test rust ${{ matrix.rustc || 'stable' }} ${{ matrix.extra_desc }}
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.allow_failure || false }}
     timeout-minutes: 30
@@ -82,20 +82,28 @@ jobs:
           - os: ubuntu-22.04
             # Oldest supported version, keep in sync with README.md
             rustc: "1.85.0"
+            extra_desc: C++ dist-tests
+            extra_args: --no-default-features --features=dist-tests test_dist_cpp_
+          - os: ubuntu-22.04
+            # Oldest supported version, keep in sync with README.md
+            rustc: "1.85.0"
             cuda: "13.0"
-            extra_desc: dist-tests cuda13.0
-            extra_args: --no-default-features --features=dist-tests test_dist_
+            extra_desc: cuda13.0 dist-tests
+            extra_args: --no-default-features --features=dist-tests test_dist_cuda_
+          - os: ubuntu-22.04
+            # Oldest supported version, keep in sync with README.md
+            rustc: "1.85.0"
+            extra_desc: cargo dist-tests
+            extra_args: --no-default-features --features=dist-tests test_dist_cargo_
           - os: ubuntu-22.04
             rustc: stable
-            cuda: "13.0"
-            extra_desc: dist-tests cuda13.0
-            extra_args: --no-default-features --features=dist-tests test_dist_
+            extra_desc: cargo dist-tests
+            extra_args: --no-default-features --features=dist-tests test_dist_cargo_
           - os: ubuntu-22.04
             rustc: nightly
             allow_failure: true
-            cuda: "13.0"
-            extra_desc: dist-tests cuda13.0
-            extra_args: --no-default-features --features=dist-tests,unstable test_dist_
+            extra_desc: cargo dist-tests
+            extra_args: --no-default-features --features=dist-tests,unstable test_dist_cargo_
           - os: ubuntu-22.04
             rustc: stable
             extra_desc: dist-server
@@ -237,9 +245,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/sccache_dist/*/data/toolchains/client/**/*
-          key: toolchain-cache-${{ matrix.os }}-cuda${{ matrix.cuda }}-${{ env.TOOLCHAIN_CACHE_KEY }}
+          key: toolchain-cache-${{ matrix.os }}-rustc-${{ matrix.rustc }}-${{ matrix.extra_desc }}-${{ env.TOOLCHAIN_CACHE_KEY }}
           restore-keys: |
-            toolchain-cache-${{ matrix.os }}-cuda${{ matrix.cuda }}
+            toolchain-cache-${{ matrix.os }}-rustc-${{ matrix.rustc }}-${{ matrix.extra_desc }}
 
       - name: Execute tests
         run: cargo test --locked --all-targets ${{ matrix.extra_args }}
