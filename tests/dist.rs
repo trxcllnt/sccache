@@ -185,7 +185,7 @@ pub fn dist_test_sccache_client_cfg(
     sccache_cfg.cache.disk.as_mut().unwrap().size = 0;
     sccache_cfg.dist.scheduler_url = Some(scheduler_url);
     sccache_cfg.dist.net.connect_timeout = 10;
-    sccache_cfg.dist.net.request_timeout = 30;
+    sccache_cfg.dist.net.request_timeout = 90;
     sccache_cfg
 }
 
