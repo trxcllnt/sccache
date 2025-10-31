@@ -10,15 +10,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Duration;
-
 use async_trait::async_trait;
 
-use crate::cache::{Cache, CacheMode, CacheWrite, Storage};
-use crate::compiler::PreprocessorCacheEntry;
-use crate::errors::*;
+use crate::{
+    cache::{AsyncReadSeek, Cache, CacheMode, ReadSeek, Storage},
+    errors::*,
+};
+
+use std::{sync::Arc, time::Duration};
 
 use super::PreprocessorCacheModeConfig;
 
@@ -32,14 +31,11 @@ impl ReadOnlyStorage {
 
 #[async_trait]
 impl Storage for ReadOnlyStorage {
-    async fn get(&self, key: &str) -> Result<Cache> {
+    async fn get(&self, key: &str) -> Result<Cache<Box<dyn ReadSeek>>> {
         self.0.get(key).await
     }
 
-    async fn get_async_reader(
-        &self,
-        key: &str,
-    ) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>> {
+    async fn get_async_reader(&self, key: &str) -> Result<Cache<Box<dyn AsyncReadSeek + Unpin>>> {
         self.0.get_async_reader(key).await
     }
 
@@ -55,7 +51,7 @@ impl Storage for ReadOnlyStorage {
     ///
     /// Returns a `Future` that will provide the result or error when the put is
     /// finished.
-    async fn put(&self, _key: &str, _entry: CacheWrite) -> Result<Duration> {
+    async fn put(&self, _key: &str, _entry: &mut dyn ReadSeek) -> Result<Duration> {
         Err(anyhow!("Cannot write to read-only storage"))
     }
 
@@ -63,7 +59,7 @@ impl Storage for ReadOnlyStorage {
         &self,
         _key: &str,
         _size: u64,
-        _stream: Pin<&mut (dyn futures::AsyncRead + Send)>,
+        _stream: &mut (dyn AsyncReadSeek + Unpin),
     ) -> Result<()> {
         Err(anyhow!("Cannot write to read-only storage"))
     }
@@ -97,24 +93,6 @@ impl Storage for ReadOnlyStorage {
     /// Return the config for preprocessor cache mode if applicable
     fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
         self.0.preprocessor_cache_mode_config()
-    }
-
-    /// Return the preprocessor cache entry for a given preprocessor key,
-    /// if it exists.
-    /// Only applicable when using preprocessor cache mode.
-    async fn get_preprocessor_cache_entry(&self, key: &str) -> Option<PreprocessorCacheEntry> {
-        self.0.get_preprocessor_cache_entry(key).await
-    }
-
-    /// Insert a preprocessor cache entry at the given preprocessor key,
-    /// overwriting the entry if it exists.
-    /// Only applicable when using preprocessor cache mode.
-    async fn put_preprocessor_cache_entry(
-        &self,
-        _key: &str,
-        _preprocessor_cache_entry: PreprocessorCacheEntry,
-    ) -> Result<()> {
-        Err(anyhow!("Cannot write to read-only storage"))
     }
 }
 
@@ -165,15 +143,7 @@ mod test {
         runtime.block_on(async move {
             assert_eq!(
                 storage
-                    .put("test1", CacheWrite::default())
-                    .await
-                    .unwrap_err()
-                    .to_string(),
-                "Cannot write to read-only storage"
-            );
-            assert_eq!(
-                storage
-                    .put_preprocessor_cache_entry("test1", PreprocessorCacheEntry::default())
+                    .put("test1", &mut std::io::Cursor::new("entry".as_bytes()))
                     .await
                     .unwrap_err()
                     .to_string(),

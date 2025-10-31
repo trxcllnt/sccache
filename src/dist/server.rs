@@ -14,7 +14,6 @@
 
 use async_trait::async_trait;
 
-use bytes::Buf;
 use celery::{error::CeleryError, task::AsyncResult};
 use futures::AsyncReadExt;
 
@@ -26,10 +25,11 @@ use std::{
 };
 
 use crate::{
-    cache::Storage,
+    cache::{Cache, Storage},
     dist::{
-        self, BuildResult, BuilderIncoming, CompileCommand, RunJobError, RunJobResponse,
-        ServerDetails, ServerService, Toolchain, ToolchainService, job_inputs_key, job_result_key,
+        self, BuildError, BuildResult, BuilderIncoming, CompileCommand, RunJobError,
+        RunJobResponse, ServerDetails, ServerService, Toolchain, ToolchainService, job_inputs_key,
+        job_result_key,
         metrics::{CountRecorder, GaugeRecorder, Metrics, TimeRecorder},
     },
     errors::*,
@@ -449,6 +449,10 @@ impl RunJobFunc {
                 .jobs_storage
                 .get_async_reader(&job_inputs_key(job_id))
                 .await
+                .and_then(|res| match res {
+                    Cache::Hit(reader) => Ok(reader),
+                    _ => Err(anyhow!("Missing job inputs")),
+                })
                 .map_err(|err| {
                     tracing::warn!("[get_job_inputs({job_id})]: Error loading stream: {err:?}");
                     err
@@ -814,7 +818,7 @@ impl Server {
                 .put_async_reader(
                     &job_result_key(job_id),
                     result.len() as u64,
-                    std::pin::pin!(futures::io::AllowStdIo::new(result.reader())),
+                    &mut futures::io::Cursor::new(&result[..]),
                 )
                 .await
                 .map_err(|err| {

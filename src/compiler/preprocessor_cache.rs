@@ -22,7 +22,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::{OsStr, OsString},
     hash::Hash,
-    io::{self, Write},
+    io::{self, Read, Seek, Write},
     ops::ControlFlow,
     path::{Path, PathBuf},
     time::SystemTime,
@@ -81,6 +81,38 @@ impl PreprocessorCacheEntry {
         }
     }
 
+    pub async fn deserialize_from<R: Read + Send + 'static>(
+        reader: R,
+    ) -> std::result::Result<Self, Error> {
+        let mut format = [0u8; 1];
+        let mut reader = reader.take(1);
+        if let Err(err) = reader.read_exact(&mut format) {
+            if matches!(err.kind(), std::io::ErrorKind::UnexpectedEof) {
+                trace!("PreprocessorCacheEntry::deserialize_from empty reader");
+                return Ok(Self {
+                    number_of_entries: 0,
+                    results: Default::default(),
+                });
+            }
+            return Err(err.into());
+        }
+        trace!(
+            "PreprocessorCacheEntry::deserialize_from format: {}",
+            format[0]
+        );
+        if format[0] != FORMAT_VERSION {
+            Err(Error::UnknownFormat(format[0]))
+        } else {
+            trace!("PreprocessorCacheEntry::deserialize_from format is good");
+            tokio::task::spawn_blocking(move || {
+                bincode::deserialize_from::<R, Self>(reader.into_inner())
+                    .map_err(|err| Error::Io(std::io::Error::other(err)))
+            })
+            .await
+            .map_err(|err| Error::Io(std::io::Error::other(err)))?
+        }
+    }
+
     /// Serialize the preprocessor cache entry to `buf`
     pub fn serialize_to(&self, mut buf: impl Write) -> std::result::Result<(), Error> {
         // Add the starting byte for version check since `bincode` doesn't
@@ -88,6 +120,17 @@ impl PreprocessorCacheEntry {
         buf.write_all(&[FORMAT_VERSION])?;
         bincode::serialize_into(buf, self)?;
         Ok(())
+    }
+
+    pub async fn serialize_into(self) -> std::result::Result<std::io::Cursor<Vec<u8>>, Error> {
+        tokio::task::spawn_blocking(move || {
+            let mut cursor = std::io::Cursor::new(vec![]);
+            self.serialize_to(&mut cursor)?;
+            cursor.seek(std::io::SeekFrom::Start(0))?;
+            std::result::Result::Ok(cursor)
+        })
+        .await
+        .map_err(|err| Error::Io(std::io::Error::other(err)))?
     }
 
     /// Insert the full compilation key and included files for a given source file.
@@ -186,7 +229,7 @@ impl PreprocessorCacheEntry {
     /// are already on disk and have not changed.
     pub fn lookup_result_digest(
         &mut self,
-        config: PreprocessorCacheModeConfig,
+        config: &PreprocessorCacheModeConfig,
         updated: &mut bool,
     ) -> Option<String> {
         // Check newest result first since it's more likely to match.
@@ -203,7 +246,7 @@ impl PreprocessorCacheEntry {
     fn result_matches(
         digest: &str,
         includes: &mut [IncludeEntry],
-        config: PreprocessorCacheModeConfig,
+        config: &PreprocessorCacheModeConfig,
         updated: &mut bool,
     ) -> bool {
         for include in includes {
@@ -501,7 +544,7 @@ pub fn process_preprocessed_file(
                 input_file,
                 cwd,
                 &mut included_files,
-                config,
+                &config,
                 time_of_compilation,
                 bytes,
                 start,
@@ -572,7 +615,7 @@ fn process_preprocessor_line(
     input_file: &Path,
     cwd: &Path,
     included_files: &mut HashMap<PathBuf, bool>,
-    config: PreprocessorCacheModeConfig,
+    config: &PreprocessorCacheModeConfig,
     time_of_compilation: std::time::SystemTime,
     bytes: &mut [u8],
     mut start: usize,
@@ -771,7 +814,7 @@ fn remember_include_file(
     cwd: &Path,
     included_files: &mut HashMap<PathBuf, bool>,
     system: bool,
-    config: PreprocessorCacheModeConfig,
+    config: &PreprocessorCacheModeConfig,
     time_of_compilation: std::time::SystemTime,
     fs_impl: &impl PreprocessorFSAbstraction,
 ) -> Result<bool> {
@@ -1291,7 +1334,7 @@ mod test {
             input_file,
             Path::new(""),
             include_files,
-            config,
+            &config,
             std::time::SystemTime::now(),
             &mut bytes,
             0,

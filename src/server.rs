@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.SCCACHE_MAX_FRAME_LENGTH
 
-use crate::cache::{Storage, storage_from_config};
+use crate::cache::{Storage, StorageKind};
 use crate::compiler::{
     CacheControl, CompileResult, Compiler, CompilerArguments, CompilerHasher, CompilerKind,
     CompilerProxy, DistType, Language, MissType, compiler_info_args, get_compiler_info,
@@ -422,7 +422,7 @@ thread_local! {
 ///
 /// Spins an event loop handling client connections until a client
 /// requests a shutdown.
-pub fn start_server(config: &Config, addr: &crate::net::SocketAddr) -> Result<()> {
+pub fn start_server(config: Config, addr: &crate::net::SocketAddr) -> Result<()> {
     info!("start_server: {addr}");
     let panic_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -441,41 +441,16 @@ pub fn start_server(config: &Config, addr: &crate::net::SocketAddr) -> Result<()
     }
     let runtime = builder.enable_all().build()?;
     let pool = runtime.handle().clone();
-    let dist_client = DistClientContainer::new(config, &pool);
+    let dist_client = DistClientContainer::new(&config, &pool);
 
     let notify = env::var_os("SCCACHE_STARTUP_NOTIFY");
 
     let init_storage = || -> Result<(Arc<dyn Storage>, Arc<dyn Storage>)> {
         runtime.block_on(async {
-            let (storage, preprocessor_storage) =
-                storage_from_config(&config.cache, &config.fallback_cache)
-                    .await
-                    .map_err(|err| {
-                        error!("storage init failed for: {err:?}");
-                        err
-                    })?;
-
-            match storage.check().await {
-                Ok(mode) => {
-                    info!("server has setup with cache={mode:?}");
-                }
-                Err(err) => {
-                    error!("storage check failed for: {err:?}");
-                    return Err(err);
-                }
-            }
-
-            match preprocessor_storage.check().await {
-                Ok(mode) => {
-                    info!("server has setup with preprocessor_cache={mode:?}");
-                }
-                Err(err) => {
-                    error!("storage check failed for: {err:?}");
-                    return Err(err);
-                }
-            }
-
-            Ok((storage, preprocessor_storage))
+            Ok((
+                StorageKind::Compilations.create(&config.caches).await?,
+                StorageKind::Preprocessor.create(&config.caches).await?,
+            ))
         })
     };
 

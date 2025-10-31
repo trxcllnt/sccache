@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cache::{Cache, CacheMode, CacheRead, CacheWrite, Storage};
-use crate::compiler::PreprocessorCacheEntry;
+use crate::cache::{AsyncReadSeek, Cache, CacheMode, ReadSeek, Storage};
+use crate::config::DiskCacheConfig;
 use crate::lru_disk_cache::Error as LruError;
 use crate::lru_disk_cache::LruDiskCache;
 use async_trait::async_trait;
@@ -21,7 +21,6 @@ use bytes::Buf;
 use futures::lock::Mutex;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -70,21 +69,14 @@ pub struct DiskCache {
     /// `LruDiskCache` does all the real work here.
     lru: Arc<Mutex<LazyDiskCache>>,
     rw_mode: CacheMode,
-    preprocessor_cache: Arc<Mutex<LazyDiskCache>>,
 }
 
 impl DiskCache {
     /// Create a new `DiskCache` rooted at `root`, with `max_size` as the maximum cache size on-disk, in bytes.
-    pub fn new<T: AsRef<OsStr>>(root: T, max_size: u64, rw_mode: CacheMode) -> DiskCache {
+    pub fn new<T: AsRef<OsStr>>(root: T, max_size: u64, rw_mode: CacheMode) -> Self {
         DiskCache {
             lru: Arc::new(Mutex::new(LazyDiskCache::Uninit {
                 root: root.as_ref().to_os_string(),
-                max_size,
-            })),
-            preprocessor_cache: Arc::new(Mutex::new(LazyDiskCache::Uninit {
-                root: Path::new(root.as_ref())
-                    .join("preprocessor")
-                    .into_os_string(),
                 max_size,
             })),
             rw_mode,
@@ -92,17 +84,10 @@ impl DiskCache {
     }
 
     async fn reader(&self, key: &str) -> Result<Box<dyn crate::cache::ReadSeek>> {
-        trace!("DiskCache::read({})", key);
         match self.lru.lock().await.get_or_init()?.get(key) {
             Ok(reader) => Ok(reader),
-            Err(LruError::Io(err)) => {
-                trace!("DiskCache::read({key}): {err}");
-                Err(err.into())
-            }
-            Err(err) => {
-                trace!("DiskCache::read({key}): {err}");
-                Err(err.into())
-            }
+            Err(LruError::Io(err)) => Err(err.into()),
+            Err(err) => Err(err.into()),
         }
     }
 }
@@ -166,9 +151,9 @@ impl DiskCache {
 
 #[async_trait]
 impl Storage for DiskCache {
-    async fn get(&self, key: &str) -> Result<Cache> {
+    async fn get(&self, key: &str) -> Result<Cache<Box<dyn ReadSeek>>> {
         match self.reader(key).await {
-            Ok(read) => Ok(Cache::Hit(CacheRead::from(read)?)),
+            Ok(read) => Ok(Cache::Hit(read)),
             Err(err) => match err.downcast_ref::<LruError>() {
                 Some(LruError::FileNotInCache) => Ok(Cache::Miss),
                 _ => Err(err),
@@ -176,16 +161,15 @@ impl Storage for DiskCache {
         }
     }
 
-    async fn get_async_reader(
-        &self,
-        key: &str,
-    ) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>> {
-        let reader = futures::io::AllowStdIo::new(
-            self.reader(key)
-                .await
-                .with_context(|| format!("[DiskCache::get_async_reader({key})]"))?,
-        );
-        Ok(Box::new(reader))
+    async fn get_async_reader(&self, key: &str) -> Result<Cache<Box<dyn AsyncReadSeek + Unpin>>> {
+        let reader = match self.reader(key).await {
+            Ok(reader) => reader,
+            Err(err) => match err.downcast_ref::<LruError>() {
+                Some(LruError::FileNotInCache) => return Ok(Cache::Miss),
+                _ => return Err(err),
+            },
+        };
+        Ok(Cache::Hit(Box::new(futures::io::AllowStdIo::new(reader))))
     }
 
     async fn del(&self, key: &str) -> Result<()> {
@@ -206,7 +190,7 @@ impl Storage for DiskCache {
         self.size(key).await.is_ok()
     }
 
-    async fn put(&self, key: &str, entry: CacheWrite) -> Result<Duration> {
+    async fn put(&self, key: &str, entry: &mut dyn ReadSeek) -> Result<Duration> {
         // We should probably do this on a background thread if we're going to buffer
         // everything in memory...
         trace!("DiskCache::put({})", key);
@@ -216,7 +200,10 @@ impl Storage for DiskCache {
         }
 
         let start = Instant::now();
-        let v = entry.finish()?;
+
+        let mut v = vec![];
+        entry.read_to_end(&mut v)?;
+
         let mut f = self
             .lru
             .lock()
@@ -246,7 +233,7 @@ impl Storage for DiskCache {
         &self,
         key: &str,
         size: u64,
-        source: Pin<&mut (dyn futures::AsyncRead + Send)>,
+        source: &mut (dyn AsyncReadSeek + Unpin),
     ) -> Result<()> {
         if self.rw_mode == CacheMode::ReadOnly {
             return Err(anyhow!("Cannot write to read-only storage"));
@@ -296,56 +283,14 @@ impl Storage for DiskCache {
     async fn max_size(&self) -> Result<Option<u64>> {
         Ok(Some(self.lru.lock().await.capacity()))
     }
+}
 
-    /// Return the preprocessor cache entry for a given preprocessor key,
-    /// if it exists.
-    /// Only applicable when using preprocessor cache mode.
-    async fn get_preprocessor_cache_entry(&self, key: &str) -> Option<PreprocessorCacheEntry> {
-        if let Some(mut file) = self
-            .preprocessor_cache
-            .lock()
-            .await
-            .get_or_init()
-            .ok()
-            .and_then(|lru| lru.get(key).ok())
-        {
-            let mut buf = vec![];
-            file.read_to_end(&mut buf).ok()?;
-            PreprocessorCacheEntry::read(&buf).ok()
-        } else {
-            None
-        }
-    }
-
-    /// Insert a preprocessor cache entry at the given preprocessor key,
-    /// overwriting the entry if it exists.
-    /// Only applicable when using preprocessor cache mode.
-    async fn put_preprocessor_cache_entry(
-        &self,
-        key: &str,
-        preprocessor_cache_entry: PreprocessorCacheEntry,
-    ) -> Result<()> {
-        if self.rw_mode == CacheMode::ReadOnly {
-            return Err(anyhow!("Cannot write to read-only storage"));
-        }
-
-        let mut f = self
-            .preprocessor_cache
-            .lock()
-            .await
-            .get_or_init()?
-            .prepare_add(key, 0)
-            .with_context(|| format!("[DiskCache::put_preprocessor_cache_entry({key})]"))?;
-
-        preprocessor_cache_entry
-            .serialize_to(std::io::BufWriter::new(f.as_file_mut()))
-            .with_context(|| format!("[DiskCache::put_preprocessor_cache_entry({key})]"))?;
-
-        self.preprocessor_cache
-            .lock()
-            .await
-            .get_or_init()?
-            .commit(f)
-            .with_context(|| format!("[DiskCache::put_preprocessor_cache_entry({key})]"))
+impl From<&DiskCacheConfig> for Arc<dyn Storage> {
+    fn from(config: &DiskCacheConfig) -> Self {
+        Arc::new(DiskCache::new(
+            &config.dir,
+            config.size,
+            config.rw_mode.into(),
+        ))
     }
 }

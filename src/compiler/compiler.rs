@@ -16,7 +16,8 @@
 #[cfg(feature = "dist-client")]
 use crate::cache::UnexpectedFileSize;
 use crate::cache::{
-    Cache, CacheWrite, DecompressionFailure, FileObjectSource, Storage, UnexpectedEmptyFile,
+    Cache, CacheRead, CacheWrite, DecompressionFailure, FileObjectSource, Storage,
+    UnexpectedEmptyFile,
 };
 use crate::compiler::args::*;
 use crate::compiler::c::{CCompiler, CCompilerKind};
@@ -536,7 +537,7 @@ where
         service: &server::SccacheService<T>,
         dist_client: Option<Arc<dyn dist::Client>>,
         creator: T,
-        object_storage: Arc<dyn Storage>,
+        compilations_storage: Arc<dyn Storage>,
         preprocessor_storage: Arc<dyn Storage>,
         arguments: Vec<OsString>,
         cwd: PathBuf,
@@ -617,7 +618,7 @@ where
 
         let lookup = lookup_or_compile
             .cache_lookup(
-                object_storage.as_ref(),
+                compilations_storage.as_ref(),
                 // Set a maximum time limit for the cache to respond before we
                 // forge ahead ourselves with a compilation.
                 // TODO: this should be configurable
@@ -687,7 +688,10 @@ where
                 // entry. We'll get the result back elsewhere.
                 let future = async move {
                     let start = Instant::now();
-                    match object_storage.put(&hash_key, entry).await {
+                    match compilations_storage
+                        .put(&hash_key, &mut std::io::Cursor::new(entry.finish()?))
+                        .await
+                    {
                         Ok(_) => {
                             trace!("[{out_pretty2}]: Stored in cache successfully!");
                             Ok(CacheWriteInfo {
@@ -982,12 +986,13 @@ impl<'a> CacheLookup<'a> {
         } = self;
 
         match storage.get(hash_key).await {
-            Ok(Cache::Hit(mut entry)) => {
+            Ok(Cache::Hit(entry)) => {
                 let duration = start.elapsed();
                 trace!(
                     "[{out_pretty}]: Cache hit in {}",
                     fmt_duration_as_secs(&duration)
                 );
+                let mut entry = CacheRead::from(entry)?;
                 let stdout = entry.get_stdout();
                 let stderr = entry.get_stderr();
                 match entry.extract_objects(outputs.to_vec(), runtime).await {
@@ -1022,7 +1027,6 @@ impl<'a> CacheLookup<'a> {
                 );
                 Ok(CacheLookupResult::Miss(MissType::CacheReadError))
             }
-            _ => unreachable!(),
         }
     }
 }
@@ -2455,7 +2459,7 @@ where
 mod test {
     use super::*;
     use crate::cache::disk::DiskCache;
-    use crate::cache::{CacheMode, CacheRead, PreprocessorCache, PreprocessorCacheModeConfig};
+    use crate::cache::{CacheMode, PreprocessorCache, PreprocessorCacheModeConfig};
     use crate::mock_command::*;
     use crate::test::mock_storage::MockStorage;
     use crate::test::utils::*;
@@ -2888,10 +2892,11 @@ LLVM version: 6.0",
         let pool = runtime.handle();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
         let cwd = f.tempdir.path();
-        let storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
+        let compilations_storage = Arc::new(MockStorage::new(None, false));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
         let service = server::SccacheService::mock_with_storage(
-            storage.clone(),
-            storage.clone(),
+            compilations_storage.clone(),
+            preprocessor_storage.clone(),
             pool.clone(),
         );
         // Write a dummy input file so the preprocessor cache mode can work
@@ -2931,7 +2936,7 @@ LLVM version: 6.0",
                         vec![],
                         pool,
                         false,
-                        storage.clone(),
+                        preprocessor_storage.clone(),
                         CacheControl::Default,
                     )
                     .wait()
@@ -3345,11 +3350,11 @@ LLVM version: 6.0",
         let gcc = f.mk_bin("gcc").unwrap();
         let runtime = Runtime::new().unwrap();
         let pool = runtime.handle().clone();
-        let storage = MockStorage::new(None, preprocessor_cache_mode);
-        let storage: Arc<MockStorage> = Arc::new(storage);
+        let compilations_storage = Arc::new(MockStorage::new(None, false));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
         let service = server::SccacheService::mock_with_storage(
-            storage.clone(),
-            storage.clone(),
+            compilations_storage.clone(),
+            preprocessor_storage.clone(),
             pool.clone(),
         );
 
@@ -3401,14 +3406,14 @@ LLVM version: 6.0",
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
         // The cache will return an error.
-        storage.next_get(Err(anyhow!("Some Error")));
+        compilations_storage.next_get(Err(anyhow!("Some Error")));
         let (cached, res) = runtime
             .block_on(hasher.get_cached_or_compile(
                 &service,
                 None,
                 creator,
-                storage.clone(),
-                storage,
+                compilations_storage,
+                preprocessor_storage,
                 arguments.clone(),
                 cwd.to_path_buf(),
                 vec![],
@@ -3447,11 +3452,11 @@ LLVM version: 6.0",
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
         // Make our storage wait 2ms for each get/put operation.
         let storage_delay = Duration::from_millis(2);
-        let storage = MockStorage::new(Some(storage_delay), preprocessor_cache_mode);
-        let storage: Arc<MockStorage> = Arc::new(storage);
+        let compilations_storage = Arc::new(MockStorage::new(Some(storage_delay), false));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
         let service = server::SccacheService::mock_with_storage(
-            storage.clone(),
-            storage.clone(),
+            compilations_storage.clone(),
+            preprocessor_storage.clone(),
             pool.clone(),
         );
         // Pretend to be GCC.
@@ -3493,8 +3498,10 @@ LLVM version: 6.0",
         cachewrite
             .put_object("obj", &mut Cursor::new(obj_file), None)
             .expect("Failed to store cache object");
-        let entry = cachewrite.finish().expect("Failed to finish cache entry");
-        let entry = CacheRead::from(Cursor::new(entry)).expect("Failed to re-read cache entry");
+
+        let entry = Box::new(Cursor::new(
+            cachewrite.finish().expect("Failed to finish cache entry"),
+        ));
 
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
@@ -3502,14 +3509,14 @@ LLVM version: 6.0",
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
-        storage.next_get(Ok(Cache::Hit(entry)));
+        compilations_storage.next_get(Ok(Cache::Hit(entry)));
         let (cached, _res) = runtime
             .block_on(hasher.get_cached_or_compile(
                 &service,
                 None,
                 creator,
-                storage.clone(),
-                storage,
+                compilations_storage,
+                preprocessor_storage,
                 arguments.clone(),
                 cwd.to_path_buf(),
                 vec![],

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::{
-    cache::{FileObjectSource, PreprocessorCacheModeConfig, Storage},
+    cache::{Cache, FileObjectSource, PreprocessorCacheModeConfig, Storage},
     compiler::{
         Cacheable, ColorMode, Compilation, CompileCommand, CompileCommandImpl, Compiler,
         CompilerArguments, CompilerHasher, CompilerKind, HashResult, Language,
@@ -35,14 +35,16 @@ use bytes::Buf;
 use fs_err as fs;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
-use std::ffi::{OsStr, OsString};
-use std::fmt;
-use std::hash::Hash;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    ffi::{OsStr, OsString},
+    fmt,
+    hash::Hash,
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tempfile::TempPath;
 
 use crate::errors::*;
@@ -449,6 +451,36 @@ enum PreprocessorCacheLookup {
     Miss(String),
 }
 
+/// Return the preprocessor cache entry for a given preprocessor key,
+/// if it exists.
+/// Only applicable when using preprocessor cache mode.
+async fn get_preprocessor_cache_entry(
+    storage: &dyn Storage,
+    key: &str,
+) -> Result<Cache<PreprocessorCacheEntry>> {
+    match storage.get(key).await {
+        Err(err) => Err(err),
+        Ok(Cache::Miss) => Ok(Cache::Miss),
+        Ok(Cache::Hit(cursor)) => Ok(Cache::Hit(
+            PreprocessorCacheEntry::deserialize_from(cursor).await?,
+        )),
+    }
+}
+
+/// Insert a preprocessor cache entry at the given preprocessor key,
+/// overwriting the entry if it exists.
+/// Only applicable when using preprocessor cache mode.
+async fn put_preprocessor_cache_entry(
+    storage: &dyn Storage,
+    key: &str,
+    preprocessor_cache_entry: PreprocessorCacheEntry,
+) -> Result<()> {
+    storage
+        .put(key, &mut preprocessor_cache_entry.serialize_into().await?)
+        .await
+        .map(|_| ())
+}
+
 impl<I> CCompilerHasher<I>
 where
     I: CCompilerImpl,
@@ -501,15 +533,14 @@ where
                 return Ok(PreprocessorCacheLookup::Miss(preprocessor_key));
             }
 
-            if let Some(mut preprocessor_cache_entry) = storage
-                .get_preprocessor_cache_entry(&preprocessor_key)
-                .await
+            if let Cache::Hit(mut preprocessor_cache_entry) =
+                get_preprocessor_cache_entry(storage, &preprocessor_key).await?
             {
                 let (hit, updated, preprocessor_cache_entry) =
                     tokio::task::spawn_blocking(move || {
                         let mut updated = false;
                         let hit = preprocessor_cache_entry
-                            .lookup_result_digest(preprocessor_cache_mode_config, &mut updated);
+                            .lookup_result_digest(&preprocessor_cache_mode_config, &mut updated);
                         Ok::<(Option<String>, bool, PreprocessorCacheEntry), anyhow::Error>((
                             hit,
                             updated,
@@ -526,9 +557,12 @@ where
                         "[{out_pretty}]: Preprocessor cache updated because of time macros: {preprocessor_key}"
                     );
 
-                    if let Err(e) = storage
-                        .put_preprocessor_cache_entry(&preprocessor_key, preprocessor_cache_entry)
-                        .await
+                    if let Err(e) = put_preprocessor_cache_entry(
+                        storage,
+                        &preprocessor_key,
+                        preprocessor_cache_entry,
+                    )
+                    .await
                     {
                         debug!("[{out_pretty}]: Failed to update preprocessor cache: {}", e);
                         update_failed = true;
@@ -791,12 +825,12 @@ where
                                 included_files,
                             );
 
-                            if let Err(e) = storage
-                                .put_preprocessor_cache_entry(
-                                    &preprocessor_key,
-                                    preprocessor_cache_entry,
-                                )
-                                .await
+                            if let Err(e) = put_preprocessor_cache_entry(
+                                storage.as_ref(),
+                                &preprocessor_key,
+                                preprocessor_cache_entry,
+                            )
+                            .await
                             {
                                 debug!(
                                     "[{out_pretty}]: Failed to update preprocessor cache: {}",
@@ -1641,6 +1675,11 @@ pub fn hash_key<R: io::Read>(
 
 #[cfg(test)]
 mod test {
+    use crate::{
+        cache::StorageKind,
+        config::{CacheModeConfig, CacheType, Config, DiskCacheConfig},
+    };
+
     use super::*;
 
     #[test]
@@ -1995,5 +2034,67 @@ mod test {
         t("Hpp");
         t("Mm");
         t("Cu");
+    }
+
+    #[test]
+    fn test_read_write_local_preprocessor_cache() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+
+        // Use disk cache.
+        let tempdir = tempfile::Builder::new()
+            .prefix("sccache_test_rust_cargo")
+            .tempdir()
+            .context("Failed to create tempdir")
+            .unwrap();
+
+        let cache_dir = tempdir.path().join("cache");
+        fs::create_dir(&cache_dir).unwrap();
+
+        let make_config = |rw_mode| Config {
+            caches: vec![CacheType::Disk(DiskCacheConfig {
+                dir: cache_dir.clone(),
+                rw_mode,
+                ..DiskCacheConfig::default()
+            })],
+            ..Default::default()
+        };
+
+        // Test Read Write
+        {
+            let caches = make_config(CacheModeConfig::ReadWrite).caches;
+            runtime.block_on(async {
+                let storage = StorageKind::Preprocessor.create(&caches).await.unwrap();
+                put_preprocessor_cache_entry(
+                    storage.as_ref(),
+                    "test1",
+                    PreprocessorCacheEntry::default(),
+                )
+                .await
+                .unwrap();
+            });
+        }
+
+        // Test Read-only
+        {
+            let caches = make_config(CacheModeConfig::ReadOnly).caches;
+            runtime.block_on(async {
+                let storage = StorageKind::Preprocessor.create(&caches).await.unwrap();
+                assert_eq!(
+                    put_preprocessor_cache_entry(
+                        storage.as_ref(),
+                        "test1",
+                        PreprocessorCacheEntry::default()
+                    )
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                    "Cannot write to read-only storage"
+                );
+            });
+        }
     }
 }

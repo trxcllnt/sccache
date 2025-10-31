@@ -20,7 +20,7 @@ use futures::{AsyncReadExt, lock::Mutex};
 use tokio_retry2::RetryError;
 
 use crate::{
-    cache::Storage,
+    cache::{Cache, Storage},
     dist::{
         self, CompileCommand, JobStats, NewJobResponse, RunJobRequest, RunJobResponse,
         SchedulerService, SchedulerStatus, ServerDetails, ServerStats, ServerStatus,
@@ -34,7 +34,6 @@ use crate::{
 
 use std::{
     collections::HashMap,
-    pin::Pin,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -372,6 +371,10 @@ impl Scheduler {
             .jobs_storage
             .get_async_reader(&job_result_key(job_id))
             .await
+            .and_then(|res| match res {
+                Cache::Hit(reader) => Ok(reader),
+                _ => Err(anyhow!("Missing job result")),
+            })
             .map_err(|err| {
                 tracing::warn!("[get_job_result({job_id})]: Error loading stream: {err:?}");
                 err

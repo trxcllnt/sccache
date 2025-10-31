@@ -46,4 +46,6 @@ pub(crate) mod http_client;
 #[cfg(feature = "watcher")]
 pub(crate) mod watch;
 
+pub(crate) mod tiered;
+
 pub use crate::cache::cache::*;

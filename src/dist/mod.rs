@@ -16,8 +16,6 @@ use async_trait::async_trait;
 #[cfg(feature = "dist-server")]
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "dist-server")]
-use std::pin::Pin;
 
 use std::{
     ffi::OsString,

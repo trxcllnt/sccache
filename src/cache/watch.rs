@@ -18,8 +18,9 @@ use notify_debouncer_full::{
 };
 use std::{ffi::OsString, future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
-use crate::cache::{Cache, CacheMode, CacheWrite, PreprocessorCacheModeConfig, Storage};
-use crate::compiler::PreprocessorCacheEntry;
+use crate::cache::{
+    AsyncReadSeek, Cache, CacheMode, PreprocessorCacheModeConfig, ReadSeek, Storage,
+};
 use crate::errors::*;
 
 pub struct WatchStorage {
@@ -179,14 +180,11 @@ impl WatchStorage {
 
 #[async_trait]
 impl Storage for WatchStorage {
-    async fn get(&self, key: &str) -> Result<Cache> {
+    async fn get(&self, key: &str) -> Result<Cache<Box<dyn ReadSeek>>> {
         self.inner().await.get(key).await
     }
 
-    async fn get_async_reader(
-        &self,
-        key: &str,
-    ) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>> {
+    async fn get_async_reader(&self, key: &str) -> Result<Cache<Box<dyn AsyncReadSeek + Unpin>>> {
         self.inner().await.get_async_reader(key).await
     }
 
@@ -198,7 +196,7 @@ impl Storage for WatchStorage {
         self.inner().await.has(key).await
     }
 
-    async fn put(&self, key: &str, entry: CacheWrite) -> Result<Duration> {
+    async fn put(&self, key: &str, entry: &mut dyn ReadSeek) -> Result<Duration> {
         self.inner().await.put(key, entry).await
     }
 
@@ -206,7 +204,7 @@ impl Storage for WatchStorage {
         &self,
         key: &str,
         size: u64,
-        source: Pin<&mut (dyn futures::AsyncRead + Send)>,
+        source: &mut (dyn AsyncReadSeek + Unpin),
     ) -> Result<()> {
         self.inner().await.put_async_reader(key, size, source).await
     }
@@ -237,27 +235,6 @@ impl Storage for WatchStorage {
 
     /// Return the config for preprocessor cache mode if applicable
     fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
-        self.preprocessor_cache_mode_config
-    }
-
-    /// Return the preprocessor cache entry for a given preprocessor key,
-    /// if it exists.
-    /// Only applicable when using preprocessor cache mode.
-    async fn get_preprocessor_cache_entry(&self, key: &str) -> Option<PreprocessorCacheEntry> {
-        self.inner().await.get_preprocessor_cache_entry(key).await
-    }
-
-    /// Insert a preprocessor cache entry at the given preprocessor key,
-    /// overwriting the entry if it exists.
-    /// Only applicable when using preprocessor cache mode.
-    async fn put_preprocessor_cache_entry(
-        &self,
-        key: &str,
-        preprocessor_cache_entry: PreprocessorCacheEntry,
-    ) -> Result<()> {
-        self.inner()
-            .await
-            .put_preprocessor_cache_entry(key, preprocessor_cache_entry)
-            .await
+        self.preprocessor_cache_mode_config.clone()
     }
 }

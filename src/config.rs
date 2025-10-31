@@ -16,6 +16,7 @@ use crate::cache::CacheMode;
 use directories::ProjectDirs;
 use fs::File;
 use fs_err as fs;
+use itertools::Itertools;
 use once_cell::sync::Lazy;
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 use serde::ser::Serializer;
@@ -181,13 +182,42 @@ impl HTTPUrl {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum TieredCacheOrder {
+    Disk = 0,
+    S3 = 1,
+    Redis = 2,
+    Memcached = 3,
+    Gcs = 4,
+    Gha = 5,
+    Azure = 6,
+    Webdav = 7,
+    Oss = 8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AzureCacheConfig {
+    #[serde(default)]
     pub connection_string: String,
+    #[serde(default)]
     pub container: String,
+    #[serde(default)]
     pub key_prefix: String,
     pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
+    #[serde(default = "AzureCacheConfig::default_order")]
+    pub order: u64,
+}
+
+impl Default for AzureCacheConfig {
+    fn default() -> Self {
+        serde_json::from_str("{}").unwrap()
+    }
+}
+
+impl AzureCacheConfig {
+    fn default_order() -> u64 {
+        TieredCacheOrder::Azure as u64
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +229,14 @@ pub struct DiskCacheConfig {
     pub size: u64,
     pub preprocessor_cache_mode: PreprocessorCacheModeConfig,
     pub rw_mode: CacheModeConfig,
+    #[serde(default = "DiskCacheConfig::default_order")]
+    pub order: u64,
+}
+
+impl DiskCacheConfig {
+    fn default_order() -> u64 {
+        TieredCacheOrder::Disk as u64
+    }
 }
 
 impl Default for DiskCacheConfig {
@@ -208,6 +246,7 @@ impl Default for DiskCacheConfig {
             size: default_disk_cache_size(),
             preprocessor_cache_mode: PreprocessorCacheModeConfig::activated(),
             rw_mode: CacheModeConfig::ReadWrite,
+            order: DiskCacheConfig::default_order(),
         }
     }
 }
@@ -231,26 +270,59 @@ impl From<CacheModeConfig> for CacheMode {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GCSCacheConfig {
+    #[serde(default)]
     pub bucket: String,
+    #[serde(default)]
     pub key_prefix: String,
     pub cred_path: Option<String>,
     pub service_account: Option<String>,
+    #[serde(default)]
     pub rw_mode: CacheModeConfig,
     pub credential_url: Option<String>,
     pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
+    #[serde(default = "GCSCacheConfig::default_order")]
+    pub order: u64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+impl Default for GCSCacheConfig {
+    fn default() -> Self {
+        serde_json::from_str("{}").unwrap()
+    }
+}
+
+impl GCSCacheConfig {
+    fn default_order() -> u64 {
+        TieredCacheOrder::Gcs as u64
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GHACacheConfig {
+    #[serde(default)]
     pub enabled: bool,
     /// Version for gha cache is a namespace. By setting different versions,
     /// we can avoid mixed caches.
+    #[serde(default)]
     pub version: String,
     pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
+    #[serde(default = "GHACacheConfig::default_order")]
+    pub order: u64,
+}
+
+impl Default for GHACacheConfig {
+    fn default() -> Self {
+        serde_json::from_str("{}").unwrap()
+    }
+}
+
+impl GHACacheConfig {
+    fn default_order() -> u64 {
+        TieredCacheOrder::Gha as u64
+    }
 }
 
 /// Memcached's default value of expiration is 10800s (3 hours), which is too
@@ -266,9 +338,10 @@ fn default_memcached_cache_expiration() -> u32 {
     DEFAULT_MEMCACHED_CACHE_EXPIRATION
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemcachedCacheConfig {
+    #[serde(default)]
     #[serde(alias = "endpoint")]
     pub url: String,
 
@@ -289,6 +362,20 @@ pub struct MemcachedCacheConfig {
     pub key_prefix: String,
 
     pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
+    #[serde(default = "MemcachedCacheConfig::default_order")]
+    pub order: u64,
+}
+
+impl Default for MemcachedCacheConfig {
+    fn default() -> Self {
+        serde_json::from_str("{}").unwrap()
+    }
+}
+
+impl MemcachedCacheConfig {
+    fn default_order() -> u64 {
+        TieredCacheOrder::Memcached as u64
+    }
 }
 
 /// redis has no default TTL - all caches live forever
@@ -298,7 +385,7 @@ pub struct MemcachedCacheConfig {
 /// Please change this value freely if we have a better choice.
 const DEFAULT_REDIS_CACHE_TTL: u64 = 0;
 pub const DEFAULT_REDIS_DB: u32 = 0;
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RedisCacheConfig {
     /// The single-node redis endpoint.
@@ -335,11 +422,27 @@ pub struct RedisCacheConfig {
     pub key_prefix: String,
 
     pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
+
+    #[serde(default = "RedisCacheConfig::default_order")]
+    pub order: u64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+impl Default for RedisCacheConfig {
+    fn default() -> Self {
+        serde_json::from_str("{}").unwrap()
+    }
+}
+
+impl RedisCacheConfig {
+    fn default_order() -> u64 {
+        TieredCacheOrder::Redis as u64
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebdavCacheConfig {
+    #[serde(default)]
     pub endpoint: String,
     #[serde(default)]
     pub key_prefix: String,
@@ -347,37 +450,84 @@ pub struct WebdavCacheConfig {
     pub password: Option<String>,
     pub token: Option<String>,
     pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
+    #[serde(default = "WebdavCacheConfig::default_order")]
+    pub order: u64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+impl Default for WebdavCacheConfig {
+    fn default() -> Self {
+        serde_json::from_str("{}").unwrap()
+    }
+}
+
+impl WebdavCacheConfig {
+    fn default_order() -> u64 {
+        TieredCacheOrder::Webdav as u64
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct S3CacheConfig {
+    #[serde(default)]
     pub bucket: String,
     pub region: Option<String>,
     #[serde(default)]
     pub key_prefix: String,
+    #[serde(default)]
     pub no_credentials: bool,
     pub endpoint: Option<String>,
     pub use_ssl: Option<bool>,
     pub server_side_encryption: Option<bool>,
     pub enable_virtual_host_style: Option<bool>,
     pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
+    #[serde(default = "S3CacheConfig::default_order")]
+    pub order: u64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+impl Default for S3CacheConfig {
+    fn default() -> Self {
+        serde_json::from_str("{}").unwrap()
+    }
+}
+
+impl S3CacheConfig {
+    fn default_order() -> u64 {
+        TieredCacheOrder::S3 as u64
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OSSCacheConfig {
+    #[serde(default)]
     pub bucket: String,
     #[serde(default)]
     pub key_prefix: String,
     pub endpoint: Option<String>,
+    #[serde(default)]
     pub no_credentials: bool,
     pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
+    #[serde(default = "OSSCacheConfig::default_order")]
+    pub order: u64,
+}
+
+impl Default for OSSCacheConfig {
+    fn default() -> Self {
+        serde_json::from_str("{}").unwrap()
+    }
+}
+
+impl OSSCacheConfig {
+    fn default_order() -> u64 {
+        TieredCacheOrder::Oss as u64
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CacheType {
     Azure(AzureCacheConfig),
+    Disk(DiskCacheConfig),
     GCS(GCSCacheConfig),
     GHA(GHACacheConfig),
     Memcached(MemcachedCacheConfig),
@@ -385,6 +535,47 @@ pub enum CacheType {
     S3(S3CacheConfig),
     Webdav(WebdavCacheConfig),
     OSS(OSSCacheConfig),
+}
+
+impl CacheType {
+    pub fn order(&self) -> u64 {
+        match self {
+            Self::Azure(cfg) => cfg.order,
+            Self::Disk(cfg) => cfg.order,
+            Self::GCS(cfg) => cfg.order,
+            Self::GHA(cfg) => cfg.order,
+            Self::Memcached(cfg) => cfg.order,
+            Self::Redis(cfg) => cfg.order,
+            Self::S3(cfg) => cfg.order,
+            Self::Webdav(cfg) => cfg.order,
+            Self::OSS(cfg) => cfg.order,
+        }
+    }
+    pub fn preprocessor_cache_mode(&self) -> Option<PreprocessorCacheModeConfig> {
+        match self {
+            Self::Azure(cfg) => cfg.preprocessor_cache_mode.clone(),
+            Self::Disk(cfg) => Some(cfg.preprocessor_cache_mode.clone()),
+            Self::GCS(cfg) => cfg.preprocessor_cache_mode.clone(),
+            Self::GHA(cfg) => cfg.preprocessor_cache_mode.clone(),
+            Self::Memcached(cfg) => cfg.preprocessor_cache_mode.clone(),
+            Self::Redis(cfg) => cfg.preprocessor_cache_mode.clone(),
+            Self::S3(cfg) => cfg.preprocessor_cache_mode.clone(),
+            Self::Webdav(cfg) => cfg.preprocessor_cache_mode.clone(),
+            Self::OSS(cfg) => cfg.preprocessor_cache_mode.clone(),
+        }
+    }
+}
+
+impl PartialOrd for CacheType {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CacheType {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.order().cmp(&other.order())
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -402,38 +593,8 @@ pub struct CacheConfigs {
 }
 
 impl CacheConfigs {
-    /// Return cache type in an arbitrary but
-    /// consistent ordering
-    fn into_fallback(self) -> (Option<CacheType>, DiskCacheConfig) {
-        let CacheConfigs {
-            azure,
-            disk,
-            gcs,
-            gha,
-            memcached,
-            redis,
-            s3,
-            webdav,
-            oss,
-        } = self;
-
-        let cache_type = s3
-            .map(CacheType::S3)
-            .or_else(|| redis.map(CacheType::Redis))
-            .or_else(|| memcached.map(CacheType::Memcached))
-            .or_else(|| gcs.map(CacheType::GCS))
-            .or_else(|| gha.map(CacheType::GHA))
-            .or_else(|| azure.map(CacheType::Azure))
-            .or_else(|| webdav.map(CacheType::Webdav))
-            .or_else(|| oss.map(CacheType::OSS));
-
-        let fallback = disk.unwrap_or_default();
-
-        (cache_type, fallback)
-    }
-
     /// Override self with any existing fields from other
-    fn merge(&mut self, other: Self) {
+    fn merge(mut self, other: Self) -> Self {
         let CacheConfigs {
             azure,
             disk,
@@ -474,45 +635,55 @@ impl CacheConfigs {
         if oss.is_some() {
             self.oss = oss
         }
+
+        self
+    }
+}
+
+// Return a list of caches in the order determined by the user
+impl From<CacheConfigs> for Vec<CacheType> {
+    fn from(value: CacheConfigs) -> Self {
+        [
+            value.disk.map(CacheType::Disk),
+            value.azure.map(CacheType::Azure),
+            value.gcs.map(CacheType::GCS),
+            value.gha.map(CacheType::GHA),
+            value.memcached.map(CacheType::Memcached),
+            value.redis.map(CacheType::Redis),
+            value.s3.map(CacheType::S3),
+            value.webdav.map(CacheType::Webdav),
+            value.oss.map(CacheType::OSS),
+        ]
+        .into_iter()
+        .flatten()
+        .sorted()
+        .collect::<Vec<_>>()
+    }
+}
+
+impl From<Vec<CacheType>> for CacheConfigs {
+    fn from(configs: Vec<CacheType>) -> Self {
+        configs
+            .into_iter()
+            .fold(Self::default(), |caches, cache| caches.merge(cache.into()))
     }
 }
 
 impl From<CacheType> for CacheConfigs {
-    fn from(cache_type: CacheType) -> Self {
-        match cache_type {
-            CacheType::Azure(opts) => Self {
-                azure: Some(opts),
-                ..Default::default()
-            },
-            CacheType::GCS(opts) => Self {
-                gcs: Some(opts),
-                ..Default::default()
-            },
-            CacheType::GHA(opts) => Self {
-                gha: Some(opts),
-                ..Default::default()
-            },
-            CacheType::Memcached(opts) => Self {
-                memcached: Some(opts),
-                ..Default::default()
-            },
-            CacheType::Redis(opts) => Self {
-                redis: Some(opts),
-                ..Default::default()
-            },
-            CacheType::S3(opts) => Self {
-                s3: Some(opts),
-                ..Default::default()
-            },
-            CacheType::Webdav(opts) => Self {
-                webdav: Some(opts),
-                ..Default::default()
-            },
-            CacheType::OSS(opts) => Self {
-                oss: Some(opts),
-                ..Default::default()
-            },
+    fn from(cache: CacheType) -> Self {
+        let mut caches = Self::default();
+        match cache {
+            CacheType::Azure(c) => caches.azure = Some(c),
+            CacheType::Disk(c) => caches.disk = Some(c),
+            CacheType::GCS(c) => caches.gcs = Some(c),
+            CacheType::GHA(c) => caches.gha = Some(c),
+            CacheType::Memcached(c) => caches.memcached = Some(c),
+            CacheType::Redis(c) => caches.redis = Some(c),
+            CacheType::S3(c) => caches.s3 = Some(c),
+            CacheType::Webdav(c) => caches.webdav = Some(c),
+            CacheType::OSS(c) => caches.oss = Some(c),
         }
+        caches
     }
 }
 
@@ -836,11 +1007,11 @@ pub struct FileConfig {
 // If the file doesn't exist or we can't read it, log the issue and proceed. If the
 // config exists but doesn't parse then something is wrong - return an error.
 pub fn try_read_config_file<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
-    trace!("Attempting to read config file at {:?}", path);
+    debug!("Attempting to read config file at {:?}", path);
     let mut file = match File::open(path) {
         Ok(f) => f,
         Err(e) => {
-            trace!("Couldn't open config file: {}", e);
+            debug!("Couldn't open config file: {}", e);
             return Ok(None);
         }
     };
@@ -933,6 +1104,9 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             server_side_encryption,
             enable_virtual_host_style,
             preprocessor_cache_mode: None,
+            order: number_from_env_var(&envvar("S3_CACHE_ORDER"))
+                .unwrap_or(Ok(S3CacheConfig::default_order()))
+                .unwrap_or(S3CacheConfig::default_order()),
         })
     } else {
         None
@@ -980,6 +1154,9 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                 ttl,
                 key_prefix,
                 preprocessor_cache_mode: None,
+                order: number_from_env_var(&envvar("REDIS_CACHE_ORDER"))
+                    .unwrap_or(Ok(RedisCacheConfig::default_order()))
+                    .unwrap_or(RedisCacheConfig::default_order()),
             })
         }
     };
@@ -1014,6 +1191,9 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             expiration,
             key_prefix,
             preprocessor_cache_mode: None,
+            order: number_from_env_var(&envvar("MEMCACHED_CACHE_ORDER"))
+                .unwrap_or(Ok(MemcachedCacheConfig::default_order()))
+                .unwrap_or(MemcachedCacheConfig::default_order()),
         })
     } else {
         None
@@ -1079,6 +1259,9 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             rw_mode,
             credential_url,
             preprocessor_cache_mode: None,
+            order: number_from_env_var(&envvar("GCS_CACHE_ORDER"))
+                .unwrap_or(Ok(GCSCacheConfig::default_order()))
+                .unwrap_or(GCSCacheConfig::default_order()),
         }
     });
 
@@ -1090,6 +1273,9 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             enabled: true,
             version,
             preprocessor_cache_mode: None,
+            order: number_from_env_var(&envvar("GHA_CACHE_ORDER"))
+                .unwrap_or(Ok(GHACacheConfig::default_order()))
+                .unwrap_or(GHACacheConfig::default_order()),
         })
     } else if bool_from_env_var(&envvar("GHA_ENABLED"))?.unwrap_or(false) {
         // If only SCCACHE_GHA_ENABLED has been set to the true value, enable with
@@ -1098,6 +1284,9 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             enabled: true,
             version: "".to_string(),
             preprocessor_cache_mode: None,
+            order: number_from_env_var(&envvar("GHA_CACHE_ORDER"))
+                .unwrap_or(Ok(GHACacheConfig::default_order()))
+                .unwrap_or(GHACacheConfig::default_order()),
         })
     } else {
         None
@@ -1114,6 +1303,9 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             container,
             key_prefix,
             preprocessor_cache_mode: None,
+            order: number_from_env_var(&envvar("AZURE_CACHE_ORDER"))
+                .unwrap_or(Ok(AzureCacheConfig::default_order()))
+                .unwrap_or(AzureCacheConfig::default_order()),
         })
     } else {
         None
@@ -1133,6 +1325,9 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             password,
             token,
             preprocessor_cache_mode: None,
+            order: number_from_env_var(&envvar("WEBDAV_CACHE_ORDER"))
+                .unwrap_or(Ok(WebdavCacheConfig::default_order()))
+                .unwrap_or(WebdavCacheConfig::default_order()),
         })
     } else {
         None
@@ -1151,6 +1346,9 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             key_prefix,
             no_credentials,
             preprocessor_cache_mode: None,
+            order: number_from_env_var(&envvar("OSS_CACHE_ORDER"))
+                .unwrap_or(Ok(OSSCacheConfig::default_order()))
+                .unwrap_or(OSSCacheConfig::default_order()),
         })
     } else {
         None
@@ -1174,6 +1372,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
     let disk_sz = env::var(envvar("CACHE_SIZE"))
         .ok()
         .and_then(|v| parse_size(&v));
+    let disk_order = number_from_env_var(&envvar("DISK_CACHE_ORDER")).and_then(|o| o.ok());
 
     let mut preprocessor_cache_mode = PreprocessorCacheModeConfig::activated();
     let preprocessor_mode_overridden = if let Some(value) = bool_from_env_var(&envvar("DIRECT"))? {
@@ -1201,6 +1400,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
 
     let any_overridden = disk_dir.is_some()
         || disk_sz.is_some()
+        || disk_order.is_some()
         || preprocessor_mode_overridden
         || disk_rw_mode_overridden;
     let disk = if any_overridden {
@@ -1209,6 +1409,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             size: disk_sz.unwrap_or_else(default_disk_cache_size),
             preprocessor_cache_mode,
             rw_mode: disk_rw_mode,
+            order: disk_order.unwrap_or(DiskCacheConfig::default_order()),
         })
     } else {
         None
@@ -1254,8 +1455,7 @@ fn config_file(env_var: &str, leaf: &str) -> PathBuf {
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Config {
-    pub cache: Option<CacheType>,
-    pub fallback_cache: DiskCacheConfig,
+    pub caches: Vec<CacheType>,
     pub dist: DistConfig,
     pub server_startup_timeout: Option<Duration>,
 }
@@ -1285,16 +1485,15 @@ impl Config {
 
         let server_startup_timeout = server_startup_timeout_ms.map(Duration::from_millis);
 
-        let (cache, fallback_cache) = {
-            let mut conf_caches: CacheConfigs = Default::default();
-            conf_caches.merge(file_conf.cache);
-            conf_caches.merge(env_conf.cache);
-            conf_caches.into_fallback()
+        let caches = {
+            CacheConfigs::default()
+                .merge(file_conf.cache)
+                .merge(env_conf.cache)
+                .into()
         };
 
         Self {
-            cache,
-            fallback_cache,
+            caches,
             dist,
             server_startup_timeout,
         }
@@ -1461,33 +1660,6 @@ pub struct MetricsConfigs {
 }
 
 #[cfg(feature = "dist-server")]
-#[derive(Clone, Debug, Default)]
-pub struct StorageConfig {
-    pub storage: Option<CacheType>,
-    pub fallback: DiskCacheConfig,
-}
-
-#[cfg(feature = "dist-server")]
-impl From<CacheConfigs> for StorageConfig {
-    fn from(conf: CacheConfigs) -> Self {
-        let (storage, fallback) = conf.into_fallback();
-        Self { storage, fallback }
-    }
-}
-
-#[cfg(feature = "dist-server")]
-impl From<StorageConfig> for CacheConfigs {
-    fn from(conf: StorageConfig) -> Self {
-        conf.storage
-            .map(|x| x.clone().into())
-            .unwrap_or_else(|| Self {
-                disk: Some(conf.fallback),
-                ..Default::default()
-            })
-    }
-}
-
-#[cfg(feature = "dist-server")]
 pub mod scheduler {
     use std::env;
     use std::path::PathBuf;
@@ -1498,15 +1670,16 @@ pub mod scheduler {
     use serde::{Deserialize, Serialize};
 
     use super::{
-        CacheConfigs, CacheModeConfig, DiskCacheConfig, MessageBroker, MetricsConfigs,
-        StorageConfig, config_from_env, default_disk_cache_dir, default_disk_cache_size,
-        number_from_env_var, try_read_config_file,
+        CacheConfigs, CacheModeConfig, CacheType, DiskCacheConfig, MessageBroker, MetricsConfigs,
+        config_from_env, default_disk_cache_dir, default_disk_cache_size, number_from_env_var,
+        try_read_config_file,
     };
 
-    #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
     #[serde(tag = "type")]
     #[serde(deny_unknown_fields)]
     pub enum ClientAuth {
+        #[default]
         #[serde(rename = "DANGEROUSLY_INSECURE")]
         Insecure,
         #[serde(rename = "token")]
@@ -1524,19 +1697,26 @@ pub mod scheduler {
         },
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
     #[serde(default)]
     #[serde(deny_unknown_fields)]
     pub struct FileConfig {
         pub client_auth: ClientAuth,
-        pub job_time_limit: Option<u32>,
+        #[serde(default = "Config::default_job_time_limit")]
+        pub job_time_limit: u32,
+        #[serde(default = "Config::default_jobs_storage")]
         pub jobs: CacheConfigs,
-        pub max_body_size: Option<usize>,
+        #[serde(default = "Config::default_max_body_size")]
+        pub max_body_size: usize,
         pub message_broker: Option<MessageBroker>,
         pub metrics: MetricsConfigs,
+        #[serde(default = "Config::default_public_addr")]
         pub public_addr: SocketAddr,
-        pub scheduler_id: Option<String>,
-        pub shutdown_timeout: Option<u64>,
+        #[serde(default = "Config::default_scheduler_id")]
+        pub scheduler_id: String,
+        #[serde(default = "Config::default_shutdown_timeout")]
+        pub shutdown_timeout: u64,
+        #[serde(default = "Config::default_toolchains_storage")]
         pub toolchains: CacheConfigs,
     }
 
@@ -1544,31 +1724,15 @@ pub mod scheduler {
         fn default() -> Self {
             Self {
                 client_auth: ClientAuth::Insecure,
-                job_time_limit: None,
-                jobs: CacheConfigs {
-                    disk: Some(DiskCacheConfig {
-                        dir: default_disk_cache_dir().join("jobs"),
-                        rw_mode: CacheModeConfig::ReadWrite,
-                        size: default_disk_cache_size(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                max_body_size: None,
+                job_time_limit: Config::default_job_time_limit(),
+                jobs: Config::default_jobs_storage(),
+                max_body_size: Config::default_max_body_size(),
                 message_broker: None,
                 metrics: Default::default(),
                 public_addr: SocketAddr::from_str("0.0.0.0:10500").unwrap(),
-                scheduler_id: None,
-                shutdown_timeout: Some(10),
-                toolchains: CacheConfigs {
-                    disk: Some(DiskCacheConfig {
-                        dir: default_disk_cache_dir().join("toolchains"),
-                        rw_mode: CacheModeConfig::ReadWrite,
-                        size: default_disk_cache_size(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
+                scheduler_id: Config::default_scheduler_id(),
+                shutdown_timeout: Config::default_shutdown_timeout(),
+                toolchains: Config::default_toolchains_storage(),
             }
         }
     }
@@ -1577,17 +1741,61 @@ pub mod scheduler {
     pub struct Config {
         pub client_auth: ClientAuth,
         pub job_time_limit: u32,
-        pub jobs: StorageConfig,
+        pub jobs: Vec<CacheType>,
         pub max_body_size: usize,
         pub message_broker: Option<MessageBroker>,
         pub metrics: MetricsConfigs,
         pub public_addr: SocketAddr,
         pub scheduler_id: String,
         pub shutdown_timeout: u64,
-        pub toolchains: StorageConfig,
+        pub toolchains: Vec<CacheType>,
+    }
+
+    impl Default for Config {
+        fn default() -> Self {
+            FileConfig::default().into()
+        }
     }
 
     impl Config {
+        pub fn default_jobs_storage() -> CacheConfigs {
+            CacheConfigs {
+                disk: Some(DiskCacheConfig {
+                    dir: default_disk_cache_dir().join("jobs"),
+                    rw_mode: CacheModeConfig::ReadWrite,
+                    size: default_disk_cache_size(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        }
+        pub fn default_toolchains_storage() -> CacheConfigs {
+            CacheConfigs {
+                disk: Some(DiskCacheConfig {
+                    dir: default_disk_cache_dir().join("toolchains"),
+                    rw_mode: CacheModeConfig::ReadWrite,
+                    size: default_disk_cache_size(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        }
+        pub fn default_job_time_limit() -> u32 {
+            600
+        }
+        pub fn default_max_body_size() -> usize {
+            // 1GiB should be enough for toolchains and compile inputs, right?
+            1024 * 1024 * 1024
+        }
+        pub fn default_public_addr() -> SocketAddr {
+            SocketAddr::from_str("0.0.0.0:10500").unwrap()
+        }
+        pub fn default_scheduler_id() -> String {
+            uuid::Uuid::new_v4().as_simple().to_string()
+        }
+        pub fn default_shutdown_timeout() -> u64 {
+            10
+        }
         pub fn load(conf_path: Option<PathBuf>) -> Result<Self> {
             let FileConfig {
                 client_auth,
@@ -1614,48 +1822,43 @@ pub mod scheduler {
                 })
                 .unwrap_or_default();
 
-            let mut jobs_storage = CacheConfigs::default();
-            jobs_storage.merge(jobs);
-            jobs_storage.merge(config_from_env("SCCACHE_DIST_JOBS_")?.cache);
+            let jobs = CacheConfigs::default()
+                .merge(jobs)
+                .merge(config_from_env("SCCACHE_DIST_JOBS_")?.cache);
 
-            let mut toolchains_storage = CacheConfigs::default();
-            toolchains_storage.merge(toolchains);
-            toolchains_storage.merge(config_from_env("SCCACHE_DIST_TOOLCHAINS_")?.cache);
+            let toolchains = CacheConfigs::default()
+                .merge(toolchains)
+                .merge(config_from_env("SCCACHE_DIST_TOOLCHAINS_")?.cache);
 
             let job_time_limit = number_from_env_var("SCCACHE_DIST_JOB_TIME_LIMIT_SECS")
                 .transpose()?
-                .or(job_time_limit)
-                .unwrap_or(600);
+                .unwrap_or(job_time_limit);
 
             let max_body_size = number_from_env_var("SCCACHE_DIST_MAX_BODY_SIZE")
                 .transpose()?
-                .or(max_body_size)
-                // 1GiB should be enough for toolchains and compile inputs, right?
-                .unwrap_or(1024 * 1024 * 1024);
+                .unwrap_or(max_body_size);
 
             let message_broker = MessageBroker::from_env().or(message_broker);
 
             let scheduler_id = env::var("SCCACHE_DIST_SCHEDULER_ID")
                 .ok()
-                .or(scheduler_id)
-                .unwrap_or(uuid::Uuid::new_v4().as_simple().to_string());
+                .unwrap_or(scheduler_id);
 
             let shutdown_timeout = number_from_env_var("SCCACHE_DIST_SHUTDOWN_TIMEOUT")
                 .transpose()?
-                .or(shutdown_timeout)
-                .unwrap_or(10);
+                .unwrap_or(shutdown_timeout);
 
             Ok(Self {
                 client_auth,
                 job_time_limit,
-                jobs: jobs_storage.into(),
+                jobs: jobs.into(),
                 max_body_size,
                 message_broker,
                 metrics,
                 public_addr,
                 scheduler_id,
                 shutdown_timeout,
-                toolchains: toolchains_storage.into(),
+                toolchains: toolchains.into(),
             })
         }
 
@@ -1667,15 +1870,32 @@ pub mod scheduler {
     impl From<Config> for FileConfig {
         fn from(scheduler_config: Config) -> Self {
             Self {
-                client_auth: scheduler_config.client_auth.clone(),
-                job_time_limit: Some(scheduler_config.job_time_limit),
+                client_auth: scheduler_config.client_auth,
+                job_time_limit: scheduler_config.job_time_limit,
                 jobs: scheduler_config.jobs.into(),
-                max_body_size: Some(scheduler_config.max_body_size),
+                max_body_size: scheduler_config.max_body_size,
                 message_broker: scheduler_config.message_broker,
                 metrics: scheduler_config.metrics,
                 public_addr: scheduler_config.public_addr,
-                scheduler_id: Some(scheduler_config.scheduler_id),
-                shutdown_timeout: Some(scheduler_config.shutdown_timeout),
+                scheduler_id: scheduler_config.scheduler_id,
+                shutdown_timeout: scheduler_config.shutdown_timeout,
+                toolchains: scheduler_config.toolchains.into(),
+            }
+        }
+    }
+
+    impl From<FileConfig> for Config {
+        fn from(scheduler_config: FileConfig) -> Self {
+            Self {
+                client_auth: scheduler_config.client_auth,
+                job_time_limit: scheduler_config.job_time_limit,
+                jobs: scheduler_config.jobs.into(),
+                max_body_size: scheduler_config.max_body_size,
+                message_broker: scheduler_config.message_broker,
+                metrics: scheduler_config.metrics,
+                public_addr: scheduler_config.public_addr,
+                scheduler_id: scheduler_config.scheduler_id,
+                shutdown_timeout: scheduler_config.shutdown_timeout,
                 toolchains: scheduler_config.toolchains.into(),
             }
         }
@@ -1685,9 +1905,9 @@ pub mod scheduler {
 #[cfg(feature = "dist-server")]
 pub mod server {
     use super::{
-        CacheConfigs, CacheModeConfig, DiskCacheConfig, MessageBroker, MetricsConfigs,
-        PrometheusMetricsConfig, StorageConfig, config_from_env, default_disk_cache_dir,
-        default_disk_cache_size, number_from_env_var, try_read_config_file,
+        CacheConfigs, CacheModeConfig, CacheType, DiskCacheConfig, MessageBroker, MetricsConfigs,
+        PrometheusMetricsConfig, config_from_env, default_disk_cache_dir, default_disk_cache_size,
+        number_from_env_var, try_read_config_file,
     };
     use serde::{Deserialize, Serialize};
     use std::env;
@@ -1724,10 +1944,11 @@ pub mod server {
             .collect()
     }
 
-    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
     #[serde(tag = "type")]
     #[serde(deny_unknown_fields)]
     pub enum BuilderType {
+        #[default]
         #[serde(rename = "docker")]
         Docker,
         #[serde(rename = "overlay")]
@@ -1748,21 +1969,29 @@ pub mod server {
         },
     }
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
     #[serde(default)]
     #[serde(deny_unknown_fields)]
     pub struct FileConfig {
         pub builder: BuilderType,
         pub cache_dir: PathBuf,
-        pub heartbeat_interval_ms: Option<u64>,
+        #[serde(default = "Config::default_heartbeat_interval_ms")]
+        pub heartbeat_interval_ms: u64,
+        #[serde(default = "Config::default_jobs_storage")]
         pub jobs: CacheConfigs,
-        pub max_per_core_load: Option<f64>,
-        pub max_per_core_prefetch: Option<f64>,
+        #[serde(default = "Config::default_max_per_core_load")]
+        pub max_per_core_load: f64,
+        #[serde(default = "Config::default_max_per_core_prefetch")]
+        pub max_per_core_prefetch: f64,
         pub message_broker: Option<MessageBroker>,
         pub metrics: MetricsConfigs,
-        pub server_id: Option<String>,
-        pub shutdown_timeout: Option<u64>,
-        pub toolchain_cache_size: Option<u64>,
+        #[serde(default = "Config::default_server_id")]
+        pub server_id: String,
+        #[serde(default = "Config::default_shutdown_timeout")]
+        pub shutdown_timeout: u64,
+        #[serde(default = "Config::default_toolchain_cache_size")]
+        pub toolchain_cache_size: u64,
+        #[serde(default = "Config::default_toolchains_storage")]
         pub toolchains: CacheConfigs,
     }
 
@@ -1771,32 +2000,16 @@ pub mod server {
             Self {
                 builder: BuilderType::Docker,
                 cache_dir: Default::default(),
-                heartbeat_interval_ms: None,
-                jobs: CacheConfigs {
-                    disk: Some(DiskCacheConfig {
-                        dir: default_disk_cache_dir().join("jobs"),
-                        rw_mode: CacheModeConfig::ReadWrite,
-                        size: default_disk_cache_size(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                max_per_core_load: None,
-                max_per_core_prefetch: None,
+                heartbeat_interval_ms: Config::default_heartbeat_interval_ms(),
+                jobs: Config::default_jobs_storage(),
+                max_per_core_load: Config::default_max_per_core_load(),
+                max_per_core_prefetch: Config::default_max_per_core_prefetch(),
                 message_broker: None,
                 metrics: Default::default(),
-                server_id: None,
-                shutdown_timeout: Some(10),
-                toolchain_cache_size: None,
-                toolchains: CacheConfigs {
-                    disk: Some(DiskCacheConfig {
-                        dir: default_disk_cache_dir().join("toolchains"),
-                        rw_mode: CacheModeConfig::ReadWrite,
-                        size: default_disk_cache_size(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
+                server_id: Config::default_server_id(),
+                shutdown_timeout: Config::default_shutdown_timeout(),
+                toolchain_cache_size: Config::default_toolchain_cache_size(),
+                toolchains: Config::default_toolchains_storage(),
             }
         }
     }
@@ -1806,7 +2019,7 @@ pub mod server {
         pub builder: BuilderType,
         pub cache_dir: PathBuf,
         pub heartbeat_interval_ms: u64,
-        pub jobs: StorageConfig,
+        pub jobs: Vec<CacheType>,
         pub max_per_core_load: f64,
         pub max_per_core_prefetch: f64,
         pub message_broker: Option<MessageBroker>,
@@ -1814,10 +2027,59 @@ pub mod server {
         pub server_id: String,
         pub shutdown_timeout: u64,
         pub toolchain_cache_size: u64,
-        pub toolchains: StorageConfig,
+        pub toolchains: Vec<CacheType>,
+    }
+
+    impl Default for Config {
+        fn default() -> Self {
+            FileConfig::default().into()
+        }
     }
 
     impl Config {
+        pub fn default_jobs_storage() -> CacheConfigs {
+            CacheConfigs {
+                disk: Some(DiskCacheConfig {
+                    dir: default_disk_cache_dir().join("jobs"),
+                    rw_mode: CacheModeConfig::ReadWrite,
+                    size: default_disk_cache_size(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        }
+        pub fn default_toolchains_storage() -> CacheConfigs {
+            CacheConfigs {
+                disk: Some(DiskCacheConfig {
+                    dir: default_disk_cache_dir().join("toolchains"),
+                    rw_mode: CacheModeConfig::ReadWrite,
+                    size: default_disk_cache_size(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        }
+        // Default to 5s
+        fn default_heartbeat_interval_ms() -> u64 {
+            5000
+        }
+        // Default to 1
+        fn default_max_per_core_load() -> f64 {
+            1.0
+        }
+        // Default to 1
+        fn default_max_per_core_prefetch() -> f64 {
+            1.0
+        }
+        fn default_server_id() -> String {
+            uuid::Uuid::new_v4().as_simple().to_string()
+        }
+        fn default_shutdown_timeout() -> u64 {
+            10
+        }
+        fn default_toolchain_cache_size() -> u64 {
+            default_toolchain_cache_size()
+        }
         pub fn load(conf_path: Option<PathBuf>) -> Result<Self> {
             let FileConfig {
                 message_broker,
@@ -1905,55 +2167,44 @@ pub mod server {
                 builder => builder,
             };
 
-            let mut jobs_storage = CacheConfigs::default();
-            jobs_storage.merge(jobs);
-            jobs_storage.merge(config_from_env("SCCACHE_DIST_JOBS_")?.cache);
+            let jobs = CacheConfigs::default()
+                .merge(jobs)
+                .merge(config_from_env("SCCACHE_DIST_JOBS_")?.cache);
 
-            let mut toolchains_storage = CacheConfigs::default();
-            toolchains_storage.merge(toolchains);
-            toolchains_storage.merge(config_from_env("SCCACHE_DIST_TOOLCHAINS_")?.cache);
+            let toolchains = CacheConfigs::default()
+                .merge(toolchains)
+                .merge(config_from_env("SCCACHE_DIST_TOOLCHAINS_")?.cache);
 
             let heartbeat_interval_ms =
                 number_from_env_var("SCCACHE_DIST_SERVER_HEARTBEAT_INTERVAL")
                     .transpose()?
-                    .or(heartbeat_interval_ms)
-                    // Default to 5s
-                    .unwrap_or(5000);
+                    .unwrap_or(heartbeat_interval_ms);
 
             let max_per_core_load = number_from_env_var("SCCACHE_DIST_MAX_PER_CORE_LOAD")
                 .transpose()?
-                .or(max_per_core_load)
-                // Default to 1.1
-                .unwrap_or(1.1f64);
+                .unwrap_or(max_per_core_load);
 
             let max_per_core_prefetch = number_from_env_var("SCCACHE_DIST_MAX_PER_CORE_PREFETCH")
                 .transpose()?
-                .or(max_per_core_prefetch)
-                // Default to 1
-                .unwrap_or(1f64);
+                .unwrap_or(max_per_core_prefetch);
 
             let message_broker = MessageBroker::from_env().or(message_broker);
 
-            let server_id = env::var("SCCACHE_DIST_SERVER_ID")
-                .ok()
-                .or(server_id)
-                .unwrap_or(uuid::Uuid::new_v4().as_simple().to_string());
+            let server_id = env::var("SCCACHE_DIST_SERVER_ID").ok().unwrap_or(server_id);
 
             let shutdown_timeout = number_from_env_var("SCCACHE_DIST_SHUTDOWN_TIMEOUT")
                 .transpose()?
-                .or(shutdown_timeout)
-                .unwrap_or(10);
+                .unwrap_or(shutdown_timeout);
 
             let toolchain_cache_size = number_from_env_var("SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE")
                 .transpose()?
-                .or(toolchain_cache_size)
-                .unwrap_or(default_toolchain_cache_size());
+                .unwrap_or(toolchain_cache_size);
 
             Ok(Self {
                 builder,
                 cache_dir,
                 heartbeat_interval_ms,
-                jobs: jobs_storage.into(),
+                jobs: jobs.into(),
                 max_per_core_load,
                 max_per_core_prefetch,
                 message_broker,
@@ -1961,7 +2212,7 @@ pub mod server {
                 server_id,
                 shutdown_timeout,
                 toolchain_cache_size,
-                toolchains: toolchains_storage.into(),
+                toolchains: toolchains.into(),
             })
         }
 
@@ -1973,17 +2224,36 @@ pub mod server {
     impl From<Config> for FileConfig {
         fn from(server_config: Config) -> Self {
             Self {
-                builder: server_config.builder.clone(),
-                cache_dir: server_config.cache_dir.clone(),
-                heartbeat_interval_ms: Some(server_config.heartbeat_interval_ms),
+                builder: server_config.builder,
+                cache_dir: server_config.cache_dir,
+                heartbeat_interval_ms: server_config.heartbeat_interval_ms,
                 jobs: server_config.jobs.into(),
-                max_per_core_load: Some(server_config.max_per_core_load),
-                max_per_core_prefetch: Some(server_config.max_per_core_prefetch),
+                max_per_core_load: server_config.max_per_core_load,
+                max_per_core_prefetch: server_config.max_per_core_prefetch,
                 message_broker: server_config.message_broker,
                 metrics: server_config.metrics,
-                server_id: Some(server_config.server_id),
-                shutdown_timeout: Some(server_config.shutdown_timeout),
-                toolchain_cache_size: Some(server_config.toolchain_cache_size),
+                server_id: server_config.server_id,
+                shutdown_timeout: server_config.shutdown_timeout,
+                toolchain_cache_size: server_config.toolchain_cache_size,
+                toolchains: server_config.toolchains.into(),
+            }
+        }
+    }
+
+    impl From<FileConfig> for Config {
+        fn from(server_config: FileConfig) -> Self {
+            Self {
+                builder: server_config.builder,
+                cache_dir: server_config.cache_dir,
+                heartbeat_interval_ms: server_config.heartbeat_interval_ms,
+                jobs: server_config.jobs.into(),
+                max_per_core_load: server_config.max_per_core_load,
+                max_per_core_prefetch: server_config.max_per_core_prefetch,
+                message_broker: server_config.message_broker,
+                metrics: server_config.metrics,
+                server_id: server_config.server_id,
+                shutdown_timeout: server_config.shutdown_timeout,
+                toolchain_cache_size: server_config.toolchain_cache_size,
                 toolchains: server_config.toolchains.into(),
             }
         }
@@ -2000,6 +2270,38 @@ fn test_parse_size() {
     assert_eq!(Some(10 * 1024 * 1024), parse_size("10M"));
     assert_eq!(Some(TEN_GIGS), parse_size("10G"));
     assert_eq!(Some(1024 * TEN_GIGS), parse_size("10T"));
+}
+
+#[test]
+fn test_cache_ordering() {
+    let disk = CacheType::Disk(DiskCacheConfig::default());
+    let s3 = CacheType::S3(S3CacheConfig::default());
+    let redis = CacheType::Redis(RedisCacheConfig::default());
+    let memcached = CacheType::Memcached(MemcachedCacheConfig::default());
+    let gcs = CacheType::GCS(GCSCacheConfig::default());
+    let gha = CacheType::GHA(GHACacheConfig::default());
+    let azure = CacheType::Azure(AzureCacheConfig::default());
+    let webdav = CacheType::Webdav(WebdavCacheConfig::default());
+    let oss = CacheType::OSS(OSSCacheConfig::default());
+
+    assert_eq!(disk.order(), DiskCacheConfig::default_order());
+    assert_eq!(s3.order(), S3CacheConfig::default_order());
+    assert_eq!(redis.order(), RedisCacheConfig::default_order());
+    assert_eq!(memcached.order(), MemcachedCacheConfig::default_order());
+    assert_eq!(gcs.order(), GCSCacheConfig::default_order());
+    assert_eq!(gha.order(), GHACacheConfig::default_order());
+    assert_eq!(azure.order(), AzureCacheConfig::default_order());
+    assert_eq!(webdav.order(), WebdavCacheConfig::default_order());
+    assert_eq!(oss.order(), OSSCacheConfig::default_order());
+
+    let mut caches = vec![oss, redis, gha, memcached, gcs, s3, webdav, disk, azure];
+    caches.sort();
+
+    while let Some(cache) = caches.pop() {
+        for other in caches.iter() {
+            assert_eq!(cache.cmp(other), std::cmp::Ordering::Greater);
+        }
+    }
 }
 
 #[test]
@@ -2059,21 +2361,35 @@ fn config_overrides() {
     assert_eq!(
         Config::from_env_and_file_configs(env_conf, file_conf),
         Config {
-            cache: Some(CacheType::Redis(RedisCacheConfig {
-                endpoint: Some("myotherredisurl".to_owned()),
-                ttl: 24 * 3600,
-                key_prefix: "/redis/prefix".into(),
-                db: 10,
-                username: Some("user".to_owned()),
-                password: Some("secret".to_owned()),
-                ..Default::default()
-            }),),
-            fallback_cache: DiskCacheConfig {
-                dir: "/env-cache".into(),
-                size: 5,
-                rw_mode: CacheModeConfig::ReadWrite,
-                ..Default::default()
-            },
+            caches: vec![
+                CacheType::Disk(DiskCacheConfig {
+                    dir: "/env-cache".into(),
+                    size: 5,
+                    rw_mode: CacheModeConfig::ReadWrite,
+                    ..Default::default()
+                }),
+                CacheType::Redis(RedisCacheConfig {
+                    endpoint: Some("myotherredisurl".to_owned()),
+                    ttl: 24 * 3600,
+                    key_prefix: "/redis/prefix".into(),
+                    db: 10,
+                    username: Some("user".to_owned()),
+                    password: Some("secret".to_owned()),
+                    ..Default::default()
+                }),
+                CacheType::Memcached(MemcachedCacheConfig {
+                    url: "memurl".to_owned(),
+                    expiration: 24 * 3600,
+                    key_prefix: String::new(),
+                    ..Default::default()
+                }),
+                CacheType::Azure(AzureCacheConfig {
+                    connection_string: String::new(),
+                    container: String::new(),
+                    key_prefix: String::new(),
+                    ..Default::default()
+                }),
+            ],
             ..Default::default()
         }
     );
@@ -2222,7 +2538,7 @@ fn test_gcs_service_account() {
 }
 
 #[test]
-fn full_toml_parse() {
+fn client_toml_parse() {
     const CONFIG_STR: &str = r#"
 server_startup_timeout_ms = 10000
 
@@ -2239,9 +2555,10 @@ cache_dir = "/home/user/.cache/sccache-dist-client"
 type = "token"
 token = "secrettoken"
 
-
-#[cache.azure]
-# does not work as it appears
+[cache.azure]
+connection_string = "connection_string"
+container = "container"
+key_prefix = "key_prefix"
 
 [cache.disk]
 dir = "/tmp/.cache/sccache"
@@ -2307,7 +2624,13 @@ no_credentials = true
         file_config,
         FileConfig {
             cache: CacheConfigs {
-                azure: None, // TODO not sure how to represent a unit struct in TOML Some(AzureCacheConfig),
+                // azure: None, // TODO not sure how to represent a unit struct in TOML Some(AzureCacheConfig),
+                azure: Some(AzureCacheConfig {
+                    connection_string: "connection_string".into(),
+                    container: "container".into(),
+                    key_prefix: "key_prefix".into(),
+                    ..Default::default()
+                }),
                 disk: Some(DiskCacheConfig {
                     dir: PathBuf::from("/tmp/.cache/sccache"),
                     size: 7 * 1024 * 1024 * 1024,
@@ -2399,38 +2722,131 @@ no_credentials = true
 
 #[test]
 #[cfg(feature = "dist-server")]
+fn scheduler_toml_parse() {
+    use std::net::SocketAddr;
+
+    const CONFIG_STR: &str = r#"
+# The socket address the scheduler will listen on. It's strongly recommended
+# to listen on localhost and put a HTTPS server in front of it.
+public_addr = "127.0.0.1:10500"
+# The address of the AMQP broker
+message_broker.amqp = "amqp://127.0.0.1:5672//"
+scheduler_id = "scheduler-1"
+# Don't allow jobs to run for longer than 20 minutes
+job_time_limit = 1200
+
+[metrics.prometheus]
+type = "push"
+endpoint = "http://127.0.0.1:9091/metrics/job/scheduler"
+interval = 1000
+username = "sccache"
+password = "sccache"
+
+[jobs.redis]
+endpoint = "redis://127.0.0.1:6379"
+expiration = 3600
+key_prefix = "/sccache-dist-jobs"
+
+[toolchains.s3]
+bucket = "sccache"
+region = "auto"
+endpoint = "192.168.1.69:9000"
+use_ssl = false
+no_credentials = false
+key_prefix = "sccache-dist-toolchains"
+"#;
+
+    let scheduler_config: scheduler::FileConfig =
+        toml::from_str(CONFIG_STR).expect("Is valid toml.");
+    assert_eq!(
+        scheduler_config,
+        scheduler::FileConfig {
+            public_addr: SocketAddr::from_str("127.0.0.1:10500").unwrap(),
+            job_time_limit: 1200,
+            message_broker: Some(MessageBroker::AMQP("amqp://127.0.0.1:5672//".into())),
+            metrics: MetricsConfigs {
+                prometheus: Some(PrometheusMetricsConfig::PushGateway {
+                    endpoint: "http://127.0.0.1:9091/metrics/job/scheduler".into(),
+                    interval: Some(1000),
+                    username: Some("sccache".into()),
+                    password: Some("sccache".into()),
+                    http_method: None,
+                }),
+                ..Default::default()
+            },
+            jobs: CacheConfigs {
+                redis: Some(RedisCacheConfig {
+                    endpoint: Some("redis://127.0.0.1:6379".into()),
+                    ttl: 3600,
+                    key_prefix: "/sccache-dist-jobs".into(),
+                    ..RedisCacheConfig::default()
+                }),
+                ..CacheConfigs::default()
+            },
+            toolchains: CacheConfigs {
+                s3: Some(S3CacheConfig {
+                    bucket: "sccache".into(),
+                    region: Some("auto".into()),
+                    endpoint: Some("192.168.1.69:9000".into()),
+                    use_ssl: Some(false),
+                    no_credentials: false,
+                    key_prefix: "sccache-dist-toolchains".into(),
+                    ..S3CacheConfig::default()
+                }),
+                ..CacheConfigs::default()
+            },
+            scheduler_id: "scheduler-1".into(),
+            ..Default::default()
+        }
+    )
+}
+
+#[test]
+#[cfg(feature = "dist-server")]
 fn server_toml_parse() {
     use server::BuilderType;
     const CONFIG_STR: &str = r#"
-    # This is where client toolchains will be stored.
-    cache_dir = "/tmp/toolchains"
-    # Dedicate (nproc * 1.25) CPUs to building
-    max_per_core_load = 1.25
-    # Prefetch (nproc * 1) jobs
-    max_per_core_prefetch = 1
-    server_id = "server-1"
-    # The maximum size of the toolchain cache, in bytes.
-    # If unspecified the default is 10GB.
-    toolchain_cache_size = 10737418240
+# This is where client toolchains will be stored.
+cache_dir = "/tmp/toolchains"
+# Dedicate (nproc * 1.25) CPUs to building
+max_per_core_load = 1.25
+# Prefetch (nproc * 1) jobs
+max_per_core_prefetch = 1
+server_id = "server-1"
+# The maximum size of the toolchain cache, in bytes.
+# If unspecified the default is 10GB.
+toolchain_cache_size = 10737418240
 
-    [builder]
-    type = "overlay"
-    # The directory under which a sandboxed filesystem will be created for builds.
-    build_dir = "/tmp/build"
-    # The path to the bubblewrap version 0.3.0+ `bwrap` binary.
-    bwrap_path = "/usr/bin/bwrap"
+[builder]
+type = "overlay"
+# The directory under which a sandboxed filesystem will be created for builds.
+build_dir = "/tmp/build"
+# The path to the bubblewrap version 0.3.0+ `bwrap` binary.
+bwrap_path = "/usr/bin/bwrap"
 
-    [message_broker]
-    amqp = "amqp://127.0.0.1:5672//"
+[message_broker]
+amqp = "amqp://127.0.0.1:5672//"
 
-    [metrics.prometheus]
-    type = "push"
-    endpoint = "http://127.0.0.1:9091/metrics/job/server"
-    interval = 1000
-    username = "sccache"
-    password = "sccache"
+[metrics.prometheus]
+type = "push"
+endpoint = "http://127.0.0.1:9091/metrics/job/server"
+interval = 1000
+username = "sccache"
+password = "sccache"
 
-    "#;
+[jobs.redis]
+endpoint = "redis://127.0.0.1:6379"
+expiration = 3600
+key_prefix = "/sccache-dist-jobs"
+
+[toolchains.s3]
+bucket = "sccache"
+region = "auto"
+endpoint = "192.168.1.69:9000"
+use_ssl = false
+no_credentials = false
+key_prefix = "sccache-dist-toolchains"
+"#;
 
     let server_config: server::FileConfig = toml::from_str(CONFIG_STR).expect("Is valid toml.");
     assert_eq!(
@@ -2441,8 +2857,8 @@ fn server_toml_parse() {
                 bwrap_path: PathBuf::from("/usr/bin/bwrap"),
             },
             cache_dir: PathBuf::from("/tmp/toolchains"),
-            max_per_core_load: Some(1.25),
-            max_per_core_prefetch: Some(1.0),
+            max_per_core_load: 1.25,
+            max_per_core_prefetch: 1.0,
             message_broker: Some(MessageBroker::AMQP("amqp://127.0.0.1:5672//".into())),
             metrics: MetricsConfigs {
                 prometheus: Some(PrometheusMetricsConfig::PushGateway {
@@ -2454,8 +2870,29 @@ fn server_toml_parse() {
                 }),
                 ..Default::default()
             },
-            server_id: Some("server-1".into()),
-            toolchain_cache_size: Some(10737418240),
+            jobs: CacheConfigs {
+                redis: Some(RedisCacheConfig {
+                    endpoint: Some("redis://127.0.0.1:6379".into()),
+                    ttl: 3600,
+                    key_prefix: "/sccache-dist-jobs".into(),
+                    ..RedisCacheConfig::default()
+                }),
+                ..CacheConfigs::default()
+            },
+            toolchains: CacheConfigs {
+                s3: Some(S3CacheConfig {
+                    bucket: "sccache".into(),
+                    region: Some("auto".into()),
+                    endpoint: Some("192.168.1.69:9000".into()),
+                    use_ssl: Some(false),
+                    no_credentials: false,
+                    key_prefix: "sccache-dist-toolchains".into(),
+                    ..S3CacheConfig::default()
+                }),
+                ..CacheConfigs::default()
+            },
+            server_id: "server-1".into(),
+            toolchain_cache_size: 10737418240,
             ..Default::default()
         }
     )

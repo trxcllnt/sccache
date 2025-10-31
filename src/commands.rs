@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cache::storage_from_config;
+use crate::cache::StorageKind;
 use crate::client::{ServerConnection, connect_to_server, connect_with_retry};
 use crate::cmdline::{Command, StatsFormat};
 use crate::compiler::ColorMode;
@@ -642,14 +642,10 @@ where
 
 /// Run `cmd` and return the process exit status.
 pub fn run_command(cmd: Command) -> Result<i32> {
-    // Config isn't required for all commands, but if it's broken then we should flag
-    // it early and loudly.
-    let config = &Config::load()?;
-    let startup_timeout = config.server_startup_timeout;
-
     match cmd {
         Command::ShowStats(fmt, advanced) => {
             trace!("Command::ShowStats({:?})", fmt);
+            let config = Config::load()?;
             let stats = match connect_to_server(&get_addr()) {
                 Ok(srv) => request_stats(srv).context("failed to get stats from server")?,
                 // If there is no server, spawning a new server would start with zero stats
@@ -657,11 +653,13 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 Err(_) => {
                     let runtime = Runtime::new()?;
                     runtime.block_on(async {
-                        let (storage, preprocessor_storage) =
-                            storage_from_config(&config.cache, &config.fallback_cache).await?;
+                        let (compilations_storage, preprocessor_storage) = tokio::try_join!(
+                            StorageKind::Compilations.create(&config.caches),
+                            StorageKind::Preprocessor.create(&config.caches),
+                        )?;
                         ServerInfo::new(
                             ServerStats::default(),
-                            Some(storage).as_deref(),
+                            Some(compilations_storage).as_deref(),
                             Some(preprocessor_storage).as_deref(),
                         )
                         .await
@@ -707,6 +705,8 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 sccache = env!("CARGO_PKG_NAME"),
                 version = env!("CARGO_PKG_VERSION")
             );
+            // Load config after redirecting stderr so those are captured in the file
+            let config = Config::load()?;
             server::start_server(config, &get_addr())?;
         }
         Command::StartServer => {
@@ -716,8 +716,9 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 sccache = env!("CARGO_PKG_NAME"),
                 version = env!("CARGO_PKG_VERSION")
             );
-            let startup =
-                run_server_process(startup_timeout).context("failed to start server process")?;
+            let config = Config::load()?;
+            let startup = run_server_process(config.server_startup_timeout)
+                .context("failed to start server process")?;
             match startup {
                 ServerStartup::Ok { addr } => {
                     println!("sccache: Listening on address {addr}");
@@ -736,7 +737,8 @@ pub fn run_command(cmd: Command) -> Result<i32> {
         }
         Command::ZeroStats => {
             trace!("Command::ZeroStats");
-            let conn = connect_or_start_server(&get_addr(), startup_timeout)?;
+            let config = Config::load()?;
+            let conn = connect_or_start_server(&get_addr(), config.server_startup_timeout)?;
             request_zero_stats(conn).context("couldn't zero stats on server")?;
             eprintln!("Statistics zeroed.");
         }
@@ -745,6 +747,8 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             use crate::config;
             use crate::dist;
             use url::Url;
+
+            let config = Config::load()?;
 
             match &config.dist.auth {
                 config::DistAuth::Token { .. } => {
@@ -798,7 +802,8 @@ pub fn run_command(cmd: Command) -> Result<i32> {
         ),
         Command::DistStatus => {
             trace!("Command::DistStatus");
-            let srv = connect_or_start_server(&get_addr(), startup_timeout)?;
+            let config = Config::load()?;
+            let srv = connect_or_start_server(&get_addr(), config.server_startup_timeout)?;
             let status =
                 request_dist_status(srv).context("failed to get dist-status from server")?;
             serde_json::to_writer(&mut io::stdout(), &status)?;
@@ -838,7 +843,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             env_vars,
         } => {
             trace!("Command::Compile {{ {:?}, {:?}, {:?} }}", exe, cmdline, cwd);
-
+            let config = Config::load()?;
             let incr_env_strs = ["CARGO_BUILD_INCREMENTAL", "CARGO_INCREMENTAL"];
             incr_env_strs
                 .iter()
@@ -853,7 +858,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 });
 
             let jobserver = Client::new();
-            let conn = connect_or_start_server(&get_addr(), startup_timeout)?;
+            let conn = connect_or_start_server(&get_addr(), config.server_startup_timeout)?;
             let mut runtime = Runtime::new()?;
             let res = do_compile(
                 ProcessCommandCreator::new(&jobserver),

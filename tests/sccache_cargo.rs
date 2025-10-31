@@ -382,7 +382,7 @@ fn test_rust_cargo_cmd_readonly_preemtive_block() -> Result<()> {
 
     let log_contents = fs::read_to_string(sccache_log)?;
     assert!(
-        predicates::str::contains("server has setup with cache=ReadOnly")
+        predicates::str::contains("server configured with object cache: ReadOnly")
             .eval(log_contents.as_str())
     );
     assert!(

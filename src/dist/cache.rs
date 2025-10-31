@@ -496,7 +496,7 @@ mod server {
     use std::sync::Arc;
 
     use crate::cache::disk::DiskCache;
-    use crate::cache::{Storage, cache};
+    use crate::cache::{Cache, Storage, cache};
     use crate::dist::metrics::{Metrics, TimeRecorder};
     use crate::dist::{Toolchain, ToolchainService};
     use crate::errors::*;
@@ -671,9 +671,12 @@ mod server {
             let deflated_key = format!("{}.tgz", tc.archive_id);
             if !self.cache.has(&deflated_key).await {
                 let deflated_size = self.load_deflated_toolchain_size(tc).await?;
-                let reader = self.store.get_async_reader(&tc.archive_id).await?;
+                let mut reader = match self.store.get_async_reader(&tc.archive_id).await? {
+                    Cache::Hit(reader) => reader,
+                    Cache::Miss => return Err(anyhow!("Missing toolchain")),
+                };
                 self.cache
-                    .put_async_reader(&deflated_key, deflated_size, std::pin::pin!(reader))
+                    .put_async_reader(&deflated_key, deflated_size, &mut reader)
                     .await?;
             }
             self.cache.entry(&deflated_key).await.map(|(path, _)| path)

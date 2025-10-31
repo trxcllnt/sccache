@@ -9,7 +9,7 @@ mod cmdline;
 use cmdline::Command;
 
 use sccache::{
-    cache::cache::storage_from_config,
+    cache::cache::StorageKind,
     config::{scheduler as scheduler_config, server as server_config, server::BuilderType},
     dist::{
         self, BuilderIncoming, ServerToolchains, env_info,
@@ -109,25 +109,26 @@ fn run(command: Command) -> Result<()> {
                         ],
                     )?;
 
-                    let (jobs_storage, _) = storage_from_config(&jobs.storage, &jobs.fallback)
+                    let jobs = StorageKind::Compilations
+                        .create(&jobs)
                         .await
                         .context("Failed to initialize jobs storage")?;
 
                     // Verify read/write access to jobs storage
-                    match jobs_storage.check().await {
+                    match jobs.check().await {
                         Ok(sccache::cache::CacheMode::ReadWrite) => {}
                         _ => {
                             bail!("Scheduler jobs storage must be read/write")
                         }
                     }
 
-                    let (toolchains_storage, _) =
-                        storage_from_config(&toolchains.storage, &toolchains.fallback)
-                            .await
-                            .context("Failed to initialize toolchain storage")?;
+                    let toolchains = StorageKind::Compilations
+                        .create(&toolchains)
+                        .await
+                        .context("Failed to initialize toolchain storage")?;
 
                     // Verify read/write access to toolchain storage
-                    match toolchains_storage.check().await {
+                    match toolchains.check().await {
                         Ok(sccache::cache::CacheMode::ReadWrite) => {}
                         _ => {
                             bail!("Scheduler toolchain storage must be read/write")
@@ -138,7 +139,7 @@ fn run(command: Command) -> Result<()> {
                     let client_auth_check = new_client_auth_check(client_auth).await?;
 
                     let scheduler = scheduler::Scheduler::new(
-                        jobs_storage,
+                        jobs,
                         SchedulerMetrics::new(metrics.clone()),
                         &scheduler_id,
                         tasks::Tasks::scheduler(
@@ -148,7 +149,7 @@ fn run(command: Command) -> Result<()> {
                         )
                         .await?
                         .set_job_time_limit(job_time_limit),
-                        toolchains_storage,
+                        toolchains,
                     )?;
 
                     let (handle, server) = dist::http::Scheduler::new(
@@ -185,25 +186,26 @@ fn run(command: Command) -> Result<()> {
                         ],
                     )?;
 
-                    let (jobs_storage, _) = storage_from_config(&jobs.storage, &jobs.fallback)
+                    let jobs = StorageKind::Compilations
+                        .create(&jobs)
                         .await
                         .context("Failed to initialize jobs storage")?;
 
                     // Verify read/write access to jobs storage
-                    match jobs_storage.check().await {
+                    match jobs.check().await {
                         Ok(sccache::cache::CacheMode::ReadWrite) => {}
                         _ => {
                             bail!("Server jobs storage must be read/write")
                         }
                     }
 
-                    let (toolchains_storage, _) =
-                        storage_from_config(&toolchains.storage, &toolchains.fallback)
-                            .await
-                            .context("Failed to initialize toolchain storage")?;
+                    let toolchains = StorageKind::Compilations
+                        .create(&toolchains)
+                        .await
+                        .context("Failed to initialize toolchain storage")?;
 
                     // Verify toolchain storage
-                    toolchains_storage
+                    toolchains
                         .check()
                         .await
                         .context("Failed to initialize toolchain storage")?;
@@ -220,7 +222,7 @@ fn run(command: Command) -> Result<()> {
 
                     let server = server::Server::new(
                         init_builder(builder, job_queue.clone()).await?,
-                        jobs_storage,
+                        jobs,
                         server::ServerState {
                             id: server_id.clone(),
                             job_queue,
@@ -239,7 +241,7 @@ fn run(command: Command) -> Result<()> {
                         ServerToolchains::new(
                             cache_dir.join("tc"),
                             toolchain_cache_size,
-                            toolchains_storage,
+                            toolchains,
                             metrics.clone(),
                         ),
                     )?;

@@ -12,12 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cache::{Cache, CacheWrite, PreprocessorCacheModeConfig, Storage};
-use crate::compiler::PreprocessorCacheEntry;
+use crate::cache::{AsyncReadSeek, Cache, PreprocessorCacheModeConfig, ReadSeek, Storage};
 use crate::errors::*;
 use async_trait::async_trait;
 use futures::channel::mpsc;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -25,8 +23,8 @@ use tokio::time::sleep;
 
 /// A mock `Storage` implementation.
 pub struct MockStorage {
-    rx: Arc<Mutex<mpsc::UnboundedReceiver<Result<Cache>>>>,
-    tx: mpsc::UnboundedSender<Result<Cache>>,
+    rx: Arc<Mutex<mpsc::UnboundedReceiver<Result<Cache<Box<dyn ReadSeek>>>>>>,
+    tx: mpsc::UnboundedSender<Result<Cache<Box<dyn ReadSeek>>>>,
     delay: Option<Duration>,
     preprocessor_cache_mode: bool,
 }
@@ -44,37 +42,32 @@ impl MockStorage {
     }
 
     /// Queue up `res` to be returned as the next result from `Storage::get`.
-    pub(crate) fn next_get(&self, res: Result<Cache>) {
+    pub(crate) fn next_get(&self, res: Result<Cache<Box<dyn ReadSeek>>>) {
         self.tx.unbounded_send(res).unwrap();
     }
 }
 
 #[async_trait]
 impl Storage for MockStorage {
-    async fn get(&self, _key: &str) -> Result<Cache> {
+    async fn get(&self, _key: &str) -> Result<Cache<Box<dyn ReadSeek>>> {
         if let Some(delay) = self.delay {
             sleep(delay).await;
         }
-        let next = self.rx.lock().await.try_next().unwrap();
+        let next = match self.rx.lock().await.try_next() {
+            Ok(next) => next,
+            Err(_) => return Ok(Cache::Miss),
+        };
 
         next.expect("MockStorage get called but no get results available")
     }
-    async fn get_async_reader(
-        &self,
-        key: &str,
-    ) -> Result<Box<dyn futures::AsyncRead + Send + Unpin>> {
+    async fn get_async_reader(&self, key: &str) -> Result<Cache<Box<dyn AsyncReadSeek + Unpin>>> {
         if let Some(delay) = self.delay {
             sleep(delay).await;
         }
-        let next = self.rx.lock().await.try_next().unwrap();
-        let next = next.expect("MockStorage get called but no get results available")?;
-        match next {
-            Cache::Hit(file) => {
-                let reader = file.into_inner();
-                let reader = futures::io::AllowStdIo::new(reader);
-                Ok(Box::new(reader) as Box<dyn futures::AsyncRead + Send + Unpin>)
-            }
-            _ => Err(anyhow!("No cache entry for key `{key}`")),
+        match self.get(key).await? {
+            // Err(err) => Err(anyhow!("No cache entry for key `{key}`")),
+            Cache::Miss => Ok(Cache::Miss),
+            Cache::Hit(reader) => Ok(Cache::Hit(Box::new(futures::io::AllowStdIo::new(reader)))),
         }
     }
     async fn del(&self, _key: &str) -> Result<()> {
@@ -86,7 +79,7 @@ impl Storage for MockStorage {
     async fn has(&self, _key: &str) -> bool {
         false
     }
-    async fn put(&self, _key: &str, _entry: CacheWrite) -> Result<Duration> {
+    async fn put(&self, _key: &str, _entry: &mut dyn ReadSeek) -> Result<Duration> {
         Ok(if let Some(delay) = self.delay {
             sleep(delay).await;
             delay
@@ -98,7 +91,7 @@ impl Storage for MockStorage {
         &self,
         _key: &str,
         _size: u64,
-        _source: Pin<&mut (dyn futures::AsyncRead + Send)>,
+        _source: &mut (dyn AsyncReadSeek + Unpin),
     ) -> Result<()> {
         if let Some(delay) = self.delay {
             sleep(delay).await;
@@ -110,8 +103,7 @@ impl Storage for MockStorage {
             sleep(delay).await;
         }
         let next = self.rx.lock().await.try_next().unwrap();
-        if let Some(Ok(Cache::Hit(next))) = next {
-            let mut next = next.into_inner();
+        if let Some(Ok(Cache::Hit(mut next))) = next {
             let mut data = vec![];
             return Ok(next.read_to_end(&mut data)? as u64);
         }
@@ -131,17 +123,5 @@ impl Storage for MockStorage {
             use_preprocessor_cache_mode: self.preprocessor_cache_mode,
             ..Default::default()
         }
-    }
-
-    async fn get_preprocessor_cache_entry(&self, _key: &str) -> Option<PreprocessorCacheEntry> {
-        None
-    }
-
-    async fn put_preprocessor_cache_entry(
-        &self,
-        _key: &str,
-        _preprocessor_cache_entry: PreprocessorCacheEntry,
-    ) -> Result<()> {
-        Ok(())
     }
 }
