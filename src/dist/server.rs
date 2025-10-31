@@ -480,7 +480,7 @@ impl RunJobFunc {
         inputs: Vec<u8>,
         command: CompileCommand,
         outputs: Vec<String>,
-    ) -> Result<BuildResult> {
+    ) -> std::result::Result<BuildResult, BuildError> {
         // Record build time
         let _timer = self.state.metrics.run_build_timer();
         self.builder
@@ -574,7 +574,11 @@ impl RunJobFunc {
             })
             .map_err(|e| {
                 if self.state.is_alive() {
-                    e.into()
+                    if let BuildError::UnpackInputs(_) = e {
+                        RunJobError::MissingJobInputs
+                    } else {
+                        RunJobError::Retryable(e.into())
+                    }
                 } else {
                     RunJobError::server_terminated()
                 }

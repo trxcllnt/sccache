@@ -12,19 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use async_compression::futures::bufread::ZlibDecoder as ZlibDecoderAsync;
 use async_trait::async_trait;
 use bytes::Buf;
 use futures::lock::Mutex;
 use itertools::Itertools;
-use sccache::dist::{BuildResult, BuilderIncoming, CompileCommand, OutputData};
+use sccache::dist::{
+    BuildError, BuildResult as BuildOutput, BuilderIncoming, CompileCommand, OutputData,
+};
 use sccache::mock_command::ProcessOutput;
 use std::collections::{HashMap, hash_map};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
 use uuid::Uuid;
+
+pub type BuildResult = std::result::Result<BuildOutput, BuildError>;
 
 #[async_trait]
 trait AsyncCommandExt {
@@ -181,7 +185,7 @@ impl PotBuilder {
                         hash_map::Entry::Vacant(e) => {
                             tracing::info!(
                                 "[get_container({job_id})]: Creating pot image for {:?} (may block requests)",
-                                toolchain_dir.components().last().unwrap()
+                                toolchain_dir.components().next_back().unwrap()
                             );
                             let image = Self::make_image(
                                 job_id,
@@ -270,7 +274,7 @@ impl PotBuilder {
         pot_cmd: &PathBuf,
         pot_clone_args: &[String],
     ) -> Result<String> {
-        let toolchain_name = toolchain_dir.components().last().unwrap();
+        let toolchain_name = toolchain_dir.components().next_back().unwrap();
         let imagename = format!(
             "sccache-image-{}",
             toolchain_name.as_os_str().to_string_lossy()
@@ -374,20 +378,25 @@ impl PotBuilder {
         cid: &str,
         pot_fs_root: &Path,
         job_queue: &tokio::sync::Semaphore,
-    ) -> Result<BuildResult> {
+    ) -> BuildResult {
         tracing::trace!("[perform_build({job_id})]: Compile environment: {env_vars:?}");
         tracing::trace!("[perform_build({job_id})]: Compile command: {executable:?} {arguments:?}");
         tracing::trace!("[perform_build({job_id})]: Output paths: {output_paths:?}");
 
         if output_paths.is_empty() {
-            bail!("output_paths is empty");
+            return Err(BuildError::Unknown(anyhow!("Output paths is empty")));
         }
 
         // Do as much asyncio work as possible before acquiring a job slot
 
         {
             // Bail early if job_queue is closed while this job is running
-            drop(job_queue.acquire().await?);
+            drop(
+                job_queue
+                    .acquire()
+                    .await
+                    .map_err(|e| BuildError::Unknown(e.into()))?,
+            );
             tracing::trace!("[perform_build({job_id})]: copying in inputs");
             let jail_root = pot_fs_root.join("jails").join(cid).join("m");
             let reader = inputs.reader();
@@ -397,7 +406,8 @@ impl PotBuilder {
             async_tar::Archive::new(reader)
                 .unpack(&jail_root)
                 .await
-                .context("Failed to unpack inputs to tempdir")?;
+                .context("Failed to unpack inputs to tempdir")
+                .map_err(BuildError::UnpackInputs)?;
         }
 
         let cwd = Path::new(&cwd);
@@ -410,7 +420,12 @@ impl PotBuilder {
 
         {
             // Bail early if job_queue is closed while this job is running
-            drop(job_queue.acquire().await?);
+            drop(
+                job_queue
+                    .acquire()
+                    .await
+                    .map_err(|e| BuildError::Unknown(e.into()))?,
+            );
             tracing::trace!("[perform_build({job_id})]: creating output directories");
 
             let mut cmd = tokio::process::Command::new("jexec");
@@ -431,12 +446,16 @@ impl PotBuilder {
 
             cmd.check_run()
                 .await
-                .context("Failed to create directories required for compiling in container")?;
+                .context("Failed to create directories required for compiling in container")
+                .map_err(BuildError::Unknown)?;
         }
 
         let output: ProcessOutput = {
             // Guard compiling until we get a token from the job queue
-            let _job_slot = job_queue.acquire().await?;
+            let _job_slot = job_queue
+                .acquire()
+                .await
+                .map_err(|e| BuildError::Unknown(e.into()))?;
 
             tracing::trace!("[perform_build({job_id})]: creating compile command");
 
@@ -468,13 +487,18 @@ impl PotBuilder {
 
             cmd.output()
                 .await
-                .context("Failed to start executing compile")?
+                .map_err(BuildError::SpawnChildProcess)?
                 .into()
         };
 
         let outputs = {
             // Bail early if job_queue is closed while this job is running
-            drop(job_queue.acquire().await?);
+            drop(
+                job_queue
+                    .acquire()
+                    .await
+                    .map_err(|e| BuildError::Unknown(e.into()))?,
+            );
 
             let mut outputs = vec![];
 
@@ -491,28 +515,37 @@ impl PotBuilder {
             } else {
                 tracing::trace!("[perform_build({job_id})]: retrieving {output_paths:?}");
 
-                for (path, abspath) in output_paths.iter().zip(output_paths_absolute.iter()) {
+                for (path, abs_path) in output_paths
+                    .into_iter()
+                    .zip(output_paths_absolute.into_iter())
+                {
                     // TODO: this isn't great, but cp gives it out as a tar
                     let output = tokio::process::Command::new("jexec")
                         .args([cid, "cat"])
-                        .arg(abspath)
+                        .arg(&abs_path)
                         .output()
-                        .await
-                        .context("Failed to start command to retrieve output file")?;
+                        .await;
 
-                    if output.status.success() {
-                        match OutputData::try_from_reader(&*output.stdout) {
-                            Ok(output) => outputs.push((path.clone(), output)),
-                            Err(err) => {
-                                tracing::error!(
-                                    "[perform_build({job_id})]: Failed to read and compress output file host={abspath:?}, container={path:?}: {err}"
+                    match output {
+                        Ok(output) => {
+                            if output.status.success() {
+                                match OutputData::try_from_reader(&*output.stdout) {
+                                    Ok(data) => outputs.push((path, data)),
+                                    Err(err) => {
+                                        tracing::error!(
+                                            "[perform_build({job_id})]: Failed to read and compress output file host={abs_path:?}, container={path:?}: {err}"
+                                        )
+                                    }
+                                }
+                            } else {
+                                tracing::debug!(
+                                    "[perform_build({job_id})]: Missing output path {path:?} ({abs_path:?})"
                                 )
                             }
                         }
-                    } else {
-                        tracing::debug!(
-                            "[perform_build({job_id})]: Missing output path {path:?} ({abspath:?})"
-                        )
+                        Err(err) => {
+                            return Err(BuildError::ReadBuildResult(abs_path, err));
+                        }
                     }
                 }
             }
@@ -520,7 +553,7 @@ impl PotBuilder {
             outputs
         };
 
-        Ok(BuildResult { output, outputs })
+        BuildResult::Ok(BuildOutput { output, outputs })
     }
 }
 
@@ -534,16 +567,22 @@ impl BuilderIncoming for PotBuilder {
         inputs: Vec<u8>,
         command: CompileCommand,
         outputs: Vec<String>,
-    ) -> Result<BuildResult> {
+    ) -> BuildResult {
         // Bail early if job_queue is closed while this job is running
-        drop(self.job_queue.acquire().await?);
+        drop(
+            self.job_queue
+                .acquire()
+                .await
+                .map_err(|e| BuildError::Unknown(e.into()))?,
+        );
 
         tracing::debug!("[run_build({job_id})]: Finding container");
 
         let cid = self
             .get_container(job_id, toolchain_dir)
             .await
-            .context("Failed to get a container for build")?;
+            .context("Failed to get a container for build")
+            .map_err(BuildError::Unknown)?;
 
         self.cids
             .lock()
@@ -565,7 +604,7 @@ impl BuilderIncoming for PotBuilder {
 
         tracing::debug!("[run_build({job_id})]: Returning result");
 
-        res.context("Failed to perform build")
+        res
     }
 
     async fn finish_build(&self, job_id: &str) {

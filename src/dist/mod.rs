@@ -490,6 +490,71 @@ pub struct BuildResult {
     pub outputs: Vec<(String, OutputData)>,
 }
 
+pub enum BuildError {
+    PrepareOverlay(Error),
+    EnterNewNS(nix::errno::Errno),
+    MountNsRoot(nix::errno::Errno),
+    MakeOverlayDir(PathBuf, std::io::Error),
+    MountOverlayFS(Error),
+    UnpackInputs(Error),
+    MakeOutputDir(PathBuf, std::io::Error),
+    SpawnChildProcess(std::io::Error),
+    ReadChildOutput(std::io::Error),
+    WaitChildOutput(std::io::Error),
+    KillChildProcess(std::io::Error),
+    ReadBuildResult(PathBuf, std::io::Error),
+    Cancelled,
+    Unknown(Error),
+}
+
+impl fmt::Debug for BuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PrepareOverlay(e) => write!(f, "Failed to prepare overlay dirs: {e:?}"),
+            Self::EnterNewNS(e) => write!(f, "Failed to enter a new Linux namespace: {e:?}"),
+            Self::MountNsRoot(e) => write!(f, "Failed to mount Linux namespace root: {e:?}"),
+            Self::MakeOverlayDir(p, e) => write!(f, "Failed to create overlay dir {p:?}: {e:?}"),
+            Self::MountOverlayFS(e) => write!(f, "Failed to mount overlay FS: {e:?}"),
+            Self::UnpackInputs(e) => write!(f, "Failed to unpack inputs to overlay: {e:?}"),
+            Self::MakeOutputDir(p, e) => write!(f, "Failed to create output dir {p:?}: {e:?}"),
+            Self::SpawnChildProcess(e) => write!(f, "Failed to spawn build process: {e:?}"),
+            Self::ReadChildOutput(e) => write!(f, "Failed to read process output: {e:?}"),
+            Self::WaitChildOutput(e) => write!(f, "Failed to wait for build process: {e:?}"),
+            Self::KillChildProcess(e) => write!(f, "Failed to kill build process: {e:?}"),
+            Self::ReadBuildResult(p, e) => write!(f, "Failed to read build result {p:?}: {e:?}"),
+            Self::Cancelled => write!(f, "Build cancelled"),
+            Self::Unknown(e) => write!(f, "Build error: {e:?}"),
+        }
+    }
+}
+
+impl fmt::Display for BuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PrepareOverlay(e) => write!(f, "Failed to prepare overlay dirs: {e}"),
+            Self::EnterNewNS(e) => write!(f, "Failed to enter a new Linux namespace: {e}"),
+            Self::MountNsRoot(e) => write!(f, "Failed to mount Linux namespace root: {e}"),
+            Self::MakeOverlayDir(p, e) => write!(f, "Failed to create overlay dir {p:?}: {e}"),
+            Self::MountOverlayFS(e) => write!(f, "Failed to mount overlay FS: {e}"),
+            Self::UnpackInputs(e) => write!(f, "Failed to unpack inputs to overlay: {e}"),
+            Self::MakeOutputDir(p, e) => write!(f, "Failed to create output dir {p:?}: {e}"),
+            Self::SpawnChildProcess(e) => write!(f, "Failed to spawn build process: {e}"),
+            Self::ReadChildOutput(e) => write!(f, "Failed to read process output: {e}"),
+            Self::WaitChildOutput(e) => write!(f, "Failed to wait for build process: {e}"),
+            Self::KillChildProcess(e) => write!(f, "Failed to kill build process: {e}"),
+            Self::ReadBuildResult(p, e) => write!(f, "Failed to read build result {p:?}: {e}"),
+            Self::Cancelled => write!(f, "Build cancelled"),
+            Self::Unknown(e) => write!(f, "Build error: {e:?}"),
+        }
+    }
+}
+
+impl From<BuildError> for anyhow::Error {
+    fn from(err: BuildError) -> Self {
+        anyhow!(err)
+    }
+}
+
 // CompileCommand
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -758,7 +823,7 @@ pub trait BuilderIncoming: Send + Sync {
         inputs: Vec<u8>,
         command: CompileCommand,
         outputs: Vec<String>,
-    ) -> Result<BuildResult>;
+    ) -> std::result::Result<BuildResult, BuildError>;
     // From Server
     async fn finish_build(&self, job_id: &str);
     // From Server
