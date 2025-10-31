@@ -768,8 +768,7 @@ pub trait SchedulerService: Send + Sync {
     async fn put_toolchain(
         &self,
         toolchain: &Toolchain,
-        toolchain_size: u64,
-        toolchain_reader: Pin<&mut (dyn futures::AsyncRead + Send)>,
+        toolchain_archive: Vec<u8>,
     ) -> Result<SubmitToolchainResult>;
 
     async fn del_toolchain(&self, toolchain: &Toolchain) -> Result<()>;
@@ -777,12 +776,7 @@ pub trait SchedulerService: Send + Sync {
     async fn has_job(&self, job_id: &str) -> bool;
     async fn new_job(&self, toolchain: Toolchain, inputs: Vec<u8>) -> Result<NewJobResponse>;
     async fn run_job(&self, job_id: &str, request: RunJobRequest) -> Result<RunJobResponse>;
-    async fn put_job(
-        &self,
-        job_id: &str,
-        inputs_size: u64,
-        inputs: Pin<&mut (dyn futures::AsyncRead + Send)>,
-    ) -> Result<()>;
+    async fn put_job(&self, job_id: &str, inputs: Vec<u8>) -> Result<()>;
     async fn del_job(&self, job_id: &str) -> Result<()>;
 
     async fn job_finished(&self, job_id: &str, server: ServerDetails) -> Result<()>;

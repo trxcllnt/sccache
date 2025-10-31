@@ -194,9 +194,7 @@ mod scheduler {
 
     use axum_extra::{
         TypedHeader,
-        headers::{
-            Authorization, ContentLength, ContentType, Header, HeaderValue, authorization::Bearer,
-        },
+        headers::{Authorization, ContentType, Header, HeaderValue, authorization::Bearer},
     };
 
     use futures::{TryFutureExt, TryStreamExt};
@@ -211,7 +209,7 @@ mod scheduler {
     };
 
     use tokio::io::AsyncReadExt;
-    use tokio_util::{compat::TokioAsyncReadCompatExt, io::StreamReader};
+    use tokio_util::io::StreamReader;
     use tower::ServiceBuilder;
     use tower_http::{
         request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -466,29 +464,6 @@ mod scheduler {
         }
     }
 
-    struct RequestBodyAsyncRead(Box<dyn futures::AsyncRead + Send + Unpin>);
-
-    #[async_trait]
-    impl<S> FromRequest<S> for RequestBodyAsyncRead
-    where
-        S: Send + Sync,
-    {
-        type Rejection = StatusCode;
-
-        async fn from_request(
-            req: Request,
-            _state: &S,
-        ) -> std::result::Result<Self, Self::Rejection> {
-            let RequestBodyTokioAsyncRead(body) = req
-                .extract::<RequestBodyTokioAsyncRead, _>()
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            // Convert the request body into an `futures::AsyncRead`
-            Ok(Self(Box::new(body.compat())))
-        }
-    }
-
     struct SchedulerState {
         service: Arc<dyn SchedulerService>,
         // Test whether clients are permitted to use the scheduler
@@ -596,21 +571,36 @@ mod scheduler {
                         |TypedHeader(AcceptedMimeTypes(mime)),
                          Extension::<Arc<SchedulerState>>(state),
                          Path(archive_id): Path<String>,
-                         mut req: Request| async move {
-                            let TypedHeader(ContentLength(len)) = req
-                                .extract_parts::<TypedHeader<ContentLength>>()
+                         req: Request| async move {
+                            let RequestBodyTokioAsyncRead(mut reader) = req
+                                .extract::<RequestBodyTokioAsyncRead, _>()
                                 .await
-                                .unwrap_or(TypedHeader(ContentLength(0)));
-                            let RequestBodyAsyncRead(body) = req
-                                .extract::<RequestBodyAsyncRead, _>()
+                                .map_err(|_| AppError(anyhow!("")))
+                                .map_err(IntoResponse::into_response)?;
+
+                            // First read all inputs into memory
+                            let mut toolchain = vec![];
+                            reader
+                                .read_to_end(&mut toolchain)
                                 .await
-                                .map_err(|_| AppError(anyhow!("")))?;
-                            state
-                                .service
-                                .put_toolchain(&Toolchain { archive_id }, len, std::pin::pin!(body))
-                                .and_then(|res| mime.serialize(res))
-                                .map_err(AppError)
-                                .await
+                                .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job inputs"))
+                                .map_err(IntoResponse::into_response)?;
+
+                            let service = state.service.clone();
+
+                            // Once we've received the entire input, spawn a new task to write them
+                            // to storage that won't be cancelled. This ensures we don't perform an
+                            // incomplete write if the client disconnects prematurely, for example,
+                            // if a user ctrl-C's their build.
+                            tokio::spawn(async move {
+                                service
+                                    .put_toolchain(&Toolchain { archive_id }, toolchain)
+                                    .and_then(|res| mime.serialize(res))
+                                    .map_err(|e| AppError(e).into_response())
+                                    .await
+                            })
+                            .await
+                            .map_err(|_| AppError(anyhow!("")).into_response())?
                         },
                     ),
                 )
@@ -640,7 +630,7 @@ mod scheduler {
                         |TypedHeader(AcceptedMimeTypes(mime)),
                          Extension::<Arc<SchedulerState>>(state),
                          RequestBodyTokioAsyncRead(mut body)| async move {
-                            // Deserialize new job requests.
+                            // First deserialize the job request and read all inputs into memory.
                             // The toolchain bincode is first, followed by the compressed inputs.
                             let (toolchain, inputs) = {
                                 let bincode_len = body
@@ -674,12 +664,21 @@ mod scheduler {
                                 (toolchain, inputs)
                             };
 
-                            state
-                                .service
-                                .new_job(toolchain, inputs)
-                                .and_then(|res| mime.serialize(res))
-                                .map_err(|e| AppError(e).into_response())
-                                .await
+                            let service = state.service.clone();
+
+                            // Once we've received the entire input, spawn a new task to write them
+                            // to storage that won't be cancelled. This ensures we don't perform an
+                            // incomplete write if the client disconnects prematurely, for example,
+                            // if a user ctrl-C's their build.
+                            tokio::spawn(async move {
+                                service
+                                    .new_job(toolchain, inputs)
+                                    .and_then(|res| mime.serialize(res))
+                                    .map_err(|e| AppError(e).into_response())
+                                    .await
+                            })
+                            .await
+                            .map_err(|_| AppError(anyhow!("")).into_response())?
                         },
                     ),
                 )
@@ -690,23 +689,36 @@ mod scheduler {
                         |TypedHeader(AcceptedMimeTypes(mime)),
                          Extension::<Arc<SchedulerState>>(state),
                          Path::<String>(job_id),
-                         mut req: Request| async move {
-                            let TypedHeader(ContentLength(len)) = req
-                                .extract_parts::<TypedHeader<ContentLength>>()
+                         req: Request| async move {
+                            let RequestBodyTokioAsyncRead(mut reader) = req
+                                .extract::<RequestBodyTokioAsyncRead, _>()
                                 .await
-                                .unwrap_or(TypedHeader(ContentLength(0)));
+                                .map_err(|_| AppError(anyhow!("")))
+                                .map_err(IntoResponse::into_response)?;
 
-                            let RequestBodyAsyncRead(inputs) = req
-                                .extract::<RequestBodyAsyncRead, _>()
+                            // First read all inputs into memory
+                            let mut inputs = vec![];
+                            reader
+                                .read_to_end(&mut inputs)
                                 .await
-                                .map_err(|_| AppError(anyhow!("")))?;
+                                .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job inputs"))
+                                .map_err(IntoResponse::into_response)?;
 
-                            state
-                                .service
-                                .put_job(&job_id, len, std::pin::pin!(inputs))
-                                .and_then(|res| mime.serialize(res))
-                                .map_err(AppError)
-                                .await
+                            let service = state.service.clone();
+
+                            // Once we've received the entire input, spawn a new task to write them
+                            // to storage that won't be cancelled. This ensures we don't perform an
+                            // incomplete write if the client disconnects prematurely, for example,
+                            // if a user ctrl-C's their build.
+                            tokio::spawn(async move {
+                                service
+                                    .put_job(&job_id, inputs)
+                                    .and_then(|res| mime.serialize(res))
+                                    .map_err(|e| AppError(e).into_response())
+                                    .await
+                            })
+                            .await
+                            .map_err(|_| AppError(anyhow!("")).into_response())?
                         },
                     ),
                 )
