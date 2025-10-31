@@ -12,6 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::{
+    cache::{disk::DiskCache, readonly::ReadOnlyStorage, tiered::TieredCache},
+    config::{
+        AzureCacheConfig, CacheType, DEFAULT_REDIS_DB, DiskCacheConfig, GCSCacheConfig,
+        GHACacheConfig, MemcachedCacheConfig, OSSCacheConfig, RedisCacheConfig, S3CacheConfig,
+        WebdavCacheConfig,
+    },
+    errors::*,
+};
+
+use async_trait::async_trait;
+use fs_err as fs;
+use futures::{AsyncReadExt, FutureExt, StreamExt, TryFutureExt};
+use itertools::Itertools;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::io::{self, Cursor, Read, Seek, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use tempfile::NamedTempFile;
+use zip::write::FileOptions;
+use zip::{CompressionMethod, ZipArchive, ZipWriter};
+
 #[cfg(feature = "azure")]
 use crate::cache::azure::AzureBlobCache;
 #[cfg(feature = "gcs")]
@@ -30,25 +54,6 @@ use crate::cache::s3::S3Cache;
 use crate::cache::watch::WatchStorage;
 #[cfg(feature = "webdav")]
 use crate::cache::webdav::WebdavCache;
-
-use crate::{
-    cache::{disk::DiskCache, readonly::ReadOnlyStorage, tiered::TieredCache},
-    config::{CacheType, DiskCacheConfig},
-};
-
-use async_trait::async_trait;
-use fs_err as fs;
-use futures::{AsyncReadExt, FutureExt, StreamExt, TryFutureExt};
-use itertools::Itertools;
-use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::io::{self, Cursor, Read, Seek, Write};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
-use tempfile::NamedTempFile;
-use zip::write::FileOptions;
-use zip::{CompressionMethod, ZipArchive, ZipWriter};
 #[cfg(any(
     feature = "azure",
     feature = "gcs",
@@ -59,13 +64,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
     feature = "webdav",
     feature = "oss"
 ))]
-use {
-    crate::{config, util::retry_with_jitter},
-    futures::AsyncWriteExt,
-    tokio_retry2::RetryError,
-};
-
-use crate::errors::*;
+use {crate::util::retry_with_jitter, futures::AsyncWriteExt, tokio_retry2::RetryError};
 
 #[cfg(unix)]
 fn get_file_mode(file: &fs::File) -> Result<Option<u32>> {
@@ -1077,9 +1076,9 @@ impl From<(StorageKind, DiskCacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "azure")]
-impl From<(StorageKind, config::AzureCacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, config::AzureCacheConfig)) -> Self {
-        let config::AzureCacheConfig {
+impl From<(StorageKind, AzureCacheConfig)> for StorageBuilder {
+    fn from((storage_kind, config): (StorageKind, AzureCacheConfig)) -> Self {
+        let AzureCacheConfig {
             connection_string,
             container,
             key_prefix,
@@ -1102,9 +1101,9 @@ impl From<(StorageKind, config::AzureCacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "gcs")]
-impl From<(StorageKind, config::GCSCacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, config::GCSCacheConfig)) -> Self {
-        let config::GCSCacheConfig {
+impl From<(StorageKind, GCSCacheConfig)> for StorageBuilder {
+    fn from((storage_kind, config): (StorageKind, GCSCacheConfig)) -> Self {
+        let GCSCacheConfig {
             bucket,
             key_prefix,
             cred_path,
@@ -1139,9 +1138,9 @@ impl From<(StorageKind, config::GCSCacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "gha")]
-impl From<(StorageKind, config::GHACacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, config::GHACacheConfig)) -> Self {
-        let config::GHACacheConfig {
+impl From<(StorageKind, GHACacheConfig)> for StorageBuilder {
+    fn from((storage_kind, config): (StorageKind, GHACacheConfig)) -> Self {
+        let GHACacheConfig {
             version,
             preprocessor_cache_mode,
             ..
@@ -1160,9 +1159,9 @@ impl From<(StorageKind, config::GHACacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "memcached")]
-impl From<(StorageKind, config::MemcachedCacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, config::MemcachedCacheConfig)) -> Self {
-        let config::MemcachedCacheConfig {
+impl From<(StorageKind, MemcachedCacheConfig)> for StorageBuilder {
+    fn from((storage_kind, config): (StorageKind, MemcachedCacheConfig)) -> Self {
+        let MemcachedCacheConfig {
             url,
             username,
             password,
@@ -1194,9 +1193,9 @@ impl From<(StorageKind, config::MemcachedCacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "redis")]
-impl From<(StorageKind, config::RedisCacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, config::RedisCacheConfig)) -> Self {
-        let config::RedisCacheConfig {
+impl From<(StorageKind, RedisCacheConfig)> for StorageBuilder {
+    fn from((storage_kind, config): (StorageKind, RedisCacheConfig)) -> Self {
+        let RedisCacheConfig {
             endpoint,
             cluster_endpoints,
             username,
@@ -1238,7 +1237,7 @@ impl From<(StorageKind, config::RedisCacheConfig)> for StorageBuilder {
                 }
                 (None, None, Some(url)) => {
                     warn!("Init redis single-node {storage_kind} cache from deprecated API with url {url}");
-                    if username.is_some() || password.is_some() || db != crate::config::DEFAULT_REDIS_DB {
+                    if username.is_some() || password.is_some() || db != DEFAULT_REDIS_DB {
                         bail!("`username`, `password` and `db` has no effect when `url` is set. Please use `endpoint` or `cluster_endpoints` for new API accessing");
                     }
 
@@ -1255,9 +1254,9 @@ impl From<(StorageKind, config::RedisCacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "s3")]
-impl From<(StorageKind, config::S3CacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, config::S3CacheConfig)) -> Self {
-        let config::S3CacheConfig {
+impl From<(StorageKind, S3CacheConfig)> for StorageBuilder {
+    fn from((storage_kind, config): (StorageKind, S3CacheConfig)) -> Self {
+        let S3CacheConfig {
             bucket,
             enable_virtual_host_style,
             endpoint,
@@ -1302,9 +1301,9 @@ impl From<(StorageKind, config::S3CacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "webdav")]
-impl From<(StorageKind, config::WebdavCacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, config::WebdavCacheConfig)) -> Self {
-        let config::WebdavCacheConfig {
+impl From<(StorageKind, WebdavCacheConfig)> for StorageBuilder {
+    fn from((storage_kind, config): (StorageKind, WebdavCacheConfig)) -> Self {
+        let WebdavCacheConfig {
             endpoint,
             key_prefix,
             password,
@@ -1335,9 +1334,9 @@ impl From<(StorageKind, config::WebdavCacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "oss")]
-impl From<(StorageKind, config::OSSCacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, config::OSSCacheConfig)) -> Self {
-        let config::OSSCacheConfig {
+impl From<(StorageKind, OSSCacheConfig)> for StorageBuilder {
+    fn from((storage_kind, config): (StorageKind, OSSCacheConfig)) -> Self {
+        let OSSCacheConfig {
             bucket,
             endpoint,
             key_prefix,
@@ -1413,7 +1412,7 @@ impl StorageKind {
                 .filter({
                     let use_preprocessor_cache_mode = matches!(kind, StorageKind::Preprocessor);
                     move |&config| match config {
-                        config::CacheType::Disk(_) => true,
+                        CacheType::Disk(_) => true,
                         _ => config
                             .preprocessor_cache_mode()
                             .map(|cache| cache.use_preprocessor_cache_mode)

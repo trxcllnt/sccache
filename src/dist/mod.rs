@@ -488,6 +488,7 @@ pub struct BuildResult {
     pub outputs: Vec<(String, OutputData)>,
 }
 
+#[cfg(feature = "dist-server")]
 pub enum BuildError {
     PrepareOverlay(Error),
     EnterNewNS(nix::errno::Errno),
@@ -505,6 +506,7 @@ pub enum BuildError {
     Unknown(Error),
 }
 
+#[cfg(feature = "dist-server")]
 impl fmt::Debug for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -526,6 +528,7 @@ impl fmt::Debug for BuildError {
     }
 }
 
+#[cfg(feature = "dist-server")]
 impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -547,6 +550,7 @@ impl fmt::Display for BuildError {
     }
 }
 
+#[cfg(feature = "dist-server")]
 impl From<BuildError> for anyhow::Error {
     fn from(err: BuildError) -> Self {
         anyhow!(err)
