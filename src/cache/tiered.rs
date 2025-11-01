@@ -93,10 +93,15 @@ impl Storage for TieredCache {
 
     async fn put(&self, key: &str, entry: &mut dyn ReadSeek) -> Result<Duration> {
         let start = Instant::now();
-        self.0.put(key, entry).await?;
+        let res1 = self.0.put(key, entry).await;
         entry.seek(std::io::SeekFrom::Start(0))?;
-        let _ = self.1.put(key, entry).await;
-        Ok(Instant::now() - start)
+        let res2 = self.1.put(key, entry).await;
+        match (res1, res2) {
+            (Err(err1), Err(err2)) => Err(anyhow!(
+                "Failed to put key {key:?} (err1={err1}, err2={err2})"
+            )),
+            _ => Ok(Instant::now() - start),
+        }
     }
 
     async fn put_async_reader(
@@ -105,10 +110,15 @@ impl Storage for TieredCache {
         size: u64,
         mut source: &mut (dyn AsyncReadSeek + Unpin),
     ) -> Result<()> {
-        self.0.put_async_reader(key, size, &mut source).await?;
+        let res1 = self.0.put_async_reader(key, size, &mut source).await;
         source.seek(std::io::SeekFrom::Start(0)).await?;
-        let _ = self.1.put_async_reader(key, size, &mut source).await;
-        Ok(())
+        let res2 = self.1.put_async_reader(key, size, &mut source).await;
+        match (res1, res2) {
+            (Err(err1), Err(err2)) => Err(anyhow!(
+                "Failed to put key {key:?} (err1={err1}, err2={err2})"
+            )),
+            _ => Ok(()),
+        }
     }
 
     async fn size(&self, key: &str) -> Result<u64> {
