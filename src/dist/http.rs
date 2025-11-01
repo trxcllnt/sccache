@@ -14,11 +14,9 @@
 
 #[cfg(feature = "dist-client")]
 pub use self::client::Client;
+
 #[cfg(feature = "dist-server")]
-pub use self::{
-    scheduler::Scheduler,
-    server::{ClientAuthCheck, ClientVisibleMsg},
-};
+pub use self::scheduler::{ClientAuthCheck, ClientClaims, Scheduler};
 
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 pub use self::common::bincode_req_fut;
@@ -158,25 +156,6 @@ pub mod urls {
 }
 
 #[cfg(feature = "dist-server")]
-mod server {
-    use async_trait::async_trait;
-
-    // Messages that are non-sensitive and can be sent to the client
-    #[derive(Debug)]
-    pub struct ClientVisibleMsg(pub String);
-    impl ClientVisibleMsg {
-        pub fn from_nonsensitive(s: String) -> Self {
-            ClientVisibleMsg(s)
-        }
-    }
-
-    #[async_trait]
-    pub trait ClientAuthCheck: Send + Sync {
-        async fn check(&self, token: &str) -> std::result::Result<(), ClientVisibleMsg>;
-    }
-}
-
-#[cfg(feature = "dist-server")]
 mod scheduler {
 
     use async_trait::async_trait;
@@ -201,6 +180,7 @@ mod scheduler {
     use serde_json::json;
 
     use std::{
+        collections::HashMap,
         io,
         net::SocketAddr,
         str::FromStr,
@@ -217,13 +197,21 @@ mod scheduler {
         trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
     };
 
-    use crate::dist::{
-        RunJobRequest, SchedulerService, Toolchain,
-        http::{ClientAuthCheck, ClientVisibleMsg, bincode_deserialize, bincode_serialize},
-        metrics::Metrics,
+    use crate::{
+        dist::{
+            RunJobRequest, SchedulerService, Toolchain,
+            http::{bincode_deserialize, bincode_serialize},
+            metrics::Metrics,
+        },
+        errors::*,
     };
 
-    use crate::errors::*;
+    pub type ClientClaims = HashMap<String, String>;
+
+    #[async_trait]
+    pub trait ClientAuthCheck: Send + Sync {
+        async fn check(&self, token: &str) -> Result<ClientClaims>;
+    }
 
     // Make our own error that wraps `anyhow::Error`.
     struct AppError(anyhow::Error);
@@ -358,7 +346,7 @@ mod scheduler {
 
     // Verify authenticated sccache clients
     #[allow(dead_code)]
-    struct RequireAuth(SocketAddr);
+    struct RequireAuth(SocketAddr, HashMap<String, String>);
 
     #[async_trait]
     impl<S> FromRequestParts<S> for RequireAuth
@@ -399,10 +387,10 @@ mod scheduler {
             this.client_auth
                 .check(bearer.token())
                 .await
-                .map(|_| RequireAuth(remote_addr))
-                .map_err(|ClientVisibleMsg(msg)| {
-                    tracing::warn!("[RequireAuth({remote_addr})]: Authentication failure: {msg}");
-                    (StatusCode::UNAUTHORIZED, msg)
+                .map(|claims| RequireAuth(remote_addr, claims))
+                .map_err(|err| {
+                    tracing::warn!("[RequireAuth({remote_addr})]: Authentication failure: {err}");
+                    (StatusCode::UNAUTHORIZED, "Unauthorized".into())
                 })
         }
     }
@@ -498,33 +486,32 @@ mod scheduler {
             };
 
             async fn record_metrics(
+                RequireAuth(_, mut labels): RequireAuth,
                 req: Request,
                 next: axum::middleware::Next,
             ) -> impl IntoResponse {
                 let start = Instant::now();
-                let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
-                    matched_path.as_str().to_owned()
-                } else {
-                    req.uri().path().to_owned()
-                };
-                let method = req.method().clone();
 
-                let response = next.run(req).await;
+                // Labels include auth claims to support `GROUPBY "user_id"` etc.
+                labels.insert("method".into(), req.method().to_string());
+                labels.insert(
+                    "path".into(),
+                    req.extensions()
+                        .get::<MatchedPath>()
+                        .map(|path| path.as_str().to_string())
+                        .unwrap_or_else(|| req.uri().path().to_owned()),
+                );
 
-                let latency = start.elapsed().as_secs_f64();
-                let status = response.status().as_u16().to_string();
+                let res = next.run(req).await;
 
-                let labels = [
-                    ("method", method.to_string()),
-                    ("path", path),
-                    ("status", status),
-                ];
+                // Labels include auth claims to support `GROUPBY "user_id"` etc.
+                labels.insert("status".into(), res.status().as_u16().to_string());
 
                 metrics::counter!("sccache::scheduler::http::request_count", &labels).increment(1);
                 metrics::histogram!("sccache::scheduler::http::request_time", &labels)
-                    .record(latency);
+                    .record(start.elapsed().as_secs_f64());
 
-                response
+                res
             }
 
             // Define this at the end so we also track metrics for the `/metrics` route
@@ -768,9 +755,11 @@ mod scheduler {
             ]);
 
             let request_id_header_name = http::HeaderName::from_str(
-                &std::env::var("SCCACHE_DIST_REQUEST_ID_HEADER_NAME")
+                std::env::var("SCCACHE_DIST_REQUEST_ID_HEADER_NAME")
+                    .as_ref()
+                    .map(|s| s.as_str())
                     // tower_http::request_id::X_REQUEST_ID inlined here because it is not public
-                    .unwrap_or("x-request-id".to_owned()),
+                    .unwrap_or("x-request-id"),
             )
             .unwrap();
 

@@ -1,57 +1,21 @@
 use crate::{
-    config::{INSECURE_DIST_CLIENT_TOKEN, scheduler::ClientAuth},
-    dist::http::{ClientAuthCheck, ClientVisibleMsg},
-    util::{BASE64_URL_SAFE_ENGINE, new_reqwest_client},
+    config::{
+        INSECURE_DIST_CLIENT_TOKEN,
+        scheduler::{ClientAuth, ProxyTokenDecodeConfig},
+    },
+    dist::http::{ClientAuthCheck, ClientClaims},
+    errors::*,
+    util::new_reqwest_client,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, bail};
 use async_trait::async_trait;
-use base64::Engine;
 use futures::lock::Mutex;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::result::Result as StdResult;
-use std::time::{Duration, Instant};
+use jwt::jwk::JwkSet;
 
-// https://auth0.com/docs/jwks
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Jwks {
-    pub keys: Vec<Jwk>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Jwk {
-    pub kid: String,
-    kty: String,
-    n: String,
-    e: String,
-}
-
-impl Jwk {
-    // https://github.com/lawliet89/biscuit/issues/96#issuecomment-399149872
-    pub fn to_der_pkcs1(&self) -> Result<Vec<u8>> {
-        if self.kty != "RSA" {
-            bail!("Cannot handle non-RSA JWK")
-        }
-
-        // JWK is big-endian, openssl bignum from_slice is big-endian
-        let n = BASE64_URL_SAFE_ENGINE
-            .decode(&self.n)
-            .context("Failed to base64 decode n")?;
-        let e = BASE64_URL_SAFE_ENGINE
-            .decode(&self.e)
-            .context("Failed to base64 decode e")?;
-        let n_bn = openssl::bn::BigNum::from_slice(&n)
-            .context("Failed to create openssl bignum from n")?;
-        let e_bn = openssl::bn::BigNum::from_slice(&e)
-            .context("Failed to create openssl bignum from e")?;
-        let pubkey = openssl::rsa::Rsa::from_public_components(n_bn, e_bn)
-            .context("Failed to create pubkey from n and e")?;
-        let der: Vec<u8> = pubkey
-            .public_key_to_der_pkcs1()
-            .context("Failed to convert public key to der pkcs1")?;
-        Ok(der)
-    }
-}
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 // Check a token is equal to a fixed string
 pub struct EqCheck {
@@ -60,13 +24,11 @@ pub struct EqCheck {
 
 #[async_trait]
 impl ClientAuthCheck for EqCheck {
-    async fn check(&self, token: &str) -> StdResult<(), ClientVisibleMsg> {
+    async fn check(&self, token: &str) -> Result<ClientClaims> {
         if self.s == token {
-            Ok(())
+            Ok(HashMap::with_capacity(0))
         } else {
-            Err(ClientVisibleMsg::from_nonsensitive(
-                "Fixed token mismatch".to_owned(),
-            ))
+            Err(anyhow!("Fixed token mismatch"))
         }
     }
 }
@@ -77,53 +39,89 @@ impl EqCheck {
     }
 }
 
+enum ProxyTokenDecoder {
+    None,
+    Jwt(ValidJWTCheck),
+}
+
+impl ProxyTokenDecoder {
+    async fn decode(&self, response: &str) -> Result<ClientClaims> {
+        match self {
+            Self::Jwt(jwt) => jwt.check(response).await,
+            _ => Ok(HashMap::with_capacity(0)),
+        }
+    }
+}
+
 // Don't check a token is valid (it may not even be a JWT) just forward it to
 // an API and check for success
 pub struct ProxyTokenCheck {
+    cache: Mutex<HashMap<String, (Instant, ClientClaims)>>,
     client: reqwest::Client,
-    maybe_auth_cache: Option<Mutex<(HashMap<String, Instant>, Duration)>>,
+    decoder: ProxyTokenDecoder,
+    token_ttl: Option<Duration>,
     url: String,
 }
 
 #[async_trait]
 impl ClientAuthCheck for ProxyTokenCheck {
-    async fn check(&self, token: &str) -> StdResult<(), ClientVisibleMsg> {
+    async fn check(&self, token: &str) -> Result<ClientClaims> {
         match self.check_token_with_forwarding(token).await {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                tracing::warn!("Proxying token validation failed: {}", e);
-                Err(ClientVisibleMsg::from_nonsensitive(
-                    "Validation with token forwarding failed".to_owned(),
-                ))
+            Ok(claims) => Ok(claims),
+            Err(err) => {
+                tracing::warn!("Proxying token validation failed: {err}");
+                Err(err)
             }
         }
     }
 }
 
 impl ProxyTokenCheck {
-    pub fn new(url: String, cache_secs: Option<u64>) -> Self {
-        let maybe_auth_cache: Option<Mutex<(HashMap<String, Instant>, Duration)>> =
-            cache_secs.map(|secs| Mutex::new((HashMap::new(), Duration::from_secs(secs))));
-        Self {
+    pub async fn new(
+        url: String,
+        token_ttl: Option<u64>,
+        decode: Option<ProxyTokenDecodeConfig>,
+    ) -> Result<Self> {
+        let decoder = match decode {
+            Some(ProxyTokenDecodeConfig::JwtDecoder {
+                audience,
+                issuer,
+                jwks_url,
+                claims,
+            }) => ProxyTokenDecoder::Jwt(
+                ValidJWTCheck::new(audience, issuer, &jwks_url, claims)
+                    .await
+                    .context("Failed to create a checker for valid JWTs")?,
+            ),
+            _ => ProxyTokenDecoder::None,
+        };
+
+        Ok(Self {
+            cache: Mutex::new(HashMap::new()),
             client: new_reqwest_client(None),
-            maybe_auth_cache,
+            token_ttl: token_ttl.map(Duration::from_secs),
             url,
-        }
+            decoder,
+        })
     }
 
-    async fn check_token_with_forwarding(&self, token: &str) -> Result<()> {
+    async fn check_token_with_forwarding(&self, token: &str) -> Result<ClientClaims> {
         // If the token is cached and not cache has not expired, return it
-        if let Some(ref auth_cache) = self.maybe_auth_cache {
-            let mut auth_cache = auth_cache.lock().await;
-            let (ref mut auth_cache, cache_duration) = *auth_cache;
-            if let Some(cached_at) = auth_cache.get(token) {
-                if cached_at.elapsed() < cache_duration {
-                    return Ok(());
-                }
+        if let Some(token_ttl) = self.token_ttl {
+            let mut cache = self.cache.lock().await;
+            let entry = cache
+                .get(token)
+                .filter(|(cached_at, _)| cached_at.elapsed() < token_ttl)
+                .map(|(_, claims)| claims);
+            if let Some(claims) = entry {
+                return Ok(claims.clone());
+            } else {
+                cache.remove(token);
             }
-            auth_cache.remove(token);
         }
+
         tracing::trace!("Validating token by forwarding to {}", self.url);
+
         // Make a request to another API, which as a side effect should actually check the token
         let res = self
             .client
@@ -132,16 +130,42 @@ impl ProxyTokenCheck {
             .send()
             .await
             .context("Failed to make request to proxying url")?;
+
         if !res.status().is_success() {
             bail!("Token forwarded to {} returned {}", self.url, res.status());
         }
+
+        let mime = res
+            .headers()
+            .get(http::header::CONTENT_TYPE)
+            .map(|t| t.to_str().unwrap_or("application/text"));
+
+        let auth = match mime.unwrap_or("application/text") {
+            "application/json" => {
+                let json = res.json::<serde_json::Value>().await?;
+                json.as_object()
+                    .and_then(|o| o.get("token"))
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_owned())
+                    .unwrap_or_default()
+            }
+            _ => res.text().await?,
+        };
+
+        let claims = self.decoder.decode(&auth).await.or_else(|err| {
+            tracing::warn!("Failed to decode token: {err}");
+            Result::Ok(HashMap::with_capacity(0))
+        })?;
+
         // Cache the token
-        if let Some(ref auth_cache) = self.maybe_auth_cache {
-            let mut auth_cache = auth_cache.lock().await;
-            let (ref mut auth_cache, _) = *auth_cache;
-            auth_cache.insert(token.to_owned(), Instant::now());
+        if self.token_ttl.is_some() {
+            self.cache
+                .lock()
+                .await
+                .insert(token.to_owned(), (Instant::now(), claims.clone()));
         }
-        Ok(())
+
+        Ok(claims)
     }
 }
 
@@ -149,65 +173,111 @@ impl ProxyTokenCheck {
 pub struct ValidJWTCheck {
     audience: String,
     issuer: String,
-    kid_to_pkcs1: HashMap<String, Vec<u8>>,
+    keys: HashMap<String, jwt::DecodingKey>,
+    claims: Vec<String>,
 }
 
 #[async_trait]
 impl ClientAuthCheck for ValidJWTCheck {
-    async fn check(&self, token: &str) -> StdResult<(), ClientVisibleMsg> {
+    async fn check(&self, token: &str) -> Result<ClientClaims> {
         match self.check_jwt_validity(token).await {
-            Ok(()) => Ok(()),
+            Ok(claims) => Ok(claims),
             Err(e) => {
                 tracing::warn!("JWT validation failed: {}", e);
-                Err(ClientVisibleMsg::from_nonsensitive(
-                    "JWT could not be validated".to_owned(),
-                ))
+                Err(e)
             }
         }
     }
 }
 
 impl ValidJWTCheck {
-    pub async fn new(audience: String, issuer: String, jwks_url: &str) -> Result<Self> {
+    pub async fn new(
+        audience: String,
+        issuer: String,
+        jwks_url: &str,
+        claims: Option<Vec<String>>,
+    ) -> Result<Self> {
         let res = reqwest::get(jwks_url)
             .await
             .context("Failed to make request to JWKs url")?;
         if !res.status().is_success() {
             bail!("Could not retrieve JWKs, HTTP error: {}", res.status())
         }
-        let jwks: Jwks = res.json().await.context("Failed to parse JWKs json")?;
-        let kid_to_pkcs1 = jwks
+
+        let keys = res
+            .json::<JwkSet>()
+            .await
+            .context("Failed to parse JWKs json")?
             .keys
-            .into_iter()
-            .map(|k| k.to_der_pkcs1().map(|pkcs1| (k.kid, pkcs1)))
-            .collect::<Result<_>>()
-            .context("Failed to convert JWKs into pkcs1")?;
+            .iter()
+            .filter_map(|jwk| {
+                jwk.common.key_id.as_ref().and_then(|kid| {
+                    jwt::DecodingKey::from_jwk(jwk)
+                        .ok()
+                        .map(|key| (kid.clone(), key))
+                })
+            })
+            .collect();
+
         Ok(Self {
             audience,
             issuer,
-            kid_to_pkcs1,
+            keys,
+            claims: claims.unwrap_or_default(),
         })
     }
 
-    async fn check_jwt_validity(&self, token: &str) -> Result<()> {
+    async fn check_jwt_validity(&self, token: &str) -> Result<ClientClaims> {
+        tracing::trace!("Validating JWT");
+
         let header = jwt::decode_header(token).context("Could not decode jwt header")?;
-        tracing::trace!("Validating JWT in scheduler");
+
         // Prepare validation
-        let kid = header.kid.context("No kid found")?;
-        let pkcs1 = jwt::DecodingKey::from_rsa_der(
-            self.kid_to_pkcs1
-                .get(&kid)
-                .context("kid not found in jwks")?,
-        );
         let mut validation = jwt::Validation::new(header.alg);
         validation.set_audience(&[&self.audience]);
         validation.set_issuer(&[&self.issuer]);
-        #[derive(Deserialize)]
-        struct Claims {}
-        // Decode the JWT, discarding any claims - we just care about validity
-        let _tokendata = jwt::decode::<Claims>(token, &pkcs1, &validation)
-            .context("Unable to validate and decode jwt")?;
-        Ok(())
+
+        let decode = |key: &jwt::DecodingKey| {
+            let jwt::TokenData { claims, .. } =
+                jwt::decode::<serde_json::Value>(token, key, &validation)?;
+            Ok(claims
+                .as_object()
+                .map(|obj| {
+                    self.claims
+                        .iter()
+                        .filter_map(|key| {
+                            obj.get(key).map(|val| {
+                                (
+                                    key.clone(),
+                                    val.as_str()
+                                        .map(|val| val.to_string())
+                                        .unwrap_or_else(|| val.to_string()),
+                                )
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default())
+        };
+
+        // Decode the JWT and return the claims
+
+        if let Some(key) = header.kid.as_ref().and_then(|kid| self.keys.get(kid)) {
+            decode(key)
+        } else {
+            self.keys
+                .values()
+                .try_for_each(|key| {
+                    if let Ok(claims) = decode(key) {
+                        std::ops::ControlFlow::Break(claims)
+                    } else {
+                        std::ops::ControlFlow::Continue(())
+                    }
+                })
+                .map_break(Ok)
+                .break_value()
+                .unwrap_or_else(|| bail!("Unable to validate and decode jwt"))
+        }
     }
 }
 
@@ -219,13 +289,16 @@ pub async fn new_client_auth_check(client_auth: ClientAuth) -> Result<Box<dyn Cl
             audience,
             issuer,
             jwks_url,
+            claims,
         } => Box::new(
-            ValidJWTCheck::new(audience, issuer, &jwks_url)
+            ValidJWTCheck::new(audience, issuer, &jwks_url, claims)
                 .await
                 .context("Failed to create a checker for valid JWTs")?,
         ),
-        ClientAuth::ProxyToken { url, cache_secs } => {
-            Box::new(ProxyTokenCheck::new(url, cache_secs))
-        }
+        ClientAuth::ProxyToken {
+            url,
+            cache_secs,
+            decode,
+        } => Box::new(ProxyTokenCheck::new(url, cache_secs, decode).await?),
     })
 }

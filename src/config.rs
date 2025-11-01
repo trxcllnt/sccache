@@ -1689,11 +1689,28 @@ pub mod scheduler {
             audience: String,
             issuer: String,
             jwks_url: String,
+            claims: Option<Vec<String>>,
         },
         #[serde(rename = "proxy_token")]
         ProxyToken {
             url: String,
             cache_secs: Option<u64>,
+            decode: Option<ProxyTokenDecodeConfig>,
+        },
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "type")]
+    #[serde(deny_unknown_fields)]
+    pub enum ProxyTokenDecodeConfig {
+        #[default]
+        None,
+        #[serde(rename = "jwt")]
+        JwtDecoder {
+            audience: String,
+            issuer: String,
+            jwks_url: String,
+            claims: Option<Vec<String>>,
         },
     }
 
