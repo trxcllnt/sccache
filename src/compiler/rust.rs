@@ -1236,7 +1236,7 @@ fn parse_arguments(arguments: &[OsString], cwd: &Path) -> CompilerArguments<Pars
         return CompilerArguments::NotCompilation;
     }
     // If it's not an rlib and not a staticlib then crate-type wasn't passed,
-    // so it will usually be inferred as a binary, though the `#![crate_type`
+    // so it will usually be inferred as a binary, though the `#![crate_type]`
     // annotation may dictate otherwise - either way, we don't know what to do.
     if let CrateTypes {
         rlib: false,
