@@ -80,11 +80,17 @@ linked-hash-map = "0.5"
 log = "0.4"
 memchr = "2"
 memmap2 = "0.9.4"
-metrics = { git = "https://github.com/trxcllnt/metrics-rs.git", branch = "sccache", default-features = false, optional = true }
-metrics-exporter-dogstatsd = { git = "https://github.com/trxcllnt/metrics-rs.git", branch = "sccache", default-features = false, optional = true }
-metrics-exporter-prometheus = { git = "https://github.com/trxcllnt/metrics-rs.git", branch = "sccache", default-features = false, optional = true, features = [
+metrics = { git = "https://github.com/metrics-rs/metrics.git", branch = "main", default-features = false, optional = true }
+metrics-exporter-dogstatsd = { git = "https://github.com/metrics-rs/metrics.git", branch = "main", default-features = false, optional = true }
+metrics-exporter-prometheus = { git = "https://github.com/metrics-rs/metrics.git", branch = "main", default-features = false, optional = true, features = [
   "http-listener",
-  "push-gateway",
+  "push-gateway-no-tls-provider",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+  "logging",
+  "std",
+  "tls12",
+  "ring",
 ] }
 
 mime = "0.3"

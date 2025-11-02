@@ -39,6 +39,9 @@ fn main() {
 ))]
 fn main() {
     dist::init_logging();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .unwrap();
 
     let incr_env_strs = ["CARGO_BUILD_INCREMENTAL", "CARGO_INCREMENTAL"];
     incr_env_strs
