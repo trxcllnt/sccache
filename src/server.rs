@@ -2410,12 +2410,23 @@ impl ServerInfo {
             advanced,
             self.use_preprocessor_cache_mode,
         );
-        println!(
-            "{:<name_width$} {}",
-            "Cache location",
-            self.cache_location,
-            name_width = name_width
-        );
+        for (i, cache_location) in self.cache_location.split("\n").enumerate() {
+            if i == 0 {
+                println!(
+                    "{:<name_width$} {}",
+                    "Cache location",
+                    cache_location,
+                    name_width = name_width
+                );
+            } else {
+                println!(
+                    "{:<name_width$} {}",
+                    "              ",
+                    cache_location,
+                    name_width = name_width
+                );
+            }
+        }
         if self.cache_location.starts_with("Local disk") {
             println!(
                 "{:<name_width$} {}",

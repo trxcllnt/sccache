@@ -137,7 +137,7 @@ impl Storage for TieredCache {
 
     /// Get the storage location.
     async fn location(&self) -> String {
-        self.0.location().await
+        [self.0.location().await, self.1.location().await].join("\n")
     }
 
     /// Get the current storage usage, if applicable.
