@@ -1066,9 +1066,9 @@ pub fn daemonize() -> Result<()> {
         discard_inherited_jobserver();
     }
 
-    static mut PREV_SIGSEGV: *mut libc::sigaction = 0 as *mut _;
-    static mut PREV_SIGBUS: *mut libc::sigaction = 0 as *mut _;
-    static mut PREV_SIGILL: *mut libc::sigaction = 0 as *mut _;
+    static mut PREV_SIGSEGV: *mut libc::sigaction = std::ptr::null_mut();
+    static mut PREV_SIGBUS: *mut libc::sigaction = std::ptr::null_mut();
+    static mut PREV_SIGILL: *mut libc::sigaction = std::ptr::null_mut();
 
     // We don't have a parent process any more once we've reached this point,
     // which means that no one's probably listening for our exit status.
