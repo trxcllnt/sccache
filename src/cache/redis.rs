@@ -26,7 +26,12 @@ pub struct RedisCache;
 
 impl RedisCache {
     /// Create a new `RedisCache` for the given URL.
-    pub fn build_from_url(url: &str, key_prefix: &str, ttl: u64) -> Result<Operator> {
+    pub fn build_from_url(
+        url: &str,
+        key_prefix: &str,
+        ttl: u64,
+        connection_pool_max_size: u32,
+    ) -> Result<Operator> {
         let parsed = Url::parse(url)?;
 
         let mut builder = Redis::default()
@@ -34,6 +39,10 @@ impl RedisCache {
             .username(parsed.username())
             .password(parsed.password().unwrap_or_default())
             .root(key_prefix);
+
+        if connection_pool_max_size > 0 {
+            builder = builder.connection_pool_max_size(connection_pool_max_size);
+        }
         if ttl != 0 {
             builder = builder.default_ttl(Duration::from_secs(ttl));
         }
@@ -61,10 +70,19 @@ impl RedisCache {
         db: u32,
         key_prefix: &str,
         ttl: u64,
+        connection_pool_max_size: u32,
     ) -> Result<Operator> {
         let builder = Redis::default().endpoint(endpoint);
 
-        Self::build_common(builder, username, password, db, key_prefix, ttl)
+        Self::build_common(
+            builder,
+            username,
+            password,
+            db,
+            key_prefix,
+            ttl,
+            connection_pool_max_size,
+        )
     }
 
     /// Create a new `RedisCache` for the given cluster.
@@ -75,10 +93,19 @@ impl RedisCache {
         db: u32,
         key_prefix: &str,
         ttl: u64,
+        connection_pool_max_size: u32,
     ) -> Result<Operator> {
         let builder = Redis::default().cluster_endpoints(endpoints);
 
-        Self::build_common(builder, username, password, db, key_prefix, ttl)
+        Self::build_common(
+            builder,
+            username,
+            password,
+            db,
+            key_prefix,
+            ttl,
+            connection_pool_max_size,
+        )
     }
 
     fn build_common(
@@ -88,12 +115,16 @@ impl RedisCache {
         db: u32,
         key_prefix: &str,
         ttl: u64,
+        connection_pool_max_size: u32,
     ) -> Result<Operator> {
         builder = builder
             .username(username.unwrap_or_default())
             .password(password.unwrap_or_default())
             .db(db.into())
             .root(key_prefix);
+        if connection_pool_max_size > 0 {
+            builder = builder.connection_pool_max_size(connection_pool_max_size);
+        }
         if ttl != 0 {
             builder = builder.default_ttl(Duration::from_secs(ttl));
         }

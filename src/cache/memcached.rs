@@ -31,6 +31,7 @@ impl MemcachedCache {
         password: Option<&str>,
         key_prefix: &str,
         expiration: u32,
+        connection_pool_max_size: u32,
     ) -> Result<Operator> {
         let mut builder = Memcached::default().endpoint(url);
 
@@ -39,6 +40,9 @@ impl MemcachedCache {
         }
         if let Some(password) = password {
             builder = builder.password(password);
+        }
+        if connection_pool_max_size > 0 {
+            builder = builder.connection_pool_max_size(connection_pool_max_size);
         }
 
         builder = builder

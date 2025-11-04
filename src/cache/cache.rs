@@ -1166,11 +1166,13 @@ impl From<(StorageKind, MemcachedCacheConfig)> for StorageBuilder {
             username,
             password,
             expiration,
+            connection_pool_max_size,
             key_prefix,
             preprocessor_cache_mode,
             ..
         } = config;
 
+        let connection_pool_max_size = connection_pool_max_size.unwrap_or(10);
         let key_prefix = storage_kind.key_prefix(key_prefix, preprocessor_cache_mode.as_ref());
 
         Self::default()
@@ -1183,11 +1185,12 @@ impl From<(StorageKind, MemcachedCacheConfig)> for StorageBuilder {
                     password.as_deref(),
                     &key_prefix,
                     expiration,
+                    connection_pool_max_size,
                 )
                 .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
                 .map_err(|err| anyhow!("create memcached cache failed: {err:?}"))
             })
-            .max_concurrent_requests(9)
+            .max_concurrent_requests(connection_pool_max_size as usize)
             .preprocessor_cache_mode(preprocessor_cache_mode)
     }
 }
@@ -1203,11 +1206,13 @@ impl From<(StorageKind, RedisCacheConfig)> for StorageBuilder {
             db,
             url,
             ttl,
+            connection_pool_max_size,
             key_prefix,
             preprocessor_cache_mode,
             ..
         } = config;
 
+        let connection_pool_max_size = connection_pool_max_size.unwrap_or(10);
         let key_prefix = storage_kind.key_prefix(key_prefix, preprocessor_cache_mode.as_ref());
 
         Self::default()
@@ -1222,6 +1227,7 @@ impl From<(StorageKind, RedisCacheConfig)> for StorageBuilder {
                         db,
                         &key_prefix,
                         ttl,
+                        connection_pool_max_size,
                     )
                 }
                 (None, Some(urls), None) => {
@@ -1233,6 +1239,7 @@ impl From<(StorageKind, RedisCacheConfig)> for StorageBuilder {
                         db,
                         &key_prefix,
                         ttl,
+                        connection_pool_max_size,
                     )
                 }
                 (None, None, Some(url)) => {
@@ -1241,14 +1248,14 @@ impl From<(StorageKind, RedisCacheConfig)> for StorageBuilder {
                         bail!("`username`, `password` and `db` has no effect when `url` is set. Please use `endpoint` or `cluster_endpoints` for new API accessing");
                     }
 
-                    RedisCache::build_from_url(url, &key_prefix, ttl)
+                    RedisCache::build_from_url(url, &key_prefix, ttl, connection_pool_max_size)
                 }
                 _ => bail!("Only one of `endpoint`, `cluster_endpoints`, `url` must be set"),
             }
             .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
             .map_err(|err| anyhow!("create redis cache failed: {err:?}"))
         })
-        .max_concurrent_requests(9)
+        .max_concurrent_requests(connection_pool_max_size as usize)
         .preprocessor_cache_mode(preprocessor_cache_mode)
     }
 }

@@ -361,7 +361,13 @@ pub struct MemcachedCacheConfig {
     #[serde(default)]
     pub key_prefix: String,
 
+    /// The maximum number of connections allowed.
+    ///
+    /// Default to 10
+    pub connection_pool_max_size: Option<u32>,
+
     pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
+
     #[serde(default = "MemcachedCacheConfig::default_order")]
     pub order: u64,
 }
@@ -417,6 +423,11 @@ pub struct RedisCacheConfig {
     /// Default to infinity (0)
     #[serde(default, alias = "expiration")]
     pub ttl: u64,
+
+    /// The maximum number of connections allowed.
+    ///
+    /// Default to 10
+    pub connection_pool_max_size: Option<u32>,
 
     #[serde(default)]
     pub key_prefix: String,
@@ -1142,6 +1153,11 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                 .transpose()?
                 .unwrap_or(DEFAULT_REDIS_CACHE_TTL);
 
+            let connection_pool_max_size =
+                number_from_env_var(&envvar("REDIS_CONNECTION_POOL_SIZE"))
+                    .transpose()?
+                    .unwrap_or(10);
+
             let key_prefix = key_prefix_from_env_var(&envvar("REDIS_KEY_PREFIX"));
 
             Some(RedisCacheConfig {
@@ -1153,6 +1169,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                 db,
                 ttl,
                 key_prefix,
+                connection_pool_max_size: Some(connection_pool_max_size),
                 preprocessor_cache_mode: None,
                 order: number_from_env_var(&envvar("REDIS_CACHE_ORDER"))
                     .unwrap_or(Ok(RedisCacheConfig::default_order()))
@@ -1182,6 +1199,11 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             .transpose()?
             .unwrap_or(DEFAULT_MEMCACHED_CACHE_EXPIRATION);
 
+        let connection_pool_max_size =
+            number_from_env_var(&envvar("MEMCACHED_CONNECTION_POOL_SIZE"))
+                .transpose()?
+                .unwrap_or(10);
+
         let key_prefix = key_prefix_from_env_var(&envvar("MEMCACHED_KEY_PREFIX"));
 
         Some(MemcachedCacheConfig {
@@ -1190,6 +1212,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             password,
             expiration,
             key_prefix,
+            connection_pool_max_size: Some(connection_pool_max_size),
             preprocessor_cache_mode: None,
             order: number_from_env_var(&envvar("MEMCACHED_CACHE_ORDER"))
                 .unwrap_or(Ok(MemcachedCacheConfig::default_order()))
