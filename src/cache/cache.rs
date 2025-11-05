@@ -1190,7 +1190,7 @@ impl From<(StorageKind, MemcachedCacheConfig)> for StorageBuilder {
                 .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
                 .map_err(|err| anyhow!("create memcached cache failed: {err:?}"))
             })
-            .max_concurrent_requests(connection_pool_max_size as usize)
+            .max_concurrent_requests(connection_pool_max_size.saturating_sub(1).max(1) as usize)
             .preprocessor_cache_mode(preprocessor_cache_mode)
     }
 }
@@ -1198,9 +1198,12 @@ impl From<(StorageKind, MemcachedCacheConfig)> for StorageBuilder {
 #[cfg(feature = "redis")]
 impl From<(StorageKind, RedisCacheConfig)> for StorageBuilder {
     fn from((storage_kind, config): (StorageKind, RedisCacheConfig)) -> Self {
+        use crate::cache::simplex::SimplexCache;
+
         let RedisCacheConfig {
             endpoint,
             cluster_endpoints,
+            reader_endpoints,
             username,
             password,
             db,
@@ -1213,49 +1216,78 @@ impl From<(StorageKind, RedisCacheConfig)> for StorageBuilder {
         } = config;
 
         let connection_pool_max_size = connection_pool_max_size.unwrap_or(10);
+        let connection_limit = connection_pool_max_size.saturating_sub(1).max(1) as usize;
         let key_prefix = storage_kind.key_prefix(key_prefix, preprocessor_cache_mode.as_ref());
 
         Self::default()
             .create_storage(move || {
-            match (&endpoint, &cluster_endpoints, &url) {
-                (Some(url), None, None) => {
-                    debug!("Init redis single-node {storage_kind} cache with url {url}");
-                    RedisCache::build_single(
-                        url,
-                        username.as_deref(),
-                        password.as_deref(),
-                        db,
-                        &key_prefix,
-                        ttl,
-                        connection_pool_max_size,
-                    )
-                }
-                (None, Some(urls), None) => {
-                    debug!("Init redis cluster {storage_kind} cache with urls {urls}");
-                    RedisCache::build_cluster(
-                        urls,
-                        username.as_deref(),
-                        password.as_deref(),
-                        db,
-                        &key_prefix,
-                        ttl,
-                        connection_pool_max_size,
-                    )
-                }
-                (None, None, Some(url)) => {
-                    warn!("Init redis single-node {storage_kind} cache from deprecated API with url {url}");
-                    if username.is_some() || password.is_some() || db != DEFAULT_REDIS_DB {
-                        bail!("`username`, `password` and `db` has no effect when `url` is set. Please use `endpoint` or `cluster_endpoints` for new API accessing");
+                match (&endpoint, &cluster_endpoints, &url) {
+                    (Some(url), None, None) => {
+                        debug!("Init redis single-node {storage_kind} cache with url {url}");
+                        RedisCache::build_single(
+                            url,
+                            username.as_deref(),
+                            password.as_deref(),
+                            db,
+                            &key_prefix,
+                            ttl,
+                            connection_pool_max_size,
+                        )
                     }
+                    (None, Some(urls), None) => {
+                        debug!("Init redis cluster {storage_kind} cache with urls {urls}");
+                        RedisCache::build_cluster(
+                            urls,
+                            username.as_deref(),
+                            password.as_deref(),
+                            db,
+                            &key_prefix,
+                            ttl,
+                            connection_pool_max_size,
+                        )
+                    }
+                    (None, None, Some(url)) => {
+                        warn!("Init redis single-node {storage_kind} cache from deprecated API with url {url}");
+                        if username.is_some() || password.is_some() || db != DEFAULT_REDIS_DB {
+                            bail!("`username`, `password` and `db` has no effect when `url` is set. Please use `endpoint` or `cluster_endpoints` for new API accessing");
+                        }
 
-                    RedisCache::build_from_url(url, &key_prefix, ttl, connection_pool_max_size)
+                        RedisCache::build_from_url(url, &key_prefix, ttl, connection_pool_max_size)
+                    }
+                    _ => bail!("Only one of `endpoint`, `cluster_endpoints`, `url` must be set"),
                 }
-                _ => bail!("Only one of `endpoint`, `cluster_endpoints`, `url` must be set"),
-            }
-            .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
-            .map_err(|err| anyhow!("create redis cache failed: {err:?}"))
+                .map(|storage| QueuedRequests::create(Arc::new(storage), connection_limit))
+                .and_then(|storage| {
+                    if let Some(reader_endpoints) = &reader_endpoints {
+                        debug!("Init redis cluster {storage_kind} cache with reader endpoints {reader_endpoints}");
+                        let reader = if reader_endpoints.contains(",") {
+                            RedisCache::build_cluster(
+                                reader_endpoints,
+                                username.as_deref(),
+                                password.as_deref(),
+                                db,
+                                &key_prefix,
+                                ttl,
+                                connection_pool_max_size,
+                            )?
+                        } else {
+                            RedisCache::build_single(
+                                reader_endpoints,
+                                username.as_deref(),
+                                password.as_deref(),
+                                db,
+                                &key_prefix,
+                                ttl,
+                                connection_pool_max_size,
+                            )?
+                        };
+                        Ok(SimplexCache::create(QueuedRequests::create(Arc::new(reader), connection_limit), storage))
+                    } else {
+                        Ok(storage)
+                    }
+                })
+                .map_err(|err| anyhow!("create redis cache failed: {err:?}"))
         })
-        .max_concurrent_requests(connection_pool_max_size as usize)
         .preprocessor_cache_mode(preprocessor_cache_mode)
     }
 }

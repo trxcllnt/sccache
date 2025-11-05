@@ -2838,7 +2838,7 @@ checksum = "3fdb12b2476b595f9358c5161aa467c2438859caa136dec86c26fdd2efe17b92"
 [[package]]
 name = "opendal"
 version = "0.54.1"
-source = "git+https://github.com/trxcllnt/opendal.git?branch=fix%2Fconnection-pool-size#2ef9a0186bc52f134529cf0a80900655de993ec0"
+source = "git+https://github.com/trxcllnt/opendal.git?branch=fix%2Fconnection-pool-size#92f1928968db01ac7ae6420d78c716c4cfe6750c"
 dependencies = [
  "anyhow",
  "backon",

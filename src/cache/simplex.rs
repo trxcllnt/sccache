@@ -1,0 +1,95 @@
+// Copyright 2016 Mozilla Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::{
+    cache::{AsyncReadSeek, Cache, CacheMode, PreprocessorCacheModeConfig, ReadSeek, Storage},
+    errors::*,
+};
+
+use async_trait::async_trait;
+use std::{sync::Arc, time::Duration};
+
+pub struct SimplexCache(
+    // reader cache
+    pub Arc<dyn Storage>,
+    // writer cache
+    pub Arc<dyn Storage>,
+);
+
+impl SimplexCache {
+    pub fn create(reader: Arc<dyn Storage>, writer: Arc<dyn Storage>) -> Arc<dyn Storage> {
+        Arc::new(Self(reader, writer)) as Arc<dyn Storage>
+    }
+}
+
+#[async_trait]
+impl Storage for SimplexCache {
+    async fn get(&self, key: &str) -> Result<Cache<Box<dyn ReadSeek>>> {
+        self.0.get(key).await
+    }
+
+    async fn get_async_reader(&self, key: &str) -> Result<Cache<Box<dyn AsyncReadSeek + Unpin>>> {
+        self.0.get_async_reader(key).await
+    }
+
+    async fn del(&self, key: &str) -> Result<()> {
+        self.1.del(key).await
+    }
+
+    async fn has(&self, key: &str) -> bool {
+        self.0.has(key).await
+    }
+
+    async fn put(&self, key: &str, entry: &mut dyn ReadSeek) -> Result<Duration> {
+        self.1.put(key, entry).await
+    }
+
+    async fn put_async_reader(
+        &self,
+        key: &str,
+        size: u64,
+        mut source: &mut (dyn AsyncReadSeek + Unpin),
+    ) -> Result<()> {
+        self.1.put_async_reader(key, size, &mut source).await
+    }
+
+    async fn size(&self, key: &str) -> Result<u64> {
+        self.0.size(key).await
+    }
+
+    /// Check the cache capability.
+    async fn check(&self) -> Result<CacheMode> {
+        self.1.check().await
+    }
+
+    /// Get the storage location.
+    async fn location(&self) -> String {
+        [self.0.location().await, self.1.location().await].join("\n")
+    }
+
+    /// Get the current storage usage, if applicable.
+    async fn current_size(&self) -> Result<Option<u64>> {
+        self.0.current_size().await
+    }
+
+    /// Get the maximum storage size, if applicable.
+    async fn max_size(&self) -> Result<Option<u64>> {
+        self.0.max_size().await
+    }
+
+    /// Return the config for preprocessor cache mode if applicable
+    fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
+        self.1.preprocessor_cache_mode_config()
+    }
+}

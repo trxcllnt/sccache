@@ -402,6 +402,9 @@ pub struct RedisCacheConfig {
     /// Mutually exclusive with `endpoint`.
     pub cluster_endpoints: Option<String>,
 
+    /// The redis reader endpoint(s).
+    pub reader_endpoints: Option<String>,
+
     /// Username to authenticate with.
     pub username: Option<String>,
 
@@ -1138,9 +1141,10 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         env::var(envvar("REDIS")).ok(),
         env::var(envvar("REDIS_ENDPOINT")).ok(),
         env::var(envvar("REDIS_CLUSTER_ENDPOINTS")).ok(),
+        env::var(envvar("REDIS_READER_ENDPOINTS")).ok(),
     ) {
-        (None, None, None) => None,
-        (url, endpoint, cluster_endpoints) => {
+        (None, None, None, None) => None,
+        (url, endpoint, cluster_endpoints, reader_endpoints) => {
             let db = number_from_env_var(&envvar("REDIS_DB"))
                 .transpose()?
                 .unwrap_or(DEFAULT_REDIS_DB);
@@ -1164,6 +1168,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                 url,
                 endpoint,
                 cluster_endpoints,
+                reader_endpoints,
                 username,
                 password,
                 db,
