@@ -277,7 +277,7 @@ mod toolchain_imp {
             self,
             writer: W,
         ) -> Result<String> {
-            use crate::util::Digest;
+            use crate::util::{Digest, num_cpus};
 
             use gzp::{
                 deflate::Gzip,
@@ -290,6 +290,7 @@ mod toolchain_imp {
             let this = tokio::task::spawn_blocking(move || {
                 let compressor = ParCompressBuilder::<Gzip>::new()
                     .compression_level(Compression::default())
+                    .num_threads(num_cpus())?
                     .from_writer(writer);
 
                 let mut builder = tar::Builder::new(compressor);
@@ -310,7 +311,7 @@ mod toolchain_imp {
                     builder.append_link(&mut header, tar_safe_path(from_path), to_path)?;
                 }
 
-                builder.finish().map(|_| this)
+                builder.finish().map(|_| this).map_err(anyhow::Error::new)
             })
             .await??;
 

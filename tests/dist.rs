@@ -46,6 +46,7 @@ async fn cc_compile(client: &SccacheClient, tmpdir: &Path) -> Result<()> {
         .arg("-o")
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
+        .env("SCCACHE_MAX_THREADS", "4")
         .env("TOKIO_WORKER_THREADS", "2")
         .kill_on_drop(true)
         .output()
@@ -76,6 +77,7 @@ async fn nvcc_compile(
         .arg("-o")
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
+        .env("SCCACHE_MAX_THREADS", "4")
         .env("TOKIO_WORKER_THREADS", "2")
         .kill_on_drop(true)
         .output()
@@ -124,6 +126,7 @@ async fn stdpar_compile(client: &SccacheClient, compiler: &Compiler, tmpdir: &Pa
         .arg("-o")
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
+        .env("SCCACHE_MAX_THREADS", "4")
         .env("TOKIO_WORKER_THREADS", "2")
         .kill_on_drop(true)
         .output()
@@ -169,6 +172,7 @@ async fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Result<Output> {
         .env("RUSTC_WRAPPER", &client.path)
         .env("CARGO_TARGET_DIR", "target")
         .env("RUST_BACKTRACE", "1")
+        .env("SCCACHE_MAX_THREADS", "4")
         .env("TOKIO_WORKER_THREADS", "2")
         .kill_on_drop(true)
         .output()
@@ -185,7 +189,7 @@ pub fn dist_test_sccache_client_cfg(
     sccache_cfg.cache.disk.as_mut().unwrap().size = 0;
     sccache_cfg.dist.scheduler_url = Some(scheduler_url);
     sccache_cfg.dist.net.connect_timeout = 10;
-    sccache_cfg.dist.net.request_timeout = 90;
+    sccache_cfg.dist.net.request_timeout = 180;
     sccache_cfg
 }
 

@@ -1276,7 +1276,13 @@ pub fn ascii_unescape_default(s: &[u8]) -> std::io::Result<Vec<u8>> {
 }
 
 pub fn num_cpus() -> usize {
-    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+    let max_cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    std::env::var("SCCACHE_MAX_THREADS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(max_cpus)
+        .min(max_cpus)
+        .max(1)
 }
 
 #[macro_export]

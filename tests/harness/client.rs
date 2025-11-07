@@ -72,6 +72,7 @@ impl SccacheClient {
 
         let mut envvars = vec![
             ("SCCACHE_SERVER_PORT".into(), port.to_string().into()),
+            ("SCCACHE_MAX_THREADS".into(), "4".into()),
             ("TOKIO_WORKER_THREADS".into(), "2".into()),
         ];
 
