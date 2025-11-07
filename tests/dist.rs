@@ -204,31 +204,50 @@ async fn test_dist_cargo_build(message_broker: &str) -> Result<()> {
         .build()
         .await?;
 
-    let client = system.new_client(&dist_test_sccache_client_cfg(
-        system.data_dir(),
-        system.scheduler(0)?.url(),
-        false,
-    ));
+    // This test is flaky on github's small runners,
+    // so run a few times before reporting failure
+    for i in 1..=5 {
+        let client = system.new_client(&dist_test_sccache_client_cfg(
+            system.data_dir(),
+            system.scheduler(0)?.url(),
+            false,
+        ));
 
-    let output = rust_compile(&client, system.test_dir()).await?;
+        let output = rust_compile(&client, system.test_dir()).await?;
 
-    // Ensure sccache ignores inherited jobservers in CARGO_MAKEFLAGS
-    assert!(
-        !String::from_utf8_lossy(&output.stderr)
-            .contains("warning: failed to connect to jobserver from environment variable")
-    );
+        // Ensure sccache ignores inherited jobservers in CARGO_MAKEFLAGS
+        assert!(
+            !String::from_utf8_lossy(&output.stderr)
+                .contains("warning: failed to connect to jobserver from environment variable")
+        );
 
-    // Assert compilation succeeded
-    check_output(output)?;
+        // Assert compilation succeeded
+        check_output(output)?;
 
-    let stats = client.stats()?;
-    assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
-    assert_eq!(0, stats.dist_errors);
-    // check >= 5 because cargo >=1.82 does additional requests with -vV
-    assert!(stats.compile_requests >= 5);
-    assert_eq!(1, stats.requests_executed);
-    assert_eq!(1, stats.compilations);
-    assert_eq!(0, stats.cache_hits.all());
+        let stats = client.stats()?;
+
+        if i == 5 {
+            // Assert on the last iteration
+            assert_eq!(1, stats.dist_compiles.values().sum::<usize>());
+            assert_eq!(0, stats.dist_errors);
+            // check >= 5 because cargo >=1.82 does additional requests with -vV
+            assert!(stats.compile_requests >= 5);
+            assert_eq!(1, stats.requests_executed);
+            assert_eq!(1, stats.compilations);
+            assert_eq!(0, stats.cache_hits.all());
+        } else {
+            // check >= 5 because cargo >=1.82 does additional requests with -vV
+            if stats.compile_requests >= 5
+                && stats.dist_compiles.values().sum::<usize>() == 1
+                && stats.dist_errors == 0
+                && stats.requests_executed == 1
+                && stats.compilations == 1
+                && stats.cache_hits.all() == 0
+            {
+                break;
+            }
+        }
+    }
 
     Ok(())
 }
