@@ -18,9 +18,7 @@ use notify_debouncer_full::{
 };
 use std::{ffi::OsString, future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
-use crate::cache::{
-    AsyncReadSeek, Cache, CacheMode, PreprocessorCacheModeConfig, ReadSeek, Storage,
-};
+use crate::cache::{BufReadSeek, Cache, CacheMode, PreprocessorCacheModeConfig, Storage};
 use crate::errors::*;
 
 pub struct WatchStorage {
@@ -180,12 +178,8 @@ impl WatchStorage {
 
 #[async_trait]
 impl Storage for WatchStorage {
-    async fn get(&self, key: &str) -> Result<Cache<Box<dyn ReadSeek>>> {
+    async fn get(&self, key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
         self.inner().await.get(key).await
-    }
-
-    async fn get_async_reader(&self, key: &str) -> Result<Cache<Box<dyn AsyncReadSeek + Unpin>>> {
-        self.inner().await.get_async_reader(key).await
     }
 
     async fn del(&self, key: &str) -> Result<()> {
@@ -196,17 +190,8 @@ impl Storage for WatchStorage {
         self.inner().await.has(key).await
     }
 
-    async fn put(&self, key: &str, entry: &mut dyn ReadSeek) -> Result<Duration> {
+    async fn put(&self, key: &str, entry: &mut dyn BufReadSeek) -> Result<Duration> {
         self.inner().await.put(key, entry).await
-    }
-
-    async fn put_async_reader(
-        &self,
-        key: &str,
-        size: u64,
-        source: &mut (dyn AsyncReadSeek + Unpin),
-    ) -> Result<()> {
-        self.inner().await.put_async_reader(key, size, source).await
     }
 
     async fn size(&self, key: &str) -> Result<u64> {

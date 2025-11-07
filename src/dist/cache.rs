@@ -488,8 +488,8 @@ mod server {
     use async_compression::futures::bufread::GzipDecoder;
     use async_trait::async_trait;
 
-    use futures::{StreamExt, io::BufReader};
-    use tokio_retry2::RetryError;
+    use futures::io::BufReader;
+    use tokio_util::compat::TokioAsyncReadCompatExt;
 
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
@@ -500,12 +500,10 @@ mod server {
     use crate::dist::metrics::{Metrics, TimeRecorder};
     use crate::dist::{Toolchain, ToolchainService};
     use crate::errors::*;
-    use crate::util::retry_with_jitter;
 
     const TC_LOAD: &str = "sccache::server::toolchain::load_time";
     const TC_LOAD_INFLATED: &str = "sccache::server::toolchain::load_inflated_time";
     const TC_LOAD_DEFLATED: &str = "sccache::server::toolchain::load_deflated_time";
-    const TC_LOAD_DEFLATED_SIZE: &str = "sccache::server::toolchain::load_deflated_size_time";
     const TC_LOAD_INFLATED_SIZE: &str = "sccache::server::toolchain::load_inflated_size_time";
     const TC_UNPACK_INFLATED: &str = "sccache::server::toolchain::unpack_inflated_time";
 
@@ -532,11 +530,6 @@ mod server {
                 "The time to load a deflated toolchain"
             );
             metrics::describe_histogram!(
-                TC_LOAD_DEFLATED_SIZE,
-                metrics::Unit::Seconds,
-                "The time to calculate the deflated size of a toolchain"
-            );
-            metrics::describe_histogram!(
                 TC_LOAD_INFLATED_SIZE,
                 metrics::Unit::Seconds,
                 "The time to calculate the inflated size of a toolchain"
@@ -559,14 +552,6 @@ mod server {
 
         pub fn load_deflated_timer(&self) -> TimeRecorder {
             self.metrics.timer(TC_LOAD_DEFLATED, &[])
-        }
-
-        pub fn load_deflated_size_timer(&self) -> TimeRecorder {
-            self.metrics.timer(TC_LOAD_DEFLATED_SIZE, &[])
-        }
-
-        pub fn load_inflated_size_timer(&self) -> TimeRecorder {
-            self.metrics.timer(TC_LOAD_INFLATED_SIZE, &[])
         }
 
         pub fn unpack_inflated_timer(&self) -> TimeRecorder {
@@ -622,20 +607,10 @@ mod server {
         async fn load(&self, tc: &Toolchain) -> Result<PathBuf> {
             // Record toolchain load time after retrying
             let _timer = self.metrics.load_timer();
-            retry_with_jitter(3, || async {
-                // Load and cache the deflated toolchain.
-                // Inflate, unpack, and cache it in a directory.
-                // Return the path to the unpacked toolchain dir.
-                self.load_inflated_toolchain(tc).await.map_err(|err| {
-                    if is_special_tokio_shutdown_io_error(&err) {
-                        RetryError::permanent(err)
-                    } else {
-                        RetryError::transient(err)
-                    }
-                })
-            })
-            .await
-            .map_err(|err| {
+            // Load and cache the deflated toolchain.
+            // Inflate, unpack, and cache it in a directory.
+            // Return the path to the unpacked toolchain dir.
+            self.load_inflated_toolchain(tc).await.map_err(|err| {
                 if !is_special_tokio_shutdown_io_error(&err) {
                     tracing::error!(
                         "[ServerToolchains({})]: Error loading toolchain: {err:?}",
@@ -654,89 +629,53 @@ mod server {
                 Ok(inflated_path)
             } else {
                 // Load the compressed toolchain
-                let deflated_path = self.load_deflated_toolchain(tc).await?;
-                // Compute the toolchain's inflated size
-                let inflated_size = self.load_inflated_toolchain_size(&deflated_path).await?;
+                let (deflated_path, deflated_size) = self.load_deflated_toolchain(tc).await?;
                 // Inflate and unpack the toolchain archive
                 let inflated_path = self
-                    .unpack_inflated_toolchain(&deflated_path, &tc.archive_id, inflated_size)
+                    .unpack_inflated_toolchain(&deflated_path, deflated_size, &tc.archive_id)
                     .await?;
                 Ok(inflated_path)
             }
         }
 
-        async fn load_deflated_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
+        async fn load_deflated_toolchain(&self, tc: &Toolchain) -> Result<(PathBuf, u64)> {
             // Record toolchain load_deflated time
             let _timer = self.metrics.load_deflated_timer();
             let deflated_key = format!("{}.tgz", tc.archive_id);
             if !self.cache.has(&deflated_key).await {
-                let deflated_size = self.load_deflated_toolchain_size(tc).await?;
-                let mut reader = match self.store.get_async_reader(&tc.archive_id).await? {
+                let mut reader = match self.store.get(&tc.archive_id).await? {
                     Cache::Hit(reader) => reader,
                     Cache::Miss => return Err(anyhow!("Missing toolchain")),
                 };
-                self.cache
-                    .put_async_reader(&deflated_key, deflated_size, &mut reader)
-                    .await?;
+                self.cache.put(&deflated_key, &mut reader).await?;
             }
-            self.cache.entry(&deflated_key).await.map(|(path, _)| path)
-        }
-
-        async fn load_deflated_toolchain_size(&self, tc: &Toolchain) -> Result<u64> {
-            // Record toolchain load_deflated_size time
-            let _timer = self.metrics.load_deflated_size_timer();
-            self.store.size(&tc.archive_id).await
-        }
-
-        async fn load_inflated_toolchain_size(&self, deflated_path: &Path) -> Result<u64> {
-            // Record toolchain load_inflated_size time
-            let _timer = self.metrics.load_inflated_size_timer();
-            let deflated_file = tokio::fs::File::open(&deflated_path)
-                .await?
-                .into_std()
-                .await;
-            let buffer_reader = BufReader::new(futures::io::AllowStdIo::new(deflated_file));
-            let inflated_size = async_tar::Archive::new(GzipDecoder::new(buffer_reader))
-                .entries()?
-                .fold(0, |inflated_size, entry| async move {
-                    if let Ok(inflated_entry_size) = entry.and_then(|e| e.header().size()) {
-                        inflated_size + inflated_entry_size
-                    } else {
-                        inflated_size
-                    }
-                })
-                .await;
-            Ok(inflated_size)
+            self.cache.entry(&deflated_key).await
         }
 
         async fn unpack_inflated_toolchain(
             &self,
             deflated_path: &Path,
+            deflated_size: u64,
             inflated_key: &str,
-            inflated_size: u64,
         ) -> Result<PathBuf> {
             // Record toolchain unpack_inflated time
             let _timer = self.metrics.unpack_inflated_timer();
             self.cache
-                .insert_with(inflated_key, inflated_size, |inflated_path: &Path| {
+                .insert_with(inflated_key, deflated_size, |inflated_path: &Path| {
                     let deflated_path = deflated_path.to_owned();
                     let inflated_path = inflated_path.to_owned();
                     async move {
                         // Ensure the inflated dir exists first
                         tokio::fs::create_dir_all(&inflated_path).await?;
-                        let deflated_file = tokio::fs::File::open(&deflated_path)
-                            .await?
-                            .into_std()
-                            .await;
-                        let buffer_reader =
-                            BufReader::new(futures::io::AllowStdIo::new(deflated_file));
-                        let targz_archive =
-                            async_tar::Archive::new(GzipDecoder::new(buffer_reader));
+                        let deflated_file = tokio::fs::File::open(&deflated_path).await?;
+                        let targz_archive = async_tar::Archive::new(GzipDecoder::new(
+                            BufReader::new(deflated_file.compat()),
+                        ));
                         // Unpack the tgz into the inflated dir
                         targz_archive
                             .unpack(&inflated_path)
                             .await
-                            .map(|_| inflated_size)
+                            .map(|_| deflated_size)
                     }
                 })
                 .await

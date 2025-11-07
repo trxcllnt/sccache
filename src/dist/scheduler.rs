@@ -16,8 +16,7 @@ use async_trait::async_trait;
 
 use celery::{error::CeleryError, task::AsyncResult};
 
-use futures::{AsyncReadExt, lock::Mutex};
-use tokio_retry2::RetryError;
+use futures::lock::Mutex;
 
 use crate::{
     cache::{Cache, Storage},
@@ -39,8 +38,6 @@ use std::{
 };
 
 use crate::dist::{job_inputs_key, job_result_key};
-
-use crate::util::retry_with_jitter;
 
 const HAS_JOB_INPUTS_TIME: &str = "sccache::scheduler::has_job_inputs_time";
 const HAS_JOB_RESULT_TIME: &str = "sccache::scheduler::has_job_result_time";
@@ -369,7 +366,7 @@ impl Scheduler {
         // Retrieve the result
         let mut reader = self
             .jobs_storage
-            .get_async_reader(&job_result_key(job_id))
+            .get(&job_result_key(job_id))
             .await
             .and_then(|res| match res {
                 Cache::Hit(reader) => Ok(reader),
@@ -381,7 +378,7 @@ impl Scheduler {
             })?;
 
         let mut result = vec![];
-        reader.read_to_end(&mut result).await.map_err(|err| {
+        reader.read_to_end(&mut result).map_err(|err| {
             tracing::warn!("[get_job_result({job_id})]: Error reading stream: {err:?}");
             err
         })?;
@@ -505,22 +502,18 @@ impl SchedulerService for Scheduler {
         // Record put_toolchain time
         let _timer = self.metrics.put_toolchain_timer();
         // Upload toolchain to toolchains storage (S3, GCS, etc.)
-        retry_with_jitter(3, || async {
-            self.toolchains
-                .put(
-                    &toolchain.archive_id,
-                    &mut std::io::Cursor::new(&toolchain_archive[..]),
-                )
-                .await
-                .map_err(RetryError::transient)
-                .map(|_| SubmitToolchainResult::Success)
-        })
-        .await
-        .context("Failed to put toolchain")
-        .map_err(|err| {
-            tracing::error!("[put_toolchain({})]: {err:?}", toolchain.archive_id);
-            err
-        })
+        self.toolchains
+            .put(
+                &toolchain.archive_id,
+                &mut std::io::Cursor::new(&toolchain_archive[..]),
+            )
+            .await
+            .map(|_| SubmitToolchainResult::Success)
+            .context("Failed to put toolchain")
+            .map_err(|err| {
+                tracing::error!("[put_toolchain({})]: {err:?}", toolchain.archive_id);
+                err
+            })
     }
 
     async fn del_toolchain(&self, toolchain: &Toolchain) -> Result<()> {
@@ -542,13 +535,7 @@ impl SchedulerService for Scheduler {
         let (has_toolchain, has_inputs) = futures::future::join(
             async { Ok::<bool, anyhow::Error>(self.has_toolchain(&toolchain).await) },
             async {
-                retry_with_jitter(3, || async {
-                    self.put_job_inputs(&job_id, &inputs)
-                        .await
-                        .map_err(RetryError::transient)
-                })
-                .await
-                .map_err(|err| {
+                self.put_job_inputs(&job_id, &inputs).await.map_err(|err| {
                     // Record put_job_result errors after retrying
                     self.metrics.inc_put_job_inputs_error_count();
                     tracing::warn!("[new_job({job_id})]: Error storing job result: {err:?}");

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::{
-    cache::{AsyncReadSeek, Cache, CacheMode, PreprocessorCacheModeConfig, ReadSeek, Storage},
+    cache::{BufReadSeek, Cache, CacheMode, PreprocessorCacheModeConfig, Storage},
     errors::*,
 };
 
@@ -35,12 +35,8 @@ impl SimplexCache {
 
 #[async_trait]
 impl Storage for SimplexCache {
-    async fn get(&self, key: &str) -> Result<Cache<Box<dyn ReadSeek>>> {
+    async fn get(&self, key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
         self.0.get(key).await
-    }
-
-    async fn get_async_reader(&self, key: &str) -> Result<Cache<Box<dyn AsyncReadSeek + Unpin>>> {
-        self.0.get_async_reader(key).await
     }
 
     async fn del(&self, key: &str) -> Result<()> {
@@ -51,17 +47,8 @@ impl Storage for SimplexCache {
         self.0.has(key).await
     }
 
-    async fn put(&self, key: &str, entry: &mut dyn ReadSeek) -> Result<Duration> {
+    async fn put(&self, key: &str, entry: &mut dyn BufReadSeek) -> Result<Duration> {
         self.1.put(key, entry).await
-    }
-
-    async fn put_async_reader(
-        &self,
-        key: &str,
-        size: u64,
-        mut source: &mut (dyn AsyncReadSeek + Unpin),
-    ) -> Result<()> {
-        self.1.put_async_reader(key, size, &mut source).await
     }
 
     async fn size(&self, key: &str) -> Result<u64> {

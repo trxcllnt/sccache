@@ -24,7 +24,7 @@ use crate::{
 
 use async_trait::async_trait;
 use fs_err as fs;
-use futures::{AsyncReadExt, FutureExt, StreamExt, TryFutureExt};
+use futures::{FutureExt, StreamExt, TryFutureExt};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -64,7 +64,7 @@ use crate::cache::webdav::WebdavCache;
     feature = "webdav",
     feature = "oss"
 ))]
-use {crate::util::retry_with_jitter, futures::AsyncWriteExt, tokio_retry2::RetryError};
+use {crate::util::retry_with_jitter, tokio_retry2::RetryError};
 
 #[cfg(unix)]
 fn get_file_mode(file: &fs::File) -> Result<Option<u32>> {
@@ -135,15 +135,13 @@ pub enum CacheMode {
 }
 
 /// Trait objects can't be bounded by more than one non-builtin trait.
-pub trait ReadSeek: Read + Seek + Send {}
-pub trait AsyncReadSeek: futures::AsyncRead + futures::AsyncSeek + Send {}
+pub trait BufReadSeek: std::io::BufRead + Seek + Send {}
 
-impl<T: Read + Seek + Send> ReadSeek for T {}
-impl<T: futures::AsyncRead + futures::AsyncSeek + Send> AsyncReadSeek for T {}
+impl<T: std::io::BufRead + Seek + Send> BufReadSeek for T {}
 
 /// Data stored in the compiler cache.
 pub struct CacheRead {
-    zip: ZipArchive<Box<dyn ReadSeek>>,
+    zip: ZipArchive<Box<dyn BufReadSeek>>,
 }
 
 /// Represents a failure to decompress stored object data.
@@ -188,9 +186,9 @@ impl CacheRead {
     /// Create a cache entry from `reader`.
     pub fn from<R>(reader: R) -> Result<CacheRead>
     where
-        R: ReadSeek + 'static,
+        R: BufReadSeek + 'static,
     {
-        let z = ZipArchive::new(Box::new(reader) as Box<dyn ReadSeek>)
+        let z = ZipArchive::new(Box::new(reader) as Box<dyn BufReadSeek>)
             .context("Failed to parse cache entry")?;
         Ok(CacheRead { zip: z })
     }
@@ -236,7 +234,7 @@ impl CacheRead {
         bytes
     }
 
-    pub fn into_inner(self) -> Box<dyn ReadSeek> {
+    pub fn into_inner(self) -> Box<dyn BufReadSeek> {
         self.zip.into_inner()
     }
 
@@ -424,9 +422,7 @@ pub trait Storage: Send + Sync {
     /// it should return a `Cache::Miss`.
     /// If the entry is successfully found in the cache, it should
     /// return a `Cache::Hit`.
-    async fn get(&self, key: &str) -> Result<Cache<Box<dyn ReadSeek>>>;
-
-    async fn get_async_reader(&self, key: &str) -> Result<Cache<Box<dyn AsyncReadSeek + Unpin>>>;
+    async fn get(&self, key: &str) -> Result<Cache<Box<dyn BufReadSeek>>>;
 
     /// Delete the cache entry for `key`.
     async fn del(&self, key: &str) -> Result<()>;
@@ -441,14 +437,7 @@ pub trait Storage: Send + Sync {
     ///
     /// Returns a `Future` that will provide the result or error when the put is
     /// finished.
-    async fn put(&self, key: &str, entry: &mut dyn ReadSeek) -> Result<Duration>;
-
-    async fn put_async_reader(
-        &self,
-        key: &str,
-        size: u64,
-        source: &mut (dyn AsyncReadSeek + Unpin),
-    ) -> Result<()>;
+    async fn put(&self, key: &str, entry: &mut dyn BufReadSeek) -> Result<Duration>;
 
     async fn size(&self, key: &str) -> Result<u64>;
 
@@ -597,43 +586,15 @@ mod operator {
         .await
     }
 
-    pub async fn async_reader_with_retry(
-        storage: &opendal::Operator,
-        key: &str,
-    ) -> std::result::Result<opendal::Reader, opendal::Error> {
-        // TODO: Allow configuring the number of retries
-        retry_with_jitter(usize::MAX, || async {
-            storage
-                .reader(&normalize_key(key))
-                .await
-                .map_err(|e| to_retry_err("lookup", e))
-        })
-        .await
-    }
-
     pub async fn write_with_retry(
         storage: &opendal::Operator,
         key: &str,
-        buf: bytes::Bytes,
+        data: bytes::Bytes,
     ) -> std::result::Result<opendal::Metadata, opendal::Error> {
         // TODO: Allow configuring the number of retries
         retry_with_jitter(usize::MAX, || async {
             storage
-                .write(&normalize_key(key), buf.clone())
-                .await
-                .map_err(|e| to_retry_err("write", e))
-        })
-        .await
-    }
-
-    pub async fn async_writer_with_retry(
-        storage: &opendal::Operator,
-        key: &str,
-    ) -> std::result::Result<opendal::Writer, opendal::Error> {
-        // TODO: Allow configuring the number of retries
-        retry_with_jitter(usize::MAX, || async {
-            storage
-                .writer(&normalize_key(key))
+                .write(&normalize_key(key), data.clone())
                 .await
                 .map_err(|e| to_retry_err("write", e))
         })
@@ -654,31 +615,14 @@ mod operator {
 ))]
 #[async_trait]
 impl Storage for opendal::Operator {
-    async fn get(&self, key: &str) -> Result<Cache<Box<dyn ReadSeek>>> {
+    async fn get(&self, key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
         match operator::read_with_retry(self, key).await {
-            Ok(res) => Ok(Cache::Hit(Box::new(io::Cursor::new(res.to_bytes())))),
+            Ok(res) => Ok(Cache::Hit(Box::new(std::io::Cursor::new(res.to_vec())))),
             Err(err) => match err.kind() {
                 opendal::ErrorKind::NotFound => Ok(Cache::Miss),
                 _ => Err(err.into()),
             },
         }
-    }
-
-    async fn get_async_reader(&self, key: &str) -> Result<Cache<Box<dyn AsyncReadSeek + Unpin>>> {
-        let reader = match operator::async_reader_with_retry(self, key).await {
-            Ok(reader) => reader,
-            Err(err) => match err.kind() {
-                opendal::ErrorKind::NotFound => return Ok(Cache::Miss),
-                _ => return Err(err.into()),
-            },
-        };
-        let mut buffer = vec![];
-        reader
-            .into_futures_async_read(..)
-            .await?
-            .read_to_end(&mut buffer)
-            .await?;
-        Ok(Cache::Hit(Box::new(futures::io::Cursor::new(buffer))))
     }
 
     async fn del(&self, key: &str) -> Result<()> {
@@ -691,33 +635,13 @@ impl Storage for opendal::Operator {
         self.stat(&normalize_key(key)).await.is_ok()
     }
 
-    async fn put(&self, key: &str, entry: &mut dyn ReadSeek) -> Result<Duration> {
+    async fn put(&self, key: &str, source: &mut dyn BufReadSeek) -> Result<Duration> {
         let start = std::time::Instant::now();
-
-        let mut b = vec![];
-        entry.read_to_end(&mut b)?;
-        let b = bytes::Bytes::from(b);
-        operator::write_with_retry(self, key, b).await?;
-
+        let mut buf = vec![];
+        source.read_to_end(&mut buf)?;
+        let buf = bytes::Bytes::from(buf);
+        operator::write_with_retry(self, key, buf).await?;
         Ok(start.elapsed())
-    }
-
-    async fn put_async_reader(
-        &self,
-        key: &str,
-        _size: u64,
-        source: &mut (dyn AsyncReadSeek + Unpin),
-    ) -> Result<()> {
-        let mut sink = operator::async_writer_with_retry(self, key)
-            .await?
-            .into_futures_async_write();
-        if let Err(err) = futures::io::copy(source, &mut sink).await {
-            sink.close().await?;
-            Err(err.into())
-        } else {
-            sink.close().await?;
-            Ok(())
-        }
     }
 
     async fn size(&self, key: &str) -> Result<u64> {
@@ -824,14 +748,9 @@ impl QueuedRequests {
 
 #[async_trait]
 impl Storage for QueuedRequests {
-    async fn get(&self, key: &str) -> Result<Cache<Box<dyn ReadSeek>>> {
+    async fn get(&self, key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
         let _permit = self.queue.acquire().await?;
         self.inner.get(key).await
-    }
-
-    async fn get_async_reader(&self, key: &str) -> Result<Cache<Box<dyn AsyncReadSeek + Unpin>>> {
-        let _permit = self.queue.acquire().await?;
-        self.inner.get_async_reader(key).await
     }
 
     async fn del(&self, key: &str) -> Result<()> {
@@ -848,19 +767,9 @@ impl Storage for QueuedRequests {
         }
     }
 
-    async fn put(&self, key: &str, entry: &mut dyn ReadSeek) -> Result<Duration> {
+    async fn put(&self, key: &str, entry: &mut dyn BufReadSeek) -> Result<Duration> {
         let _permit = self.queue.acquire().await?;
         self.inner.put(key, entry).await
-    }
-
-    async fn put_async_reader(
-        &self,
-        key: &str,
-        size: u64,
-        source: &mut (dyn AsyncReadSeek + Unpin),
-    ) -> Result<()> {
-        let _permit = self.queue.acquire().await?;
-        self.inner.put_async_reader(key, size, source).await
     }
 
     async fn size(&self, key: &str) -> Result<u64> {
@@ -904,12 +813,8 @@ impl PreprocessorCache {
 
 #[async_trait]
 impl Storage for PreprocessorCache {
-    async fn get(&self, key: &str) -> Result<Cache<Box<dyn ReadSeek>>> {
+    async fn get(&self, key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
         self.0.get(key).await
-    }
-
-    async fn get_async_reader(&self, key: &str) -> Result<Cache<Box<dyn AsyncReadSeek + Unpin>>> {
-        self.0.get_async_reader(key).await
     }
 
     async fn del(&self, key: &str) -> Result<()> {
@@ -920,17 +825,8 @@ impl Storage for PreprocessorCache {
         self.0.has(key).await
     }
 
-    async fn put(&self, key: &str, entry: &mut dyn ReadSeek) -> Result<Duration> {
+    async fn put(&self, key: &str, entry: &mut dyn BufReadSeek) -> Result<Duration> {
         self.0.put(key, entry).await
-    }
-
-    async fn put_async_reader(
-        &self,
-        key: &str,
-        size: u64,
-        source: &mut (dyn AsyncReadSeek + Unpin),
-    ) -> Result<()> {
-        self.0.put_async_reader(key, size, source).await
     }
 
     async fn size(&self, key: &str) -> Result<u64> {

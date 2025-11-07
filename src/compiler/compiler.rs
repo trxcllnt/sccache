@@ -1287,6 +1287,8 @@ where
             .map(tokio_retry2::strategy::jitter);
 
         let dist_compile_res = loop {
+            use futures::{TryFutureExt, TryStreamExt};
+
             let job_id: &String;
             let timeout: u32;
 
@@ -1452,138 +1454,175 @@ where
             );
 
             let mut outputs = outputs.iter().collect::<Vec<_>>();
+            let build_outputs_count = build_result.outputs.len();
+            let build_outputs = build_result.outputs.into_iter();
 
-            let unpack_result = build_result
-                .outputs
-                .into_iter()
-                .try_fold(vec![], |mut output_paths, (path, data)| {
-                    let path = path_transformer
-                        .to_local(&path)
-                        .with_context(|| format!(
-                            "[{out_pretty}, {job_id}]: unable to transform output path {path}"
-                        ))
-                        .map_err(|err| (output_paths.clone(), err))?;
+            struct BuildOutput {
+                dir: PathBuf,
+                path: PathBuf,
+                data: dist::OutputData,
+                expected_size: u64,
+                must_be_non_empty: bool,
+            }
 
-                    // Do this first so cleanup works correctly
-                    output_paths.push(path.clone());
+            let mut output_paths = Vec::with_capacity(build_outputs_count);
 
-                    // Ensure the parent paths exist
-                    let dir = match path.parent() {
-                        Some(dir) => {
-                            if !dir.as_os_str().is_empty() {
-                                fs::create_dir_all(dir).with_context(|| {
-                                    format!("Failed to create output dir {dir:?}")
-                                })
-                                .map_err(|err| (output_paths.clone(), err))?;
-                            }
-                            dir
-                        },
-                        None => return Err((output_paths, anyhow!("Output file without a parent: {path:?}"))),
-                    };
+            // Aggregate outputs into a list so if an error occurs while unpacking
+            // an output, we can clean up everything that's been written so far.
+            let unpack_result = build_outputs.map(|(path, data)| {
+                let path = path_transformer.to_local(&path).with_context(|| {
+                    format!("[{out_pretty}, {job_id}]: unable to transform output path {path}")
+                });
 
-                    let must_be_non_empty = if let Some(idx) = outputs.iter().position(|o| o.path == path) {
+                let path = match path {
+                    Ok(path) => path,
+                    Err(err) => return Err(err),
+                };
+
+                let out = BuildOutput {
+                    expected_size: data.lens().actual,
+                    // Do this in the iterator adapter so we can borrow `outputs` as mutable
+                    must_be_non_empty: if let Some(idx) =
+                        outputs.iter().position(|o| o.path == path)
+                    {
                         outputs.swap_remove(idx).must_be_non_empty
                     } else {
                         false
-                    };
-
-                    // Write the output file to a tempfile and then atomically
-                    // move it to its final location so that other compiler invocations
-                    // happening in parallel don't see a partially-written file.
-
-                    // Create the output tempfile
-                    let mut tmp = tempfile::NamedTempFile::new_in(dir)
-                        .with_context(|| {
-                            format!("Failed to create tempfile for output path {path:?}")
-                        })
-                        .map_err(|err| (output_paths.clone(), err))?;
-
-                    // Write the output file
-                    let expected_size = data.lens().actual;
-                    let bytes_written = io::copy(&mut data.into_reader(), tmp.as_file_mut())
-                        .with_context(|| format!("Failed to write output to {path:?}"))
-                        .map_err(|err| (output_paths.clone(), err))?;
-
-                    // Verify we wrote the number of bytes we expected to
-                    if bytes_written != expected_size {
-                        return Err((output_paths, anyhow!(UnexpectedFileSize(expected_size, bytes_written))));
-                    }
-
-                    // Verify the tempfile file isn't empty
-                    if must_be_non_empty && bytes_written == 0 {
-                        return Err((output_paths, anyhow!(UnexpectedEmptyFile(path))));
-                    }
-
-                    // Persist the tempfile to its real location
-                    let file = match tmp.persist(&path) {
-                        Ok(file) => {
-                            // Sync immediately so other readers see the file.
-                            // This is important for nvcc's .module_id files,
-                            // which are read during many pararllel compilations.
-                            file.sync_all().map(|_| file)
-                        },
-                        Err(err) => Err(err.error),
-                    }
-                    .with_context(|| format!("Failed to persist tempfile to {path:?}"))
-                    .map_err(|err| (output_paths.clone(), anyhow!(err)))?;
-
-                    // Verify the output file isn't empty
-                    if must_be_non_empty {
-                        let size_on_disk = file.metadata()
-                            .map_err(|err| (output_paths.clone(), anyhow!(err)))?
-                            .len();
-                        if size_on_disk == 0 {
-                            return Err((output_paths, anyhow!(UnexpectedEmptyFile(path))));
-                        }
-                    }
-
-                    Ok(output_paths)
-                })
-                .and_then(|output_paths| {
-                    let extra_inputs = tc_archive
-                        .as_ref()
-                        .map(|p| vec![p.as_path()])
-                        .unwrap_or_default();
-                    outputs_rewriter
-                        .handle_outputs(&path_transformer, &output_paths, extra_inputs.as_slice())
-                        .with_context(|| "Failed to rewrite outputs from compile")
-                        .map_err(|err| (output_paths, err))
-                })
-                .map_or_else(
-                    |(output_paths, err)| {
-                        // Do our best to clean up. We may end up deleting a file that we just wrote over
-                        // the top of, but it's better to clean up too much than too little
-                        for path in output_paths.iter() {
-                            if let Err(e) = fs::remove_file(path) {
-                                if e.kind() != io::ErrorKind::NotFound {
-                                    debug!("[{out_pretty}, {job_id}]: {e} while attempting to remove {path:?}")
-                                }
-                            }
-                        }
-                        Err(err)
                     },
-                    |_| Ok((DistType::Ok(server_id), build_result.output))
-                );
+                    data,
+                    dir: PathBuf::new(),
+                    path,
+                };
 
-            match unpack_result {
-                Ok(res) => break Ok(res),
-                Err(err) => {
-                    if err.downcast_ref::<UnexpectedFileSize>().is_some() {
-                        debug!("[{out_pretty}]: {err:?}");
-                        retry_or_bail!(err);
-                    } else if err.downcast_ref::<UnexpectedEmptyFile>().is_some() {
-                        debug!("[{out_pretty}]: {err:?}");
-                        match dist_client.del_job(job_id).await {
-                            Ok(_) => {
-                                has_inputs = false;
-                                retry_or_bail!(err)
-                            }
-                            Err(err) => break Err(err),
+                output_paths.push(out.path.clone());
+
+                Ok(out)
+            });
+
+            let unpack_result = futures::stream::iter(unpack_result);
+
+            // Ensure the parent dirs exist
+            let unpack_result = unpack_result.and_then(|mut out| async {
+                let path = out.path.as_path();
+
+                out.dir = match path.parent() {
+                    None => {
+                        return Err(anyhow!("Output file without a parent: {path:?}"));
+                    }
+                    Some(path) if path.as_os_str().is_empty() => PathBuf::new(),
+                    Some(path) => {
+                        tokio::fs::try_exists(path)
+                            .and_then(|exists| async move {
+                                if !exists {
+                                    tokio::fs::create_dir_all(path).await
+                                } else {
+                                    Ok(())
+                                }
+                            })
+                            .await
+                            .with_context(|| format!("Failed to create output dir {path:?}"))?;
+                        path.to_path_buf()
+                    }
+                };
+
+                Ok(out)
+            });
+
+            // Write the output file to a tempfile and then atomically
+            // move it to its final location so that other compiler invocations
+            // happening in parallel don't see a partially-written file.
+            let unpack_result = unpack_result.and_then(|out| async move {
+                let dir = out.dir.as_path();
+                let path = out.path.as_path();
+                let expected_size = out.expected_size;
+                let must_be_non_empty = out.must_be_non_empty;
+
+                // Create the output tempfile
+                let mut tmp = tempfile::NamedTempFile::new_in(dir).with_context(|| {
+                    format!("Failed to create tempfile for output path {path:?}")
+                })?;
+
+                let bytes_written = futures::io::copy_buf(
+                    futures::io::AllowStdIo::new(std::io::BufReader::new(out.data.into_reader())),
+                    &mut futures::io::AllowStdIo::new(std::io::BufWriter::new(tmp.as_file_mut())),
+                )
+                .await
+                .with_context(|| format!("Failed to write output to {path:?}"))?;
+
+                // Verify we wrote the number of bytes we expected to
+                if bytes_written != expected_size {
+                    return Err(UnexpectedFileSize(expected_size, bytes_written).into());
+                }
+
+                // Verify the tempfile file isn't empty
+                if must_be_non_empty && bytes_written == 0 {
+                    return Err(UnexpectedEmptyFile(path.to_owned()).into());
+                }
+
+                // Persist the tempfile to its real location
+                let file = match tmp.persist(path) {
+                    Ok(file) => {
+                        // Sync immediately so other readers see the file.
+                        // This is important for nvcc's .module_id files,
+                        // which are read during many pararllel compilations.
+                        file.sync_all().map(|_| file)
+                    }
+                    Err(err) => Err(err.error),
+                }
+                .with_context(|| format!("Failed to persist tempfile to {path:?}"))?;
+
+                // Verify the output file isn't empty
+                if must_be_non_empty && file.metadata()?.len() == 0 {
+                    return Err(UnexpectedEmptyFile(path.to_owned()).into());
+                }
+
+                Ok(())
+            });
+
+            let unpack_result = unpack_result.try_collect::<()>().await;
+
+            // Rewrite Rust compilation outputs
+            let unpack_result = unpack_result.and_then(|_| {
+                let output_paths = output_paths.iter().map(|o| o.as_path()).collect::<Vec<_>>();
+                let extra_inputs = tc_archive
+                    .as_ref()
+                    .map(|p| vec![p.as_path()])
+                    .unwrap_or_default();
+                outputs_rewriter
+                    .handle_outputs(&path_transformer, &output_paths, &extra_inputs)
+                    .with_context(|| "Failed to rewrite outputs from compile")
+            });
+
+            // Clean up on errors
+            if let Err(err) = unpack_result {
+                // Do our best to clean up. We may end up deleting a file that we just wrote over
+                // the top of, but it's better to clean up too much than too little
+                for path in output_paths.iter() {
+                    if let Err(e) = tokio::fs::remove_file(path).await {
+                        if e.kind() != io::ErrorKind::NotFound {
+                            debug!(
+                                "[{out_pretty}, {job_id}]: {e} while attempting to remove {path:?}"
+                            )
                         }
                     }
+                }
+
+                if err.downcast_ref::<UnexpectedFileSize>().is_some() {
+                    debug!("[{out_pretty}]: {err:?}");
+                    retry_or_bail!(err);
+                } else if err.downcast_ref::<UnexpectedEmptyFile>().is_some() {
+                    debug!("[{out_pretty}]: {err:?}");
+                    has_inputs = false;
+                    match dist_client.del_job(job_id).await {
+                        Ok(_) => retry_or_bail!(err),
+                        Err(err) => retry_or_bail!(err),
+                    }
+                } else {
                     break Err(err);
                 }
             }
+
+            break Ok((DistType::Ok(server_id), build_result.output));
         };
 
         // Inform the scheduler we've received and unpacked the result.
@@ -1659,7 +1698,7 @@ pub trait OutputsRewriter: Send + Sync {
     fn handle_outputs(
         &self,
         path_transformer: &dist::PathTransformer,
-        output_paths: &[PathBuf],
+        output_paths: &[&Path],
         extra_inputs: &[&Path],
     ) -> Result<()>;
 }
@@ -1671,7 +1710,7 @@ impl OutputsRewriter for NoopOutputsRewriter {
     fn handle_outputs(
         &self,
         _path_transformer: &dist::PathTransformer,
-        _output_paths: &[PathBuf],
+        _output_paths: &[&Path],
         _extra_inputs: &[&Path],
     ) -> Result<()> {
         Ok(())

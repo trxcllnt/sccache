@@ -15,11 +15,11 @@
 use anyhow::{Context, Result, anyhow, bail};
 use async_compression::futures::bufread::ZlibDecoder as ZlibDecoderAsync;
 use async_trait::async_trait;
-use bytes::Buf;
 use futures::lock::Mutex;
 use itertools::Itertools;
 use sccache::dist::{
-    BuildError, BuildResult as BuildOutput, BuilderIncoming, CompileCommand, OutputData,
+    BufReadSeek, BuildError, BuildResult as BuildOutput, BuilderIncoming, CompileCommand,
+    OutputData,
 };
 use sccache::mock_command::ProcessOutput;
 use std::collections::{HashMap, hash_map};
@@ -374,7 +374,7 @@ impl PotBuilder {
             cwd,
         }: CompileCommand,
         output_paths: Vec<String>,
-        inputs: Vec<u8>,
+        inputs: Box<dyn BufReadSeek>,
         cid: &str,
         pot_fs_root: &Path,
         job_queue: &tokio::sync::Semaphore,
@@ -399,11 +399,10 @@ impl PotBuilder {
             );
             tracing::trace!("[perform_build({job_id})]: copying in inputs");
             let jail_root = pot_fs_root.join("jails").join(cid).join("m");
-            let reader = inputs.reader();
-            let reader = futures::io::AllowStdIo::new(reader);
-            let reader = ZlibDecoderAsync::new(reader);
+            let inputs = futures::io::AllowStdIo::new(inputs);
+            let inputs = ZlibDecoderAsync::new(inputs);
             // Copy inputs to jail_root
-            async_tar::Archive::new(reader)
+            async_tar::Archive::new(inputs)
                 .unpack(&jail_root)
                 .await
                 .context("Failed to unpack inputs to tempdir")
@@ -564,7 +563,7 @@ impl BuilderIncoming for PotBuilder {
         &self,
         job_id: &str,
         toolchain_dir: &Path,
-        inputs: Vec<u8>,
+        inputs: Box<dyn BufReadSeek>,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> BuildResult {

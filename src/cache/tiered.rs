@@ -13,12 +13,12 @@
 // limitations under the License.
 
 use crate::{
-    cache::{AsyncReadSeek, Cache, CacheMode, PreprocessorCacheModeConfig, ReadSeek, Storage},
+    cache::{BufReadSeek, Cache, CacheMode, PreprocessorCacheModeConfig, Storage},
     errors::*,
 };
 
 use async_trait::async_trait;
-use futures::{AsyncSeekExt, TryFutureExt};
+use futures::TryFutureExt;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -39,7 +39,7 @@ impl TieredCache {
 
 #[async_trait]
 impl Storage for TieredCache {
-    async fn get(&self, key: &str) -> Result<Cache<Box<dyn ReadSeek>>> {
+    async fn get(&self, key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
         match self.0.get(key).await {
             Ok(Cache::Hit(mut entry)) => {
                 if !self.1.has(key).await {
@@ -59,26 +59,6 @@ impl Storage for TieredCache {
         }
     }
 
-    async fn get_async_reader(&self, key: &str) -> Result<Cache<Box<dyn AsyncReadSeek + Unpin>>> {
-        match self.0.get_async_reader(key).await {
-            Ok(Cache::Hit(mut cursor)) => {
-                if !self.1.has(key).await {
-                    let _ = self.0.put_async_reader(key, 0, &mut cursor).await;
-                    cursor.seek(std::io::SeekFrom::Start(0)).await?;
-                }
-                Ok(Cache::Hit(cursor))
-            }
-            _ => match self.1.get_async_reader(key).await {
-                Ok(Cache::Hit(mut cursor)) => {
-                    let _ = self.0.put_async_reader(key, 0, &mut cursor).await;
-                    cursor.seek(std::io::SeekFrom::Start(0)).await?;
-                    Ok(Cache::Hit(Box::new(cursor)))
-                }
-                res => res,
-            },
-        }
-    }
-
     async fn del(&self, key: &str) -> Result<()> {
         tokio::join!(self.0.del(key), self.1.del(key)).0
     }
@@ -91,7 +71,7 @@ impl Storage for TieredCache {
         }
     }
 
-    async fn put(&self, key: &str, entry: &mut dyn ReadSeek) -> Result<Duration> {
+    async fn put(&self, key: &str, entry: &mut dyn BufReadSeek) -> Result<Duration> {
         let start = Instant::now();
         let res1 = self.0.put(key, entry).await;
         entry.seek(std::io::SeekFrom::Start(0))?;
@@ -101,23 +81,6 @@ impl Storage for TieredCache {
                 "Failed to put key {key:?} (err1={err1}, err2={err2})"
             )),
             _ => Ok(Instant::now() - start),
-        }
-    }
-
-    async fn put_async_reader(
-        &self,
-        key: &str,
-        size: u64,
-        mut source: &mut (dyn AsyncReadSeek + Unpin),
-    ) -> Result<()> {
-        let res1 = self.0.put_async_reader(key, size, &mut source).await;
-        source.seek(std::io::SeekFrom::Start(0)).await?;
-        let res2 = self.1.put_async_reader(key, size, &mut source).await;
-        match (res1, res2) {
-            (Err(err1), Err(err2)) => Err(anyhow!(
-                "Failed to put key {key:?} (err1={err1}, err2={err2})"
-            )),
-            _ => Ok(()),
         }
     }
 
@@ -158,8 +121,6 @@ impl Storage for TieredCache {
 
 #[cfg(test)]
 mod test {
-    use futures::AsyncReadExt;
-
     use super::*;
     use crate::config::DiskCacheConfig;
     use std::io::{Cursor, Read};
@@ -223,29 +184,6 @@ mod test {
                 assert_eq!(v, "val".as_bytes());
             }
         }
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_write_read_async() -> Result<()> {
-        let (cache1, cache2, cache3, cache4, cache5) = make_disk_caches().await?;
-
-        // Test async writing to cache5 writes to the other 4 caches
-        cache5
-            .put_async_reader("key", 0, &mut futures::io::Cursor::new("val".as_bytes()))
-            .await?;
-
-        // Verify we can async read "key" from each cache
-        for cache in [&cache1, &cache2, &cache3, &cache4, &cache5] {
-            let e = cache.get_async_reader("key").await?;
-            assert!(matches!(e, Cache::Hit(_)));
-            if let Cache::Hit(mut e) = e {
-                let mut v = vec![];
-                e.read_to_end(&mut v).await?;
-                assert_eq!(v, "val".as_bytes());
-            }
-        }
-
         Ok(())
     }
 

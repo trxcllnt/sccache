@@ -45,7 +45,7 @@ pub mod tasks;
 pub mod token_check;
 
 #[cfg(feature = "dist-server")]
-pub use crate::dist::cache::ServerToolchains;
+pub use crate::{cache::BufReadSeek, dist::cache::ServerToolchains};
 
 #[cfg(feature = "dist-server")]
 pub(crate) fn job_inputs_key(job_id: &str) -> String {
@@ -816,7 +816,7 @@ pub trait BuilderIncoming: Send + Sync {
         &self,
         job_id: &str,
         toolchain_dir: &Path,
-        inputs: Vec<u8>,
+        inputs: Box<dyn BufReadSeek>,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> std::result::Result<BuildResult, BuildError>;

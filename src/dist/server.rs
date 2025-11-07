@@ -15,7 +15,6 @@
 use async_trait::async_trait;
 
 use celery::{error::CeleryError, task::AsyncResult};
-use futures::AsyncReadExt;
 
 use std::{
     collections::HashMap,
@@ -25,7 +24,7 @@ use std::{
 };
 
 use crate::{
-    cache::{Cache, Storage},
+    cache::{BufReadSeek, Cache, Storage},
     dist::{
         self, BuildError, BuildResult, BuilderIncoming, CompileCommand, RunJobError,
         RunJobResponse, ServerDetails, ServerService, Toolchain, ToolchainService, job_inputs_key,
@@ -33,12 +32,10 @@ use crate::{
         metrics::{CountRecorder, GaugeRecorder, Metrics, TimeRecorder},
     },
     errors::*,
-    util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc, retry_with_jitter},
+    util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
 };
 
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
-
-use tokio_retry2::RetryError;
 
 const CPU_USAGE_RATIO: &str = "sccache::server::cpu_usage_ratio";
 const MEM_AVAIL_BYTES: &str = "sccache::server::mem_avail_bytes";
@@ -441,47 +438,31 @@ impl RunJobFunc {
             })
     }
 
-    async fn get_job_inputs(&self, job_id: &str) -> Result<Vec<u8>> {
+    async fn get_job_inputs(&self, job_id: &str) -> Result<Box<dyn BufReadSeek>> {
         // Record get_job_inputs time
         let _timer = self.state.metrics.get_job_inputs_timer();
-        async {
-            let mut reader = self
-                .jobs_storage
-                .get_async_reader(&job_inputs_key(job_id))
-                .await
-                .and_then(|res| match res {
-                    Cache::Hit(reader) => Ok(reader),
-                    _ => Err(anyhow!("Missing job inputs")),
-                })
-                .map_err(|err| {
-                    tracing::warn!("[get_job_inputs({job_id})]: Error loading stream: {err:?}");
-                    err
-                })?;
-
-            let mut inputs = vec![];
-            reader.read_to_end(&mut inputs).await.map_err(|err| {
-                tracing::warn!("[get_job_inputs({job_id})]: Error reading stream: {err:?}");
+        self.jobs_storage
+            .get(&job_inputs_key(job_id))
+            .await
+            .and_then(|res| match res {
+                Cache::Hit(reader) => Ok(reader),
+                _ => Err(anyhow!("Missing job inputs")),
+            })
+            .map_err(|err| {
+                // Record get_job_inputs errors after retrying
+                if self.state.is_alive() {
+                    self.state.metrics.inc_get_job_inputs_error_count();
+                    tracing::warn!("[run_job({job_id})]: Error retrieving job inputs: {err:?}");
+                }
                 err
-            })?;
-
-            Ok(inputs)
-        }
-        .await
-        .map_err(|err| {
-            // Record get_job_inputs errors after retrying
-            if self.state.is_alive() {
-                self.state.metrics.inc_get_job_inputs_error_count();
-                tracing::warn!("[run_job({job_id})]: Error retrieving job inputs: {err:?}");
-            }
-            err
-        })
+            })
     }
 
     async fn run_build(
         &self,
         job_id: &str,
         toolchain_dir: PathBuf,
-        inputs: Vec<u8>,
+        inputs: Box<dyn BufReadSeek>,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> std::result::Result<BuildResult, BuildError> {
@@ -504,7 +485,7 @@ impl RunJobFunc {
         &self,
         job_id: &str,
         toolchain: Toolchain,
-    ) -> std::result::Result<(PathBuf, Vec<u8>), RunJobError> {
+    ) -> std::result::Result<(PathBuf, Box<dyn BufReadSeek>), RunJobError> {
         // Record load_job time
         let _timer = self.state.metrics.load_job_timer();
         let _loading = self.state.metrics.jobs_loading.increment();
@@ -813,28 +794,21 @@ impl Server {
             tracing::warn!("[put_job_result({job_id})]: Error serializing result: {err:?}");
             err
         })?;
-        retry_with_jitter(3, || async {
-            self.jobs_storage
-                .put_async_reader(
-                    &job_result_key(job_id),
-                    result.len() as u64,
-                    &mut futures::io::Cursor::new(&result[..]),
-                )
-                .await
-                .map_err(|err| {
-                    tracing::warn!("[put_job_result({job_id})]: Error writing stream: {err:?}");
-                    RetryError::transient(err)
-                })
-        })
-        .await
-        .map_err(|err| {
-            // Record put_job_result errors after retrying
-            if self.state.is_alive() {
-                self.state.metrics.inc_put_job_result_error_count();
-                tracing::warn!("[run_job({job_id})]: Error storing job result: {err:?}");
-            }
-            err
-        })
+        self.jobs_storage
+            .put(
+                &job_result_key(job_id),
+                &mut std::io::Cursor::new(&result[..]),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| {
+                // Record put_job_result errors after retrying
+                if self.state.is_alive() {
+                    self.state.metrics.inc_put_job_result_error_count();
+                    tracing::warn!("[run_job({job_id})]: Error storing job result: {err:?}");
+                }
+                err
+            })
     }
 
     async fn job_finished(&self, job_id: &str, reply_to: &str, res: &RunJobResponse) -> Result<()> {

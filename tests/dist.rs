@@ -46,8 +46,7 @@ async fn cc_compile(client: &SccacheClient, tmpdir: &Path) -> Result<()> {
         .arg("-o")
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
-        .env("SCCACHE_MAX_THREADS", "4")
-        .env("TOKIO_WORKER_THREADS", "2")
+        .env("SCCACHE_MAX_THREADS", "2")
         .kill_on_drop(true)
         .output()
         .await
@@ -77,8 +76,7 @@ async fn nvcc_compile(
         .arg("-o")
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
-        .env("SCCACHE_MAX_THREADS", "4")
-        .env("TOKIO_WORKER_THREADS", "2")
+        .env("SCCACHE_MAX_THREADS", "2")
         .kill_on_drop(true)
         .output()
         .await
@@ -126,8 +124,7 @@ async fn stdpar_compile(client: &SccacheClient, compiler: &Compiler, tmpdir: &Pa
         .arg("-o")
         .arg(tmpdir.join(obj_file))
         .env("RUST_BACKTRACE", "1")
-        .env("SCCACHE_MAX_THREADS", "4")
-        .env("TOKIO_WORKER_THREADS", "2")
+        .env("SCCACHE_MAX_THREADS", "2")
         .kill_on_drop(true)
         .output()
         .await
@@ -172,8 +169,7 @@ async fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Result<Output> {
         .env("RUSTC_WRAPPER", &client.path)
         .env("CARGO_TARGET_DIR", "target")
         .env("RUST_BACKTRACE", "1")
-        .env("SCCACHE_MAX_THREADS", "4")
-        .env("TOKIO_WORKER_THREADS", "2")
+        .env("SCCACHE_MAX_THREADS", "2")
         .kill_on_drop(true)
         .output()
         .await
@@ -189,7 +185,7 @@ pub fn dist_test_sccache_client_cfg(
     sccache_cfg.cache.disk.as_mut().unwrap().size = 0;
     sccache_cfg.dist.scheduler_url = Some(scheduler_url);
     sccache_cfg.dist.net.connect_timeout = 10;
-    sccache_cfg.dist.net.request_timeout = 180;
+    sccache_cfg.dist.net.request_timeout = 300;
     sccache_cfg
 }
 
@@ -204,6 +200,7 @@ async fn test_dist_cargo_build(message_broker: &str) -> Result<()> {
         .with_scheduler()
         .with_server()
         .with_message_broker(message_broker)
+        .with_redis_storage()
         .build()
         .await?;
 

@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cache::{AsyncReadSeek, Cache, CacheMode, ReadSeek, Storage};
+use crate::cache::{BufReadSeek, Cache, CacheMode, Storage};
 use crate::config::DiskCacheConfig;
 use crate::lru_disk_cache::Error as LruError;
 use crate::lru_disk_cache::LruDiskCache;
 use async_trait::async_trait;
-use bytes::Buf;
 use futures::lock::Mutex;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -83,7 +82,7 @@ impl DiskCache {
         }
     }
 
-    async fn reader(&self, key: &str) -> Result<Box<dyn crate::cache::ReadSeek>> {
+    async fn reader(&self, key: &str) -> Result<Box<dyn crate::cache::BufReadSeek>> {
         match self.lru.lock().await.get_or_init()?.get(key) {
             Ok(reader) => Ok(reader),
             Err(LruError::Io(err)) => Err(err.into()),
@@ -120,6 +119,7 @@ impl DiskCache {
             .await
             .get_or_init()?
             .prepare_dir(key, size)
+            .await
             .with_context(|| format!("[DiskCache::insert_with({key}, {size})]"))?;
 
         let tmp_path = tmp.as_path();
@@ -151,7 +151,7 @@ impl DiskCache {
 
 #[async_trait]
 impl Storage for DiskCache {
-    async fn get(&self, key: &str) -> Result<Cache<Box<dyn ReadSeek>>> {
+    async fn get(&self, key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
         match self.reader(key).await {
             Ok(read) => Ok(Cache::Hit(read)),
             Err(err) => match err.downcast_ref::<LruError>() {
@@ -159,17 +159,6 @@ impl Storage for DiskCache {
                 _ => Err(err),
             },
         }
-    }
-
-    async fn get_async_reader(&self, key: &str) -> Result<Cache<Box<dyn AsyncReadSeek + Unpin>>> {
-        let reader = match self.reader(key).await {
-            Ok(reader) => reader,
-            Err(err) => match err.downcast_ref::<LruError>() {
-                Some(LruError::FileNotInCache) => return Ok(Cache::Miss),
-                _ => return Err(err),
-            },
-        };
-        Ok(Cache::Hit(Box::new(futures::io::AllowStdIo::new(reader))))
     }
 
     async fn del(&self, key: &str) -> Result<()> {
@@ -190,9 +179,7 @@ impl Storage for DiskCache {
         self.size(key).await.is_ok()
     }
 
-    async fn put(&self, key: &str, entry: &mut dyn ReadSeek) -> Result<Duration> {
-        // We should probably do this on a background thread if we're going to buffer
-        // everything in memory...
+    async fn put(&self, key: &str, source: &mut dyn BufReadSeek) -> Result<Duration> {
         trace!("DiskCache::put({})", key);
 
         if self.rw_mode == CacheMode::ReadOnly {
@@ -201,20 +188,19 @@ impl Storage for DiskCache {
 
         let start = Instant::now();
 
-        let mut v = vec![];
-        entry.read_to_end(&mut v)?;
-
         let mut f = self
             .lru
             .lock()
             .await
             .get_or_init()?
-            .prepare_add(key, v.len() as u64)
+            .prepare_add(key, 0)
+            .await
             .with_context(|| format!("[DiskCache::put({key})]"))?;
 
-        futures::io::copy(
-            &mut futures::io::AllowStdIo::new(v.reader()),
-            &mut futures::io::AllowStdIo::new(f.as_file_mut()),
+        // Copy source into the tempfile
+        futures::io::copy_buf(
+            futures::io::AllowStdIo::new(source),
+            &mut futures::io::AllowStdIo::new(std::io::BufWriter::new(f.as_file_mut())),
         )
         .await
         .with_context(|| format!("[DiskCache::put({key})]"))?;
@@ -224,41 +210,10 @@ impl Storage for DiskCache {
             .await
             .get_or_init()?
             .commit(f)
+            .await
             .with_context(|| format!("[DiskCache::put({key})]"))?;
 
         Ok(start.elapsed())
-    }
-
-    async fn put_async_reader(
-        &self,
-        key: &str,
-        size: u64,
-        source: &mut (dyn AsyncReadSeek + Unpin),
-    ) -> Result<()> {
-        if self.rw_mode == CacheMode::ReadOnly {
-            return Err(anyhow!("Cannot write to read-only storage"));
-        }
-
-        let mut f = self
-            .lru
-            .lock()
-            .await
-            .get_or_init()?
-            .prepare_add(key, size)
-            .with_context(|| format!("[DiskCache::put_async_reader({key})]"))?;
-
-        futures::io::copy(source, &mut futures::io::AllowStdIo::new(f.as_file_mut()))
-            .await
-            .with_context(|| format!("[DiskCache::put_async_reader({key})]"))?;
-
-        self.lru
-            .lock()
-            .await
-            .get_or_init()?
-            .commit(f)
-            .with_context(|| format!("[DiskCache::put_async_reader({key})]"))?;
-
-        Ok(())
     }
 
     async fn size(&self, key: &str) -> Result<u64> {

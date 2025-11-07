@@ -18,7 +18,7 @@ pub use lru_cache::{LruCache, Meter};
 use tempfile::{NamedTempFile, TempDir};
 use walkdir::WalkDir;
 
-use crate::cache::ReadSeek;
+use crate::cache::BufReadSeek;
 use crate::util::OsStrExt;
 
 const TEMPFILE_PREFIX: &str = ".sccachetmp";
@@ -450,17 +450,17 @@ impl LruDiskCache {
 
     /// Prepare the insertion of a file at path `key`. The resulting entry must be
     /// committed with `LruDiskCache::commit`.
-    pub fn prepare_add<'a, K: AsRef<OsStr> + 'a>(
+    pub async fn prepare_add<'a, K: AsRef<OsStr> + 'a>(
         &mut self,
         key: K,
         size: u64,
     ) -> Result<LruDiskCacheAddEntry> {
         // Ensure we have enough space for the advertized space.
-        self.make_space(size)?;
+        self.make_space_async(size).await?;
         let key = self.key_to_rel_path(key).into_os_string();
         self.pending.push(key.clone());
         self.pending_size += size;
-        fs::create_dir_all(&self.root)?;
+        tokio::fs::create_dir_all(&self.root).await?;
         tempfile::Builder::new()
             .rand_bytes(16)
             .prefix(TEMPFILE_PREFIX)
@@ -471,17 +471,17 @@ impl LruDiskCache {
 
     /// Prepare the insertion of a directory at path `key`. The resulting entry must be
     /// committed with `LruDiskCache::commit_dir`.
-    pub fn prepare_dir<'a, K: AsRef<OsStr> + 'a>(
+    pub async fn prepare_dir<'a, K: AsRef<OsStr> + 'a>(
         &mut self,
         key: K,
         size: u64,
     ) -> Result<LruDiskCacheDirEntry> {
         // Ensure we have enough space for the advertized space.
-        self.make_space(size)?;
+        self.make_space_async(size).await?;
         let key = self.key_to_rel_path(key).into_os_string();
         self.pending.push(key.clone());
         self.pending_size += size;
-        fs::create_dir_all(&self.root)?;
+        tokio::fs::create_dir_all(&self.root).await?;
         tempfile::Builder::new()
             .rand_bytes(16)
             .prefix(TEMPFILE_PREFIX)
@@ -491,7 +491,7 @@ impl LruDiskCache {
     }
 
     /// Commit an entry coming from `LruDiskCache::prepare_add`.
-    pub fn commit(&mut self, entry: LruDiskCacheAddEntry) -> Result<()> {
+    pub async fn commit(&mut self, entry: LruDiskCacheAddEntry) -> Result<()> {
         let LruDiskCacheAddEntry {
             mut file,
             key,
@@ -501,10 +501,13 @@ impl LruDiskCache {
         let real_size = file.as_file().metadata()?.len();
         // If the file is larger than the size that had been advertized, ensure
         // we have enough space for it.
-        self.make_space(real_size.saturating_sub(size))?;
+        self.make_space_async(real_size.saturating_sub(size))
+            .await?;
         self.cleanup_pending(&key, size);
         let abs_path = self.rel_to_abs_path(&key);
-        fs::create_dir_all(abs_path.parent().unwrap())?;
+        if let Some(parent) = abs_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
         file.persist(&abs_path).map_err(|e| e.error)?;
         self.lru.insert(key, real_size);
         Ok(())
@@ -523,10 +526,17 @@ impl LruDiskCache {
             Ok(entry) => {
                 self.cleanup_pending(&entry.key, entry.size);
                 let abs_path = self.rel_to_abs_path(&entry.key);
-                tokio::fs::create_dir_all(abs_path.parent().unwrap()).await?;
+                if let Some(parent) = abs_path.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                let real_size = get_entry_size(&abs_path);
+                // If the dir is larger than the size that had been advertized, ensure
+                // we have enough space for it.
+                self.make_space_async(real_size.saturating_sub(entry.size))
+                    .await?;
                 tokio::fs::rename(entry.as_path(), &abs_path).await?;
-                self.lru.insert(entry.key.clone(), entry.size);
-                Ok((abs_path, entry.size))
+                self.lru.insert(entry.key.clone(), real_size);
+                Ok((abs_path, real_size))
             }
         }
     }
@@ -550,7 +560,7 @@ impl LruDiskCache {
         let rel_path = self.key_to_rel_path(&key);
         let abs_path = self.rel_to_abs_path(&rel_path);
         let path_key = rel_path.as_os_str();
-        let size = if abs_path.exists() {
+        let size = if abs_path.try_exists().is_ok_and(|e| e) {
             if let Some(size) = self.lru.get(path_key) {
                 Ok(*size)
             } else {
@@ -559,7 +569,7 @@ impl LruDiskCache {
             }
         } else {
             let _ = self.lru.remove(path_key);
-            Err(Error::FileNotInCache)
+            return Err(Error::FileNotInCache);
         };
 
         size.and_then(|size| {
@@ -582,8 +592,9 @@ impl LruDiskCache {
     /// be opened. Updates the LRU state of the file if present.
     /// Entries created by `LruDiskCache::prepare_add` but not yet committed return
     /// `Err(Error::FileNotInCache)`.
-    pub fn get<K: AsRef<OsStr>>(&mut self, key: K) -> Result<Box<dyn ReadSeek>> {
-        self.get_file(key).map(|f| Box::new(f) as Box<dyn ReadSeek>)
+    pub fn get<K: AsRef<OsStr>>(&mut self, key: K) -> Result<Box<dyn BufReadSeek>> {
+        self.get_file(key)
+            .map(|f| Box::new(std::io::BufReader::new(f)) as Box<dyn BufReadSeek>)
     }
 
     /// Remove the given key from the cache.
@@ -606,6 +617,7 @@ impl LruDiskCache {
 mod tests {
     use super::fs::{self, File};
     use super::{Error, LruDiskCache, LruDiskCacheAddEntry, get_all_entries, normalize_key};
+    use crate::test::utils::*;
 
     use filetime::{FileTime, set_file_times};
     use std::io::{self, Read, Write};
@@ -829,26 +841,26 @@ mod tests {
         let f = TestFixture::new();
         let cache_dir = f.tmp();
         let mut c = LruDiskCache::new(cache_dir, 25).unwrap();
-        let mut tmp = c.prepare_add("abc", 10).unwrap();
+        let mut tmp = c.prepare_add("abc", 10).wait().unwrap();
         // An entry added but not committed doesn't count, except for the
         // (reserved) size of the disk cache.
         assert!(!c.contains_key("abc"));
         assert_eq!(c.size(), 10);
         assert_eq!(c.lru.size(), 0);
         tmp.as_file_mut().write_all(&[0; 10]).unwrap();
-        c.commit(tmp).unwrap();
+        c.commit(tmp).wait().unwrap();
         // Once committed, the file appears.
         assert!(c.contains_key("abc"));
         assert_eq!(c.size(), 10);
         assert_eq!(c.lru.size(), 10);
 
-        let mut tmp = c.prepare_add("abd", 10).unwrap();
+        let mut tmp = c.prepare_add("abd", 10).wait().unwrap();
         assert_eq!(c.size(), 20);
         assert_eq!(c.lru.size(), 10);
         // Even though we haven't committed the second file, preparing for
         // the addition of the third one should put the cache above the
         // limit and trigger cleanup.
-        let mut tmp2 = c.prepare_add("xyz", 10).unwrap();
+        let mut tmp2 = c.prepare_add("xyz", 10).wait().unwrap();
         assert_eq!(c.size(), 20);
         assert_eq!(c.lru.size(), 0);
         // At this point, we expect the first entry to have been removed entirely.
@@ -856,20 +868,20 @@ mod tests {
         assert!(!f.tmp().join(normalize_key("abc")).exists());
         tmp.as_file_mut().write_all(&[0; 10]).unwrap();
         tmp2.as_file_mut().write_all(&[0; 10]).unwrap();
-        c.commit(tmp).unwrap();
+        c.commit(tmp).wait().unwrap();
         assert_eq!(c.size(), 20);
         assert_eq!(c.lru.size(), 10);
-        c.commit(tmp2).unwrap();
+        c.commit(tmp2).wait().unwrap();
         assert_eq!(c.size(), 20);
         assert_eq!(c.lru.size(), 20);
 
-        let mut tmp = c.prepare_add("abc", 5).unwrap();
+        let mut tmp = c.prepare_add("abc", 5).wait().unwrap();
         assert_eq!(c.size(), 25);
         assert_eq!(c.lru.size(), 20);
         // Committing a file bigger than the promised size should properly
         // handle the case where the real size makes the cache go over the limit.
         tmp.as_file_mut().write_all(&[0; 10]).unwrap();
-        c.commit(tmp).unwrap();
+        c.commit(tmp).wait().unwrap();
         assert_eq!(c.size(), 20);
         assert_eq!(c.lru.size(), 20);
         assert!(!c.contains_key("abd"));
@@ -877,7 +889,7 @@ mod tests {
 
         // If for some reason, the cache still contains a temporary file on
         // initialization, the temporary file is removed.
-        let LruDiskCacheAddEntry { file, .. } = c.prepare_add("abd", 5).unwrap();
+        let LruDiskCacheAddEntry { file, .. } = c.prepare_add("abd", 5).wait().unwrap();
         let (_, path) = file.keep().unwrap();
         std::mem::drop(c);
         // Ensure that the temporary file is indeed there.

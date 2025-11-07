@@ -72,8 +72,7 @@ impl SccacheClient {
 
         let mut envvars = vec![
             ("SCCACHE_SERVER_PORT".into(), port.to_string().into()),
-            ("SCCACHE_MAX_THREADS".into(), "4".into()),
-            ("TOKIO_WORKER_THREADS".into(), "2".into()),
+            ("SCCACHE_MAX_THREADS".into(), "2".into()),
         ];
 
         // Send daemon logs to a file if SCCACHE_DEBUG is defined

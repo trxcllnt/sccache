@@ -2279,7 +2279,7 @@ impl OutputsRewriter for RustOutputsRewriter {
     fn handle_outputs(
         &self,
         path_transformer: &dist::PathTransformer,
-        output_paths: &[PathBuf],
+        output_paths: &[&Path],
         extra_inputs: &[&Path],
     ) -> Result<()> {
         use std::io::Write;
@@ -2378,7 +2378,7 @@ src/bin/sccache-dist/token_check.rs:
         dep_info: Some(depinfo_file.clone()),
     });
     let () = ror
-        .handle_outputs(&pt, &[depinfo_file.clone()], &[])
+        .handle_outputs(&pt, &[depinfo_file.as_path()], &[])
         .unwrap();
 
     let mut s = String::new();

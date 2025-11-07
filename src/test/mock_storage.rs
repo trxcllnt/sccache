@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cache::{AsyncReadSeek, Cache, PreprocessorCacheModeConfig, ReadSeek, Storage};
+use crate::cache::{BufReadSeek, Cache, PreprocessorCacheModeConfig, Storage};
 use crate::errors::*;
 use async_trait::async_trait;
 use futures::channel::mpsc;
@@ -23,8 +23,8 @@ use tokio::time::sleep;
 
 /// A mock `Storage` implementation.
 pub struct MockStorage {
-    rx: Arc<Mutex<mpsc::UnboundedReceiver<Result<Cache<Box<dyn ReadSeek>>>>>>,
-    tx: mpsc::UnboundedSender<Result<Cache<Box<dyn ReadSeek>>>>,
+    rx: Arc<Mutex<mpsc::UnboundedReceiver<Result<Cache<Box<dyn BufReadSeek>>>>>>,
+    tx: mpsc::UnboundedSender<Result<Cache<Box<dyn BufReadSeek>>>>,
     delay: Option<Duration>,
     preprocessor_cache_mode: bool,
 }
@@ -42,14 +42,14 @@ impl MockStorage {
     }
 
     /// Queue up `res` to be returned as the next result from `Storage::get`.
-    pub(crate) fn next_get(&self, res: Result<Cache<Box<dyn ReadSeek>>>) {
+    pub(crate) fn next_get(&self, res: Result<Cache<Box<dyn BufReadSeek>>>) {
         self.tx.unbounded_send(res).unwrap();
     }
 }
 
 #[async_trait]
 impl Storage for MockStorage {
-    async fn get(&self, _key: &str) -> Result<Cache<Box<dyn ReadSeek>>> {
+    async fn get(&self, _key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
         if let Some(delay) = self.delay {
             sleep(delay).await;
         }
@@ -60,16 +60,6 @@ impl Storage for MockStorage {
 
         next.expect("MockStorage get called but no get results available")
     }
-    async fn get_async_reader(&self, key: &str) -> Result<Cache<Box<dyn AsyncReadSeek + Unpin>>> {
-        if let Some(delay) = self.delay {
-            sleep(delay).await;
-        }
-        match self.get(key).await? {
-            // Err(err) => Err(anyhow!("No cache entry for key `{key}`")),
-            Cache::Miss => Ok(Cache::Miss),
-            Cache::Hit(reader) => Ok(Cache::Hit(Box::new(futures::io::AllowStdIo::new(reader)))),
-        }
-    }
     async fn del(&self, _key: &str) -> Result<()> {
         if let Some(delay) = self.delay {
             sleep(delay).await;
@@ -79,24 +69,13 @@ impl Storage for MockStorage {
     async fn has(&self, _key: &str) -> bool {
         false
     }
-    async fn put(&self, _key: &str, _entry: &mut dyn ReadSeek) -> Result<Duration> {
+    async fn put(&self, _key: &str, _entry: &mut dyn BufReadSeek) -> Result<Duration> {
         Ok(if let Some(delay) = self.delay {
             sleep(delay).await;
             delay
         } else {
             Duration::from_secs(0)
         })
-    }
-    async fn put_async_reader(
-        &self,
-        _key: &str,
-        _size: u64,
-        _source: &mut (dyn AsyncReadSeek + Unpin),
-    ) -> Result<()> {
-        if let Some(delay) = self.delay {
-            sleep(delay).await;
-        }
-        Ok(())
     }
     async fn size(&self, _key: &str) -> Result<u64> {
         if let Some(delay) = self.delay {
