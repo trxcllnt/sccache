@@ -299,7 +299,7 @@ mod toolchain_imp {
                     builder.append_dir(tar_path, dir_path)?;
                 }
                 for (tar_path, file_path) in this.file_set.iter() {
-                    builder.append_file(tar_path, fs::File::open(file_path)?.file_mut())?;
+                    builder.append_path_with_name(file_path, tar_path)?;
                 }
                 for (from_path, to_path) in this.symlinks.iter() {
                     let mut header = tar::Header::new_gnu();

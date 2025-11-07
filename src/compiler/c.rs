@@ -1148,15 +1148,20 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
             let dependencies = {
                 let input_path = cwd.join(&parsed_args.input);
                 let input_path = pkg::tarify_path(&mut symlinks, &input_path)?;
-                let dist_input_path = path_transformer.as_dist(&input_path).with_context(|| {
-                    format!("unable to transform input path {}", input_path.display())
-                })?;
 
                 match preprocessor_output {
                     PreprocessorOutput::File(file) => {
                         builder.append_path_with_name(
                             file.path(),
-                            pkg::tar_safe_path(dist_input_path),
+                            path_transformer
+                                .as_dist(&input_path)
+                                .map(pkg::tar_safe_path)
+                                .with_context(|| {
+                                    format!(
+                                        "unable to transform input path {}",
+                                        input_path.display()
+                                    )
+                                })?,
                         )?;
                         vec![]
                     }
@@ -1202,19 +1207,15 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                     )
                 }
 
-                let dist_extra_path = path_transformer.as_dist(&extra_path).with_context(|| {
-                    format!("unable to transform input path {}", extra_path.display())
-                })?;
-
-                let mut file = io::BufReader::new(fs::File::open(&extra_path)?);
-                let mut output = vec![];
-                io::copy(&mut file, &mut output)?;
-
-                let (mut file_header, dist_extra_path) =
-                    pkg::make_tar_header(&extra_path, &dist_extra_path)?;
-                file_header.set_size(output.len() as u64);
-                file_header.set_cksum();
-                builder.append_data(&mut file_header, dist_extra_path, &*output)?;
+                builder.append_path_with_name(
+                    &extra_path,
+                    path_transformer
+                        .as_dist(&extra_path)
+                        .map(pkg::tar_safe_path)
+                        .with_context(|| {
+                            format!("unable to transform input path {}", extra_path.display())
+                        })?,
+                )?;
             }
 
             for (from_path, to_path) in symlinks.iter() {
