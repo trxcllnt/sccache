@@ -179,7 +179,7 @@ jobs:
       BINARY_DIR: "target/debug"
       GRCOV_IGNORE_OPTION: '--ignore build.rs --ignore "/*" --ignore "[a-zA-Z]:/*"'
       GRCOV_EXCLUDE_OPTION: '--excl-br-line "^\s*((debug_)?assert(_eq|_ne)?!|#\[derive\()"'
-      # SCCACHE_DEBUG: 1
+      SCCACHE_DEBUG: 1
       # Don't colorize logs
       NO_COLOR: 1
       NOTEST_CUDA_COMPILERS: ${{ matrix.notest_cuda_compilers || '' }}
