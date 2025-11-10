@@ -523,6 +523,10 @@ impl PreprocessorCacheModeConfig {
             ..Default::default()
         }
     }
+
+    pub fn default_key_prefix() -> String {
+        "preprocessor".into()
+    }
 }
 
 #[cfg(any(
@@ -1044,14 +1048,17 @@ impl From<(StorageKind, GHACacheConfig)> for StorageBuilder {
         let GHACacheConfig {
             version,
             preprocessor_cache_mode,
+            key_prefix,
             ..
         } = config;
+
+        let key_prefix = storage_kind.key_prefix(key_prefix, preprocessor_cache_mode.as_ref());
 
         Self::default()
             .create_storage(move || {
                 debug!("Init gha {storage_kind} cache with version {version}");
 
-                GHACache::build(&version)
+                GHACache::build(&version, key_prefix.as_str())
                     .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
                     .map_err(|err| anyhow!("create gha cache failed: {err:?}"))
             })
@@ -1351,13 +1358,19 @@ impl StorageKind {
                 .rev()
                 .filter({
                     let use_preprocessor_cache_mode = matches!(kind, StorageKind::Preprocessor);
-                    move |&config| match config {
-                        CacheType::Disk(_) => true,
-                        _ => config
-                            .preprocessor_cache_mode()
-                            .map(|cache| cache.use_preprocessor_cache_mode)
-                            .filter(|&f| f == use_preprocessor_cache_mode)
-                            .unwrap_or(!use_preprocessor_cache_mode),
+                    move |&config| {
+                        if use_preprocessor_cache_mode {
+                            match config {
+                                CacheType::Disk(_) => true,
+                                _ => config
+                                    .preprocessor_cache_mode()
+                                    .map(|cache| cache.use_preprocessor_cache_mode)
+                                    .filter(|&f| f == use_preprocessor_cache_mode)
+                                    .unwrap_or_default(),
+                            }
+                        } else {
+                            true
+                        }
                     }
                 })
                 .map(|config| StorageBuilder::from((kind, config.clone()))),

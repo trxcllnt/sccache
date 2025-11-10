@@ -304,6 +304,8 @@ impl GCSCacheConfig {
 pub struct GHACacheConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub key_prefix: String,
     /// Version for gha cache is a namespace. By setting different versions,
     /// we can avoid mixed caches.
     #[serde(default)]
@@ -1055,14 +1057,13 @@ pub struct EnvConfig {
     cache: CacheConfigs,
 }
 
-fn key_prefix_from_env_var(env_var_name: &str) -> String {
+fn key_prefix_from_env_var(env_var_name: &str) -> Option<String> {
     env::var(env_var_name)
         .ok()
         .as_ref()
         .map(|s| s.trim_end_matches('/'))
         .filter(|s| !s.is_empty())
-        .unwrap_or_default()
-        .to_owned()
+        .map(|s| s.to_owned())
 }
 
 pub fn number_from_env_var<A: std::str::FromStr>(env_var_name: &str) -> Option<Result<A>>
@@ -1105,7 +1106,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         let use_ssl = bool_from_env_var(&envvar("S3_USE_SSL"))?;
         let server_side_encryption = bool_from_env_var(&envvar("S3_SERVER_SIDE_ENCRYPTION"))?;
         let endpoint = env::var(envvar("ENDPOINT")).ok();
-        let key_prefix = key_prefix_from_env_var(&envvar("S3_KEY_PREFIX"));
+        let key_prefix = key_prefix_from_env_var(&envvar("S3_KEY_PREFIX")).unwrap_or_default();
         let enable_virtual_host_style = bool_from_env_var(&envvar("S3_ENABLE_VIRTUAL_HOST_STYLE"))?;
 
         Some(S3CacheConfig {
@@ -1117,7 +1118,15 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             use_ssl,
             server_side_encryption,
             enable_virtual_host_style,
-            preprocessor_cache_mode: None,
+            preprocessor_cache_mode: Some(PreprocessorCacheModeConfig {
+                use_preprocessor_cache_mode: bool_from_env_var(&envvar(
+                    "S3_USE_PREPROCESSOR_CACHE_MODE",
+                ))?
+                .unwrap_or_default(),
+                key_prefix: key_prefix_from_env_var(&envvar("S3_PREPROCESSOR_CACHE_KEY_PREFIX"))
+                    .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
+                ..Default::default()
+            }),
             order: number_from_env_var(&envvar("S3_CACHE_ORDER"))
                 .unwrap_or(Ok(S3CacheConfig::default_order()))
                 .unwrap_or(S3CacheConfig::default_order()),
@@ -1162,7 +1171,8 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                     .transpose()?
                     .unwrap_or(10);
 
-            let key_prefix = key_prefix_from_env_var(&envvar("REDIS_KEY_PREFIX"));
+            let key_prefix =
+                key_prefix_from_env_var(&envvar("REDIS_KEY_PREFIX")).unwrap_or_default();
 
             Some(RedisCacheConfig {
                 url,
@@ -1175,7 +1185,17 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                 ttl,
                 key_prefix,
                 connection_pool_max_size: Some(connection_pool_max_size),
-                preprocessor_cache_mode: None,
+                preprocessor_cache_mode: Some(PreprocessorCacheModeConfig {
+                    use_preprocessor_cache_mode: bool_from_env_var(&envvar(
+                        "REDIS_USE_PREPROCESSOR_CACHE_MODE",
+                    ))?
+                    .unwrap_or_default(),
+                    key_prefix: key_prefix_from_env_var(&envvar(
+                        "REDIS_PREPROCESSOR_CACHE_KEY_PREFIX",
+                    ))
+                    .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
+                    ..Default::default()
+                }),
                 order: number_from_env_var(&envvar("REDIS_CACHE_ORDER"))
                     .unwrap_or(Ok(RedisCacheConfig::default_order()))
                     .unwrap_or(RedisCacheConfig::default_order()),
@@ -1209,7 +1229,8 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                 .transpose()?
                 .unwrap_or(10);
 
-        let key_prefix = key_prefix_from_env_var(&envvar("MEMCACHED_KEY_PREFIX"));
+        let key_prefix =
+            key_prefix_from_env_var(&envvar("MEMCACHED_KEY_PREFIX")).unwrap_or_default();
 
         Some(MemcachedCacheConfig {
             url,
@@ -1218,7 +1239,17 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             expiration,
             key_prefix,
             connection_pool_max_size: Some(connection_pool_max_size),
-            preprocessor_cache_mode: None,
+            preprocessor_cache_mode: Some(PreprocessorCacheModeConfig {
+                use_preprocessor_cache_mode: bool_from_env_var(&envvar(
+                    "MEMCACHED_USE_PREPROCESSOR_CACHE_MODE",
+                ))?
+                .unwrap_or_default(),
+                key_prefix: key_prefix_from_env_var(&envvar(
+                    "MEMCACHED_PREPROCESSOR_CACHE_KEY_PREFIX",
+                ))
+                .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
+                ..Default::default()
+            }),
             order: number_from_env_var(&envvar("MEMCACHED_CACHE_ORDER"))
                 .unwrap_or(Ok(MemcachedCacheConfig::default_order()))
                 .unwrap_or(MemcachedCacheConfig::default_order()),
@@ -1251,7 +1282,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
     }
 
     let gcs = env::var(envvar("GCS_BUCKET")).ok().map(|bucket| {
-        let key_prefix = key_prefix_from_env_var(&envvar("GCS_KEY_PREFIX"));
+        let key_prefix = key_prefix_from_env_var(&envvar("GCS_KEY_PREFIX")).unwrap_or_default();
 
         if env::var(envvar("GCS_OAUTH_URL")).is_ok() {
             eprintln!("{} has been deprecated", envvar("GCS_OAUTH_URL"));
@@ -1286,7 +1317,16 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             service_account,
             rw_mode,
             credential_url,
-            preprocessor_cache_mode: None,
+            preprocessor_cache_mode: Some(PreprocessorCacheModeConfig {
+                use_preprocessor_cache_mode: bool_from_env_var(&envvar(
+                    "GCS_USE_PREPROCESSOR_CACHE_MODE",
+                ))
+                .unwrap_or(None)
+                .unwrap_or_default(),
+                key_prefix: key_prefix_from_env_var(&envvar("GCS_PREPROCESSOR_CACHE_KEY_PREFIX")) //
+                    .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
+                ..Default::default()
+            }),
             order: number_from_env_var(&envvar("GCS_CACHE_ORDER"))
                 .unwrap_or(Ok(GCSCacheConfig::default_order()))
                 .unwrap_or(GCSCacheConfig::default_order()),
@@ -1300,7 +1340,17 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         Some(GHACacheConfig {
             enabled: true,
             version,
-            preprocessor_cache_mode: None,
+            key_prefix: key_prefix_from_env_var(&envvar("GHA_PREPROCESSOR_CACHE_KEY_PREFIX"))
+                .unwrap_or_default(),
+            preprocessor_cache_mode: Some(PreprocessorCacheModeConfig {
+                use_preprocessor_cache_mode: bool_from_env_var(&envvar(
+                    "GHA_USE_PREPROCESSOR_CACHE_MODE",
+                ))?
+                .unwrap_or_default(),
+                key_prefix: key_prefix_from_env_var(&envvar("GHA_PREPROCESSOR_CACHE_KEY_PREFIX"))
+                    .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
+                ..Default::default()
+            }),
             order: number_from_env_var(&envvar("GHA_CACHE_ORDER"))
                 .unwrap_or(Ok(GHACacheConfig::default_order()))
                 .unwrap_or(GHACacheConfig::default_order()),
@@ -1311,7 +1361,17 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         Some(GHACacheConfig {
             enabled: true,
             version: "".to_string(),
-            preprocessor_cache_mode: None,
+            key_prefix: key_prefix_from_env_var(&envvar("GHA_PREPROCESSOR_CACHE_KEY_PREFIX"))
+                .unwrap_or_default(),
+            preprocessor_cache_mode: Some(PreprocessorCacheModeConfig {
+                use_preprocessor_cache_mode: bool_from_env_var(&envvar(
+                    "GHA_USE_PREPROCESSOR_CACHE_MODE",
+                ))?
+                .unwrap_or_default(),
+                key_prefix: key_prefix_from_env_var(&envvar("GHA_PREPROCESSOR_CACHE_KEY_PREFIX"))
+                    .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
+                ..Default::default()
+            }),
             order: number_from_env_var(&envvar("GHA_CACHE_ORDER"))
                 .unwrap_or(Ok(GHACacheConfig::default_order()))
                 .unwrap_or(GHACacheConfig::default_order()),
@@ -1325,12 +1385,20 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         env::var(envvar("AZURE_CONNECTION_STRING")),
         env::var(envvar("AZURE_BLOB_CONTAINER")),
     ) {
-        let key_prefix = key_prefix_from_env_var(&envvar("AZURE_KEY_PREFIX"));
+        let key_prefix = key_prefix_from_env_var(&envvar("AZURE_KEY_PREFIX")).unwrap_or_default();
         Some(AzureCacheConfig {
             connection_string,
             container,
             key_prefix,
-            preprocessor_cache_mode: None,
+            preprocessor_cache_mode: Some(PreprocessorCacheModeConfig {
+                use_preprocessor_cache_mode: bool_from_env_var(&envvar(
+                    "AZURE_USE_PREPROCESSOR_CACHE_MODE",
+                ))?
+                .unwrap_or_default(),
+                key_prefix: key_prefix_from_env_var(&envvar("AZURE_PREPROCESSOR_CACHE_KEY_PREFIX"))
+                    .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
+                ..Default::default()
+            }),
             order: number_from_env_var(&envvar("AZURE_CACHE_ORDER"))
                 .unwrap_or(Ok(AzureCacheConfig::default_order()))
                 .unwrap_or(AzureCacheConfig::default_order()),
@@ -1341,7 +1409,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
 
     // ======= WebDAV =======
     let webdav = if let Ok(endpoint) = env::var(envvar("WEBDAV_ENDPOINT")) {
-        let key_prefix = key_prefix_from_env_var(&envvar("WEBDAV_KEY_PREFIX"));
+        let key_prefix = key_prefix_from_env_var(&envvar("WEBDAV_KEY_PREFIX")).unwrap_or_default();
         let username = env::var(envvar("WEBDAV_USERNAME")).ok();
         let password = env::var(envvar("WEBDAV_PASSWORD")).ok();
         let token = env::var(envvar("WEBDAV_TOKEN")).ok();
@@ -1352,7 +1420,17 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             username,
             password,
             token,
-            preprocessor_cache_mode: None,
+            preprocessor_cache_mode: Some(PreprocessorCacheModeConfig {
+                use_preprocessor_cache_mode: bool_from_env_var(&envvar(
+                    "WEBDAV_USE_PREPROCESSOR_CACHE_MODE",
+                ))?
+                .unwrap_or_default(),
+                key_prefix: key_prefix_from_env_var(&envvar(
+                    "WEBDAV_PREPROCESSOR_CACHE_KEY_PREFIX",
+                ))
+                .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
+                ..Default::default()
+            }),
             order: number_from_env_var(&envvar("WEBDAV_CACHE_ORDER"))
                 .unwrap_or(Ok(WebdavCacheConfig::default_order()))
                 .unwrap_or(WebdavCacheConfig::default_order()),
@@ -1364,7 +1442,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
     // ======= OSS =======
     let oss = if let Ok(bucket) = env::var(envvar("OSS_BUCKET")) {
         let endpoint = env::var(envvar("OSS_ENDPOINT")).ok();
-        let key_prefix = key_prefix_from_env_var(&envvar("OSS_KEY_PREFIX"));
+        let key_prefix = key_prefix_from_env_var(&envvar("OSS_KEY_PREFIX")).unwrap_or_default();
 
         let no_credentials = bool_from_env_var(&envvar("OSS_NO_CREDENTIALS"))?.unwrap_or(false);
 
@@ -1373,7 +1451,15 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
             endpoint,
             key_prefix,
             no_credentials,
-            preprocessor_cache_mode: None,
+            preprocessor_cache_mode: Some(PreprocessorCacheModeConfig {
+                use_preprocessor_cache_mode: bool_from_env_var(&envvar(
+                    "OSS_USE_PREPROCESSOR_CACHE_MODE",
+                ))?
+                .unwrap_or_default(),
+                key_prefix: key_prefix_from_env_var(&envvar("OSS_PREPROCESSOR_CACHE_KEY_PREFIX"))
+                    .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
+                ..Default::default()
+            }),
             order: number_from_env_var(&envvar("OSS_CACHE_ORDER"))
                 .unwrap_or(Ok(OSSCacheConfig::default_order()))
                 .unwrap_or(OSSCacheConfig::default_order()),
@@ -1396,8 +1482,11 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
     }
 
     // ======= Local =======
-    let disk_dir = env::var_os(envvar("DIR")).map(PathBuf::from);
+    let disk_dir = env::var_os(envvar("DIR"))
+        .or(env::var_os(envvar("DISK_CACHE_PATH")))
+        .map(PathBuf::from);
     let disk_sz = env::var(envvar("CACHE_SIZE"))
+        .or(env::var(envvar("DISK_CACHE_SIZE")))
         .ok()
         .and_then(|v| parse_size(&v));
     let disk_order = number_from_env_var(&envvar("DISK_CACHE_ORDER")).and_then(|o| o.ok());
@@ -1406,9 +1495,20 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
     let preprocessor_mode_overridden = if let Some(value) = bool_from_env_var(&envvar("DIRECT"))? {
         preprocessor_cache_mode.use_preprocessor_cache_mode = value;
         true
+    } else if let Some(value) = bool_from_env_var(&envvar("DISK_USE_PREPROCESSOR_CACHE_MODE"))? {
+        preprocessor_cache_mode.use_preprocessor_cache_mode = value;
+        true
     } else {
         false
     };
+
+    if preprocessor_cache_mode.use_preprocessor_cache_mode
+        && env::var(envvar("DISK_PREPROCESSOR_CACHE_KEY_PREFIX")).is_ok()
+    {
+        preprocessor_cache_mode.key_prefix =
+            key_prefix_from_env_var(&envvar("DISK_PREPROCESSOR_CACHE_KEY_PREFIX"))
+                .unwrap_or(preprocessor_cache_mode.key_prefix);
+    }
 
     let (disk_rw_mode, disk_rw_mode_overridden) = match env::var(envvar("LOCAL_RW_MODE"))
         .as_ref()

@@ -25,14 +25,21 @@ use super::http_client::set_user_agent;
 pub struct GHACache;
 
 impl GHACache {
-    pub fn build(version: &str) -> Result<Operator> {
+    pub fn build<'a, P: Into<Option<&'a str>>>(version: &str, key_prefix: P) -> Result<Operator> {
         let mut builder = Ghac::default()
             // This is the prefix of gha cache.
             // From user side, cache key will be like `sccache/f/c/b/fcbxxx`
             //
             // User customization is theoretically supported, but I decided
             // to see the community feedback first.
-            .root("/sccache");
+            .root(
+                key_prefix
+                    .into()
+                    .filter(|p| !p.is_empty())
+                    .map(|p| ["/sccache", p].join("/"))
+                    .unwrap_or_else(|| "/sccache".into())
+                    .as_str(),
+            );
 
         builder = if version.is_empty() {
             builder.version(&format!("sccache-v{VERSION}"))
