@@ -542,7 +542,7 @@ impl PreprocessorCacheModeConfig {
 mod operator {
     use super::*;
 
-    pub fn to_retry_err(kind: &str, err: opendal::Error) -> RetryError<opendal::Error> {
+    fn to_retry_err(kind: &str, err: opendal::Error) -> RetryError<opendal::Error> {
         match err.kind() {
             opendal::ErrorKind::NotFound => {
                 trace!("cache {kind} error (permanent): {err}");
@@ -576,28 +576,29 @@ mod operator {
         }
     }
 
-    pub async fn reader_with_retry(
+    pub async fn read_with_retry(
         storage: &opendal::Operator,
         key: &str,
-    ) -> std::result::Result<opendal::Reader, opendal::Error> {
+    ) -> std::result::Result<opendal::Buffer, opendal::Error> {
         // TODO: Allow configuring the number of retries
         retry_with_jitter(usize::MAX, || async {
             storage
-                .reader(&normalize_key(key))
+                .read(&normalize_key(key))
                 .await
                 .map_err(|e| to_retry_err("lookup", e))
         })
         .await
     }
 
-    pub async fn writer_with_retry(
+    pub async fn write_with_retry(
         storage: &opendal::Operator,
         key: &str,
-    ) -> std::result::Result<opendal::Writer, opendal::Error> {
+        data: bytes::Bytes,
+    ) -> std::result::Result<opendal::Metadata, opendal::Error> {
         // TODO: Allow configuring the number of retries
         retry_with_jitter(usize::MAX, || async {
             storage
-                .writer(&normalize_key(key))
+                .write(&normalize_key(key), data.clone())
                 .await
                 .map_err(|e| to_retry_err("write", e))
         })
@@ -619,13 +620,12 @@ mod operator {
 #[async_trait]
 impl Storage for opendal::Operator {
     async fn get(&self, key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
-        use futures::io::{AllowStdIo, copy_buf};
-        match operator::reader_with_retry(self, key).await {
-            Ok(source) => {
-                let mut sink = vec![];
-                let source = source.into_futures_async_read(..).await?;
-                copy_buf(source, &mut AllowStdIo::new(&mut sink)).await?;
-                Ok(Cache::Hit(Box::new(std::io::Cursor::new(sink))))
+        match operator::read_with_retry(self, key).await {
+            Ok(res) => {
+                let mut buf = vec![];
+                let mut res = futures::io::AllowStdIo::new(res);
+                futures::AsyncReadExt::read_to_end(&mut res, &mut buf).await?;
+                Ok(Cache::Hit(Box::new(std::io::Cursor::new(buf))))
             }
             Err(err) => match err.kind() {
                 opendal::ErrorKind::NotFound => Ok(Cache::Miss),
@@ -645,19 +645,11 @@ impl Storage for opendal::Operator {
     }
 
     async fn put(&self, key: &str, source: &mut dyn BufReadSeek) -> Result<Duration> {
-        use futures::AsyncWriteExt;
-        use futures::io::{AllowStdIo, copy_buf};
-
         let start = std::time::Instant::now();
-
-        let mut sink = operator::writer_with_retry(self, key)
-            .await?
-            .into_futures_async_write();
-
-        let res = copy_buf(AllowStdIo::new(source), &mut sink).await;
-
-        res.and(sink.close().await)?;
-
+        let mut buf = vec![];
+        source.read_to_end(&mut buf)?;
+        let buf = bytes::Bytes::from(buf);
+        operator::write_with_retry(self, key, buf).await?;
         Ok(start.elapsed())
     }
 
