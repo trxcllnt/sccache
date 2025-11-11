@@ -385,8 +385,6 @@ jobs:
       matrix:
         job:
           - { os: ubuntu-22.04 }
-    env:
-      SCCACHE_DEBUG: 1
     steps:
       - uses: actions/checkout@v5
       - name: Prepare, build and test
@@ -396,7 +394,6 @@ jobs:
           usesh: true
           sync: rsync
           copyback: true
-          envs: 'SCCACHE_DEBUG'
           prepare: pkg install -y ca_root_nss curl gmake gtar pot sudo rabbitmq
           run: |
             #####################################################################################
