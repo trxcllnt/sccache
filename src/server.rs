@@ -1518,8 +1518,12 @@ where
     ) -> Result<CompileFinished> {
         self.stats.lock().await.requests_executed += 1;
 
-        let force_recache = env_vars.iter().any(|(k, _v)| k == "SCCACHE_RECACHE");
-        let force_no_cache = env_vars.iter().any(|(k, _v)| k == "SCCACHE_NO_CACHE");
+        let force_recache = env_vars.iter().any(|(k, v)| {
+            k == "SCCACHE_RECACHE" && matches!(v.to_str().unwrap_or_default(), "true" | "on" | "1")
+        });
+        let force_no_cache = env_vars.iter().any(|(k, v)| {
+            k == "SCCACHE_NO_CACHE" && matches!(v.to_str().unwrap_or_default(), "true" | "on" | "1")
+        });
 
         let cache_control = if force_no_cache {
             CacheControl::ForceNoCache
