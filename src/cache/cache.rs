@@ -735,80 +735,6 @@ pub(in crate::cache) fn normalize_key(key: &str) -> String {
     format!("{}/{}/{}/{}", &key[0..1], &key[1..2], &key[2..3], &key)
 }
 
-struct QueuedRequests {
-    inner: Arc<dyn Storage>,
-    queue: Arc<tokio::sync::Semaphore>,
-}
-
-// Opendal memcached and redis use connection pools with
-// non-configurable max sizes and connection timeouts of 30s.
-// Limit the number of concurrent requests when using those storage backends.
-impl QueuedRequests {
-    pub fn create(inner: Arc<dyn Storage>, max_size: usize) -> Arc<dyn Storage> {
-        Arc::new(Self {
-            inner,
-            queue: Arc::new(tokio::sync::Semaphore::new(max_size)),
-        })
-    }
-}
-
-#[async_trait]
-impl Storage for QueuedRequests {
-    async fn get(&self, key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
-        let _permit = self.queue.acquire().await?;
-        self.inner.get(key).await
-    }
-
-    async fn del(&self, key: &str) -> Result<()> {
-        let _permit = self.queue.acquire().await?;
-        self.inner.del(key).await
-    }
-
-    async fn has(&self, key: &str) -> bool {
-        let permit = self.queue.acquire().await;
-        if permit.is_ok() {
-            self.inner.has(key).await
-        } else {
-            false
-        }
-    }
-
-    async fn put(&self, key: &str, entry: &mut dyn BufReadSeek) -> Result<Duration> {
-        let _permit = self.queue.acquire().await?;
-        self.inner.put(key, entry).await
-    }
-
-    async fn size(&self, key: &str) -> Result<u64> {
-        let _permit = self.queue.acquire().await?;
-        self.inner.size(key).await
-    }
-
-    /// Check the cache capability.
-    async fn check(&self) -> Result<CacheMode> {
-        self.inner.check().await
-    }
-
-    /// Get the storage location.
-    async fn location(&self) -> String {
-        self.inner.location().await
-    }
-
-    /// Get the current storage usage, if applicable.
-    async fn current_size(&self) -> Result<Option<u64>> {
-        self.inner.current_size().await
-    }
-
-    /// Get the maximum storage size, if applicable.
-    async fn max_size(&self) -> Result<Option<u64>> {
-        self.inner.max_size().await
-    }
-
-    /// Return the config for preprocessor cache mode if applicable
-    fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
-        self.inner.preprocessor_cache_mode_config()
-    }
-}
-
 pub struct PreprocessorCache(pub Arc<dyn Storage>, pub PreprocessorCacheModeConfig);
 
 impl PreprocessorCache {
@@ -868,7 +794,6 @@ impl Storage for PreprocessorCache {
 #[derive(Default)]
 struct StorageBuilder {
     create_storage: Option<Box<dyn Fn() -> Result<Arc<dyn Storage>> + Send>>,
-    max_concurrent_requests: Option<usize>,
     preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
     watch_paths: Vec<PathBuf>,
 }
@@ -894,13 +819,6 @@ impl StorageBuilder {
         }
     }
 
-    pub fn max_concurrent_requests<P: Into<Option<usize>>>(self, limit: P) -> Self {
-        Self {
-            max_concurrent_requests: limit.into(),
-            ..self
-        }
-    }
-
     pub fn watch_paths<P: ToOwned<Owned = Vec<PathBuf>>>(self, paths: P) -> Self {
         Self {
             watch_paths: paths.to_owned(),
@@ -911,22 +829,12 @@ impl StorageBuilder {
     pub async fn build(self) -> Result<Arc<dyn Storage>> {
         let Self {
             create_storage,
-            max_concurrent_requests,
             preprocessor_cache_mode,
             #[allow(unused_variables)]
             watch_paths,
         } = self;
 
         let create_storage = create_storage.expect("create_storage should exist");
-
-        let create_storage = move || {
-            let storage = create_storage()?;
-            Ok(if let Some(limit) = max_concurrent_requests {
-                QueuedRequests::create(storage, limit)
-            } else {
-                storage
-            })
-        };
 
         let create_storage = move || {
             use futures::{FutureExt, TryFutureExt, future};
@@ -1095,7 +1003,6 @@ impl From<(StorageKind, MemcachedCacheConfig)> for StorageBuilder {
                 .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
                 .map_err(|err| anyhow!("create memcached cache failed: {err:?}"))
             })
-            .max_concurrent_requests(connection_pool_max_size.saturating_sub(1).max(1) as usize)
             .preprocessor_cache_mode(preprocessor_cache_mode)
     }
 }
@@ -1121,7 +1028,6 @@ impl From<(StorageKind, RedisCacheConfig)> for StorageBuilder {
         } = config;
 
         let connection_pool_max_size = connection_pool_max_size.unwrap_or(10);
-        let connection_limit = connection_pool_max_size.saturating_sub(1).max(1) as usize;
         let key_prefix = storage_kind.key_prefix(key_prefix, preprocessor_cache_mode.as_ref());
 
         Self::default()
@@ -1161,7 +1067,7 @@ impl From<(StorageKind, RedisCacheConfig)> for StorageBuilder {
                     }
                     _ => bail!("Only one of `endpoint`, `cluster_endpoints`, `url` must be set"),
                 }
-                .map(|storage| QueuedRequests::create(Arc::new(storage), connection_limit))
+                .map(Arc::new)
                 .and_then(|storage| {
                     if let Some(reader_endpoints) = &reader_endpoints {
                         debug!("Init redis cluster {storage_kind} cache with reader endpoints {reader_endpoints}");
@@ -1186,7 +1092,7 @@ impl From<(StorageKind, RedisCacheConfig)> for StorageBuilder {
                                 connection_pool_max_size,
                             )?
                         };
-                        Ok(SimplexCache::create(QueuedRequests::create(Arc::new(reader), connection_limit), storage))
+                        Ok(SimplexCache::create(Arc::new(reader), storage))
                     } else {
                         Ok(storage)
                     }
