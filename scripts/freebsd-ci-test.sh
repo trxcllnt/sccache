@@ -46,8 +46,10 @@ init()
 	export XDG_CONFIG_HOME="$TEST_TMPDIR/.config"
 	mkdir -p "$XDG_CONFIG_HOME"
 	export SCCACHE_DIR="$TEST_TMPDIR/.cache"
-	export SCCACHE_DIST_JOBS_DIR="$TEST_TMPDIR/.cache/jobs"
-	export SCCACHE_DIST_TOOLCHAINS_DIR="$TEST_TMPDIR/.cache/toolchains"
+    mkdir -p "$SCCACHE_DIR"/sccache{,-dist}
+    mkdir -p "$SCCACHE_DIR"/{jobs,toolchains}
+	export SCCACHE_DIST_JOBS_DIR="$SCCACHE_DIR/jobs"
+	export SCCACHE_DIST_TOOLCHAINS_DIR="$SCCACHE_DIR/toolchains"
 	killall sccache 2>/dev/null || true
 	killall sccache-dist 2>/dev/null || true
 	export RUST_LOG_STYLE=never
@@ -190,7 +192,7 @@ start_scheduler()
 	sudo \
 		AMQP_ADDR="amqp://127.0.0.1:5672//" \
 		NO_COLOR=1 \
-		SCCACHE_DIR="$SCCACHE_DIR" \
+		SCCACHE_DIR="$SCCACHE_DIR/sccache-dist" \
 		SCCACHE_DIST_JOBS_DIR="$SCCACHE_DIST_JOBS_DIR" \
 		SCCACHE_DIST_TOOLCHAINS_DIR="$SCCACHE_DIST_TOOLCHAINS_DIR" \
 		SCCACHE_LOG="sccache=debug,tower_http=debug,axum::rejection=trace" \
@@ -207,9 +209,9 @@ start_build_server()
 	sudo \
 		AMQP_ADDR="amqp://127.0.0.1:5672//" \
 		NO_COLOR=1 \
-		SCCACHE_DIR="$SCCACHE_DIR" \
-		SCCACHE_DIST_JOBS_DIR="$SCCACHE_DIST_JOBS_DIR" \
 		SCCACHE_DIST_SERVER_ID="build-server" \
+		SCCACHE_DIR="$SCCACHE_DIR/sccache-dist" \
+		SCCACHE_DIST_JOBS_DIR="$SCCACHE_DIST_JOBS_DIR" \
 		SCCACHE_DIST_TOOLCHAINS_DIR="$SCCACHE_DIST_TOOLCHAINS_DIR" \
 		SCCACHE_LOG="sccache=debug" \
 		SCCACHE_NO_DAEMON=1 \
@@ -232,7 +234,10 @@ start_sccache_server()
 {
 	echo "#### starting sccache-server"
 	killall sccache 2>/dev/null || true
+    rm -rf "$SCCACHE_DIR/sccache" "$TEST_TMPDIR"/sccache_client_log.txt
+    mkdir -p "$SCCACHE_DIR/sccache"
 	SCCACHE_LOG="sccache=debug" \
+    SCCACHE_DIR="$SCCACHE_DIR/sccache" \
 	SCCACHE_ERROR_LOG="$TEST_TMPDIR"/sccache_client_log.txt \
 		sccache --start-server \
 		1>"$TEST_TMPDIR"/sccache_client_log.txt 2>&1
@@ -243,6 +248,7 @@ test_sccache_dist_01()
 {
 	echo "#### running scache_dist test 01"
 	cd "$TEST_TMPDIR/buildtest"
+    sccache -z
 	cargo clean --target-dir /tmp/buildtest
 	RUSTC_WRAPPER=sccache cargo build --target-dir /tmp/buildtest
 	STATS="$(sccache --show-adv-stats)"
@@ -374,12 +380,17 @@ main()
 	start_scheduler
 	start_build_server
 	create_build_test_project
-	start_sccache_server
-	test_sccache_dist_01
-	test_sccache_dist_02
+
+    # Retry a few times because GHA runners have slow disks
+    i=1
+    until start_sccache_server \
+       && test_sccache_dist_01 \
+       && test_sccache_dist_02; do
+        if test $((i++)) -eq 5; then
+            exit 1
+        fi
+    done
+
 	remove_signal_handler
 	cleanup
 }
-
-# run main function
-main
