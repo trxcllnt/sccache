@@ -621,12 +621,9 @@ mod operator {
 impl Storage for opendal::Operator {
     async fn get(&self, key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
         match operator::read_with_retry(self, key).await {
-            Ok(res) => {
-                let mut buf = vec![];
-                let mut res = futures::io::AllowStdIo::new(res);
-                futures::AsyncReadExt::read_to_end(&mut res, &mut buf).await?;
-                Ok(Cache::Hit(Box::new(std::io::Cursor::new(buf))))
-            }
+            Ok(buf) => Ok(Cache::Hit(Box::new(std::io::Cursor::new(
+                tokio::task::spawn_blocking(move || buf.to_vec()).await?,
+            )))),
             Err(err) => match err.kind() {
                 opendal::ErrorKind::NotFound => Ok(Cache::Miss),
                 _ => Err(err.into()),
