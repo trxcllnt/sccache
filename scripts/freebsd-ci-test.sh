@@ -394,3 +394,6 @@ main()
 	remove_signal_handler
 	cleanup
 }
+
+# run main function
+main
