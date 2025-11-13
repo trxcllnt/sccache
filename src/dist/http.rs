@@ -348,6 +348,7 @@ mod scheduler {
     #[allow(dead_code)]
     struct RequireAuth(SocketAddr, HashMap<String, String>);
 
+    #[async_trait]
     impl<S> FromRequestParts<S> for RequireAuth
     where
         S: Send + Sync,
@@ -396,6 +397,7 @@ mod scheduler {
 
     struct Bincode<T>(T);
 
+    #[async_trait]
     impl<S, T> FromRequest<S> for Bincode<T>
     where
         Bytes: FromRequest<S>,
@@ -432,6 +434,7 @@ mod scheduler {
 
     struct RequestBodyTokioAsyncRead(Box<dyn tokio::io::AsyncRead + Send + Unpin>);
 
+    #[async_trait]
     impl<S> FromRequest<S> for RequestBodyTokioAsyncRead
     where
         S: Send + Sync,

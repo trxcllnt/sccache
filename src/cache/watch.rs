@@ -62,7 +62,7 @@ impl WatchStorage {
             })
             .filter_map(|(p, dir)| p.file_name().map(|name| (dir, name.to_owned())))
             .sorted_by_key(|(dir, _)| dir.clone())
-            .chunk_by(|(dir, _)| dir.clone())
+            .group_by(|(dir, _)| dir.clone())
             .into_iter()
             .map(|(dir, names)| {
                 (
