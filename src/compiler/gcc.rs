@@ -1307,6 +1307,7 @@ pub fn generate_compile_commands(
                     }
 
                     arguments.extend(dist::osstrings_to_strings(&parsed_args.common_args)?);
+                    arguments.extend(dist::osstrings_to_strings(&parsed_args.arch_args)?);
 
                     // Escape hatch to work around compiler bugs when compiling preprocessed input.
                     // Sometimes code that doesn't warn in fused preprocess-compile mode does warn
