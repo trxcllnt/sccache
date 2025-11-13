@@ -122,7 +122,6 @@ impl Gcc {
             .lines()
             .map_while(|line| line.ok())
             .filter_map(|line| {
-                debug!("[Gcc::read_native_arch]: {line:?}");
                 let line = line.trim();
                 if line.starts_with("-march=") || line.starts_with("-mtune=") {
                     line.split_once('=')
