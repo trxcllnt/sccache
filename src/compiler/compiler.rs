@@ -2365,11 +2365,16 @@ compiler_version=__VERSION__
                     Gcc::read_implicit_specfiles(&mut creator, &executable, arguments, &env, "-v")
                         .await?;
 
+                let (native_march, native_mtune) =
+                    Gcc::read_native_arch(&mut creator, &executable, &env).await?;
+
                 return CCompiler::new(
                     Gcc {
                         gplusplus: kind == "g++",
                         specfiles: specfiles.clone(),
                         version,
+                        native_march,
+                        native_mtune,
                     },
                     executable,
                     specfiles,
@@ -2530,6 +2535,23 @@ mod test {
         );
         // Try to read gcc implicit specfiles
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
+        // Try to read -march=native
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                exit_status(0),
+                [
+                    "  -mandroid                   		[disabled]",
+                    "  -march=                     		znver2",
+                    "  -masm=                      		att",
+                    "  -mtune-ctrl=                		",
+                    "  -mtune=                     		znver2",
+                    "  -muclibc                    		[disabled]",
+                ]
+                .join("\n"),
+                "",
+            )),
+        );
         let c1 = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
             .wait()
             .unwrap()
@@ -2563,16 +2585,60 @@ mod test {
                 format!("Reading specs from {}", specfile.display()),
             )),
         );
+        // Try to read -march=native
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                exit_status(0),
+                [
+                    "  -mandroid                   		[disabled]",
+                    "  -march=                     		znver2",
+                    "  -masm=                      		att",
+                    "  -mtune-ctrl=                		",
+                    "  -mtune=                     		znver2",
+                    "  -muclibc                    		[disabled]",
+                ]
+                .join("\n"),
+                "",
+            )),
+        );
         let c2 = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
             .wait()
             .unwrap()
             .0;
         assert_eq!(CompilerKind::C(CCompilerKind::Gcc), c2.kind());
+
         if let (Ok(c1), Ok(c2)) = (
             c1.into_any().downcast::<CCompiler<Gcc>>(),
             c2.into_any().downcast::<CCompiler<Gcc>>(),
         ) {
             assert_ne!(c1.executable_digest, c2.executable_digest);
+
+            use crate::compiler::c::CCompilerImpl;
+
+            match c1.compiler().parse_arguments(
+                ovec![
+                    "-c",
+                    "foo.cxx",
+                    "-march=native",
+                    "-mtune=native",
+                    "-o",
+                    "foo.o"
+                ]
+                .as_slice(),
+                ".".as_ref(),
+                &[],
+            ) {
+                CompilerArguments::Ok(parsed_args) => {
+                    assert_eq!(
+                        parsed_args.arch_args,
+                        ovec!["-march=znver2", "-mtune=znver2"]
+                    );
+                    assert!(!parsed_args.common_args.contains(&("-march=native".into())));
+                    assert!(!parsed_args.common_args.contains(&("-mtune=native".into())));
+                }
+                _ => unreachable!("Failed to parse arguments"),
+            }
         } else {
             unreachable!("Failed to downcast");
         }
@@ -2698,6 +2764,23 @@ mod test {
         );
         // Try to read gcc implicit specfiles
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
+        // Try to read -march=native
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                exit_status(0),
+                [
+                    "  -mandroid                   		[disabled]",
+                    "  -march=                     		znver2",
+                    "  -masm=                      		att",
+                    "  -mtune-ctrl=                		",
+                    "  -mtune=                     		znver2",
+                    "  -muclibc                    		[disabled]",
+                ]
+                .join("\n"),
+                "",
+            )),
+        );
         let c1 = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
             .wait()
             .unwrap()
@@ -3081,6 +3164,23 @@ LLVM version: 6.0",
         );
         // Try to read gcc implicit specfiles
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
+        // Try to read -march=native
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                exit_status(0),
+                [
+                    "  -mandroid                   		[disabled]",
+                    "  -march=                     		znver2",
+                    "  -masm=                      		att",
+                    "  -mtune-ctrl=                		",
+                    "  -mtune=                     		znver2",
+                    "  -muclibc                    		[disabled]",
+                ]
+                .join("\n"),
+                "",
+            )),
+        );
         let c = get_compiler_info(creator, &gcc, f.tempdir.path(), &[], &[], pool, None)
             .wait()
             .unwrap()
@@ -3126,6 +3226,23 @@ LLVM version: 6.0",
         );
         // Try to read gcc implicit specfiles
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
+        // Try to read -march=native
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                exit_status(0),
+                [
+                    "  -mandroid                   		[disabled]",
+                    "  -march=                     		znver2",
+                    "  -masm=                      		att",
+                    "  -mtune-ctrl=                		",
+                    "  -mtune=                     		znver2",
+                    "  -muclibc                    		[disabled]",
+                ]
+                .join("\n"),
+                "",
+            )),
+        );
         let c = get_compiler_info(
             creator.clone(),
             &gcc,
@@ -3264,6 +3381,23 @@ LLVM version: 6.0",
         );
         // Try to read gcc implicit specfiles
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
+        // Try to read -march=native
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                exit_status(0),
+                [
+                    "  -mandroid                   		[disabled]",
+                    "  -march=                     		znver2",
+                    "  -masm=                      		att",
+                    "  -mtune-ctrl=                		",
+                    "  -mtune=                     		znver2",
+                    "  -muclibc                    		[disabled]",
+                ]
+                .join("\n"),
+                "",
+            )),
+        );
         let c = get_compiler_info(
             creator.clone(),
             &gcc,
@@ -3406,6 +3540,23 @@ LLVM version: 6.0",
         );
         // Try to read gcc implicit specfiles
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
+        // Try to read -march=native
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                exit_status(0),
+                [
+                    "  -mandroid                   		[disabled]",
+                    "  -march=                     		znver2",
+                    "  -masm=                      		att",
+                    "  -mtune-ctrl=                		",
+                    "  -mtune=                     		znver2",
+                    "  -muclibc                    		[disabled]",
+                ]
+                .join("\n"),
+                "",
+            )),
+        );
         let c = get_compiler_info(
             creator.clone(),
             &gcc,
@@ -3505,6 +3656,23 @@ LLVM version: 6.0",
         );
         // Try to read gcc implicit specfiles
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
+        // Try to read -march=native
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                exit_status(0),
+                [
+                    "  -mandroid                   		[disabled]",
+                    "  -march=                     		znver2",
+                    "  -masm=                      		att",
+                    "  -mtune-ctrl=                		",
+                    "  -mtune=                     		znver2",
+                    "  -muclibc                    		[disabled]",
+                ]
+                .join("\n"),
+                "",
+            )),
+        );
         let c = get_compiler_info(
             creator.clone(),
             &gcc,
@@ -3608,6 +3776,23 @@ LLVM version: 6.0",
         );
         // Try to read gcc implicit specfiles
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
+        // Try to read -march=native
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                exit_status(0),
+                [
+                    "  -mandroid                   		[disabled]",
+                    "  -march=                     		znver2",
+                    "  -masm=                      		att",
+                    "  -mtune-ctrl=                		",
+                    "  -mtune=                     		znver2",
+                    "  -muclibc                    		[disabled]",
+                ]
+                .join("\n"),
+                "",
+            )),
+        );
         let c = get_compiler_info(
             creator.clone(),
             &gcc,
@@ -3755,6 +3940,23 @@ LLVM version: 6.0",
         });
         // Try to read gcc implicit specfiles
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
+        // Try to read -march=native
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                exit_status(0),
+                [
+                    "  -mandroid                   		[disabled]",
+                    "  -march=                     		znver2",
+                    "  -masm=                      		att",
+                    "  -mtune-ctrl=                		",
+                    "  -mtune=                     		znver2",
+                    "  -muclibc                    		[disabled]",
+                ]
+                .join("\n"),
+                "",
+            )),
+        );
         let c = get_compiler_info(
             creator.clone(),
             &gcc,
@@ -3851,6 +4053,23 @@ LLVM version: 6.0",
         );
         // Try to read gcc implicit specfiles
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
+        // Try to read -march=native
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                exit_status(0),
+                [
+                    "  -mandroid                   		[disabled]",
+                    "  -march=                     		znver2",
+                    "  -masm=                      		att",
+                    "  -mtune-ctrl=                		",
+                    "  -mtune=                     		znver2",
+                    "  -muclibc                    		[disabled]",
+                ]
+                .join("\n"),
+                "",
+            )),
+        );
         let c = get_compiler_info(
             creator.clone(),
             &gcc,

@@ -239,6 +239,20 @@ fn test_server_compile() {
         c.next_command_spawns(Ok(MockChild::new(exit_status(0), "compiler_id=gcc", "")));
         // Try to read gcc implicit specfiles
         c.next_command_spawns(Ok(MockChild::new(exit_status(0), "", "")));
+        // Try to read -march=native
+        c.next_command_spawns(Ok(MockChild::new(
+            exit_status(0),
+            [
+                "  -mandroid                   		[disabled]",
+                "  -march=                     		znver2",
+                "  -masm=                      		att",
+                "  -mtune-ctrl=                		",
+                "  -mtune=                     		znver2",
+                "  -muclibc                    		[disabled]",
+            ]
+            .join("\n"),
+            "",
+        )));
         // Preprocessor invocation.
         c.next_command_spawns(Ok(MockChild::new(
             exit_status(0),

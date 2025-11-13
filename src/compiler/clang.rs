@@ -189,6 +189,8 @@ impl CCompilerImpl for Clang {
     }
 }
 
+pub const ARCH_FLAG: &str = "-arch";
+
 counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("--dependent-lib", OsString, Concatenated(b'='), PassThrough),
     take_arg!("--hip-device-lib-path", PathBuf, Concatenated(b'='), PassThroughPath),
@@ -206,6 +208,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     flag!("-Wno-unused-parameter", PassThroughFlag),
     take_arg!("-Xclang", OsString, Separated, XClang),
     take_arg!("-add-plugin", OsString, Separated, PassThrough),
+    take_arg!(ARCH_FLAG, OsString, Separated, Arch),
     take_arg!("-debug-info-kind", OsString, Concatenated(b'='), PassThrough),
     take_arg!("-dependency-file", PathBuf, Separated, DepArgumentPath),
     flag!("-emit-pch", PassThroughFlag),

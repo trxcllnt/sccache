@@ -47,6 +47,8 @@ pub struct Gcc {
     pub gplusplus: bool,
     pub specfiles: Vec<PathBuf>,
     pub version: Option<String>,
+    pub native_march: String,
+    pub native_mtune: String,
 }
 
 impl Gcc {
@@ -93,6 +95,48 @@ impl Gcc {
             .try_collect()
             .unwrap_or_default())
     }
+
+    pub async fn read_native_arch<T>(
+        creator: &mut T,
+        exe: &Path,
+        env_vars: &[(OsString, OsString)],
+    ) -> Result<(String, String)>
+    where
+        T: CommandCreatorSync,
+    {
+        use bytes::Buf;
+        use itertools::Itertools;
+        use std::io::BufRead;
+
+        let mut cmd = creator.new_command_sync(exe);
+        cmd.env_clear()
+            .envs(env_vars.iter().map(|s| (&s.0, &s.1)))
+            .arg("-Q")
+            .arg("-march=native")
+            .arg("--help=target");
+
+        let output = run_input_output(cmd, None).await?;
+
+        output
+            .stdout
+            .reader()
+            .lines()
+            .map_while(|line| line.ok())
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.starts_with("-march=") || line.starts_with("-mtune=") {
+                    line.split_once('=')
+                        .map(|(_, arch)| arch.trim().to_owned())
+                        .filter(|arch| !arch.is_empty())
+                } else {
+                    None
+                }
+            })
+            .take(2)
+            .collect_tuple()
+            .map(Ok)
+            .unwrap_or_else(|| bail!("Could not detect CPU name for -march=native"))
+    }
 }
 
 #[async_trait]
@@ -119,6 +163,16 @@ impl CCompilerImpl for Gcc {
             parsed_args
                 .extra_hash_files
                 .extend(self.specfiles.iter().cloned());
+
+            // Rewrite -march=native to the current CPU architecture to
+            // ensure the correct architecture is used if dist compiling
+            for arch in parsed_args.arch_args.iter_mut() {
+                if arch == "-march=native" {
+                    *arch = format!("-march={}", self.native_march).into();
+                } else if arch == "-mtune=native" {
+                    *arch = format!("-mtune={}", self.native_mtune).into();
+                }
+            }
         }
         parsed_args
     }
@@ -244,8 +298,6 @@ ArgData! { pub
 
 use self::ArgData::*;
 
-const ARCH_FLAG: &str = "-arch";
-
 // Mostly taken from https://github.com/ccache/ccache/blob/master/src/compopt.cpp#L52-L172
 counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     flag!("-", TooHardFlag),
@@ -279,7 +331,6 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("-Xassembler", OsString, Separated, PassThrough),
     take_arg!("-Xlinker", OsString, Separated, PassThrough),
     take_arg!("-Xpreprocessor", OsString, Separated, PreprocessorArgument),
-    take_arg!(ARCH_FLAG, OsString, Separated, Arch),
     take_arg!("-aux-info", OsString, Separated, PassThrough),
     take_arg!("-b", OsString, Separated, PassThrough),
     flag!("-c", DoCompilation),
@@ -311,6 +362,8 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("-ivfsstatcache", PathBuf, CanBeSeparated, PassThroughPath),
     take_arg!("-iwithprefix", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
     take_arg!("-iwithprefixbefore", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
+    take_arg!("-march", OsString, Concatenated(b'='), Arch),
+    take_arg!("-mtune", OsString, Concatenated(b'='), Arch),
     flag!("-nostdinc", PreprocessorArgumentFlag),
     flag!("-nostdinc++", PreprocessorArgumentFlag),
     take_arg!("-o", PathBuf, CanBeSeparated, Output),
@@ -488,15 +541,17 @@ where
                 };
             }
             Some(Arch(arch)) => {
-                match seen_arch {
-                    Some(s) if &s != arch && dont_cache_multiarch => {
-                        cannot_cache!(
-                            "multiple different -arch, and SCCACHE_CACHE_MULTIARCH not set"
-                        )
-                    }
-                    _ => {}
-                };
-                seen_arch = Some(arch.clone());
+                if kind == CCompilerKind::Clang {
+                    match seen_arch {
+                        Some(s) if &s != arch && dont_cache_multiarch => {
+                            cannot_cache!(
+                                "multiple different -arch, and SCCACHE_CACHE_MULTIARCH not set"
+                            )
+                        }
+                        _ => {}
+                    };
+                    seen_arch = Some(arch.clone());
+                }
             }
             Some(XClang(s)) => xclangs.push(s.clone()),
             None => match arg {
@@ -814,35 +869,41 @@ where
         }
     }
 
-    // Explicitly rewrite the -arch args to be preprocessor defines of the form
-    // __arch__ so that they affect the preprocessor output but don't cause
-    // clang to error.
-    let rewritten_arch_args = parsed_args
-        .arch_args
-        .iter()
-        .filter(|&arg| arg.ne(ARCH_FLAG))
-        .filter_map(|arg| {
-            arg.to_str()
-                .map(|arg_string| format!("-D__{arg_string}__=1").into())
-        })
-        .collect::<Vec<OsString>>();
-
-    let mut arch_args_to_use = &rewritten_arch_args;
-    let mut unique_rewritten = rewritten_arch_args.clone();
-    unique_rewritten.sort();
-    unique_rewritten.dedup();
-    if unique_rewritten.len() <= 1 {
-        // don't use rewritten arch args if there is only one arch
-        arch_args_to_use = &parsed_args.arch_args;
-    } else {
-        debug_if_trace!("-arch args before rewrite: {:?}", parsed_args.arch_args);
-        debug_if_trace!("-arch args after rewrite:  {:?}", arch_args_to_use);
-    }
-
     cmd.args(&parsed_args.preprocessor_args)
         .args(&parsed_args.dependency_args)
         .args(&parsed_args.common_args)
-        .args(arch_args_to_use)
+        .args(
+            (
+                // Explicitly rewrite the -arch args to be preprocessor defines of the form
+                // __arch__ so that they affect the preprocessor output but don't cause
+                // clang to error.
+                if kind == &CCompilerKind::Clang {
+                    let rewritten_arch_args = parsed_args
+                        .arch_args
+                        .iter()
+                        .filter(|&arg| arg.ne(clang::ARCH_FLAG))
+                        .filter_map(|arg| {
+                            arg.to_str()
+                                .map(|arg_string| format!("-D__{arg_string}__=1").into())
+                        })
+                        .collect::<Vec<OsString>>();
+                    let mut unique_rewritten = rewritten_arch_args.clone();
+                    unique_rewritten.sort();
+                    unique_rewritten.dedup();
+                    if unique_rewritten.len() <= 1 {
+                        // don't use rewritten arch args if there is only one arch
+                        parsed_args.arch_args.clone()
+                    } else {
+                        debug_if_trace!("-arch args before rewrite: {:?}", parsed_args.arch_args);
+                        debug_if_trace!("-arch args after rewrite:  {:?}", rewritten_arch_args);
+                        rewritten_arch_args
+                    }
+                } else {
+                    parsed_args.arch_args.clone()
+                }
+            )
+            .as_slice(),
+        )
         // older NVCC versions only support `-E` when it comes after preprocessor and common flags.
         .arg("-E")
         .args(extra_preprocessor_flags);
@@ -1406,7 +1467,7 @@ mod test {
         parse_arguments(
             &args,
             ".".as_ref(),
-            &ARGS[..],
+            (&ARGS[..], &clang::ARGS[..]),
             plusplus,
             CCompilerKind::Clang,
         )
@@ -1782,6 +1843,44 @@ mod test {
     }
 
     #[test]
+    fn test_parse_arguments_march_native() {
+        let args = stringvec![
+            "-c",
+            "foo.cxx",
+            "-march=native",
+            "-mtune=native",
+            "-o",
+            "foo.o"
+        ];
+        let ParsedArguments {
+            input,
+            language,
+            outputs,
+            arch_args,
+            common_args,
+            ..
+        } = match parse_arguments_(args, false) {
+            CompilerArguments::Ok(args) => args,
+            o => panic!("Got unexpected parse result: {o:?}"),
+        };
+        assert_eq!(Some("foo.cxx"), input.to_str());
+        assert_eq!(Language::Cxx, language);
+        assert_map_contains!(
+            outputs,
+            (
+                "obj",
+                ArtifactDescriptor {
+                    path: "foo.o".into(),
+                    optional: false,
+                    must_be_non_empty: false,
+                }
+            )
+        );
+        assert_eq!(ovec!["-march=native", "-mtune=native"], arch_args);
+        assert!(common_args.is_empty());
+    }
+
+    #[test]
     fn test_parse_arguments_preprocessor_args() {
         let args = stringvec![
             "-c",
@@ -2073,7 +2172,7 @@ mod test {
     fn test_preprocess_cmd_rewrites_archs() {
         with_var("SCCACHE_CACHE_MULTIARCH", Some("1"), || {
             let args = stringvec!["-arch", "arm64", "-arch", "i386", "-c", "foo.cc"];
-            let parsed_args = match parse_arguments_(args, false) {
+            let parsed_args = match parse_arguments_clang(args, false) {
                 CompilerArguments::Ok(args) => args,
                 o => panic!("Got unexpected parse result: {o:?}"),
             };
@@ -2085,7 +2184,7 @@ mod test {
                 &parsed_args,
                 Path::new(""),
                 &[],
-                &CCompilerKind::Gcc,
+                &CCompilerKind::Clang,
                 true,
                 &[],
             );
@@ -2093,7 +2192,7 @@ mod test {
             let expected_args = ovec![
                 "-x",
                 "c++",
-                "-fdirectives-only",
+                "-frewrite-includes",
                 "-D__arm64__=1",
                 "-D__i386__=1",
                 "-E",
@@ -2106,7 +2205,7 @@ mod test {
     #[test]
     fn test_preprocess_cmd_doesnt_rewrite_single_arch() {
         let args = stringvec!["-arch", "arm64", "-c", "foo.cc"];
-        let parsed_args = match parse_arguments_(args, false) {
+        let parsed_args = match parse_arguments_clang(args, false) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {o:?}"),
         };
@@ -2418,7 +2517,7 @@ mod test {
                     "multiple different -arch, and SCCACHE_CACHE_MULTIARCH not set",
                     None
                 ),
-                parse_arguments_(
+                parse_arguments_clang(
                     stringvec![
                         "-fPIC", "-arch", "arm64", "-arch", "i386", "-o", "foo.o", "-c", "foo.cpp"
                     ],
@@ -2430,7 +2529,7 @@ mod test {
 
     #[test]
     fn test_parse_arguments_multiple_arch() {
-        match parse_arguments_(
+        match parse_arguments_clang(
             stringvec!["-arch", "arm64", "-o", "foo.o", "-c", "foo.cpp"],
             false,
         ) {
@@ -2439,7 +2538,7 @@ mod test {
         }
 
         with_var("SCCACHE_CACHE_MULTIARCH", Some("1"), || {
-            match parse_arguments_(
+            match parse_arguments_clang(
                 stringvec![
                     "-arch", "arm64", "-arch", "arm64", "-o", "foo.o", "-c", "foo.cpp"
                 ],
@@ -2462,7 +2561,7 @@ mod test {
                 common_args,
                 arch_args,
                 ..
-            } = match parse_arguments_(args, false) {
+            } = match parse_arguments_clang(args, false) {
                 CompilerArguments::Ok(args) => args,
                 o => panic!("Got unexpected parse result: {o:?}"),
             };
