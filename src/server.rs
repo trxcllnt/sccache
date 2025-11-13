@@ -66,7 +66,7 @@ use tokio::{
 };
 use tokio_serde::Framed;
 use tokio_util::codec::{LengthDelimitedCodec, length_delimited};
-use tower_service::Service;
+use tower::Service;
 
 use crate::errors::*;
 
