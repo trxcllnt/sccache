@@ -2365,16 +2365,14 @@ compiler_version=__VERSION__
                     Gcc::read_implicit_specfiles(&mut creator, &executable, arguments, &env, "-v")
                         .await?;
 
-                let (native_march, native_mtune) =
-                    Gcc::read_native_arch(&mut creator, &executable, &env).await?;
+                let native_archs = Gcc::read_native_arch(&mut creator, &executable, &env).await;
 
                 return CCompiler::new(
                     Gcc {
                         gplusplus: kind == "g++",
                         specfiles: specfiles.clone(),
                         version,
-                        native_march,
-                        native_mtune,
+                        native_archs,
                     },
                     executable,
                     specfiles,

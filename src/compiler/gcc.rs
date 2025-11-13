@@ -47,8 +47,7 @@ pub struct Gcc {
     pub gplusplus: bool,
     pub specfiles: Vec<PathBuf>,
     pub version: Option<String>,
-    pub native_march: String,
-    pub native_mtune: String,
+    pub native_archs: Option<(String, String)>,
 }
 
 impl Gcc {
@@ -100,7 +99,7 @@ impl Gcc {
         creator: &mut T,
         exe: &Path,
         env_vars: &[(OsString, OsString)],
-    ) -> Result<(String, String)>
+    ) -> Option<(String, String)>
     where
         T: CommandCreatorSync,
     {
@@ -115,7 +114,7 @@ impl Gcc {
             .arg("-march=native")
             .arg("--help=target");
 
-        let output = run_input_output(cmd, None).await?;
+        let output = run_input_output(cmd, None).await.ok()?;
 
         output
             .stdout
@@ -123,6 +122,7 @@ impl Gcc {
             .lines()
             .map_while(|line| line.ok())
             .filter_map(|line| {
+                debug!("[Gcc::read_native_arch]: {line:?}");
                 let line = line.trim();
                 if line.starts_with("-march=") || line.starts_with("-mtune=") {
                     line.split_once('=')
@@ -134,8 +134,6 @@ impl Gcc {
             })
             .take(2)
             .collect_tuple()
-            .map(Ok)
-            .unwrap_or_else(|| bail!("Could not detect CPU name for -march=native"))
     }
 }
 
@@ -166,11 +164,13 @@ impl CCompilerImpl for Gcc {
 
             // Rewrite -march=native to the current CPU architecture to
             // ensure the correct architecture is used if dist compiling
-            for arch in parsed_args.arch_args.iter_mut() {
-                if arch == "-march=native" {
-                    *arch = format!("-march={}", self.native_march).into();
-                } else if arch == "-mtune=native" {
-                    *arch = format!("-mtune={}", self.native_mtune).into();
+            if let Some((native_march, native_mtune)) = self.native_archs.as_ref() {
+                for arch in parsed_args.arch_args.iter_mut() {
+                    if arch == "-march=native" {
+                        *arch = format!("-march={native_march}").into();
+                    } else if arch == "-mtune=native" {
+                        *arch = format!("-mtune={native_mtune}").into();
+                    }
                 }
             }
         }
