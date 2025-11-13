@@ -478,7 +478,7 @@ impl Rust {
                     None
                 }
             };
-            hash_all(&libs, &pool).await.map(move |digests| Rust {
+            hash_all(&libs).await.map(move |digests| Rust {
                 executable,
                 host,
                 version: rustc_verbose_version.to_string(),
@@ -491,7 +491,7 @@ impl Rust {
         #[cfg(not(feature = "dist-client"))]
         {
             let (sysroot, libs) = sysroot_and_libs.await?;
-            hash_all(&libs, &pool).await.map(move |digests| Rust {
+            hash_all(&libs).await.map(move |digests| Rust {
                 executable,
                 host,
                 version: rustc_verbose_version.to_string(),
@@ -1341,9 +1341,10 @@ where
         pool: &tokio::runtime::Handle,
         _rewrite_includes_only: bool,
         _storage: Arc<dyn Storage>,
-        _cache_control: CacheControl,
+        cache_control: CacheControl,
     ) -> Result<HashResult<T>> {
         trace!("[{}]: generate_hash_key", self.parsed_args.crate_name);
+
         // TODO: this doesn't produce correct arguments if they should be concatenated - should use iter_os_strings
         let os_string_arguments: Vec<(OsString, Option<OsString>)> = self
             .parsed_args
@@ -1356,6 +1357,7 @@ where
                 )
             })
             .collect();
+
         // `filtered_arguments` omits --emit and --out-dir arguments.
         // It's used for invoking rustc with `--emit=dep-info` to get the list of
         // source files for this crate.
@@ -1371,76 +1373,31 @@ where
             .flat_map(|(arg, val)| Some(arg).into_iter().chain(val))
             .cloned()
             .collect::<Vec<_>>();
-        // Find all the source files and hash them
-        let source_hashes_pool = pool.clone();
-        let source_files_and_hashes_and_env_deps = async {
-            let (source_files, env_deps) = get_source_files_and_env_deps(
-                creator,
-                &self.parsed_args.crate_name,
-                &self.executable,
-                &filtered_arguments,
-                &cwd,
-                &env_vars,
-                pool,
-            )
-            .await?;
-            let source_hashes = hash_all(&source_files, &source_hashes_pool).await?;
-            Ok((source_files, source_hashes, env_deps))
-        };
 
-        // Hash the contents of the externs listed on the commandline.
-        trace!(
-            "[{}]: hashing {} externs",
-            self.parsed_args.crate_name,
-            self.parsed_args.externs.len()
-        );
+        let (source_files, mut env_deps) = get_source_files_and_env_deps(
+            creator,
+            &self.parsed_args.crate_name,
+            &self.executable,
+            &filtered_arguments,
+            &cwd,
+            &env_vars,
+            pool,
+        )
+        .await?;
+
         let abs_externs = self
             .parsed_args
             .externs
             .iter()
             .map(|e| cwd.join(e))
             .collect::<Vec<_>>();
-        let extern_hashes = hash_all(&abs_externs, pool);
-        // Hash the contents of the staticlibs listed on the commandline.
-        trace!(
-            "[{}]: hashing {} staticlibs",
-            self.parsed_args.crate_name,
-            self.parsed_args.staticlibs.len()
-        );
+
         let abs_staticlibs = self
             .parsed_args
             .staticlibs
             .iter()
             .map(|s| cwd.join(s))
             .collect::<Vec<_>>();
-        let staticlib_hashes = hash_all_archives(&abs_staticlibs, pool);
-
-        // Hash the content of the specified target json file, if any.
-        let mut target_json_files = Vec::new();
-        if let Some(path) = &self.parsed_args.target_json {
-            trace!(
-                "[{}]: hashing target json file {}",
-                self.parsed_args.crate_name,
-                path.display()
-            );
-            let abs_target_json = cwd.join(path);
-            target_json_files.push(abs_target_json);
-        }
-
-        let target_json_hash = hash_all(&target_json_files, pool);
-
-        // Perform all hashing operations on the files.
-        let (
-            (source_files, source_hashes, mut env_deps),
-            extern_hashes,
-            staticlib_hashes,
-            target_json_hash,
-        ) = futures::try_join!(
-            source_files_and_hashes_and_env_deps,
-            extern_hashes,
-            staticlib_hashes,
-            target_json_hash
-        )?;
 
         // If you change any of the inputs to the hash, you should change `CACHE_VERSION`.
         let mut m = Digest::new();
@@ -1452,98 +1409,147 @@ where
             m.update(d.as_bytes());
         }
         let weak_toolchain_key = m.clone().finish();
-        // 3. The full commandline (self.arguments)
-        // TODO: there will be full paths here, it would be nice to
-        // normalize them so we can get cross-machine cache hits.
-        // A few argument types are not passed in a deterministic order
-        // by cargo: --extern, -L, --cfg. We'll filter those out, sort them,
-        // and append them to the rest of the arguments.
-        let args = {
-            let (mut sortables, rest): (Vec<_>, Vec<_>) = os_string_arguments
-                .iter()
-                // We exclude a few arguments from the hash:
-                //   -L, --extern, --out-dir, --diagnostic-width
-                // These contain paths which aren't relevant to the output, and the compiler inputs
-                // in those paths (rlibs and static libs used in the compilation) are used as hash
-                // inputs below.
-                .filter(|&(arg, _)| {
-                    !(arg == "--extern"
-                        || arg == "-L"
-                        || arg == "--out-dir"
-                        || arg == "--diagnostic-width")
-                })
-                // We also exclude `--target` if it specifies a path to a .json file. The file content
-                // is used as hash input below.
-                // If `--target` specifies a string, it continues to be hashed as part of the arguments.
-                .filter(|&(arg, _)| self.parsed_args.target_json.is_none() || arg != "--target")
-                // A few argument types were not passed in a deterministic order
-                // by older versions of cargo: --extern, -L, --cfg. We'll filter the rest of those
-                // out, sort them, and append them to the rest of the arguments.
-                .partition(|&(arg, _)| arg == "--cfg");
-            sortables.sort();
-            rest.into_iter()
-                .chain(sortables)
-                .flat_map(|(arg, val)| iter::once(arg).chain(val.as_ref()))
-                .fold(OsString::new(), |mut a, b| {
-                    a.push(b);
-                    a
-                })
-        };
-        args.hash(&mut HashToDigest { digest: &mut m });
-        // 4. The digest of all source files (this includes src file from cmdline).
-        // 5. The digest of all files listed on the commandline (self.externs).
-        // 6. The digest of all static libraries listed on the commandline (self.staticlibs).
-        // 7. The digest of the content of the target json file specified via `--target` (if any).
-        for h in source_hashes
-            .into_iter()
-            .chain(extern_hashes)
-            .chain(staticlib_hashes)
-            .chain(target_json_hash)
-        {
-            m.update(h.as_bytes());
-        }
-        // 8. Environment variables: Hash all environment variables listed in the rustc dep-info
-        //    output. Additionally also has all environment variables starting with `CARGO_`,
-        //    since those are not listed in dep-info but affect cacheability.
-        env_deps.sort();
-        for (var, val) in env_deps.iter() {
-            var.hash(&mut HashToDigest { digest: &mut m });
-            m.update(b"=");
-            val.hash(&mut HashToDigest { digest: &mut m });
-        }
-        let mut env_vars: Vec<_> = env_vars
-            .iter()
-            // Filter out RUSTC_COLOR since we control color usage with command line flags.
-            // rustc reports an error when both are present.
-            .filter(|(k, _)| k != "RUSTC_COLOR")
-            .cloned()
-            .collect();
-        env_vars.sort();
-        for (var, val) in env_vars.iter() {
-            if !var.starts_with("CARGO_") {
-                continue;
+
+        let key = if CacheControl::ForceNoCache == cache_control {
+            // Skip hashing if we're not going to do any cache reads/writes
+            // In this mode, the cache key doesn't matter, so return empty string
+            String::new()
+        } else {
+            // Find all the source files and hash them
+            let source_hashes = hash_all(&source_files);
+
+            // Hash the contents of the externs listed on the commandline.
+            trace!(
+                "[{}]: hashing {} externs",
+                self.parsed_args.crate_name,
+                self.parsed_args.externs.len()
+            );
+            let extern_hashes = hash_all(&abs_externs);
+            // Hash the contents of the staticlibs listed on the commandline.
+            trace!(
+                "[{}]: hashing {} staticlibs",
+                self.parsed_args.crate_name,
+                self.parsed_args.staticlibs.len()
+            );
+            let staticlib_hashes = hash_all_archives(&abs_staticlibs, pool);
+
+            // Hash the content of the specified target json file, if any.
+            let mut target_json_files = Vec::new();
+            if let Some(path) = &self.parsed_args.target_json {
+                trace!(
+                    "[{}]: hashing target json file {}",
+                    self.parsed_args.crate_name,
+                    path.display()
+                );
+                let abs_target_json = cwd.join(path);
+                target_json_files.push(abs_target_json);
             }
 
-            // CARGO_MAKEFLAGS will have jobserver info which is extremely non-cacheable.
-            // CARGO_REGISTRIES_*_TOKEN contains non-cacheable secrets.
-            // Registry override config doesn't need to be hashed, because deps' package IDs
-            // already uniquely identify the relevant registries.
-            // CARGO_BUILD_JOBS only affects Cargo's parallelism, not rustc output.
-            if var == "CARGO_MAKEFLAGS"
-                || var.starts_with("CARGO_REGISTRIES_")
-                || var == "CARGO_BUILD_JOBS"
+            let target_json_hash = hash_all(&target_json_files);
+
+            // Perform all hashing operations on the files.
+            let (source_hashes, extern_hashes, staticlib_hashes, target_json_hash) = futures::try_join!(
+                source_hashes,
+                extern_hashes,
+                staticlib_hashes,
+                target_json_hash
+            )?;
+
+            // 3. The full commandline (self.arguments)
+            // TODO: there will be full paths here, it would be nice to
+            // normalize them so we can get cross-machine cache hits.
+            // A few argument types are not passed in a deterministic order
+            // by cargo: --extern, -L, --cfg. We'll filter those out, sort them,
+            // and append them to the rest of the arguments.
+            let args = {
+                let (mut sortables, rest): (Vec<_>, Vec<_>) = os_string_arguments
+                    .iter()
+                    // We exclude a few arguments from the hash:
+                    //   -L, --extern, --out-dir, --diagnostic-width
+                    // These contain paths which aren't relevant to the output, and the compiler inputs
+                    // in those paths (rlibs and static libs used in the compilation) are used as hash
+                    // inputs below.
+                    .filter(|&(arg, _)| {
+                        !(arg == "--extern"
+                            || arg == "-L"
+                            || arg == "--out-dir"
+                            || arg == "--diagnostic-width")
+                    })
+                    // We also exclude `--target` if it specifies a path to a .json file. The file content
+                    // is used as hash input below.
+                    // If `--target` specifies a string, it continues to be hashed as part of the arguments.
+                    .filter(|&(arg, _)| self.parsed_args.target_json.is_none() || arg != "--target")
+                    // A few argument types were not passed in a deterministic order
+                    // by older versions of cargo: --extern, -L, --cfg. We'll filter the rest of those
+                    // out, sort them, and append them to the rest of the arguments.
+                    .partition(|&(arg, _)| arg == "--cfg");
+                sortables.sort();
+                rest.into_iter()
+                    .chain(sortables)
+                    .flat_map(|(arg, val)| iter::once(arg).chain(val.as_ref()))
+                    .fold(OsString::new(), |mut a, b| {
+                        a.push(b);
+                        a
+                    })
+            };
+            args.hash(&mut HashToDigest { digest: &mut m });
+            // 4. The digest of all source files (this includes src file from cmdline).
+            // 5. The digest of all files listed on the commandline (self.externs).
+            // 6. The digest of all static libraries listed on the commandline (self.staticlibs).
+            // 7. The digest of the content of the target json file specified via `--target` (if any).
+            for h in source_hashes
+                .into_iter()
+                .chain(extern_hashes)
+                .chain(staticlib_hashes)
+                .chain(target_json_hash)
             {
-                continue;
+                m.update(h.as_bytes());
             }
+            // 8. Environment variables: Hash all environment variables listed in the rustc dep-info
+            //    output. Additionally also has all environment variables starting with `CARGO_`,
+            //    since those are not listed in dep-info but affect cacheability.
+            env_deps.sort();
+            for (var, val) in env_deps.iter() {
+                var.hash(&mut HashToDigest { digest: &mut m });
+                m.update(b"=");
+                val.hash(&mut HashToDigest { digest: &mut m });
+            }
+            let mut env_vars: Vec<_> = env_vars
+                .iter()
+                // Filter out RUSTC_COLOR since we control color usage with command line flags.
+                // rustc reports an error when both are present.
+                .filter(|(k, _)| k != "RUSTC_COLOR")
+                .cloned()
+                .collect();
+            env_vars.sort();
+            for (var, val) in env_vars.iter() {
+                if !var.starts_with("CARGO_") {
+                    continue;
+                }
 
-            var.hash(&mut HashToDigest { digest: &mut m });
-            m.update(b"=");
-            val.hash(&mut HashToDigest { digest: &mut m });
-        }
-        // 9. The cwd of the compile. This will wind up in the rlib.
-        cwd.hash(&mut HashToDigest { digest: &mut m });
-        // 10. The version of the compiler.
-        self.version.hash(&mut HashToDigest { digest: &mut m });
+                // CARGO_MAKEFLAGS will have jobserver info which is extremely non-cacheable.
+                // CARGO_REGISTRIES_*_TOKEN contains non-cacheable secrets.
+                // Registry override config doesn't need to be hashed, because deps' package IDs
+                // already uniquely identify the relevant registries.
+                // CARGO_BUILD_JOBS only affects Cargo's parallelism, not rustc output.
+                if var == "CARGO_MAKEFLAGS"
+                    || var.starts_with("CARGO_REGISTRIES_")
+                    || var == "CARGO_BUILD_JOBS"
+                {
+                    continue;
+                }
+
+                var.hash(&mut HashToDigest { digest: &mut m });
+                m.update(b"=");
+                val.hash(&mut HashToDigest { digest: &mut m });
+            }
+            // 9. The cwd of the compile. This will wind up in the rlib.
+            cwd.hash(&mut HashToDigest { digest: &mut m });
+            // 10. The version of the compiler.
+            self.version.hash(&mut HashToDigest { digest: &mut m });
+
+            m.finish()
+        };
 
         // Turn arguments into a simple Vec<OsString> to calculate outputs.
         let flat_os_string_arguments: Vec<OsString> = os_string_arguments
@@ -1674,7 +1680,7 @@ where
             .collect();
 
         Ok(HashResult {
-            key: m.finish(),
+            key,
             compilation: Box::new(RustCompilation {
                 executable: self.executable.clone(),
                 host: self.host.clone(),

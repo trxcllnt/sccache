@@ -376,7 +376,7 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// Calculate the digest of each file in `files` on background threads in
 /// `pool`.
-pub async fn hash_all<T>(files: &[T], _pool: &tokio::runtime::Handle) -> Result<Vec<String>>
+pub async fn hash_all<T>(files: &[T]) -> Result<Vec<String>>
 where
     T: AsRef<Path>,
 {
