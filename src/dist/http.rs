@@ -536,7 +536,7 @@ mod scheduler {
                 //
                 // HEAD
                 .route(
-                    "/api/v2/toolchain/:archive_id",
+                    "/api/v2/toolchain/{archive_id}",
                     routing::head(
                         |Extension::<Arc<SchedulerState>>(state),
                          Path(archive_id): Path<String>| async move {
@@ -550,7 +550,7 @@ mod scheduler {
                 )
                 // PUT
                 .route(
-                    "/api/v2/toolchain/:archive_id",
+                    "/api/v2/toolchain/{archive_id}",
                     routing::put(
                         |TypedHeader(AcceptedMimeTypes(mime)),
                          Extension::<Arc<SchedulerState>>(state),
@@ -590,7 +590,7 @@ mod scheduler {
                 )
                 // DELETE
                 .route(
-                    "/api/v2/toolchain/:archive_id",
+                    "/api/v2/toolchain/{archive_id}",
                     routing::delete(
                         |TypedHeader(AcceptedMimeTypes(mime)),
                          Extension::<Arc<SchedulerState>>(state),
@@ -668,7 +668,7 @@ mod scheduler {
                 )
                 // PUT
                 .route(
-                    "/api/v2/job/:job_id",
+                    "/api/v2/job/{job_id}",
                     routing::put(
                         |TypedHeader(AcceptedMimeTypes(mime)),
                          Extension::<Arc<SchedulerState>>(state),
@@ -708,7 +708,7 @@ mod scheduler {
                 )
                 // POST
                 .route(
-                    "/api/v2/job/:job_id",
+                    "/api/v2/job/{job_id}",
                     routing::post(
                         |TypedHeader(AcceptedMimeTypes(mime)),
                          Extension::<Arc<SchedulerState>>(state),
@@ -725,7 +725,7 @@ mod scheduler {
                 )
                 // DELETE
                 .route(
-                    "/api/v2/job/:job_id",
+                    "/api/v2/job/{job_id}",
                     routing::delete(
                         |TypedHeader(AcceptedMimeTypes(mime)),
                          Extension::<Arc<SchedulerState>>(state),
