@@ -52,7 +52,7 @@ gzp = { version = "0.11.3", default-features = false, features = [
 ] }
 http = "1.0"
 http-body-util = { version = "0.1", optional = true }
-hyper = { version = "1.1", optional = true, features = [
+hyper = { version = "1.6", optional = true, features = [
   "server",
   "http1",
   "http2",
@@ -126,7 +126,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-serde = "0.8"
 tokio-util = { version = "0.7", features = ["codec", "compat", "io", "rt"] }
 toml = "0.8"
-tower = { version = "0.4", features = ["util"] }
+tower = { version = "0.5", features = ["util"] }
 url = { version = "2", optional = true }
 uuid = { version = "1.9", features = ["v4"] }
 walkdir = "2"
