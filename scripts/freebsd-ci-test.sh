@@ -213,7 +213,7 @@ start_build_server()
 		SCCACHE_DIR="$SCCACHE_DIR/sccache-dist" \
 		SCCACHE_DIST_JOBS_DIR="$SCCACHE_DIST_JOBS_DIR" \
 		SCCACHE_DIST_TOOLCHAINS_DIR="$SCCACHE_DIST_TOOLCHAINS_DIR" \
-		SCCACHE_LOG="sccache=debug" \
+		SCCACHE_LOG="sccache=trace" \
 		SCCACHE_NO_DAEMON=1 \
 		"$HOME"/.cargo/bin/sccache-dist server \
 			--config "$TEST_TMPDIR"/server.conf \
@@ -368,6 +368,12 @@ remove_signal_handler()
 	trap - EXIT INT HUP
 }
 
+run_tests() {
+    start_sccache_server
+    test_sccache_dist_01
+    test_sccache_dist_02
+}
+
 main()
 {
 	install_signal_handler
@@ -381,15 +387,14 @@ main()
 	start_build_server
 	create_build_test_project
 
-    # Retry a few times because GHA runners have slow disks
+    # Retry a few times because GHA runners have slow disks?
     i=1
-    until start_sccache_server \
-       && test_sccache_dist_01 \
-       && test_sccache_dist_02; do
-        if test "$i" -eq 5; then
+    until run_tests; do
+        echo "run_tests failed, retrying (attempt $i)" >&2
+        i=$((i + 1))
+        if test "$i" -gt 5; then
             return 1
         fi
-        ((i=i+1))
     done
 
 	remove_signal_handler
