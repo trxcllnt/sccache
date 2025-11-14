@@ -386,9 +386,10 @@ main()
     until start_sccache_server \
        && test_sccache_dist_01 \
        && test_sccache_dist_02; do
-        if test $((i++)) -eq 5; then
-            exit 1
+        if test "$i" -eq 5; then
+            return 1
         fi
+        ((i=i+1))
     done
 
 	remove_signal_handler
