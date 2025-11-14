@@ -565,9 +565,10 @@ where
         let dist_client = dist_client.filter(|_| {
             // Clients might want to set this when configuring
             // so e.g. the CMake compiler checks execute locally
-            !env_vars
-                .iter()
-                .any(|(k, _v)| k == "SCCACHE_NO_DIST_COMPILE")
+            !env_vars.iter().any(|(k, v)| {
+                k == "SCCACHE_NO_DIST_COMPILE"
+                    && matches!(v.to_str().unwrap_or_default(), "true" | "on" | "1")
+            })
         });
 
         let rewrite_includes_only = dist_client
