@@ -14,20 +14,18 @@
 
 use async_trait::async_trait;
 
-use celery::{error::CeleryError, task::AsyncResult};
-
 use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{Arc, atomic::AtomicU64},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
     cache::{BufReadSeek, Cache, Storage},
     dist::{
         self, BuildError, BuildResult, BuilderIncoming, CompileCommand, RunJobError,
-        RunJobResponse, ServerDetails, ServerService, Toolchain, ToolchainService, job_inputs_key,
+        RunJobResponse, ServerService, StatusUpdate, Toolchain, ToolchainService, job_inputs_key,
         job_result_key,
         metrics::{CountRecorder, GaugeRecorder, Metrics, TimeRecorder},
     },
@@ -271,31 +269,17 @@ impl Default for ServerMetrics {
     }
 }
 
-#[async_trait]
-pub trait ServerTasks: Send + Sync {
-    fn app(&self) -> &Arc<celery::Celery>;
-    fn queues(&self) -> Vec<&str>;
-
-    fn set_server(&self, server: Arc<dyn ServerService>) -> Result<()>;
-
-    async fn status_update(
-        &self,
-        server: ServerDetails,
-    ) -> std::result::Result<AsyncResult, CeleryError>;
-
-    async fn job_finished(
-        &self,
-        job_id: &str,
-        reply_to: &str,
-        server: ServerDetails,
-    ) -> std::result::Result<AsyncResult, CeleryError>;
+pub struct JobInfo {
+    created_at: Instant,
+    reply_to: String,
 }
 
 #[derive(Clone)]
 pub struct ServerState {
     pub alive: Arc<tokio::sync::watch::Sender<bool>>,
     pub id: String,
-    pub jobs: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    pub queue: String,
+    pub jobs: Arc<std::sync::Mutex<HashMap<String, JobInfo>>>,
     pub job_queue: Arc<tokio::sync::Semaphore>,
     pub metrics: ServerMetrics,
     pub num_cpus: usize,
@@ -315,6 +299,7 @@ impl Default for ServerState {
         Self {
             alive: Arc::new(alive),
             id: Default::default(),
+            queue: Default::default(),
             job_queue: Arc::new(tokio::sync::Semaphore::new(1)),
             jobs: Default::default(),
             metrics: Default::default(),
@@ -325,7 +310,7 @@ impl Default for ServerState {
     }
 }
 
-impl From<&ServerState> for ServerDetails {
+impl From<&ServerState> for StatusUpdate {
     fn from(state: &ServerState) -> Self {
         let (cpu_usage, mem_avail, mem_total) = state.metrics.system_metrics();
 
@@ -344,14 +329,24 @@ impl From<&ServerState> for ServerDetails {
             .jobs_finished
             .load(std::sync::atomic::Ordering::SeqCst);
 
-        let created_at = SystemTime::now()
+        let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
             .as_micros();
 
-        ServerDetails {
+        let max_job_age = {
+            let jobs = state.jobs.lock().unwrap();
+            let now = Instant::now();
+            jobs.values()
+                .map(|j| now.duration_since(j.created_at).as_micros())
+                .max()
+                .unwrap_or(0)
+        };
+
+        StatusUpdate {
             id: state.id.to_owned(),
-            info: dist::ServerStats {
+            queue: state.queue.clone(),
+            info: dist::SysStats {
                 cpu_usage,
                 mem_avail,
                 mem_total,
@@ -371,11 +366,17 @@ impl From<&ServerState> for ServerDetails {
             // but not if I implement the Task trait directly.
             // The only difference I see is they use `celery::export::Deserialize`
             // instead of `serde::Deserialize`, but that does not solve the issue.
-            created_at: (
+            timestamp: (
                 // microseconds as seconds
-                created_at.saturating_div(1_000_000) as u64,
+                timestamp.saturating_div(1_000_000) as u64,
                 // remainder microseconds as nanoseconds
-                (created_at % 1_000_000).saturating_mul(1_000) as u32,
+                (timestamp % 1_000_000).saturating_mul(1_000) as u32,
+            ),
+            max_job_age: (
+                // microseconds as seconds
+                max_job_age.saturating_div(1_000_000) as u64,
+                // remainder microseconds as nanoseconds
+                (max_job_age % 1_000_000).saturating_mul(1_000) as u32,
             ),
         }
     }
@@ -412,15 +413,10 @@ struct RunJobFunc {
     builder: Arc<dyn BuilderIncoming>,
     jobs_storage: Arc<dyn Storage>,
     state: ServerState,
-    tasks: Arc<dyn ServerTasks>,
     toolchains: AsyncMulticast<Toolchain, PathBuf>,
 }
 
 impl RunJobFunc {
-    async fn send_status(&self) -> Result<()> {
-        send_status(self.tasks.as_ref(), &self.state).await
-    }
-
     async fn get_toolchain_dir(&self, job_id: &str, toolchain: Toolchain) -> Result<PathBuf> {
         let _timer = self.state.metrics.get_toolchain_timer();
         // ServerToolchains retries internally, so no need to retry here
@@ -490,11 +486,6 @@ impl RunJobFunc {
         let _timer = self.state.metrics.load_job_timer();
         let _loading = self.state.metrics.jobs_loading.increment();
 
-        // Broadcast status after accepting the job
-        self.send_status()
-            .await
-            .map_err(|_| RunJobError::MissingJobResult)?;
-
         // Load and unpack the toolchain
         let toolchain_dir = self
             .get_toolchain_dir(job_id, toolchain)
@@ -522,11 +513,13 @@ impl RunJobFunc {
         let _timer = self.state.metrics.run_job_timer();
 
         // Add job
-        self.state
-            .jobs
-            .lock()
-            .unwrap()
-            .insert(job_id.to_owned(), reply_to.to_owned());
+        self.state.jobs.lock().unwrap().insert(
+            job_id.to_owned(),
+            JobInfo {
+                created_at: Instant::now(),
+                reply_to: reply_to.to_owned(),
+            },
+        );
 
         // Increment the job_started counter
         self.state.metrics.inc_job_accepted_count();
@@ -602,8 +595,9 @@ pub struct Server {
     builder: Arc<dyn BuilderIncoming>,
     jobs_storage: Arc<dyn Storage>,
     state: ServerState,
-    tasks: Arc<dyn ServerTasks>,
+    tasks: Arc<dyn dist::tasks::ServerTasks>,
     jobs: AsyncMulticast<RunJobArgs, RunJobResponse>,
+    schedulers: Arc<futures::lock::Mutex<HashMap<String, Instant>>>,
 }
 
 impl Server {
@@ -611,10 +605,9 @@ impl Server {
         builder: Arc<dyn BuilderIncoming>,
         jobs_storage: Arc<dyn Storage>,
         state: ServerState,
-        tasks: impl ServerTasks + 'static,
-        toolchains: impl ToolchainService + 'static,
+        tasks: Arc<dyn dist::tasks::ServerTasks>,
+        toolchains: Arc<dyn ToolchainService>,
     ) -> Result<Arc<Self>> {
-        let tasks = Arc::new(tasks);
         let this = Arc::new(Self {
             builder: builder.clone(),
             jobs_storage: jobs_storage.clone(),
@@ -624,19 +617,21 @@ impl Server {
                 builder,
                 jobs_storage,
                 state,
-                tasks,
-                toolchains: AsyncMulticast::new(LoadToolchainFn {
-                    toolchains: Arc::new(toolchains),
-                }),
+                toolchains: AsyncMulticast::new(LoadToolchainFn { toolchains }),
             }),
+            schedulers: Default::default(),
         });
 
-        this.tasks.set_server(this.clone())?;
+        this.tasks.set_service(this.clone())?;
 
         Ok(this)
     }
 
-    pub async fn start(&self, report_interval: Duration, shutdown_timeout: Duration) -> Result<()> {
+    pub async fn start(
+        &self,
+        heartbeat_interval: Duration,
+        shutdown_timeout: Duration,
+    ) -> Result<()> {
         self.tasks.app().display_pretty().await;
 
         tracing::info!(
@@ -650,7 +645,11 @@ impl Server {
 
         // Start celery
         let celery = async {
-            let res = self.tasks.app().consume_from(&self.tasks.queues()).await;
+            let res = self
+                .tasks
+                .app()
+                .consume_from(&self.tasks.queues_to_consume())
+                .await;
             tracing::info!("Celery shutdown");
             res.context("Celery error")
         };
@@ -674,7 +673,15 @@ impl Server {
             Ok(())
         };
 
-        let status = self.status(report_interval);
+        let status = tokio::spawn({
+            let this = self.clone();
+            async move {
+                loop {
+                    let _ = this.send_hearbeat().await;
+                    tokio::time::sleep(heartbeat_interval).await;
+                }
+            }
+        });
 
         // tokio::select! deterministically polls its futures in order, so
         // register celery first and sigint second so this sigint handler
@@ -691,7 +698,7 @@ impl Server {
             // a catastrophic error occurs (tokio dies somehow?). Just polling
             // it here so the task is cancelled once either of the above two
             // futures complete first.
-            res = status => res,
+            _ = status => Ok(()),
         };
 
         // Drain the jobs map before broadcasting the shutdown signal.
@@ -726,17 +733,19 @@ impl Server {
             // Write "Server terminated" job responses and send the `job_finished` tasks
             // back to each interested scheduler.
             let replies = async {
-                let replies = jobs.into_iter().map(|(job_id, reply_to)| async move {
-                    tracing::info!(
-                        "Sending server terminated response for job {job_id} to {reply_to}"
-                    );
-                    self.job_finished(
-                        &job_id,
-                        &reply_to,
-                        &RunJobResponse::server_terminated(&self.state.id),
-                    )
-                    .await
-                });
+                let replies =
+                    jobs.into_iter()
+                        .map(|(job_id, JobInfo { reply_to, .. })| async move {
+                            tracing::info!(
+                                "Sending server terminated response for job {job_id} to {reply_to}"
+                            );
+                            self.job_finished(
+                                &job_id,
+                                &reply_to,
+                                &RunJobResponse::server_terminated(&self.state.id),
+                            )
+                            .await
+                        });
                 futures::future::try_join_all(replies)
                     .await
                     .inspect(|_res| {
@@ -759,32 +768,32 @@ impl Server {
             .map(|_| tracing::info!("Server shutdown gracefully"))
     }
 
-    async fn status(&self, interval: Duration) -> Result<()> {
-        tokio::spawn({
-            let this = self.clone();
-            async move {
-                let mut alive = this.state.alive.subscribe();
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = alive.changed() => break,
-                        _ = this.send_status() => {}
-                    }
-
-                    tokio::select! {
-                        biased;
-                        _ = alive.changed() => break,
-                        _ = tokio::time::sleep(interval) => {}
-                    }
-                }
-            }
-        })
-        .await
-        .map_err(anyhow::Error::new)
-    }
-
-    async fn send_status(&self) -> Result<()> {
-        send_status(self.tasks.as_ref(), &self.state).await
+    async fn send_hearbeat(&self) -> Result<()> {
+        // Prune schedulers we haven't seen in 90s
+        let now = Instant::now();
+        let timeout = Duration::from_secs(90);
+        let schedulers = {
+            let mut schedulers = self.schedulers.lock().await;
+            schedulers.retain(|_, last_seen| now.duration_since(*last_seen) <= timeout);
+            schedulers.keys().cloned().collect::<Vec<_>>()
+        };
+        let status: StatusUpdate = (&self.state).into();
+        if schedulers.is_empty() {
+            self.tasks
+                .update_status(status, None)
+                .await
+                .map_err(anyhow::Error::new)
+                .map(|_| ())
+        } else {
+            futures::future::try_join_all(
+                schedulers
+                    .iter()
+                    .map(|send_to| self.tasks.update_status(status.clone(), Some(send_to))),
+            )
+            .await
+            .map_err(anyhow::Error::new)
+            .map(|_| ())
+        }
     }
 
     async fn put_job_result(&self, job_id: &str, result: &RunJobResponse) -> Result<()> {
@@ -835,10 +844,28 @@ impl ServerService for Server {
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> Result<RunJobResponse> {
+        let reply_to = reply_to.to_owned();
+
+        self.schedulers
+            .lock()
+            .await
+            .entry(reply_to.clone())
+            .and_modify(|last_seen| {
+                *last_seen = Instant::now();
+            })
+            .or_insert_with(Instant::now);
+
+        // Broadcast status after accepting the job
+        self.tasks
+            .update_status((&self.state).into(), Some(&reply_to))
+            .await
+            .map_err(anyhow::Error::new)
+            .map(|_| ())?;
+
         self.jobs
             .call(RunJobArgs {
                 job_id: job_id.to_owned(),
-                reply_to: reply_to.to_owned(),
+                reply_to,
                 toolchain,
                 command,
                 outputs,
@@ -897,13 +924,16 @@ impl ServerService for Server {
             Ok(())
         }
     }
-}
 
-async fn send_status(tasks: &dyn ServerTasks, state: &ServerState) -> Result<()> {
-    tasks
-        .status_update(From::from(state))
-        .await
-        .map_err(anyhow::Error::new)
-        .map(|_| ())?;
-    Ok(())
+    async fn update_scheduler_status(&self, status: StatusUpdate) -> Result<()> {
+        self.schedulers
+            .lock()
+            .await
+            .entry(status.queue.clone())
+            .and_modify(|last_seen| {
+                *last_seen = Instant::now();
+            })
+            .or_insert_with(Instant::now);
+        Ok(())
+    }
 }

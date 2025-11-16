@@ -1847,6 +1847,8 @@ pub mod scheduler {
     #[serde(deny_unknown_fields)]
     pub struct FileConfig {
         pub client_auth: ClientAuth,
+        #[serde(default = "Config::default_heartbeat_interval_ms")]
+        pub heartbeat_interval_ms: u64,
         #[serde(default = "Config::default_job_time_limit")]
         pub job_time_limit: u32,
         #[serde(default = "Config::default_jobs_storage")]
@@ -1869,6 +1871,7 @@ pub mod scheduler {
         fn default() -> Self {
             Self {
                 client_auth: ClientAuth::Insecure,
+                heartbeat_interval_ms: Config::default_heartbeat_interval_ms(),
                 job_time_limit: Config::default_job_time_limit(),
                 jobs: Config::default_jobs_storage(),
                 max_body_size: Config::default_max_body_size(),
@@ -1885,6 +1888,7 @@ pub mod scheduler {
     #[derive(Debug)]
     pub struct Config {
         pub client_auth: ClientAuth,
+        pub heartbeat_interval_ms: u64,
         pub job_time_limit: u32,
         pub jobs: Vec<CacheType>,
         pub max_body_size: usize,
@@ -1925,6 +1929,10 @@ pub mod scheduler {
                 ..Default::default()
             }
         }
+        // Default to 15s
+        fn default_heartbeat_interval_ms() -> u64 {
+            15000
+        }
         pub fn default_job_time_limit() -> u32 {
             600
         }
@@ -1944,6 +1952,7 @@ pub mod scheduler {
         pub fn load(conf_path: Option<PathBuf>) -> Result<Self> {
             let FileConfig {
                 client_auth,
+                heartbeat_interval_ms,
                 job_time_limit,
                 jobs,
                 max_body_size,
@@ -1975,6 +1984,11 @@ pub mod scheduler {
                 .merge(toolchains)
                 .merge(config_from_env("SCCACHE_DIST_TOOLCHAINS_")?.cache);
 
+            let heartbeat_interval_ms =
+                number_from_env_var("SCCACHE_DIST_SCHEDULER_HEARTBEAT_INTERVAL")
+                    .transpose()?
+                    .unwrap_or(heartbeat_interval_ms);
+
             let job_time_limit = number_from_env_var("SCCACHE_DIST_JOB_TIME_LIMIT_SECS")
                 .transpose()?
                 .unwrap_or(job_time_limit);
@@ -1995,6 +2009,7 @@ pub mod scheduler {
 
             Ok(Self {
                 client_auth,
+                heartbeat_interval_ms,
                 job_time_limit,
                 jobs: jobs.into(),
                 max_body_size,
@@ -2016,6 +2031,7 @@ pub mod scheduler {
         fn from(scheduler_config: Config) -> Self {
             Self {
                 client_auth: scheduler_config.client_auth,
+                heartbeat_interval_ms: scheduler_config.heartbeat_interval_ms,
                 job_time_limit: scheduler_config.job_time_limit,
                 jobs: scheduler_config.jobs.into(),
                 max_body_size: scheduler_config.max_body_size,
@@ -2033,6 +2049,7 @@ pub mod scheduler {
         fn from(scheduler_config: FileConfig) -> Self {
             Self {
                 client_auth: scheduler_config.client_auth,
+                heartbeat_interval_ms: scheduler_config.heartbeat_interval_ms,
                 job_time_limit: scheduler_config.job_time_limit,
                 jobs: scheduler_config.jobs.into(),
                 max_body_size: scheduler_config.max_body_size,
@@ -2204,9 +2221,9 @@ pub mod server {
                 ..Default::default()
             }
         }
-        // Default to 5s
+        // Default to 15s
         fn default_heartbeat_interval_ms() -> u64 {
-            5000
+            15000
         }
         // Default to 1
         fn default_max_per_core_load() -> f64 {

@@ -1328,7 +1328,7 @@ pub trait AsyncMulticastArgs {
 
 #[derive(Clone)]
 pub struct AsyncMulticast<K: AsyncMulticastArgs, V> {
-    run_f: Arc<dyn for<'a> AsyncMulticastFunc<K, V> + Send + Sync>,
+    run_f: Arc<dyn AsyncMulticastFunc<K, V> + Send + Sync>,
     state: Arc<
         Mutex<
             HashMap<
@@ -1346,7 +1346,7 @@ where
 {
     pub fn new<F>(run_f: F) -> Self
     where
-        F: for<'a> AsyncMulticastFunc<K, V> + Send + Sync + 'static,
+        F: AsyncMulticastFunc<K, V> + Send + Sync + 'static,
     {
         Self {
             run_f: Arc::new(run_f),

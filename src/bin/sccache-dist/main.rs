@@ -10,11 +10,14 @@ use cmdline::Command;
 
 use sccache::{
     cache::cache::StorageKind,
-    config::{scheduler as scheduler_config, server as server_config, server::BuilderType},
+    config::{
+        scheduler as scheduler_config,
+        server::{self as server_config, BuilderType},
+    },
     dist::{
         self, BuilderIncoming, ServerToolchains, env_info,
         metrics::Metrics,
-        scheduler::{self, SchedulerMetrics, SchedulerTasks},
+        scheduler::{self, SchedulerMetrics},
         server, tasks,
         token_check::new_client_auth_check,
     },
@@ -93,6 +96,7 @@ fn run(command: Command) -> Result<()> {
             match command {
                 Command::Scheduler(scheduler_config::Config {
                     client_auth,
+                    heartbeat_interval_ms,
                     job_time_limit,
                     jobs,
                     max_body_size,
@@ -141,17 +145,19 @@ fn run(command: Command) -> Result<()> {
                     // Create ClientAuthCheck and bail on Err before registering with Celery
                     let client_auth_check = new_client_auth_check(client_auth).await?;
 
+                    let tasks = tasks::Tasks::scheduler(
+                        &scheduler_id,
+                        100 * num_cpus as u16,
+                        job_time_limit,
+                        message_broker,
+                    )
+                    .await?;
+
                     let scheduler = scheduler::Scheduler::new(
                         jobs,
                         SchedulerMetrics::new(metrics.clone()),
                         &scheduler_id,
-                        tasks::Tasks::scheduler(
-                            &scheduler_id,
-                            100 * num_cpus as u16,
-                            message_broker,
-                        )
-                        .await?
-                        .set_job_time_limit(job_time_limit),
+                        tasks,
                         toolchains,
                     )?;
 
@@ -162,7 +168,12 @@ fn run(command: Command) -> Result<()> {
                     .serve(public_addr, max_body_size, metrics);
 
                     scheduler
-                        .start(handle, server, Duration::from_secs(shutdown_timeout))
+                        .start(
+                            handle,
+                            server,
+                            Duration::from_millis(heartbeat_interval_ms),
+                            Duration::from_secs(shutdown_timeout),
+                        )
                         .await
                 }
 
@@ -223,11 +234,28 @@ fn run(command: Command) -> Result<()> {
 
                     let job_queue = Arc::new(tokio::sync::Semaphore::new(occupancy));
 
+                    let builder = init_builder(builder, job_queue.clone()).await?;
+
+                    let toolchains = Arc::new(ServerToolchains::new(
+                        cache_dir.join("tc"),
+                        toolchain_cache_size,
+                        toolchains,
+                        metrics.clone(),
+                    ));
+
+                    let tasks = tasks::Tasks::server(
+                        &server_id,
+                        (occupancy as u16).saturating_add(pre_fetch as u16),
+                        message_broker,
+                    )
+                    .await?;
+
                     let server = server::Server::new(
-                        init_builder(builder, job_queue.clone()).await?,
+                        builder,
                         jobs,
                         server::ServerState {
                             id: server_id.clone(),
+                            queue: tasks.app().default_queue.clone(),
                             job_queue,
                             metrics: server::ServerMetrics::new(metrics.clone()),
                             num_cpus,
@@ -235,18 +263,8 @@ fn run(command: Command) -> Result<()> {
                             pre_fetch,
                             ..Default::default()
                         },
-                        tasks::Tasks::server(
-                            &server_id,
-                            (occupancy as u16).saturating_add(pre_fetch as u16),
-                            message_broker,
-                        )
-                        .await?,
-                        ServerToolchains::new(
-                            cache_dir.join("tc"),
-                            toolchain_cache_size,
-                            toolchains,
-                            metrics.clone(),
-                        ),
+                        tasks,
+                        toolchains,
                     )?;
 
                     // Report status every `heartbeat_interval_ms` milliseconds

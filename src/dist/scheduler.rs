@@ -14,16 +14,14 @@
 
 use async_trait::async_trait;
 
-use celery::{error::CeleryError, task::AsyncResult};
-
 use futures::lock::Mutex;
 
 use crate::{
     cache::{Cache, Storage},
     dist::{
         self, CompileCommand, JobStats, NewJobResponse, RunJobRequest, RunJobResponse,
-        SchedulerService, SchedulerStatus, ServerDetails, ServerStats, ServerStatus,
-        SubmitToolchainResult, Toolchain,
+        SchedulerService, SchedulerStatus, ServerStatus, StatusUpdate, SubmitToolchainResult,
+        SysStats, Toolchain,
         http::bincode_deserialize,
         metrics::{CountRecorder, Metrics, TimeRecorder},
     },
@@ -34,7 +32,7 @@ use crate::{
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::dist::{job_inputs_key, job_result_key};
@@ -49,6 +47,7 @@ const PUT_TOOLCHAIN_TIME: &str = "sccache::scheduler::put_toolchain_time";
 const DEL_TOOLCHAIN_TIME: &str = "sccache::scheduler::del_toolchain_time";
 const PUT_JOB_INPUTS_ERROR_COUNT: &str = "sccache::scheduler::put_job_inputs_error_count";
 
+#[derive(Clone)]
 pub struct SchedulerMetrics {
     metrics: Metrics,
 }
@@ -140,34 +139,20 @@ impl SchedulerMetrics {
     }
 }
 
-#[async_trait]
-pub trait SchedulerTasks: Send + Sync {
-    fn app(&self) -> &Arc<celery::Celery>;
-    fn queues(&self) -> Vec<&str>;
-
-    fn get_job_time_limit(&self) -> u32;
-    fn set_job_time_limit(self, job_time_limit: u32) -> Self
-    where
-        Self: Sized;
-
-    fn set_scheduler(&self, scheduler: Arc<dyn SchedulerService>) -> Result<()>;
-
-    async fn run_job(
-        &self,
-        reply_to: String,
-        job_id: String,
-        toolchain: Toolchain,
-        command: CompileCommand,
-        outputs: Vec<String>,
-    ) -> std::result::Result<AsyncResult, CeleryError>;
-}
-
 #[derive(Clone, Debug)]
 struct ServerInfo {
-    pub m_time: SystemTime,
+    // Last modified time (in the scheduler's reference frame)
+    pub m_time: Instant,
+    // Last modified time (in the server's reference frame)
     pub u_time: SystemTime,
-    pub info: ServerStats,
+    // Server performance stats
+    pub info: SysStats,
+    // Server job stats
     pub jobs: JobStats,
+    // The age of the oldest active job (in seconds)
+    pub max_job_age: u64,
+    // The server-specific queue
+    pub queue: String,
 }
 
 #[derive(Clone)]
@@ -188,7 +173,7 @@ impl AsyncMulticastArgs for RunJobArgs {
 
 struct RunJobFn {
     jobs: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<RunJobResponse>>>>,
-    tasks: Arc<dyn SchedulerTasks>,
+    tasks: Arc<dyn dist::tasks::SchedulerTasks>,
 }
 
 #[async_trait]
@@ -226,13 +211,14 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFn {
     }
 }
 
+#[derive(Clone)]
 pub struct Scheduler {
     jobs_storage: Arc<dyn Storage>,
     jobs: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<RunJobResponse>>>>,
     metrics: SchedulerMetrics,
     scheduler_id: String,
     servers: Arc<Mutex<HashMap<String, ServerInfo>>>,
-    tasks: Arc<dyn SchedulerTasks>,
+    tasks: Arc<dyn dist::tasks::SchedulerTasks>,
     toolchains: Arc<dyn Storage>,
     run_job: AsyncMulticast<RunJobArgs, RunJobResponse>,
 }
@@ -242,10 +228,9 @@ impl Scheduler {
         jobs_storage: Arc<dyn Storage>,
         metrics: SchedulerMetrics,
         scheduler_id: &str,
-        tasks: impl SchedulerTasks + 'static,
+        tasks: Arc<dyn dist::tasks::SchedulerTasks>,
         toolchains: Arc<dyn Storage>,
     ) -> Result<Arc<Self>> {
-        let tasks = Arc::new(tasks);
         let jobs = Arc::new(Mutex::new(HashMap::new()));
         let this = Arc::new(Self {
             jobs_storage,
@@ -261,7 +246,7 @@ impl Scheduler {
             }),
         });
 
-        this.tasks.set_scheduler(this.clone())?;
+        this.tasks.set_service(this.clone())?;
 
         Ok(this)
     }
@@ -270,10 +255,15 @@ impl Scheduler {
         &self,
         handle: axum_server::Handle,
         server: impl futures::Future<Output = Result<()>>,
+        heartbeat_interval: Duration,
         shutdown_timeout: Duration,
     ) -> Result<()> {
         let celery = async {
-            let res = self.tasks.app().consume_from(&self.tasks.queues()).await;
+            let res = self
+                .tasks
+                .app()
+                .consume_from(&self.tasks.queues_to_consume())
+                .await;
             tracing::info!("Celery shutdown");
             res.context("Celery error")
         };
@@ -294,6 +284,16 @@ impl Scheduler {
             Ok(())
         };
 
+        let status = tokio::spawn({
+            let this = self.clone();
+            async move {
+                loop {
+                    let _ = this.send_hearbeat().await;
+                    tokio::time::sleep(heartbeat_interval).await;
+                }
+            }
+        });
+
         // Wait for Celery or sigint, then shutdown Axum and Celery
         let shutdown_celery = async move {
             // tokio::select! deterministically polls its futures in order, so
@@ -306,7 +306,12 @@ impl Scheduler {
             let res = tokio::select! {
                 biased;
                 res = celery => res,
-                res = sigint => res
+                res = sigint => res,
+                // This should never resolve before either celery or sigint unless
+                // a catastrophic error occurs (tokio dies somehow?). Just polling
+                // it here so the task is cancelled once either of the above two
+                // futures complete first.
+                _ = status => Ok(()),
             };
 
             tracing::info!(
@@ -341,11 +346,72 @@ impl Scheduler {
             .map(|_| tracing::info!("Scheduler shutdown gracefully"))
     }
 
+    async fn send_hearbeat(&self) -> Result<()> {
+        let status = self.get_status().await?;
+        let status = StatusUpdate {
+            id: self.scheduler_id.clone(),
+            queue: self.tasks.app().default_queue.clone(),
+            info: status.info,
+            jobs: status.jobs,
+            max_job_age: {
+                let max_job_age = status
+                    .servers
+                    .iter()
+                    .map(|s| s.max_job_age)
+                    .max()
+                    .unwrap_or(0);
+                (
+                    // microseconds as seconds
+                    max_job_age.saturating_div(1_000_000) as u64,
+                    // remainder microseconds as nanoseconds
+                    (max_job_age % 1_000_000).saturating_mul(1_000) as u32,
+                )
+            },
+            timestamp: {
+                let timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or(Duration::from_secs(0))
+                    .as_micros();
+                (
+                    // microseconds as seconds
+                    timestamp.saturating_div(1_000_000) as u64,
+                    // remainder microseconds as nanoseconds
+                    (timestamp % 1_000_000).saturating_mul(1_000) as u32,
+                )
+            },
+        };
+
+        let servers = self
+            .servers
+            .lock()
+            .await
+            .values()
+            .map(|s| s.queue.to_owned())
+            .collect::<Vec<_>>();
+
+        if servers.is_empty() {
+            self.tasks
+                .update_status(status, None)
+                .await
+                .map_err(anyhow::Error::new)
+                .map(|_| ())
+        } else {
+            futures::future::try_join_all(
+                servers
+                    .iter()
+                    .map(|send_to| self.tasks.update_status(status.clone(), Some(send_to))),
+            )
+            .await
+            .map_err(anyhow::Error::new)
+            .map(|_| ())
+        }
+    }
+
     fn prune_servers(servers: &mut HashMap<String, ServerInfo>) {
-        let now = SystemTime::now();
+        let now = Instant::now();
         // Prune servers we haven't seen in 90s
         let timeout = Duration::from_secs(90);
-        servers.retain(|_, server| now.duration_since(server.m_time).unwrap() <= timeout);
+        servers.retain(|_, server| now.duration_since(server.m_time) <= timeout);
     }
 
     async fn has_job_inputs(&self, job_id: &str) -> bool {
@@ -444,7 +510,8 @@ impl SchedulerService for Scheduler {
                     id: server_id.clone(),
                     info: server.info.clone(),
                     jobs: server.jobs.clone(),
-                    u_time: server.m_time.elapsed().unwrap().as_secs(),
+                    u_time: server.m_time.elapsed().as_secs(),
+                    max_job_age: server.max_job_age,
                 });
             }
             server_statuses
@@ -454,7 +521,7 @@ impl SchedulerService for Scheduler {
             info: Some(
                 servers
                     .iter()
-                    .fold(dist::ServerStats::default(), |mut info, server| {
+                    .fold(dist::SysStats::default(), |mut info, server| {
                         info.cpu_usage += server.info.cpu_usage;
                         info.mem_avail += server.info.mem_avail;
                         info.mem_total += server.info.mem_total;
@@ -624,32 +691,36 @@ impl SchedulerService for Scheduler {
         Ok(())
     }
 
-    async fn job_finished(&self, job_id: &str, server: ServerDetails) -> Result<()> {
+    async fn job_finished(&self, job_id: &str, status: StatusUpdate) -> Result<()> {
         if let Some(sndr) = self.jobs.lock().await.remove(job_id) {
             let job_result = self.get_job_result(job_id).await.unwrap_or_else(|_| {
                 RunJobResponse::MissingJobResult {
-                    server_id: server.id.clone(),
+                    server_id: status.id.clone(),
                 }
             });
             let job_success = matches!(job_result, RunJobResponse::Complete { .. });
             let job_success = sndr
                 .send(job_result)
                 .map_or_else(|_| false, |_| job_success);
-            self.update_status(server, Some(job_success)).await
+            self.update_server_status(status, Some(job_success)).await
         } else {
             Err(anyhow!("Unknown job {job_id:?}"))
         }
     }
 
-    async fn update_status(&self, details: ServerDetails, job_status: Option<bool>) -> Result<()> {
+    async fn update_server_status(
+        &self,
+        status: StatusUpdate,
+        job_status: Option<bool>,
+    ) -> Result<()> {
         if let Some(success) = job_status {
             if success {
-                tracing::trace!("Received server success: {details:?}");
+                tracing::trace!("Received server success: {status:?}");
             } else {
-                tracing::trace!("Received server failure: {details:?}");
+                tracing::trace!("Received server failure: {status:?}");
             }
         } else {
-            tracing::trace!("Received server status: {details:?}");
+            tracing::trace!("Received server status: {status:?}");
         }
 
         let mut servers = self.servers.lock().await;
@@ -660,27 +731,31 @@ impl SchedulerService for Scheduler {
 
         // Insert or update the server info
         servers
-            .entry(details.id.clone())
+            .entry(status.id.clone())
             .and_modify(|server| {
                 // Convert to absolute durations since the Unix epoch
                 let t1 = server.u_time.duration_since(UNIX_EPOCH).unwrap();
-                let t2 = duration_from_micros(details.created_at);
+                let t2 = duration_from_micros(status.timestamp);
                 // If this event is newer than the latest state, it is now the latest state.
                 if t2 >= t1 {
-                    server.info = details.info.clone();
-                    server.jobs = details.jobs.clone();
-                    server.m_time = SystemTime::now();
+                    server.info = status.info.clone();
+                    server.jobs = status.jobs.clone();
+                    server.queue = status.queue.clone();
+                    server.m_time = Instant::now();
+                    server.max_job_age = duration_from_micros(status.max_job_age).as_secs();
                     // Increment prev time with the difference between prev and next
                     server.u_time = server.u_time.checked_add(t2 - t1).unwrap();
                 }
             })
             .or_insert_with(|| ServerInfo {
-                info: details.info.clone(),
-                jobs: details.jobs.clone(),
-                m_time: SystemTime::now(),
+                info: status.info,
+                jobs: status.jobs,
+                queue: status.queue,
+                m_time: Instant::now(),
+                max_job_age: duration_from_micros(status.max_job_age).as_secs(),
                 // Convert to absolute duration since the Unix epoch
                 u_time: UNIX_EPOCH
-                    .checked_add(duration_from_micros(details.created_at))
+                    .checked_add(duration_from_micros(status.timestamp))
                     .unwrap(),
             });
 

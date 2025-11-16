@@ -73,6 +73,11 @@ pub fn to_scheduler_queue(id: &str) -> String {
 }
 
 #[cfg(feature = "dist-server")]
+pub fn to_server_queue(id: &str) -> String {
+    queue_name_with_env_info(&format!("server-{id}"))
+}
+
+#[cfg(feature = "dist-server")]
 pub fn queue_name_with_env_info(prefix: &str) -> String {
     format!("{prefix}-{}", env_info())
 }
@@ -691,14 +696,10 @@ pub struct Toolchain {
 
 // Status
 
-// Unfortunately bincode doesn't support #[serde(flatten)] :(
-// https://github.com/bincode-org/bincode/issues/245
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchedulerStatus {
-    // #[serde(flatten)]
-    pub info: ServerStats,
+    pub info: SysStats,
     pub jobs: JobStats,
     pub servers: Vec<ServerStatus>,
 }
@@ -706,35 +707,40 @@ pub struct SchedulerStatus {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerStatus {
-    // #[serde(flatten)]
-    // pub details: ServerDetails,
+    // Server id
     pub id: String,
-    // #[serde(flatten)]
-    pub info: ServerStats,
+    // Server performance stats
+    pub info: SysStats,
+    // Server job stats
     pub jobs: JobStats,
+    // Duration since last update
     pub u_time: u64,
+    // The age of the oldest active job (in seconds)
+    pub max_job_age: u64,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ServerDetails {
-    pub id: String,
-    // #[serde(flatten)]
-    pub info: ServerStats,
-    pub jobs: JobStats,
-    // (secs, nanos)
-    pub created_at: (u64, u32),
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ServerStats {
+pub struct SysStats {
     pub cpu_usage: f32,
     pub mem_avail: u64,
     pub mem_total: u64,
     pub num_cpus: usize,
     pub occupancy: usize,
     pub pre_fetch: usize,
+}
+
+impl Default for SysStats {
+    fn default() -> Self {
+        Self {
+            cpu_usage: 0.0,
+            mem_avail: 0,
+            mem_total: 0,
+            num_cpus: 0,
+            occupancy: 0,
+            pre_fetch: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -745,6 +751,23 @@ pub struct JobStats {
     pub loading: u64,
     pub pending: u64,
     pub running: u64,
+}
+
+// A struct describing the status of a scheduler or server
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusUpdate {
+    // The id of the scheduler or server
+    pub id: String,
+    // The name of the queue for this scheduler or server
+    pub queue: String,
+    // The sysinfo stats of the scheduler or server
+    pub info: SysStats,
+    pub jobs: JobStats,
+    // When this event was created as microseconds since the Unix epoch as (secs, nanos)
+    pub timestamp: (u64, u32),
+    // The age of the oldest active job in microseconds as (secs, nanos)
+    pub max_job_age: (u64, u32),
 }
 
 // SubmitToolchain
@@ -781,9 +804,13 @@ pub trait SchedulerService: Send + Sync {
     async fn put_job(&self, job_id: &str, inputs: Vec<u8>) -> Result<()>;
     async fn del_job(&self, job_id: &str) -> Result<()>;
 
-    async fn job_finished(&self, job_id: &str, server: ServerDetails) -> Result<()>;
+    async fn job_finished(&self, job_id: &str, server: StatusUpdate) -> Result<()>;
 
-    async fn update_status(&self, server: ServerDetails, job_status: Option<bool>) -> Result<()>;
+    async fn update_server_status(
+        &self,
+        status: StatusUpdate,
+        job_status: Option<bool>,
+    ) -> Result<()>;
 }
 
 #[cfg(feature = "dist-server")]
@@ -800,6 +827,8 @@ pub trait ServerService: Send + Sync {
 
     async fn on_failure(&self, job_id: &str, reply_to: &str, err: RunJobError) -> Result<()>;
     async fn on_success(&self, job_id: &str, reply_to: &str, res: &RunJobResponse) -> Result<()>;
+
+    async fn update_scheduler_status(&self, status: StatusUpdate) -> Result<()>;
 }
 
 #[cfg(feature = "dist-server")]
