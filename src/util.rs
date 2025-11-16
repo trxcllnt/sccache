@@ -1146,6 +1146,11 @@ where
     C: Into<Option<&'a crate::config::DistNetworking>>,
 {
     let builder = reqwest::Client::builder()
+        .user_agent(format!(
+            "{}/{}",
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION")
+        ))
         // HTTP/2
         .http2_adaptive_window(true)
         // Prefer HTTP/2
