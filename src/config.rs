@@ -942,8 +942,8 @@ impl Default for DistNetworkingKeepalive {
     fn default() -> Self {
         Self {
             enabled: true,
-            timeout: 15,
-            interval: 15,
+            interval: 20,
+            timeout: 600,
         }
     }
 }
@@ -1793,6 +1793,7 @@ pub mod scheduler {
     use std::path::PathBuf;
     use std::{net::SocketAddr, str::FromStr};
 
+    use crate::config::DistNetworkingKeepalive;
     use crate::errors::*;
 
     use serde::{Deserialize, Serialize};
@@ -1853,8 +1854,10 @@ pub mod scheduler {
         pub job_time_limit: u32,
         #[serde(default = "Config::default_jobs_storage")]
         pub jobs: CacheConfigs,
+        pub keepalive: DistNetworkingKeepalive,
         #[serde(default = "Config::default_max_body_size")]
         pub max_body_size: usize,
+        pub max_concurrent_streams: Option<u32>,
         pub message_broker: Option<MessageBroker>,
         pub metrics: MetricsConfigs,
         #[serde(default = "Config::default_public_addr")]
@@ -1874,7 +1877,9 @@ pub mod scheduler {
                 heartbeat_interval_ms: Config::default_heartbeat_interval_ms(),
                 job_time_limit: Config::default_job_time_limit(),
                 jobs: Config::default_jobs_storage(),
+                keepalive: Default::default(),
                 max_body_size: Config::default_max_body_size(),
+                max_concurrent_streams: None,
                 message_broker: None,
                 metrics: Default::default(),
                 public_addr: SocketAddr::from_str("0.0.0.0:10500").unwrap(),
@@ -1891,7 +1896,9 @@ pub mod scheduler {
         pub heartbeat_interval_ms: u64,
         pub job_time_limit: u32,
         pub jobs: Vec<CacheType>,
+        pub keepalive: DistNetworkingKeepalive,
         pub max_body_size: usize,
+        pub max_concurrent_streams: Option<u32>,
         pub message_broker: Option<MessageBroker>,
         pub metrics: MetricsConfigs,
         pub public_addr: SocketAddr,
@@ -1955,7 +1962,9 @@ pub mod scheduler {
                 heartbeat_interval_ms,
                 job_time_limit,
                 jobs,
+                keepalive,
                 max_body_size,
+                max_concurrent_streams,
                 message_broker,
                 metrics,
                 public_addr,
@@ -1997,6 +2006,10 @@ pub mod scheduler {
                 .transpose()?
                 .unwrap_or(max_body_size);
 
+            let max_concurrent_streams = number_from_env_var("SCCACHE_DIST_MAX_CONCURRENT_STREAMS")
+                .transpose()
+                .unwrap_or(max_concurrent_streams);
+
             let message_broker = MessageBroker::from_env().or(message_broker);
 
             let scheduler_id = env::var("SCCACHE_DIST_SCHEDULER_ID")
@@ -2012,7 +2025,9 @@ pub mod scheduler {
                 heartbeat_interval_ms,
                 job_time_limit,
                 jobs: jobs.into(),
+                keepalive: keepalive.with_env_or_config(),
                 max_body_size,
+                max_concurrent_streams,
                 message_broker,
                 metrics,
                 public_addr,
@@ -2034,7 +2049,9 @@ pub mod scheduler {
                 heartbeat_interval_ms: scheduler_config.heartbeat_interval_ms,
                 job_time_limit: scheduler_config.job_time_limit,
                 jobs: scheduler_config.jobs.into(),
+                keepalive: scheduler_config.keepalive,
                 max_body_size: scheduler_config.max_body_size,
+                max_concurrent_streams: scheduler_config.max_concurrent_streams,
                 message_broker: scheduler_config.message_broker,
                 metrics: scheduler_config.metrics,
                 public_addr: scheduler_config.public_addr,
@@ -2052,7 +2069,9 @@ pub mod scheduler {
                 heartbeat_interval_ms: scheduler_config.heartbeat_interval_ms,
                 job_time_limit: scheduler_config.job_time_limit,
                 jobs: scheduler_config.jobs.into(),
+                keepalive: scheduler_config.keepalive,
                 max_body_size: scheduler_config.max_body_size,
+                max_concurrent_streams: scheduler_config.max_concurrent_streams,
                 message_broker: scheduler_config.message_broker,
                 metrics: scheduler_config.metrics,
                 public_addr: scheduler_config.public_addr,

@@ -99,7 +99,9 @@ fn run(command: Command) -> Result<()> {
                     heartbeat_interval_ms,
                     job_time_limit,
                     jobs,
+                    keepalive,
                     max_body_size,
+                    max_concurrent_streams,
                     message_broker,
                     metrics,
                     public_addr,
@@ -161,11 +163,14 @@ fn run(command: Command) -> Result<()> {
                         toolchains,
                     )?;
 
-                    let (handle, server) = dist::http::Scheduler::new(
-                        scheduler.clone(),
-                        client_auth_check,
-                    )
-                    .serve(public_addr, max_body_size, metrics);
+                    let (handle, server) =
+                        dist::http::Scheduler::new(scheduler.clone(), client_auth_check).serve(
+                            metrics,
+                            public_addr,
+                            keepalive,
+                            max_body_size,
+                            max_concurrent_streams,
+                        );
 
                     scheduler
                         .start(

@@ -198,6 +198,7 @@ mod scheduler {
     };
 
     use crate::{
+        config::DistNetworkingKeepalive,
         dist::{
             RunJobRequest, SchedulerService, Toolchain,
             http::{bincode_deserialize, bincode_serialize},
@@ -786,23 +787,28 @@ mod scheduler {
 
         pub fn serve(
             self,
-            addr: SocketAddr,
-            max_body_size: usize,
             metrics: Metrics,
+            bind_addr: SocketAddr,
+            keepalive: DistNetworkingKeepalive,
+            max_body_size: usize,
+            max_concurrent_streams: impl Into<Option<u32>>,
         ) -> (
             axum_server::Handle,
             impl futures::Future<Output = Result<()>>,
         ) {
-            let mut server = axum_server::bind(addr);
-            server
-                .http_builder()
-                .http2()
+            let mut server = axum_server::bind(bind_addr);
+            let mut builder = server.http_builder().http2();
+
+            builder
                 .adaptive_window(true)
-                .max_concurrent_streams(None)
-                .timer(hyper_util::rt::TokioTimer::new())
-                // TODO: Make these configurable
-                .keep_alive_interval(Duration::from_secs(20))
-                .keep_alive_timeout(Duration::from_secs(600));
+                .max_concurrent_streams(max_concurrent_streams);
+
+            if keepalive.enabled {
+                builder
+                    .timer(hyper_util::rt::TokioTimer::new())
+                    .keep_alive_interval(Duration::from_secs(keepalive.interval))
+                    .keep_alive_timeout(Duration::from_secs(keepalive.timeout));
+            }
 
             let handle = axum_server::Handle::new();
             let server = server
