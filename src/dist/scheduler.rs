@@ -288,7 +288,7 @@ impl Scheduler {
             let this = self.clone();
             async move {
                 loop {
-                    let _ = this.send_hearbeat().await;
+                    let _ = this.send_heartbeat().await;
                     tokio::time::sleep(heartbeat_interval).await;
                 }
             }
@@ -346,7 +346,7 @@ impl Scheduler {
             .map(|_| tracing::info!("Scheduler shutdown gracefully"))
     }
 
-    async fn send_hearbeat(&self) -> Result<()> {
+    async fn send_heartbeat(&self) -> Result<()> {
         let status = self.get_status().await?;
         let status = StatusUpdate {
             id: self.scheduler_id.clone(),
@@ -389,22 +389,16 @@ impl Scheduler {
             .map(|s| s.queue.to_owned())
             .collect::<Vec<_>>();
 
-        if servers.is_empty() {
-            self.tasks
-                .update_status(status, None)
-                .await
-                .map_err(anyhow::Error::new)
-                .map(|_| ())
-        } else {
-            futures::future::try_join_all(
+        futures::future::try_join_all(
+            std::iter::once(self.tasks.update_status(status.clone(), None)).chain(
                 servers
                     .iter()
                     .map(|send_to| self.tasks.update_status(status.clone(), Some(send_to))),
-            )
-            .await
-            .map_err(anyhow::Error::new)
-            .map(|_| ())
-        }
+            ),
+        )
+        .await
+        .map_err(anyhow::Error::new)
+        .map(|_| ())
     }
 
     fn prune_servers(servers: &mut HashMap<String, ServerInfo>) {

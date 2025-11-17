@@ -677,7 +677,7 @@ impl Server {
             let this = self.clone();
             async move {
                 loop {
-                    let _ = this.send_hearbeat().await;
+                    let _ = this.send_heartbeat().await;
                     tokio::time::sleep(heartbeat_interval).await;
                 }
             }
@@ -768,7 +768,7 @@ impl Server {
             .map(|_| tracing::info!("Server shutdown gracefully"))
     }
 
-    async fn send_hearbeat(&self) -> Result<()> {
+    async fn send_heartbeat(&self) -> Result<()> {
         // Prune schedulers we haven't seen in 90s
         let now = Instant::now();
         let timeout = Duration::from_secs(90);
@@ -778,22 +778,17 @@ impl Server {
             schedulers.keys().cloned().collect::<Vec<_>>()
         };
         let status: StatusUpdate = (&self.state).into();
-        if schedulers.is_empty() {
-            self.tasks
-                .update_status(status, None)
-                .await
-                .map_err(anyhow::Error::new)
-                .map(|_| ())
-        } else {
-            futures::future::try_join_all(
+
+        futures::future::try_join_all(
+            std::iter::once(self.tasks.update_status(status.clone(), None)).chain(
                 schedulers
                     .iter()
                     .map(|send_to| self.tasks.update_status(status.clone(), Some(send_to))),
-            )
-            .await
-            .map_err(anyhow::Error::new)
-            .map(|_| ())
-        }
+            ),
+        )
+        .await
+        .map_err(anyhow::Error::new)
+        .map(|_| ())
     }
 
     async fn put_job_result(&self, job_id: &str, result: &RunJobResponse) -> Result<()> {
