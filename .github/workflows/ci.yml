@@ -11,7 +11,7 @@ jobs:
       - id: has-codecov-token
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        if: "${{ env.CODECOV_TOKEN != '' }}"
+        if: "${{ env.CODECOV_TOKEN != '' && github.repository == 'mozilla/sccache' }}"
         run: echo "defined=true" >> "$GITHUB_OUTPUT"
   lint:
     name: ${{ matrix.component }} ${{ matrix.os }}
