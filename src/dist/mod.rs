@@ -21,6 +21,7 @@ use std::{
     ffi::OsString,
     fmt,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -134,6 +135,7 @@ pub mod pkg;
 #[cfg(not(feature = "dist-client"))]
 mod pkg {
     pub trait ToolchainPackager {}
+    pub trait PackagedToolchain {}
     #[allow(dead_code)]
     pub trait InputsPackager {}
 }
@@ -875,15 +877,23 @@ pub trait Client: Send + Sync {
     ) -> Result<RunJobResponse>;
     // To Scheduler
     async fn get_status(&self) -> Result<SchedulerStatus>;
-    // To Scheduler
-    async fn put_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult>;
-    // Write to local toolchain cache
-    async fn put_toolchain_local(
+    // Write to local toolchain cache if not already written, then upload to Scheduler
+    async fn put_toolchain(
+        &self,
+        compiler_path: &Path,
+        tc: Toolchain,
+        packager: Arc<dyn pkg::PackagedToolchain>,
+    ) -> Result<SubmitToolchainResult>;
+    async fn hash_toolchain(
         &self,
         compiler_path: &Path,
         weak_toolchain_key: &str,
-        toolchain_packager: Box<dyn pkg::ToolchainPackager>,
-    ) -> Result<(Toolchain, Option<(String, PathBuf)>)>;
+        toolchain_packager: &dyn pkg::ToolchainPackager,
+    ) -> Result<(
+        Toolchain,
+        Option<(String, PathBuf)>,
+        Option<Arc<dyn pkg::PackagedToolchain>>,
+    )>;
     fn fallback_to_local_compile(&self) -> bool;
     fn max_retries(&self) -> f64;
     fn request_timeout(&self) -> u32;

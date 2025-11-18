@@ -827,9 +827,10 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                     .await?
                     .0
                     .get_toolchain_packager()
-                    .write_pkg(out_file)
+                    .package()
+                    .await?
+                    .write_tar_gz(out_file)
                     .await
-                    .map(|_| ())
             })?
         }
         #[cfg(not(feature = "dist-client"))]

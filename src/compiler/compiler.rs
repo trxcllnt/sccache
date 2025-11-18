@@ -1241,9 +1241,10 @@ where
 
         trace!("[{out_pretty}]: Identifying dist toolchain for {executable:?}");
 
-        let (dist_toolchain, maybe_dist_compile_executable) = dist_client
-            .put_toolchain_local(executable, &weak_toolchain_key, toolchain_packager)
-            .await?;
+        let (dist_toolchain, maybe_dist_compile_executable, mut maybe_packaged_toolchain) =
+            dist_client
+                .hash_toolchain(executable, &weak_toolchain_key, toolchain_packager.as_ref())
+                .await?;
 
         let tc_archive =
             maybe_dist_compile_executable.map(|(dist_compile_executable, archive_path)| {
@@ -1351,8 +1352,15 @@ where
             }
 
             if !has_toolchain {
+                if maybe_packaged_toolchain.is_none() {
+                    maybe_packaged_toolchain = Some(toolchain_packager.package().await?);
+                }
                 match dist_client
-                    .put_toolchain(dist_toolchain.clone())
+                    .put_toolchain(
+                        executable,
+                        dist_toolchain.clone(),
+                        maybe_packaged_toolchain.as_ref().unwrap().clone(),
+                    )
                     .await
                     .map_err(|e| e.context("Could not submit toolchain"))
                 {
@@ -3348,10 +3356,14 @@ LLVM version: 6.0",
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
+    #[test_case(true, false ; "with preprocessor cache")]
+    #[test_case(false, false ; "without preprocessor cache")]
+    #[test_case(false, true ; "server has toolchain")]
     #[cfg(feature = "dist-client")]
-    fn test_compiler_get_cached_or_compile_dist(preprocessor_cache_mode: bool) {
+    fn test_compiler_get_cached_or_compile_dist(
+        preprocessor_cache_mode: bool,
+        server_already_has_toolchain: bool,
+    ) {
         drop(env_logger::try_init());
         let pending = crate::server::SccacheGauge::default();
         let creator = new_creator();
@@ -3428,6 +3440,7 @@ LLVM version: 6.0",
             0,
             COMPILER_STDOUT.to_owned(),
             COMPILER_STDERR.to_owned(),
+            server_already_has_toolchain,
         );
         let service = server::SccacheService::mock_with_dist_client(
             dist_client.clone(),
@@ -4179,6 +4192,18 @@ mod test_dist {
 
     use crate::errors::*;
 
+    struct PanicPackagedToolchain;
+
+    #[async_trait]
+    impl pkg::PackagedToolchain for PanicPackagedToolchain {
+        async fn compute_hash(&self) -> Result<String> {
+            panic!("PackagedToolchain::compute_hash should not have called packager")
+        }
+        async fn write_tar_gz(&self, _: fs_err::File) -> Result<()> {
+            panic!("PackagedToolchain::write_compressed_tar should not have called packager")
+        }
+    }
+
     pub struct ErrorPutToolchainClient;
     impl ErrorPutToolchainClient {
         #[allow(clippy::new_ret_no_self)]
@@ -4200,7 +4225,12 @@ mod test_dist {
         async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!()
         }
-        async fn put_toolchain(&self, _: Toolchain) -> Result<SubmitToolchainResult> {
+        async fn put_toolchain(
+            &self,
+            _: &Path,
+            _: Toolchain,
+            _: Arc<dyn pkg::PackagedToolchain>,
+        ) -> Result<SubmitToolchainResult> {
             unreachable!()
         }
         async fn run_job(
@@ -4213,13 +4243,17 @@ mod test_dist {
         ) -> Result<RunJobResponse> {
             unreachable!()
         }
-        async fn put_toolchain_local(
+        async fn hash_toolchain(
             &self,
             _: &Path,
             _: &str,
-            _: Box<dyn pkg::ToolchainPackager>,
-        ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
-            Err(anyhow!("MOCK: put toolchain failure"))
+            _: &dyn pkg::ToolchainPackager,
+        ) -> Result<(
+            Toolchain,
+            Option<(String, PathBuf)>,
+            Option<Arc<dyn pkg::PackagedToolchain>>,
+        )> {
+            Err(anyhow!("MOCK: get_toolchain_local failure"))
         }
         fn fallback_to_local_compile(&self) -> bool {
             true
@@ -4266,7 +4300,12 @@ mod test_dist {
         async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!()
         }
-        async fn put_toolchain(&self, _: Toolchain) -> Result<SubmitToolchainResult> {
+        async fn put_toolchain(
+            &self,
+            _: &Path,
+            _: Toolchain,
+            _: Arc<dyn pkg::PackagedToolchain>,
+        ) -> Result<SubmitToolchainResult> {
             unreachable!()
         }
         async fn run_job(
@@ -4279,13 +4318,17 @@ mod test_dist {
         ) -> Result<RunJobResponse> {
             unreachable!()
         }
-        async fn put_toolchain_local(
+        async fn hash_toolchain(
             &self,
             _: &Path,
             _: &str,
-            _: Box<dyn pkg::ToolchainPackager>,
-        ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
-            Ok((self.tc.clone(), None))
+            _: &dyn pkg::ToolchainPackager,
+        ) -> Result<(
+            Toolchain,
+            Option<(String, PathBuf)>,
+            Option<Arc<dyn pkg::PackagedToolchain>>,
+        )> {
+            Ok((self.tc.clone(), None, None))
         }
         fn fallback_to_local_compile(&self) -> bool {
             true
@@ -4346,7 +4389,12 @@ mod test_dist {
         async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!("fn do_get_status is not used for this test. qed")
         }
-        async fn put_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
+        async fn put_toolchain(
+            &self,
+            _: &Path,
+            tc: Toolchain,
+            _: Arc<dyn pkg::PackagedToolchain>,
+        ) -> Result<SubmitToolchainResult> {
             assert_eq!(self.tc, tc);
             Err(anyhow!("MOCK: submit toolchain failure"))
         }
@@ -4360,13 +4408,21 @@ mod test_dist {
         ) -> Result<RunJobResponse> {
             unreachable!("fn run_job is not used for this test. qed")
         }
-        async fn put_toolchain_local(
+        async fn hash_toolchain(
             &self,
             _: &Path,
             _: &str,
-            _: Box<dyn pkg::ToolchainPackager>,
-        ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
-            Ok((self.tc.clone(), None))
+            _: &dyn pkg::ToolchainPackager,
+        ) -> Result<(
+            Toolchain,
+            Option<(String, PathBuf)>,
+            Option<Arc<dyn pkg::PackagedToolchain>>,
+        )> {
+            Ok((
+                self.tc.clone(),
+                None,
+                Some(Arc::new(PanicPackagedToolchain)),
+            ))
         }
         fn fallback_to_local_compile(&self) -> bool {
             true
@@ -4427,7 +4483,12 @@ mod test_dist {
         async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!()
         }
-        async fn put_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
+        async fn put_toolchain(
+            &self,
+            _: &Path,
+            tc: Toolchain,
+            _: Arc<dyn pkg::PackagedToolchain>,
+        ) -> Result<SubmitToolchainResult> {
             assert_eq!(self.tc, tc);
             Ok(SubmitToolchainResult::Success)
         }
@@ -4445,18 +4506,23 @@ mod test_dist {
             assert_eq!(command.executable, "/overridden/compiler");
             Err(anyhow!("MOCK: run job failure"))
         }
-        async fn put_toolchain_local(
+        async fn hash_toolchain(
             &self,
             _: &Path,
             _: &str,
-            _: Box<dyn pkg::ToolchainPackager>,
-        ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
+            _: &dyn pkg::ToolchainPackager,
+        ) -> Result<(
+            Toolchain,
+            Option<(String, PathBuf)>,
+            Option<Arc<dyn pkg::PackagedToolchain>>,
+        )> {
             Ok((
                 self.tc.clone(),
                 Some((
                     "/overridden/compiler".to_owned(),
                     PathBuf::from("somearchiveid"),
                 )),
+                Some(Arc::new(PanicPackagedToolchain)),
             ))
         }
         fn fallback_to_local_compile(&self) -> bool {
@@ -4480,13 +4546,20 @@ mod test_dist {
         has_started: AtomicBool,
         tc: Toolchain,
         output: ProcessOutput,
+        has_toolchain: bool,
     }
 
     impl OneshotClient {
         #[allow(clippy::new_ret_no_self)]
-        pub fn new(code: i32, stdout: Vec<u8>, stderr: Vec<u8>) -> Arc<dyn dist::Client> {
+        pub fn new(
+            code: i32,
+            stdout: Vec<u8>,
+            stderr: Vec<u8>,
+            has_toolchain: bool,
+        ) -> Arc<dyn dist::Client> {
             Arc::new(Self {
                 has_started: AtomicBool::default(),
+                has_toolchain,
                 tc: Toolchain {
                     archive_id: "somearchiveid".to_owned(),
                 },
@@ -4506,7 +4579,7 @@ mod test_dist {
             assert_eq!(self.tc, tc);
             Ok(NewJobResponse {
                 has_inputs: true,
-                has_toolchain: false,
+                has_toolchain: self.has_toolchain,
                 job_id: "job_id".into(),
                 timeout: 10,
             })
@@ -4520,7 +4593,15 @@ mod test_dist {
         async fn get_status(&self) -> Result<SchedulerStatus> {
             unreachable!("fn do_get_status is not used for this test. qed")
         }
-        async fn put_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
+        async fn put_toolchain(
+            &self,
+            _: &Path,
+            tc: Toolchain,
+            _: Arc<dyn pkg::PackagedToolchain>,
+        ) -> Result<SubmitToolchainResult> {
+            if self.has_toolchain {
+                panic!("DistClient::put_toolchain should not have been called!")
+            }
             assert_eq!(self.tc, tc);
 
             Ok(SubmitToolchainResult::Success)
@@ -4547,7 +4628,7 @@ mod test_dist {
                 })
                 .collect();
             let result = RunJobResponse::Complete {
-                server_id: "".into(),
+                server_id: "server_id".into(),
                 result: BuildResult {
                     output: self.output.clone(),
                     outputs,
@@ -4555,18 +4636,23 @@ mod test_dist {
             };
             Ok(result)
         }
-        async fn put_toolchain_local(
+        async fn hash_toolchain(
             &self,
             _: &Path,
             _: &str,
-            _: Box<dyn pkg::ToolchainPackager>,
-        ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
+            _: &dyn pkg::ToolchainPackager,
+        ) -> Result<(
+            Toolchain,
+            Option<(String, PathBuf)>,
+            Option<Arc<dyn pkg::PackagedToolchain>>,
+        )> {
             Ok((
                 self.tc.clone(),
                 Some((
                     "/overridden/compiler".to_owned(),
                     PathBuf::from("somearchiveid"),
                 )),
+                Some(Arc::new(PanicPackagedToolchain)),
             ))
         }
         fn fallback_to_local_compile(&self) -> bool {

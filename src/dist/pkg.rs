@@ -18,6 +18,7 @@ use fs_err as fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::str;
+use std::sync::Arc;
 
 use crate::errors::*;
 
@@ -28,8 +29,14 @@ use crate::errors::*;
 pub use self::toolchain_imp::*;
 
 #[async_trait]
-pub trait ToolchainPackager: Send {
-    async fn write_pkg(self: Box<Self>, f: fs::File) -> Result<String>;
+pub trait ToolchainPackager: Send + Sync {
+    async fn package(&self) -> Result<Arc<dyn PackagedToolchain>>;
+}
+
+#[async_trait]
+pub trait PackagedToolchain: Send + Sync {
+    async fn compute_hash(&self) -> Result<String>;
+    async fn write_tar_gz(&self, f: fs::File) -> Result<()>;
 }
 
 pub trait InputsWriter: Write + Send {
@@ -82,17 +89,18 @@ pub trait InputsPackager: Send {
     all(target_os = "linux", target_arch = "aarch64"),
 )))]
 mod toolchain_imp {
-    use super::ToolchainPackager;
+    use std::sync::Arc;
+
+    use super::{PackagedToolchain, ToolchainPackager};
     use async_trait::async_trait;
-    use fs_err as fs;
 
     use crate::errors::*;
 
     // Distributed client, but an unsupported platform for toolchain packaging so
     // create a failing implementation that will conflict with any others.
     #[async_trait]
-    impl<T: Send> ToolchainPackager for T {
-        async fn write_pkg(self: Box<Self>, _f: fs::File) -> Result<String> {
+    impl<T: Send + Sync> ToolchainPackager for T {
+        async fn package(&self) -> Result<Arc<dyn PackagedToolchain>> {
             bail!("Automatic packaging not supported on this platform")
         }
     }
@@ -103,20 +111,21 @@ mod toolchain_imp {
     all(target_os = "linux", target_arch = "aarch64"),
 ))]
 mod toolchain_imp {
+    use async_trait::async_trait;
     use fs_err as fs;
     use is_executable::IsExecutable;
     use std::collections::BTreeMap;
     use std::ffi::OsString;
-    use std::io::{Read, Write};
+    use std::io::Read;
     use std::path::{Component, Path, PathBuf};
     use std::process;
     use std::str;
     use walkdir::WalkDir;
 
-    use super::tar_safe_path;
+    use super::{PackagedToolchain, tar_safe_path};
     use crate::errors::*;
 
-    pub struct ToolchainPackageBuilder {
+    pub struct ToolchainPackaged {
         // Put dirs and file in a deterministic order (map from tar_path -> real_path)
         dir_set: BTreeMap<PathBuf, PathBuf>,
         file_set: BTreeMap<PathBuf, PathBuf>,
@@ -126,9 +135,9 @@ mod toolchain_imp {
         symlinks: BTreeMap<PathBuf, PathBuf>,
     }
 
-    impl ToolchainPackageBuilder {
+    impl ToolchainPackaged {
         pub fn new() -> Self {
-            ToolchainPackageBuilder {
+            Self {
                 dir_set: BTreeMap::new(),
                 file_set: BTreeMap::new(),
                 symlinks: BTreeMap::new(),
@@ -278,60 +287,32 @@ mod toolchain_imp {
             Ok(())
         }
 
-        pub async fn into_compressed_tar<W: Write + Send + 'static>(
-            self,
-            writer: W,
-        ) -> Result<String> {
-            use crate::util::{Digest, num_cpus};
+        /// Simplify the path and strip the leading slash.
+        ///
+        /// Symlinks in the path are recorded for inclusion in the tarball.
+        fn tarify_path(&mut self, path: &Path) -> Result<PathBuf> {
+            super::tarify_path(&mut self.symlinks, path).map(tar_safe_path)
+        }
+    }
 
-            use gzp::{
-                deflate::Gzip,
-                par::compress::{Compression, ParCompressBuilder},
-            };
-
-            let this = self;
-
-            // Compute the archive first so we can feed bytes to ParCompress as fast as possible
-            let this = tokio::task::spawn_blocking(move || {
-                let compressor = ParCompressBuilder::<Gzip>::new()
-                    .compression_level(Compression::default())
-                    .num_threads(num_cpus())?
-                    .from_writer(writer);
-
-                let mut builder = tar::Builder::new(compressor);
-
-                for (tar_path, dir_path) in this.dir_set.iter() {
-                    builder.append_dir(tar_path, dir_path)?;
-                }
-                for (tar_path, file_path) in this.file_set.iter() {
-                    builder.append_path_with_name(file_path, tar_path)?;
-                }
-                for (from_path, to_path) in this.symlinks.iter() {
-                    let mut header = tar::Header::new_gnu();
-                    header.set_size(0);
-                    header.set_mtime(0);
-                    header.set_entry_type(tar::EntryType::Symlink);
-                    // Leave `to_path` as absolute, assuming the tar will
-                    // be used in a chroot-like environment.
-                    builder.append_link(&mut header, tar_safe_path(from_path), to_path)?;
-                }
-
-                builder.finish().map(|_| this).map_err(anyhow::Error::new)
-            })
-            .await??;
-
-            // Now compute the digest so it doesn't block ParCompress
+    #[async_trait]
+    impl PackagedToolchain for ToolchainPackaged {
+        async fn compute_hash(&self) -> Result<String> {
+            use crate::util::Digest;
+            let dir_set = self.dir_set.clone();
+            let file_set = self.file_set.clone();
+            let symlinks = self.symlinks.clone();
             tokio::task::spawn_blocking(move || {
                 let mut digest = Digest::new();
 
-                for (_, dir_path) in this.dir_set.iter() {
+                for (_, dir_path) in dir_set.iter() {
                     digest.update(dir_path.to_string_lossy().as_bytes());
                 }
-                for (_, file_path) in this.file_set.iter() {
+                for (_, file_path) in file_set.iter() {
                     digest.update_from_reader_sync(fs::File::open(file_path)?)?;
                     digest.update(file_path.to_string_lossy().as_bytes());
                 }
-                for (from_path, to_path) in this.symlinks.iter() {
+                for (from_path, to_path) in symlinks.iter() {
                     if to_path.is_file() {
                         digest.update_from_reader_sync(fs::File::open(to_path)?)?;
                     }
@@ -344,11 +325,45 @@ mod toolchain_imp {
             .await?
         }
 
-        /// Simplify the path and strip the leading slash.
-        ///
-        /// Symlinks in the path are recorded for inclusion in the tarball.
-        fn tarify_path(&mut self, path: &Path) -> Result<PathBuf> {
-            super::tarify_path(&mut self.symlinks, path).map(tar_safe_path)
+        async fn write_tar_gz(&self, writer: fs::File) -> Result<()> {
+            use crate::util::num_cpus;
+
+            use gzp::{
+                deflate::Gzip,
+                par::compress::{Compression, ParCompressBuilder},
+            };
+
+            let dir_set = self.dir_set.clone();
+            let file_set = self.file_set.clone();
+            let symlinks = self.symlinks.clone();
+
+            tokio::task::spawn_blocking(move || {
+                let compressor = ParCompressBuilder::<Gzip>::new()
+                    .compression_level(Compression::default())
+                    .num_threads(num_cpus())?
+                    .from_writer(writer);
+
+                let mut builder = tar::Builder::new(compressor);
+
+                for (tar_path, dir_path) in dir_set.iter() {
+                    builder.append_dir(tar_path, dir_path)?;
+                }
+                for (tar_path, file_path) in file_set.iter() {
+                    builder.append_path_with_name(file_path, tar_path)?;
+                }
+                for (from_path, to_path) in symlinks.iter() {
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(0);
+                    header.set_mtime(0);
+                    header.set_entry_type(tar::EntryType::Symlink);
+                    // Leave `to_path` as absolute, assuming the tar will
+                    // be used in a chroot-like environment.
+                    builder.append_link(&mut header, tar_safe_path(from_path), to_path)?;
+                }
+
+                builder.finish().map_err(anyhow::Error::new)
+            })
+            .await?
         }
     }
 

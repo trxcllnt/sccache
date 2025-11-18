@@ -12,10 +12,11 @@ mod client {
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     use crate::config;
     use crate::dist::Toolchain;
-    use crate::dist::pkg::ToolchainPackager;
+    use crate::dist::pkg::{PackagedToolchain, ToolchainPackager};
     use crate::lru_disk_cache::Error as LruError;
     use crate::lru_disk_cache::LruDiskCache;
     use crate::util::Digest;
@@ -184,13 +185,18 @@ mod client {
             };
             Ok(Some(file))
         }
-        // If the toolchain doesn't already exist, create it and insert into the cache
-        pub async fn put_toolchain(
+
+        // Get the toolchain hash from the cache, or hash it and insert it into the cache
+        pub async fn hash_toolchain(
             &self,
             compiler_path: &Path,
             weak_key: &str,
-            toolchain_packager: Box<dyn ToolchainPackager>,
-        ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
+            toolchain_packager: &dyn ToolchainPackager,
+        ) -> Result<(
+            Toolchain,
+            Option<(String, PathBuf)>,
+            Option<Arc<dyn PackagedToolchain>>,
+        )> {
             if self.disabled_toolchains.contains(compiler_path) {
                 bail!(
                     "Toolchain distribution for {} is disabled",
@@ -200,29 +206,82 @@ mod client {
             if let Some(tc_and_paths) = self.get_custom_toolchain(compiler_path).await {
                 debug!("Using custom toolchain for {:?}", compiler_path);
                 let (tc, compiler_path, archive) = tc_and_paths?;
-                return Ok((tc, Some((compiler_path, archive))));
+                return Ok((tc, Some((compiler_path, archive)), None));
             }
-            // Only permit one toolchain creation at a time. Not an issue if there are multiple attempts
-            // to create the same toolchain, just a waste of time
-            let mut cache = self.cache.lock().await;
-            if let Some(archive_id) = self.weak_to_strong(weak_key).await {
+
+            // Only hash one toolchain at a time.
+            // Not an issue if there are multiple attempts to
+            // create the same toolchain, just a waste of time
+            let mut weak_map = self.weak_map.lock().await;
+
+            if let Some(archive_id) = weak_map.get(weak_key) {
                 trace!("Using cached toolchain {} -> {}", weak_key, archive_id);
-                return Ok((Toolchain { archive_id }, None));
+                return Ok((
+                    Toolchain {
+                        archive_id: archive_id.to_owned(),
+                    },
+                    None,
+                    None,
+                ));
             }
-            debug!("Weak key {} appears to be new", weak_key);
+
+            debug!("Weak key {weak_key} appears to be new");
+
+            let packaged = toolchain_packager.package().await?;
+
+            let archive_id = packaged
+                .compute_hash()
+                .await
+                .context("Could not hash toolchain")?;
+
+            weak_map.insert(weak_key.to_owned(), archive_id.clone());
+
+            let weak_map_path = self.cache_dir.join("weak_map.json");
+            fs::File::create(weak_map_path)
+                .map_err(Error::from)
+                .and_then(|f| serde_json::to_writer(f, &*weak_map).map_err(Error::from))
+                .context("failed to enter toolchain in weak map")?;
+
+            Ok((Toolchain { archive_id }, None, Some(packaged)))
+        }
+
+        // If the toolchain doesn't already exist, compress it and insert into the local cache
+        pub async fn put_toolchain(
+            &self,
+            compiler_path: &Path,
+            toolchain: &Toolchain,
+            packaged: &dyn PackagedToolchain,
+        ) -> Result<()> {
+            // Only compress one toolchain at a time, because the default is to compress with all the cores.
+            let mut cache = self.cache.lock().await;
+
+            if let Ok(file) = cache.get_file(&toolchain.archive_id) {
+                trace!(
+                    "Using cached toolchain {} -> {}",
+                    toolchain.archive_id,
+                    file.path().display()
+                );
+                return Ok(());
+            }
+
+            debug!(
+                "Compressing toolchain {} -> {}",
+                compiler_path.display(),
+                toolchain.archive_id,
+            );
             let (tmpfile, tmppath) = tempfile::Builder::new()
                 .rand_bytes(16)
                 .tempfile_in(self.cache_dir.join("toolchain_tmp"))?
                 .into_parts();
-            let archive_id = toolchain_packager
-                .write_pkg(fs_err::File::from_parts(tmpfile, &tmppath))
+
+            packaged
+                .write_tar_gz(fs_err::File::from_parts(tmpfile, &tmppath))
                 .await
-                .context("Could not package toolchain")?;
-            let tc = Toolchain { archive_id };
-            cache.insert_file(&tc.archive_id, &tmppath)?;
-            self.record_weak(weak_key.to_owned(), tc.archive_id.clone())
-                .await?;
-            Ok((tc, None))
+                .context("Could not compress toolchain")?;
+
+            cache.insert_file(&toolchain.archive_id, &tmppath)?;
+
+            Ok(())
         }
 
         pub async fn get_custom_toolchain(
@@ -273,59 +332,32 @@ mod client {
                 None => None,
             }
         }
-
-        async fn weak_to_strong(&self, weak_key: &str) -> Option<String> {
-            self.weak_map
-                .lock()
-                .await
-                .get(weak_key)
-                .map(String::to_owned)
-        }
-
-        async fn record_weak(&self, weak_key: String, key: String) -> Result<()> {
-            let mut weak_map = self.weak_map.lock().await;
-            weak_map.insert(weak_key, key);
-            let weak_map_path = self.cache_dir.join("weak_map.json");
-            fs::File::create(weak_map_path)
-                .map_err(Error::from)
-                .and_then(|f| serde_json::to_writer(f, &*weak_map).map_err(Error::from))
-                .context("failed to enter toolchain in weak map")
-        }
     }
 
-    #[cfg(test)]
-    mod test {
-        use crate::config;
-        use crate::test::utils::create_file;
-        #[cfg(any(
+    #[cfg(all(
+        test,
+        feature = "dist-client",
+        any(
             all(target_os = "linux", target_arch = "x86_64"),
             all(target_os = "linux", target_arch = "aarch64"),
-        ))]
-        use async_trait::async_trait;
-        use std::io::Write;
+        )
+    ))]
+    mod test_dist {
+        use crate::{config, errors::*, test::utils::create_file};
+        use std::{io::Write, sync::Arc};
+
+        use {
+            crate::dist::pkg::{PackagedToolchain, ToolchainPackager},
+            async_trait::async_trait,
+        };
 
         use super::ClientToolchains;
 
         struct PanicToolchainPackager;
-        impl PanicToolchainPackager {
-            fn new() -> Box<Self> {
-                Box::new(PanicToolchainPackager)
-            }
-        }
-        #[cfg(any(
-            all(target_os = "linux", target_arch = "x86_64"),
-            all(target_os = "linux", target_arch = "aarch64"),
-        ))]
+
         #[async_trait]
-        #[cfg(any(
-            all(target_os = "linux", target_arch = "x86_64"),
-            all(target_os = "linux", target_arch = "aarch64"),
-        ))]
-        impl crate::dist::pkg::ToolchainPackager for PanicToolchainPackager {
-            async fn write_pkg(
-                self: Box<Self>,
-                _f: super::fs::File,
-            ) -> crate::errors::Result<String> {
+        impl ToolchainPackager for PanicToolchainPackager {
+            async fn package(&self) -> Result<Arc<dyn PackagedToolchain>> {
                 panic!("should not have called packager")
             }
         }
@@ -351,11 +383,11 @@ mod client {
             )
             .unwrap();
 
-            let (_tc, newpath) = client_toolchains
-                .put_toolchain(
+            let (_, newpath, _) = client_toolchains
+                .hash_toolchain(
                     "/my/compiler".as_ref(),
                     "weak_key",
-                    PanicToolchainPackager::new(),
+                    &PanicToolchainPackager {},
                 )
                 .await
                 .unwrap();
@@ -397,29 +429,29 @@ mod client {
             )
             .unwrap();
 
-            let (_tc, newpath) = client_toolchains
-                .put_toolchain(
+            let (_, newpath, _) = client_toolchains
+                .hash_toolchain(
                     "/my/compiler".as_ref(),
                     "weak_key",
-                    PanicToolchainPackager::new(),
+                    &PanicToolchainPackager {},
                 )
                 .await
                 .unwrap();
             assert!(newpath.unwrap() == ("/my/compiler/in_archive".to_string(), ct1.clone()));
-            let (_tc, newpath) = client_toolchains
-                .put_toolchain(
+            let (_, newpath, _) = client_toolchains
+                .hash_toolchain(
                     "/my/compiler2".as_ref(),
-                    "weak_key2",
-                    PanicToolchainPackager::new(),
+                    "weak_key",
+                    &PanicToolchainPackager {},
                 )
                 .await
                 .unwrap();
             assert!(newpath.unwrap() == ("/my/compiler2/in_archive".to_string(), ct1.clone()));
-            let (_tc, newpath) = client_toolchains
-                .put_toolchain(
+            let (_, newpath, _) = client_toolchains
+                .hash_toolchain(
                     "/my/compiler3".as_ref(),
-                    "weak_key2",
-                    PanicToolchainPackager::new(),
+                    "weak_key",
+                    &PanicToolchainPackager {},
                 )
                 .await
                 .unwrap();
@@ -444,15 +476,23 @@ mod client {
 
             assert!(
                 client_toolchains
-                    .put_toolchain(
+                    .hash_toolchain(
                         "/my/compiler".as_ref(),
                         "weak_key",
-                        PanicToolchainPackager::new()
+                        &PanicToolchainPackager {}
                     )
                     .await
                     .is_err()
             );
         }
+    }
+
+    #[cfg(test)]
+    mod test_nodist {
+        use crate::{config, test::utils::create_file};
+        use std::io::Write;
+
+        use super::ClientToolchains;
 
         #[test]
         fn test_client_toolchains_custom_nodist_conflict() {

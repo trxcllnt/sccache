@@ -2251,14 +2251,14 @@ struct RustToolchainPackager {
     all(target_os = "linux", target_arch = "aarch64"),
 ))]
 impl pkg::ToolchainPackager for RustToolchainPackager {
-    async fn write_pkg(self: Box<Self>, f: fs::File) -> Result<String> {
+    async fn package(&self) -> Result<Arc<dyn pkg::PackagedToolchain>> {
         info!(
             "Packaging Rust compiler for sysroot {}",
             self.sysroot.display()
         );
-        let RustToolchainPackager { sysroot } = *self;
+        let RustToolchainPackager { sysroot } = self;
 
-        let mut package_builder = pkg::ToolchainPackageBuilder::new();
+        let mut package_builder = pkg::ToolchainPackaged::new();
         package_builder.add_common()?;
 
         let bins_path = sysroot.join(BINS_DIR);
@@ -2271,7 +2271,9 @@ impl pkg::ToolchainPackager for RustToolchainPackager {
             package_builder.add_dir_contents(&[], &libs_path)?
         }
 
-        package_builder.into_compressed_tar(f).await
+        // Return the builder so the archive can be lazily created, depending
+        // on whether the scheduler reports it already has the toolchain or not
+        Ok(Arc::new(package_builder))
     }
 }
 

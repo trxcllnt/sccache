@@ -1283,11 +1283,11 @@ struct CToolchainPackager {
     all(target_os = "linux", target_arch = "aarch64"),
 ))]
 impl pkg::ToolchainPackager for CToolchainPackager {
-    async fn write_pkg(self: Box<Self>, f: fs::File) -> Result<String> {
+    async fn package(&self) -> Result<Arc<dyn pkg::PackagedToolchain>> {
         use std::os::unix::ffi::OsStringExt;
 
         debug!("Generating toolchain {}", self.executable.display());
-        let mut package_builder = pkg::ToolchainPackageBuilder::new();
+        let mut package_builder = pkg::ToolchainPackaged::new();
         package_builder.add_common()?;
 
         // Helper to use -print-file-name and -print-prog-name to look up
@@ -1325,20 +1325,18 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 
         // Helper to add a named file/program by to the package.
         // We ignore the case where the file doesn't exist, as we don't need it.
-        let add_named_prog =
-            |builder: &mut pkg::ToolchainPackageBuilder, name: &str| -> Result<()> {
-                if let Some(path) = named_file(&format!("-print-prog-name={name}")) {
-                    builder.add_executable_and_deps(&self.env_vars, &path)?;
-                }
-                Ok(())
-            };
-        let add_named_file =
-            |builder: &mut pkg::ToolchainPackageBuilder, name: &str| -> Result<()> {
-                if let Some(path) = named_file(&format!("-print-file-name={name}")) {
-                    builder.add_file(&self.env_vars, path)?;
-                }
-                Ok(())
-            };
+        let add_named_prog = |builder: &mut pkg::ToolchainPackaged, name: &str| -> Result<()> {
+            if let Some(path) = named_file(&format!("-print-prog-name={name}")) {
+                builder.add_executable_and_deps(&self.env_vars, &path)?;
+            }
+            Ok(())
+        };
+        let add_named_file = |builder: &mut pkg::ToolchainPackaged, name: &str| -> Result<()> {
+            if let Some(path) = named_file(&format!("-print-file-name={name}")) {
+                builder.add_file(&self.env_vars, path)?;
+            }
+            Ok(())
+        };
 
         let mut add_default_files = || -> Result<()> {
             // Add basic |as| and |objcopy| programs.
@@ -1636,8 +1634,9 @@ impl pkg::ToolchainPackager for CToolchainPackager {
             }
         }
 
-        // Bundle into a compressed tarfile.
-        package_builder.into_compressed_tar(f).await
+        // Return the builder so the archive can be lazily created, depending
+        // on whether the scheduler reports it already has the toolchain or not
+        Ok(Arc::new(package_builder))
     }
 }
 

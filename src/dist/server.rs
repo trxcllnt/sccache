@@ -382,6 +382,13 @@ impl From<&ServerState> for StatusUpdate {
     }
 }
 
+impl AsyncMulticastArgs for Toolchain {
+    type Key = String;
+    fn hash(&self) -> Self::Key {
+        self.archive_id.clone()
+    }
+}
+
 struct LoadToolchainFn {
     toolchains: Arc<dyn ToolchainService>,
 }

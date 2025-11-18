@@ -832,39 +832,32 @@ mod scheduler {
     }
 }
 
-#[cfg(any(feature = "dist-client", feature = "dist-server"))]
-impl crate::util::AsyncMulticastArgs for crate::dist::Toolchain {
-    type Key = String;
-    fn hash(&self) -> Self::Key {
-        self.archive_id.clone()
-    }
-}
-
 #[cfg(feature = "dist-client")]
 mod client {
-    use super::super::cache;
-    use crate::{
-        config,
-        dist::{
-            self, CompileCommand, NewJobResponse, RunJobRequest, RunJobResponse, SchedulerStatus,
-            SubmitToolchainResult, Toolchain, pkg::ToolchainPackager,
-        },
-        errors::*,
-        util::{AsyncMulticast, AsyncMulticastFunc, new_reqwest_client},
-    };
+    use async_trait::async_trait;
+
+    use reqwest::Body;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::compat::FuturesAsyncReadCompatExt;
 
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::Duration;
 
-    use async_trait::async_trait;
-    use reqwest::Body;
-    use std::path::{Path, PathBuf};
-
+    use super::super::cache;
     use super::common::{ReqwestRequestBuilderExt, bincode_req_fut};
     use super::{bincode_serialize, urls};
+    use crate::{
+        config,
+        dist::{
+            self, CompileCommand, NewJobResponse, RunJobRequest, RunJobResponse, SchedulerStatus,
+            SubmitToolchainResult, Toolchain,
+            pkg::{PackagedToolchain, ToolchainPackager},
+        },
+        errors::*,
+        util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc, new_reqwest_client},
+    };
 
     struct SubmitToolchainFn {
         client: Arc<ReqwestClients>,
@@ -873,9 +866,27 @@ mod client {
         client_toolchains: Arc<cache::ClientToolchains>,
     }
 
+    impl AsyncMulticastArgs
+        for (
+            PathBuf,
+            crate::dist::Toolchain,
+            Arc<dyn PackagedToolchain + '_>,
+        )
+    {
+        type Key = String;
+        fn hash(&self) -> Self::Key {
+            self.1.archive_id.clone()
+        }
+    }
+
     #[async_trait]
-    impl AsyncMulticastFunc<Toolchain, SubmitToolchainResult> for SubmitToolchainFn {
-        async fn call(&self, tc: &Toolchain) -> Result<SubmitToolchainResult> {
+    impl AsyncMulticastFunc<(PathBuf, Toolchain, Arc<dyn PackagedToolchain>), SubmitToolchainResult>
+        for SubmitToolchainFn
+    {
+        async fn call(
+            &self,
+            (compiler_path, tc, packaged): &(PathBuf, Toolchain, Arc<dyn PackagedToolchain>),
+        ) -> Result<SubmitToolchainResult> {
             let id = &tc.archive_id;
 
             debug!("Submitting toolchain {id:?}");
@@ -886,6 +897,10 @@ mod client {
                 scheduler_url,
                 client_toolchains,
             } = self;
+
+            client_toolchains
+                .put_toolchain(compiler_path, tc, packaged.as_ref())
+                .await?;
 
             let res = match client_toolchains.get_toolchain(tc).await {
                 Err(e) => Err(e),
@@ -979,7 +994,8 @@ mod client {
         request_timeout: u32,
         rewrite_includes_only: bool,
         scheduler_url: reqwest::Url,
-        submit_toolchain_reqs: AsyncMulticast<Toolchain, SubmitToolchainResult>,
+        submit_toolchain_reqs:
+            AsyncMulticast<(PathBuf, Toolchain, Arc<dyn PackagedToolchain>), SubmitToolchainResult>,
         tc_cache: Arc<cache::ClientToolchains>,
     }
 
@@ -1112,23 +1128,32 @@ mod client {
             .await
         }
 
-        async fn put_toolchain(&self, tc: Toolchain) -> Result<SubmitToolchainResult> {
+        async fn put_toolchain(
+            &self,
+            compiler_path: &Path,
+            tc: Toolchain,
+            packaged: Arc<dyn PackagedToolchain>,
+        ) -> Result<SubmitToolchainResult> {
             let id = tc.archive_id.clone();
             self.submit_toolchain_reqs
-                .call(tc)
+                .call((compiler_path.to_owned(), tc, packaged))
                 .await
                 .map(|(_, res)| res)
                 .map_err(|_| anyhow!("Failed to submit toolchain {id:?}"))
         }
 
-        async fn put_toolchain_local(
+        async fn hash_toolchain(
             &self,
             compiler_path: &Path,
             weak_toolchain_key: &str,
-            toolchain_packager: Box<dyn ToolchainPackager>,
-        ) -> Result<(Toolchain, Option<(String, PathBuf)>)> {
+            toolchain_packager: &dyn ToolchainPackager,
+        ) -> Result<(
+            Toolchain,
+            Option<(String, PathBuf)>,
+            Option<Arc<dyn PackagedToolchain>>,
+        )> {
             self.tc_cache
-                .put_toolchain(compiler_path, weak_toolchain_key, toolchain_packager)
+                .hash_toolchain(compiler_path, weak_toolchain_key, toolchain_packager)
                 .await
         }
 
