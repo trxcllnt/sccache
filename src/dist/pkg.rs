@@ -254,11 +254,16 @@ mod toolchain_imp {
             // best-effort auto packaging
             for entry in WalkDir::new(dir_path).follow_links(false) {
                 let entry = entry?;
+                let path = entry.path();
                 let file_type = entry.file_type();
                 if file_type.is_dir() {
                     continue;
                 } else if file_type.is_symlink() {
-                    let metadata = fs::metadata(entry.path())?;
+                    // Skip symlinks that point to nothing
+                    if !path.exists() {
+                        continue;
+                    }
+                    let metadata = fs::metadata(path)?;
                     if !metadata.file_type().is_file() {
                         continue;
                     }
@@ -266,9 +271,9 @@ mod toolchain_imp {
                     // Device or other oddity
                     continue;
                 }
-                trace!("walkdir add_file {}", entry.path().display());
+                trace!("walkdir add_file {}", path.display());
                 // It's either a file, or a symlink pointing to a file
-                self.add_file(env_vars, entry.path().to_owned())?
+                self.add_file(env_vars, path.to_owned())?
             }
             Ok(())
         }
