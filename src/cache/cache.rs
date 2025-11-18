@@ -12,48 +12,48 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{
-    cache::{disk::DiskCache, readonly::ReadOnlyStorage, tiered::TieredCache},
-    config::{
-        AzureCacheConfig, CacheType, DEFAULT_REDIS_DB, DiskCacheConfig, GCSCacheConfig,
-        GHACacheConfig, MemcachedCacheConfig, OSSCacheConfig, RedisCacheConfig, S3CacheConfig,
-        WebdavCacheConfig,
-    },
-    errors::*,
-};
-
 use async_trait::async_trait;
 use fs_err as fs;
 use futures::{FutureExt, StreamExt, TryFutureExt};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::io::{self, Cursor, Read, Seek, Write};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    fmt,
+    io::{self, Cursor, Read, Seek, Write},
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tempfile::NamedTempFile;
-use zip::write::FileOptions;
-use zip::{CompressionMethod, ZipArchive, ZipWriter};
+use zip::{CompressionMethod, ZipArchive, ZipWriter, write::FileOptions};
 
-#[cfg(feature = "azure")]
-use crate::cache::azure::AzureBlobCache;
-#[cfg(feature = "gcs")]
-use crate::cache::gcs::GCSCache;
-#[cfg(feature = "gha")]
-use crate::cache::gha::GHACache;
-#[cfg(feature = "memcached")]
-use crate::cache::memcached::MemcachedCache;
-#[cfg(feature = "oss")]
-use crate::cache::oss::OSSCache;
-#[cfg(feature = "redis")]
-use crate::cache::redis::RedisCache;
-#[cfg(feature = "s3")]
-use crate::cache::s3::S3Cache;
+use crate::{
+    cache::{disk::DiskCache, readonly::ReadOnlyStorage, tiered::TieredCache},
+    config::{CacheType, DiskCacheConfig},
+    errors::*,
+};
+
 #[cfg(feature = "watcher")]
 use crate::cache::watch::WatchStorage;
+#[cfg(feature = "azure")]
+use crate::{cache::azure::AzureBlobCache, config::AzureCacheConfig};
+#[cfg(feature = "gcs")]
+use crate::{cache::gcs::GCSCache, config::GCSCacheConfig};
+#[cfg(feature = "gha")]
+use crate::{cache::gha::GHACache, config::GHACacheConfig};
+#[cfg(feature = "memcached")]
+use crate::{cache::memcached::MemcachedCache, config::MemcachedCacheConfig};
+#[cfg(feature = "oss")]
+use crate::{cache::oss::OSSCache, config::OSSCacheConfig};
+#[cfg(feature = "redis")]
+use crate::{
+    cache::redis::RedisCache,
+    config::{DEFAULT_REDIS_DB, RedisCacheConfig},
+};
+#[cfg(feature = "s3")]
+use crate::{cache::s3::S3Cache, config::S3CacheConfig};
 #[cfg(feature = "webdav")]
-use crate::cache::webdav::WebdavCache;
+use crate::{cache::webdav::WebdavCache, config::WebdavCacheConfig};
 #[cfg(any(
     feature = "azure",
     feature = "gcs",
