@@ -811,12 +811,15 @@ mod scheduler {
             }
 
             let handle = axum_server::Handle::new();
+            // Authenticate the client bearer token before routing,
+            // but after capturing metrics and traces.
+            let router =
+                Self::routes().route_layer(axum::middleware::from_extractor::<RequireAuth>());
+
             let server = server
                 .handle(handle.clone())
                 .serve(
-                    Self::tracing(Self::metrics(Self::routes(), metrics))
-                        // Authenticate the client bearer token first
-                        .route_layer(axum::middleware::from_extractor::<RequireAuth>())
+                    Self::tracing(Self::metrics(router, metrics))
                         // Limit request body size
                         .layer(tower_http::limit::RequestBodyLimitLayer::new(max_body_size))
                         .layer(Extension(self.state.clone()))
