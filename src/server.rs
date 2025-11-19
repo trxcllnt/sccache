@@ -1135,7 +1135,7 @@ where
             dist_client,
             storage,
             preprocessor_storage,
-            pending_compilations_limit: (util::num_cpus() as f32 * 1.1).round() as u64,
+            pending_compilations_limit: util::num_cpus() as u64,
             compiler_info_queue,
             rt,
             creator,
@@ -1171,7 +1171,7 @@ where
             dist_client,
             storage,
             preprocessor_storage,
-            pending_compilations_limit: (util::num_cpus() as f32 * 1.1).round() as u64,
+            pending_compilations_limit: util::num_cpus() as u64,
             compiler_info_queue,
             rt,
             creator,
@@ -1222,7 +1222,7 @@ where
             dist_client,
             storage,
             preprocessor_storage,
-            pending_compilations_limit: (util::num_cpus() as f32 * 1.1).round() as u64,
+            pending_compilations_limit: util::num_cpus() as u64,
             compiler_info_queue,
             rt: rt.clone(),
             creator,
@@ -1394,11 +1394,6 @@ where
                     .pending_compilations
                     .increment_if(|pending_compilations| {
                         pending_compilations < self.pending_compilations_limit
-                        // if pending_compilations >= self.pending_compilations_limit {
-                        //     None
-                        // } else {
-                        //     Some(pending_compilations + 1)
-                        // }
                     }) {
                     Ok(pending) => {
                         break pending;
