@@ -19,7 +19,7 @@ use futures::lock::Mutex;
 use crate::{
     cache::{Cache, Storage},
     dist::{
-        self, CompileCommand, JobStats, NewJobResponse, RunJobRequest, RunJobResponse,
+        self, BufReadSeek, CompileCommand, JobStats, NewJobResponse, RunJobRequest, RunJobResponse,
         SchedulerService, SchedulerStatus, ServerStatus, StatusUpdate, SubmitToolchainResult,
         SysStats, Toolchain,
         http::bincode_deserialize,
@@ -558,16 +558,13 @@ impl SchedulerService for Scheduler {
     async fn put_toolchain(
         &self,
         toolchain: &Toolchain,
-        toolchain_archive: Vec<u8>,
+        toolchain_archive: &mut dyn BufReadSeek,
     ) -> Result<SubmitToolchainResult> {
         // Record put_toolchain time
         let _timer = self.metrics.put_toolchain_timer();
         // Upload toolchain to toolchains storage (S3, GCS, etc.)
         self.toolchains
-            .put(
-                &toolchain.archive_id,
-                &mut std::io::Cursor::new(&toolchain_archive[..]),
-            )
+            .put(&toolchain.archive_id, toolchain_archive)
             .await
             .map(|_| SubmitToolchainResult::Success)
             .context("Failed to put toolchain")

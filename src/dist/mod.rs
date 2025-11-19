@@ -795,7 +795,7 @@ pub trait SchedulerService: Send + Sync {
     async fn put_toolchain(
         &self,
         toolchain: &Toolchain,
-        toolchain_archive: Vec<u8>,
+        toolchain_archive: &mut dyn BufReadSeek,
     ) -> Result<SubmitToolchainResult>;
 
     async fn del_toolchain(&self, toolchain: &Toolchain) -> Result<()>;

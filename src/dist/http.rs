@@ -181,7 +181,7 @@ mod scheduler {
 
     use std::{
         collections::HashMap,
-        io,
+        io::{self, Seek},
         net::SocketAddr,
         str::FromStr,
         sync::Arc,
@@ -189,7 +189,7 @@ mod scheduler {
     };
 
     use tokio::io::AsyncReadExt;
-    use tokio_util::io::StreamReader;
+    use tokio_util::{compat::TokioAsyncReadCompatExt, io::StreamReader};
     use tower::ServiceBuilder;
     use tower_http::{
         request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -564,19 +564,22 @@ mod scheduler {
                          Extension::<Arc<SchedulerState>>(state),
                          Path(archive_id): Path<String>,
                          req: Request| async move {
-                            let RequestBodyTokioAsyncRead(mut reader) = req
+                            let RequestBodyTokioAsyncRead(reader) = req
                                 .extract::<RequestBodyTokioAsyncRead, _>()
                                 .await
-                                .map_err(|_| AppError(anyhow!("")))
-                                .map_err(IntoResponse::into_response)?;
+                                .map_err(|_| AppError(anyhow!("")).into_response())?;
 
-                            // First read all inputs into memory
-                            let mut toolchain = vec![];
-                            reader
-                                .read_to_end(&mut toolchain)
-                                .await
-                                .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job inputs"))
-                                .map_err(IntoResponse::into_response)?;
+                            // First read the toolchain into a tempfile
+                            let mut toolchain = crate::util::normal_tempfile()
+                                .map_err(|_| AppError(anyhow!("")).into_response())?;
+
+                            futures::io::copy(
+                                reader.compat(),
+                                &mut futures::io::AllowStdIo::new(toolchain.as_file_mut()),
+                            )
+                            .await
+                            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid toolchain"))
+                            .map_err(IntoResponse::into_response)?;
 
                             let service = state.service.clone();
 
@@ -585,8 +588,12 @@ mod scheduler {
                             // incomplete write if the client disconnects prematurely, for example,
                             // if a user ctrl-C's their build.
                             tokio::spawn(async move {
+                                let mut toolchain = std::io::BufReader::new(toolchain.as_file());
+                                toolchain
+                                    .rewind()
+                                    .map_err(|_| AppError(anyhow!("")).into_response())?;
                                 service
-                                    .put_toolchain(&Toolchain { archive_id }, toolchain)
+                                    .put_toolchain(&Toolchain { archive_id }, &mut toolchain)
                                     .and_then(|res| mime.serialize(res))
                                     .map_err(|e| AppError(e).into_response())
                                     .await
