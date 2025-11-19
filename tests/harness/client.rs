@@ -173,7 +173,7 @@ impl SccacheClient {
         );
     }
 
-    pub fn clear_disk_cache(&self) -> sccache::errors::Result<()> {
+    pub fn clear_disk_cache(&self) -> sccache::errors::Result<PathBuf> {
         self.zero_stats();
         let disk_cache = (|| {
             if let Some(cfg_path_idx) = self.envvars.iter().position(|(k, _)| k == "SCCACHE_CONF") {
@@ -191,10 +191,10 @@ impl SccacheClient {
         })();
         println!("clear_disk_cache: {:?}", disk_cache.dir);
         fs::remove_dir_all(&disk_cache.dir)?;
-        Ok(())
+        Ok(disk_cache.dir.clone())
     }
 
-    pub fn clear_toolchains_cache(&self) -> sccache::errors::Result<()> {
+    pub fn clear_toolchains_cache(&self) -> sccache::errors::Result<PathBuf> {
         let dist_config = (|| {
             if let Some(cfg_path_idx) = self.envvars.iter().position(|(k, _)| k == "SCCACHE_CONF") {
                 if let Some((_, cfg_path)) = self.envvars.get(cfg_path_idx) {
@@ -207,9 +207,17 @@ impl SccacheClient {
             }
             DistConfig::default()
         })();
-        println!("clear_toolchains_cache: {:?}", dist_config.cache_dir);
-        fs::remove_dir_all(&dist_config.cache_dir)?;
-        Ok(())
+        let tc_dir = dist_config.cache_dir.join("client").join("tc");
+        println!("clear_toolchains_cache: {:?}", tc_dir);
+        for entry in std::fs::read_dir(&tc_dir)? {
+            let path = entry?.path();
+            if fs::symlink_metadata(&path)?.is_dir() {
+                fs::remove_dir_all(&path)?;
+            } else {
+                fs::remove_file(&path)?;
+            }
+        }
+        Ok(tc_dir.clone())
     }
 }
 

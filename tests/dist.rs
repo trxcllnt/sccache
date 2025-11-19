@@ -300,12 +300,14 @@ async fn test_dist_cpp_toolchain(message_broker: &str) -> Result<()> {
         .await?;
 
     // Run twice to verify toolchain is only uploaded once
-    for _ in 0..2 {
+    for i in 0..2 {
         let client = system.new_client(&dist_test_sccache_client_cfg(
             system.data_dir(),
             system.scheduler(0)?.url(),
             false,
         ));
+
+        let tc_dir = client.clear_toolchains_cache()?;
 
         cc_compile(&client, system.test_dir()).await?;
 
@@ -318,6 +320,13 @@ async fn test_dist_cpp_toolchain(message_broker: &str) -> Result<()> {
         assert_eq!(0, stats.cache_hits.all());
 
         assert_eq!(system.count_server_toolchains(system.server(0)?)?, 1);
+
+        // Ensure the client doesn't package the toolchain again the 2nd time
+        if i == 0 {
+            assert_eq!(std::fs::read_dir(tc_dir).map(|dir| dir.count())?, 1);
+        } else {
+            assert_eq!(std::fs::read_dir(tc_dir).map(|dir| dir.count())?, 0);
+        }
     }
 
     Ok(())
