@@ -487,13 +487,17 @@ mod scheduler {
             };
 
             async fn record_metrics(
-                RequireAuth(_, mut labels): RequireAuth,
                 req: Request,
                 next: axum::middleware::Next,
             ) -> impl IntoResponse {
                 let start = Instant::now();
 
+                let auth = req.extensions().get::<RequireAuth>();
+
                 // Labels include auth claims to support `GROUPBY "user_id"` etc.
+                let mut labels = auth.map(|auth| auth.1.clone()).unwrap_or_default();
+
+                labels.insert("authorized".into(), auth.is_some().to_string());
                 labels.insert("method".into(), req.method().to_string());
                 labels.insert(
                     "path".into(),
@@ -811,17 +815,16 @@ mod scheduler {
             }
 
             let handle = axum_server::Handle::new();
-            // Authenticate the client bearer token before routing,
-            // but after capturing metrics and traces.
-            let router =
-                Self::routes().route_layer(axum::middleware::from_extractor::<RequireAuth>());
+            let router = Self::routes()
+                // Authenticate the client before routing, but after capturing metrics and traces.
+                .route_layer(axum::middleware::from_extractor::<RequireAuth>())
+                // Limit request body size
+                .layer(tower_http::limit::RequestBodyLimitLayer::new(max_body_size));
 
             let server = server
                 .handle(handle.clone())
                 .serve(
-                    Self::tracing(Self::metrics(router, metrics))
-                        // Limit request body size
-                        .layer(tower_http::limit::RequestBodyLimitLayer::new(max_body_size))
+                    Self::tracing(Self::metrics(router, metrics.clone()))
                         .layer(Extension(self.state.clone()))
                         .into_make_service_with_connect_info::<SocketAddr>(),
                 )
