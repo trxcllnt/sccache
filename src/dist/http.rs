@@ -346,8 +346,8 @@ mod scheduler {
     }
 
     // Verify authenticated sccache clients
-    #[allow(dead_code)]
-    struct RequireAuth(SocketAddr, HashMap<String, String>);
+    #[derive(Debug)]
+    struct RequireAuth(HashMap<String, String>);
 
     #[async_trait]
     impl<S> FromRequestParts<S> for RequireAuth
@@ -388,7 +388,7 @@ mod scheduler {
             this.client_auth
                 .check(bearer.token())
                 .await
-                .map(|claims| RequireAuth(remote_addr, claims))
+                .map(RequireAuth)
                 .map_err(|err| {
                     tracing::warn!("[RequireAuth({remote_addr})]: Authentication failure: {err}");
                     (StatusCode::UNAUTHORIZED, "Unauthorized".into())
@@ -487,17 +487,18 @@ mod scheduler {
             };
 
             async fn record_metrics(
-                req: Request,
+                mut req: Request,
                 next: axum::middleware::Next,
             ) -> impl IntoResponse {
                 let start = Instant::now();
 
-                let auth = req.extensions().get::<RequireAuth>();
+                let auth = req.extract_parts::<RequireAuth>().await;
+                let authorized = auth.is_ok();
 
                 // Labels include auth claims to support `GROUPBY "user_id"` etc.
-                let mut labels = auth.map(|auth| auth.1.clone()).unwrap_or_default();
+                let mut labels = auth.map(|auth| auth.0.clone()).unwrap_or_default();
 
-                labels.insert("authorized".into(), auth.is_some().to_string());
+                labels.insert("authorized".into(), authorized.to_string());
                 labels.insert("method".into(), req.method().to_string());
                 labels.insert(
                     "path".into(),
@@ -831,7 +832,7 @@ mod scheduler {
             let server = server
                 .handle(handle.clone())
                 .serve(
-                    Self::tracing(Self::metrics(router, metrics.clone()))
+                    Self::tracing(Self::metrics(router, metrics))
                         .layer(Extension(self.state.clone()))
                         .into_make_service_with_connect_info::<SocketAddr>(),
                 )
