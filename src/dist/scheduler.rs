@@ -500,12 +500,13 @@ impl SchedulerService for Scheduler {
 
             let mut server_statuses = vec![];
             for (server_id, server) in servers.iter() {
+                let u_time = server.m_time.elapsed().as_secs();
                 server_statuses.push(ServerStatus {
                     id: server_id.clone(),
                     info: server.info.clone(),
                     jobs: server.jobs.clone(),
-                    u_time: server.m_time.elapsed().as_secs(),
-                    max_job_age: server.max_job_age,
+                    u_time,
+                    max_job_age: server.max_job_age + u_time,
                 });
             }
             server_statuses
