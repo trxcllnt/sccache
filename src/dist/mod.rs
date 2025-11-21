@@ -14,6 +14,8 @@
 
 use async_trait::async_trait;
 #[cfg(feature = "dist-server")]
+use bytes::Bytes;
+#[cfg(feature = "dist-server")]
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
@@ -795,15 +797,15 @@ pub trait SchedulerService: Send + Sync {
     async fn put_toolchain(
         &self,
         toolchain: &Toolchain,
-        toolchain_archive: &mut dyn BufReadSeek,
+        toolchain_archive: Bytes,
     ) -> Result<SubmitToolchainResult>;
 
     async fn del_toolchain(&self, toolchain: &Toolchain) -> Result<()>;
 
     async fn has_job(&self, job_id: &str) -> bool;
-    async fn new_job(&self, toolchain: Toolchain, inputs: Vec<u8>) -> Result<NewJobResponse>;
+    async fn new_job(&self, toolchain: Toolchain, inputs: Bytes) -> Result<NewJobResponse>;
     async fn run_job(&self, job_id: &str, request: RunJobRequest) -> Result<RunJobResponse>;
-    async fn put_job(&self, job_id: &str, inputs: Vec<u8>) -> Result<()>;
+    async fn put_job(&self, job_id: &str, inputs: Bytes) -> Result<()>;
     async fn del_job(&self, job_id: &str) -> Result<()>;
 
     async fn job_finished(&self, job_id: &str, server: StatusUpdate) -> Result<()>;
@@ -847,7 +849,7 @@ pub trait BuilderIncoming: Send + Sync {
         &self,
         job_id: &str,
         toolchain_dir: &Path,
-        inputs: Box<dyn BufReadSeek>,
+        inputs: Bytes,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> std::result::Result<BuildResult, BuildError>;

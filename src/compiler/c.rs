@@ -461,8 +461,8 @@ async fn get_preprocessor_cache_entry(
     match storage.get(key).await {
         Err(err) => Err(err),
         Ok(Cache::Miss) => Ok(Cache::Miss),
-        Ok(Cache::Hit(cursor)) => Ok(Cache::Hit(
-            PreprocessorCacheEntry::deserialize_from(cursor).await?,
+        Ok(Cache::Hit(buf)) => Ok(Cache::Hit(
+            PreprocessorCacheEntry::deserialize_from(buf.reader()).await?,
         )),
     }
 }
@@ -476,7 +476,7 @@ async fn put_preprocessor_cache_entry(
     preprocessor_cache_entry: PreprocessorCacheEntry,
 ) -> Result<()> {
     storage
-        .put(key, &mut preprocessor_cache_entry.serialize_into().await?)
+        .put(key, preprocessor_cache_entry.serialize_into().await?)
         .await
         .map(|_| ())
 }

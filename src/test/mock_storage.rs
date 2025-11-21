@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cache::{BufReadSeek, Cache, PreprocessorCacheModeConfig, Storage};
+use crate::cache::{Cache, PreprocessorCacheModeConfig, Storage};
 use crate::errors::*;
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::channel::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,8 +24,8 @@ use tokio::time::sleep;
 
 /// A mock `Storage` implementation.
 pub struct MockStorage {
-    rx: Arc<Mutex<mpsc::UnboundedReceiver<Result<Cache<Box<dyn BufReadSeek>>>>>>,
-    tx: mpsc::UnboundedSender<Result<Cache<Box<dyn BufReadSeek>>>>,
+    rx: Arc<Mutex<mpsc::UnboundedReceiver<Result<Cache<Bytes>>>>>,
+    tx: mpsc::UnboundedSender<Result<Cache<Bytes>>>,
     delay: Option<Duration>,
     preprocessor_cache_mode: bool,
 }
@@ -42,14 +43,14 @@ impl MockStorage {
     }
 
     /// Queue up `res` to be returned as the next result from `Storage::get`.
-    pub(crate) fn next_get(&self, res: Result<Cache<Box<dyn BufReadSeek>>>) {
+    pub(crate) fn next_get(&self, res: Result<Cache<Bytes>>) {
         self.tx.unbounded_send(res).unwrap();
     }
 }
 
 #[async_trait]
 impl Storage for MockStorage {
-    async fn get(&self, _key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
+    async fn get(&self, _key: &str) -> Result<Cache<Bytes>> {
         if let Some(delay) = self.delay {
             sleep(delay).await;
         }
@@ -69,7 +70,7 @@ impl Storage for MockStorage {
     async fn has(&self, _key: &str) -> bool {
         false
     }
-    async fn put(&self, _key: &str, _entry: &mut dyn BufReadSeek) -> Result<Duration> {
+    async fn put(&self, _key: &str, _entry: Bytes) -> Result<Duration> {
         Ok(if let Some(delay) = self.delay {
             sleep(delay).await;
             delay
@@ -82,9 +83,8 @@ impl Storage for MockStorage {
             sleep(delay).await;
         }
         let next = self.rx.lock().await.try_next().unwrap();
-        if let Some(Ok(Cache::Hit(mut next))) = next {
-            let mut data = vec![];
-            return Ok(next.read_to_end(&mut data)? as u64);
+        if let Some(Ok(Cache::Hit(next))) = next {
+            return Ok(next.len() as u64);
         }
         Ok(0)
     }

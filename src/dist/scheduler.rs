@@ -14,12 +14,13 @@
 
 use async_trait::async_trait;
 
+use bytes::Bytes;
 use futures::lock::Mutex;
 
 use crate::{
     cache::{Cache, Storage},
     dist::{
-        self, BufReadSeek, CompileCommand, JobStats, NewJobResponse, RunJobRequest, RunJobResponse,
+        self, CompileCommand, JobStats, NewJobResponse, RunJobRequest, RunJobResponse,
         SchedulerService, SchedulerStatus, ServerStatus, StatusUpdate, SubmitToolchainResult,
         SysStats, Toolchain,
         http::bincode_deserialize,
@@ -424,24 +425,18 @@ impl Scheduler {
         // Record get_job_result time
         let _timer = self.metrics.get_job_result_timer();
         // Retrieve the result
-        let mut reader = self
+        let result = self
             .jobs_storage
             .get(&job_result_key(job_id))
             .await
             .and_then(|res| match res {
-                Cache::Hit(reader) => Ok(reader),
+                Cache::Hit(result) => Ok(result),
                 _ => Err(anyhow!("Missing job result")),
             })
             .map_err(|err| {
                 tracing::warn!("[get_job_result({job_id})]: Error loading stream: {err:?}");
                 err
             })?;
-
-        let mut result = vec![];
-        reader.read_to_end(&mut result).map_err(|err| {
-            tracing::warn!("[get_job_result({job_id})]: Error reading stream: {err:?}");
-            err
-        })?;
 
         // Deserialize the result
         bincode_deserialize(result).await.map_err(|err| {
@@ -476,12 +471,12 @@ impl Scheduler {
             })
     }
 
-    async fn put_job_inputs(&self, job_id: &str, inputs: &[u8]) -> Result<()> {
+    async fn put_job_inputs(&self, job_id: &str, inputs: Bytes) -> Result<()> {
         // Record put_job_inputs time
         let _timer = self.metrics.put_job_inputs_timer();
         // Store the job inputs
         self.jobs_storage
-            .put(&job_inputs_key(job_id), &mut std::io::Cursor::new(inputs))
+            .put(&job_inputs_key(job_id), inputs)
             .await
             .map(|_| ())
             .map_err(|e| {
@@ -559,7 +554,7 @@ impl SchedulerService for Scheduler {
     async fn put_toolchain(
         &self,
         toolchain: &Toolchain,
-        toolchain_archive: &mut dyn BufReadSeek,
+        toolchain_archive: Bytes,
     ) -> Result<SubmitToolchainResult> {
         // Record put_toolchain time
         let _timer = self.metrics.put_toolchain_timer();
@@ -589,12 +584,12 @@ impl SchedulerService for Scheduler {
             })
     }
 
-    async fn new_job(&self, toolchain: Toolchain, inputs: Vec<u8>) -> Result<NewJobResponse> {
+    async fn new_job(&self, toolchain: Toolchain, inputs: Bytes) -> Result<NewJobResponse> {
         let job_id = uuid::Uuid::new_v4().as_simple().to_string();
         let (has_toolchain, has_inputs) = futures::future::join(
             async { Ok::<bool, anyhow::Error>(self.has_toolchain(&toolchain).await) },
             async {
-                self.put_job_inputs(&job_id, &inputs).await.map_err(|err| {
+                self.put_job_inputs(&job_id, inputs).await.map_err(|err| {
                     // Record put_job_result errors after retrying
                     self.metrics.inc_put_job_inputs_error_count();
                     tracing::warn!("[new_job({job_id})]: Error storing job result: {err:?}");
@@ -612,8 +607,8 @@ impl SchedulerService for Scheduler {
         })
     }
 
-    async fn put_job(&self, job_id: &str, inputs: Vec<u8>) -> Result<()> {
-        self.put_job_inputs(job_id, &inputs).await
+    async fn put_job(&self, job_id: &str, inputs: Bytes) -> Result<()> {
+        self.put_job_inputs(job_id, inputs).await
     }
 
     async fn run_job(

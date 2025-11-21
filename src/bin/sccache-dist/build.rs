@@ -15,14 +15,14 @@
 use anyhow::{Context, Result, anyhow, bail};
 use async_compression::futures::bufread::ZlibDecoder as ZlibDecoderAsync;
 use async_trait::async_trait;
+use bytes::Bytes;
 use flate2::read::ZlibDecoder as ZlibDecoderSync;
 use fs_err as fs;
 use futures::lock::Mutex;
 use itertools::Itertools;
 use libmount::Overlay;
 use sccache::dist::{
-    BufReadSeek, BuildError, BuildResult as BuildOutput, BuilderIncoming, CompileCommand,
-    OutputData,
+    BuildError, BuildResult as BuildOutput, BuilderIncoming, CompileCommand, OutputData,
 };
 use sccache::mock_command::ProcessOutput;
 use std::collections::HashMap;
@@ -236,7 +236,7 @@ impl OverlayBuilder {
             env_vars,
             cwd,
         }: CompileCommand,
-        inputs: Box<dyn BufReadSeek>,
+        inputs: Bytes,
         output_paths: Vec<String>,
         overlay: OverlaySpec,
         job_queue: &tokio::sync::Semaphore,
@@ -299,7 +299,7 @@ impl OverlayBuilder {
                 tracing::trace!("[perform_build({job_id})]: copying in inputs");
                 // Note that we don't unpack directly into the upperdir since there overlayfs has some
                 // special marker files that we don't want to create by accident (or malicious intent)
-                tar::Archive::new(ZlibDecoderSync::new(inputs))
+                tar::Archive::new(ZlibDecoderSync::new(&inputs[..]))
                     .unpack(&target_dir)
                     .context("Failed to unpack inputs to overlay")
                     .map_err(BuildError::UnpackInputs)?;
@@ -556,7 +556,7 @@ impl BuilderIncoming for OverlayBuilder {
         &self,
         job_id: &str,
         toolchain_dir: &Path,
-        inputs: Box<dyn BufReadSeek>,
+        inputs: Bytes,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> BuildResult {
@@ -658,7 +658,7 @@ impl DockerBuilder {
             cwd,
         }: CompileCommand,
         output_paths: Vec<String>,
-        inputs: Box<dyn BufReadSeek>,
+        inputs: Bytes,
         job_queue: &tokio::sync::Semaphore,
     ) -> BuildResult {
         tracing::trace!("[perform_build({job_id})]: Compile environment: {env_vars:?}");
@@ -790,7 +790,7 @@ impl DockerBuilder {
             );
             tracing::trace!("[perform_build({job_id})]: copying in inputs");
 
-            let inputs = futures::io::AllowStdIo::new(inputs);
+            let inputs = futures::io::AllowStdIo::new(&inputs[..]);
             let inputs = ZlibDecoderAsync::new(inputs);
 
             let mut cmd = tokio::process::Command::new("docker");
@@ -926,7 +926,7 @@ impl BuilderIncoming for DockerBuilder {
         &self,
         job_id: &str,
         toolchain_dir: &Path,
-        inputs: Box<dyn BufReadSeek>,
+        inputs: Bytes,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> BuildResult {

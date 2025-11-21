@@ -18,7 +18,7 @@ use notify_debouncer_full::{
 };
 use std::{ffi::OsString, future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
-use crate::cache::{BufReadSeek, Cache, CacheMode, PreprocessorCacheModeConfig, Storage};
+use crate::cache::{Cache, CacheMode, PreprocessorCacheModeConfig, Storage};
 use crate::errors::*;
 
 pub struct WatchStorage {
@@ -178,7 +178,7 @@ impl WatchStorage {
 
 #[async_trait]
 impl Storage for WatchStorage {
-    async fn get(&self, key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
+    async fn get(&self, key: &str) -> Result<Cache<bytes::Bytes>> {
         self.inner().await.get(key).await
     }
 
@@ -190,7 +190,7 @@ impl Storage for WatchStorage {
         self.inner().await.has(key).await
     }
 
-    async fn put(&self, key: &str, entry: &mut dyn BufReadSeek) -> Result<Duration> {
+    async fn put(&self, key: &str, entry: bytes::Bytes) -> Result<Duration> {
         self.inner().await.put(key, entry).await
     }
 

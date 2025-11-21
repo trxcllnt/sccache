@@ -13,7 +13,7 @@
 use async_trait::async_trait;
 
 use crate::{
-    cache::{BufReadSeek, Cache, CacheMode, Storage},
+    cache::{Cache, CacheMode, Storage},
     errors::*,
 };
 
@@ -31,7 +31,7 @@ impl ReadOnlyStorage {
 
 #[async_trait]
 impl Storage for ReadOnlyStorage {
-    async fn get(&self, key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
+    async fn get(&self, key: &str) -> Result<Cache<bytes::Bytes>> {
         self.0.get(key).await
     }
 
@@ -47,7 +47,7 @@ impl Storage for ReadOnlyStorage {
     ///
     /// Returns a `Future` that will provide the result or error when the put is
     /// finished.
-    async fn put(&self, _key: &str, _entry: &mut dyn BufReadSeek) -> Result<Duration> {
+    async fn put(&self, _key: &str, _entry: bytes::Bytes) -> Result<Duration> {
         Err(anyhow!("Cannot write to read-only storage"))
     }
 
@@ -130,7 +130,7 @@ mod test {
         runtime.block_on(async move {
             assert_eq!(
                 storage
-                    .put("test1", &mut std::io::Cursor::new("entry".as_bytes()))
+                    .put("test1", "entry".into())
                     .await
                     .unwrap_err()
                     .to_string(),

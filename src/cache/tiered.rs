@@ -13,11 +13,12 @@
 // limitations under the License.
 
 use crate::{
-    cache::{BufReadSeek, Cache, CacheMode, PreprocessorCacheModeConfig, Storage},
+    cache::{Cache, CacheMode, PreprocessorCacheModeConfig, Storage},
     errors::*,
 };
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::TryFutureExt;
 use std::{
     sync::Arc,
@@ -39,19 +40,17 @@ impl TieredCache {
 
 #[async_trait]
 impl Storage for TieredCache {
-    async fn get(&self, key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
+    async fn get(&self, key: &str) -> Result<Cache<Bytes>> {
         match self.0.get(key).await {
-            Ok(Cache::Hit(mut entry)) => {
+            Ok(Cache::Hit(entry)) => {
                 if !self.1.has(key).await {
-                    let _ = self.1.put(key, &mut entry).await;
-                    entry.seek(std::io::SeekFrom::Start(0))?;
+                    let _ = self.1.put(key, entry.clone()).await;
                 }
                 Ok(Cache::Hit(entry))
             }
             _ => match self.1.get(key).await {
-                Ok(Cache::Hit(mut entry)) => {
-                    let _ = self.0.put(key, &mut entry).await;
-                    entry.seek(std::io::SeekFrom::Start(0))?;
+                Ok(Cache::Hit(entry)) => {
+                    let _ = self.0.put(key, entry.clone()).await;
                     Ok(Cache::Hit(entry))
                 }
                 res => res,
@@ -71,11 +70,10 @@ impl Storage for TieredCache {
         }
     }
 
-    async fn put(&self, key: &str, entry: &mut dyn BufReadSeek) -> Result<Duration> {
+    async fn put(&self, key: &str, entry: Bytes) -> Result<Duration> {
         let start = Instant::now();
-        let res1 = self.0.put(key, entry).await;
-        entry.seek(std::io::SeekFrom::Start(0))?;
-        let res2 = self.1.put(key, entry).await;
+        let res1 = self.0.put(key, entry.clone()).await;
+        let res2 = self.1.put(key, entry.clone()).await;
         match (res1, res2) {
             (Err(err1), Err(err2)) => Err(anyhow!(
                 "Failed to put key {key:?} (err1={err1}, err2={err2})"
@@ -123,7 +121,6 @@ impl Storage for TieredCache {
 mod test {
     use super::*;
     use crate::config::DiskCacheConfig;
-    use std::io::{Cursor, Read};
 
     async fn make_disk_caches() -> Result<(
         Arc<dyn Storage>,
@@ -170,18 +167,14 @@ mod test {
     async fn test_write_read() -> Result<()> {
         let (cache1, cache2, cache3, cache4, cache5) = make_disk_caches().await?;
         // Test writing to cache5 writes to the other 4 caches
-        cache5
-            .put("key", &mut Cursor::new("val".as_bytes()))
-            .await?;
+        cache5.put("key", "val".into()).await?;
 
         // Verify we can read "key" from each cache
         for cache in [&cache1, &cache2, &cache3, &cache4, &cache5] {
             let e = cache.get("key").await?;
             assert!(matches!(e, Cache::Hit(_)));
-            if let Cache::Hit(mut e) = e {
-                let mut v = vec![];
-                e.read_to_end(&mut v)?;
-                assert_eq!(v, "val".as_bytes());
+            if let Cache::Hit(e) = e {
+                assert_eq!(e.to_vec(), "val".as_bytes());
             }
         }
         Ok(())
@@ -192,9 +185,7 @@ mod test {
         let (cache1, cache2, cache3, cache4, cache5) = make_disk_caches().await?;
 
         // Test deleting from cache5 deletes from the other 4 caches
-        cache5
-            .put("key", &mut Cursor::new("val".as_bytes()))
-            .await?;
+        cache5.put("key", "val".into()).await?;
 
         for cache in [&cache1, &cache2, &cache3, &cache4, &cache5] {
             let e = cache.get("key").await?;
@@ -215,9 +206,7 @@ mod test {
         let (cache1, cache2, cache3, cache4, cache5) = make_disk_caches().await?;
 
         // Test reading from cache5 falls back to reading from secondary caches
-        cache1
-            .put("key", &mut Cursor::new("val".as_bytes()))
-            .await?;
+        cache1.put("key", "val".into()).await?;
 
         for cache in [&cache5, &cache4, &cache3, &cache2, &cache1] {
             let e = cache.get("key").await?;
@@ -232,9 +221,7 @@ mod test {
         let (cache1, cache2, cache3, cache4, cache5) = make_disk_caches().await?;
 
         // Test reading from cache5 falls back to reading from secondary caches
-        cache5
-            .put("key", &mut Cursor::new("val".as_bytes()))
-            .await?;
+        cache5.put("key", "val".into()).await?;
 
         cache2.del("key").await?;
         cache3.del("key").await?;

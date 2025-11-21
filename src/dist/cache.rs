@@ -683,11 +683,11 @@ mod server {
             let _timer = self.metrics.load_deflated_timer();
             let deflated_key = format!("{}.tgz", tc.archive_id);
             if !self.cache.has(&deflated_key).await {
-                let mut reader = match self.store.get(&tc.archive_id).await? {
+                let entry = match self.store.get(&tc.archive_id).await? {
                     Cache::Hit(reader) => reader,
                     Cache::Miss => return Err(anyhow!("Missing toolchain")),
                 };
-                self.cache.put(&deflated_key, &mut reader).await?;
+                self.cache.put(&deflated_key, entry).await?;
             }
             self.cache.entry(&deflated_key).await
         }

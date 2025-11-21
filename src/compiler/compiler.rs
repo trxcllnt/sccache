@@ -690,7 +690,7 @@ where
                 let future = async move {
                     let start = Instant::now();
                     match compilations_storage
-                        .put(&hash_key, &mut std::io::Cursor::new(entry.finish()?))
+                        .put(&hash_key, entry.finish()?.into())
                         .await
                     {
                         Ok(_) => {
@@ -993,7 +993,7 @@ impl<'a> CacheLookup<'a> {
                     "[{out_pretty}]: Cache hit in {}",
                     fmt_duration_as_secs(&duration)
                 );
-                let mut entry = CacheRead::from(entry)?;
+                let mut entry = CacheRead::from(std::io::Cursor::new(entry))?;
                 let stdout = entry.get_stdout();
                 let stderr = entry.get_stderr();
                 match entry.extract_objects(outputs.to_vec(), runtime).await {
@@ -3718,9 +3718,7 @@ LLVM version: 6.0",
             .put_object("obj", &mut Cursor::new(obj_file), None)
             .expect("Failed to store cache object");
 
-        let entry = Box::new(Cursor::new(
-            cachewrite.finish().expect("Failed to finish cache entry"),
-        ));
+        let entry = cachewrite.finish().expect("Failed to finish cache entry");
 
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
@@ -3728,7 +3726,7 @@ LLVM version: 6.0",
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
-        compilations_storage.next_get(Ok(Cache::Hit(entry)));
+        compilations_storage.next_get(Ok(Cache::Hit(entry.into())));
         let (cached, _res) = runtime
             .block_on(hasher.get_cached_or_compile(
                 &service,

@@ -18,6 +18,7 @@
 //! that `ccache` uses for its "direct mode", though the on-disk format is
 //! different.
 
+use bytes::Bytes;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::{OsStr, OsString},
@@ -122,12 +123,12 @@ impl PreprocessorCacheEntry {
         Ok(())
     }
 
-    pub async fn serialize_into(self) -> std::result::Result<std::io::Cursor<Vec<u8>>, Error> {
+    pub async fn serialize_into(self) -> std::result::Result<Bytes, Error> {
         tokio::task::spawn_blocking(move || {
             let mut cursor = std::io::Cursor::new(vec![]);
             self.serialize_to(&mut cursor)?;
             cursor.seek(std::io::SeekFrom::Start(0))?;
-            std::result::Result::Ok(cursor)
+            std::result::Result::Ok(cursor.into_inner().into())
         })
         .await
         .map_err(|err| Error::Io(std::io::Error::other(err)))?

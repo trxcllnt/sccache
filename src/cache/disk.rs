@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cache::{BufReadSeek, Cache, CacheMode, Storage};
+use crate::cache::{Cache, CacheMode, Storage};
 use crate::config::DiskCacheConfig;
 use crate::lru_disk_cache::Error as LruError;
 use crate::lru_disk_cache::LruDiskCache;
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::lock::Mutex;
+use memmap2::Mmap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -82,8 +84,8 @@ impl DiskCache {
         }
     }
 
-    async fn reader(&self, key: &str) -> Result<Box<dyn crate::cache::BufReadSeek>> {
-        match self.lru.lock().await.get_or_init()?.get(key) {
+    async fn file(&self, key: &str) -> Result<fs_err::File> {
+        match self.lru.lock().await.get_or_init()?.get_file(key) {
             Ok(reader) => Ok(reader),
             Err(LruError::Io(err)) => Err(err.into()),
             Err(err) => Err(err.into()),
@@ -151,9 +153,9 @@ impl DiskCache {
 
 #[async_trait]
 impl Storage for DiskCache {
-    async fn get(&self, key: &str) -> Result<Cache<Box<dyn BufReadSeek>>> {
-        match self.reader(key).await {
-            Ok(read) => Ok(Cache::Hit(read)),
+    async fn get(&self, key: &str) -> Result<Cache<Bytes>> {
+        match self.file(key).await {
+            Ok(file) => Ok(Cache::Hit(Bytes::from_owner(unsafe { Mmap::map(&file) }?))),
             Err(err) => match err.downcast_ref::<LruError>() {
                 Some(LruError::FileNotInCache) => Ok(Cache::Miss),
                 _ => Err(err),
@@ -179,7 +181,7 @@ impl Storage for DiskCache {
         self.size(key).await.is_ok()
     }
 
-    async fn put(&self, key: &str, source: &mut dyn BufReadSeek) -> Result<Duration> {
+    async fn put(&self, key: &str, source: Bytes) -> Result<Duration> {
         trace!("DiskCache::put({})", key);
 
         if self.rw_mode == CacheMode::ReadOnly {
@@ -199,7 +201,7 @@ impl Storage for DiskCache {
 
         // Copy source into the tempfile
         futures::io::copy_buf(
-            futures::io::AllowStdIo::new(source),
+            futures::io::AllowStdIo::new(&source[..]),
             &mut futures::io::AllowStdIo::new(std::io::BufWriter::new(f.as_file_mut())),
         )
         .await

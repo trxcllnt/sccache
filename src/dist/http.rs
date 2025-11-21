@@ -25,15 +25,16 @@ pub use self::common::{bincode_deserialize, bincode_serialize};
 
 mod common {
 
+    use bytes::Bytes;
     use reqwest::header;
 
     use crate::errors::*;
 
-    pub async fn bincode_deserialize<T>(bytes: Vec<u8>) -> Result<T>
+    pub async fn bincode_deserialize<T>(bytes: Bytes) -> Result<T>
     where
         T: for<'de> serde::Deserialize<'de> + Send + 'static,
     {
-        tokio::task::spawn_blocking(move || bincode::deserialize(&bytes))
+        tokio::task::spawn_blocking(move || bincode::deserialize(&bytes[..]))
             .await
             .map_err(anyhow::Error::new)?
             .map_err(anyhow::Error::new)
@@ -177,6 +178,7 @@ mod scheduler {
     };
 
     use futures::{TryFutureExt, TryStreamExt};
+    use memmap2::Mmap;
     use serde_json::json;
 
     use std::{
@@ -420,7 +422,6 @@ mod scheduler {
                 Bytes::from_request(req, state)
                     .await
                     .map_err(|_| (StatusCode::BAD_REQUEST, "Bad request".into()))?
-                    .to_vec()
             } else {
                 return Err((StatusCode::BAD_REQUEST, "Wrong content type".into()));
             };
@@ -589,12 +590,12 @@ mod scheduler {
                             // incomplete write if the client disconnects prematurely, for example,
                             // if a user ctrl-C's their build.
                             tokio::spawn(async move {
-                                let mut toolchain = std::io::BufReader::new(toolchain.as_file());
-                                toolchain
-                                    .rewind()
+                                let toolchain = Ok(toolchain.into_file())
+                                    .and_then(|mut tc| tc.rewind().map(|_| tc))
+                                    .and_then(|tc| unsafe { Mmap::map(&tc) }.map(Bytes::from_owner))
                                     .map_err(|_| AppError(anyhow!("")).into_response())?;
                                 service
-                                    .put_toolchain(&Toolchain { archive_id }, &mut toolchain)
+                                    .put_toolchain(&Toolchain { archive_id }, toolchain)
                                     .and_then(|res| mime.serialize(res))
                                     .map_err(|e| AppError(e).into_response())
                                     .await
@@ -648,7 +649,7 @@ mod scheduler {
                                     .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid toolchain"))
                                     .map_err(IntoResponse::into_response)?;
 
-                                let toolchain = bincode_deserialize(bincode)
+                                let toolchain = bincode_deserialize(bincode.into())
                                     .await
                                     .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid toolchain"))
                                     .map_err(IntoResponse::into_response)?;
@@ -672,7 +673,7 @@ mod scheduler {
                             // if a user ctrl-C's their build.
                             tokio::spawn(async move {
                                 service
-                                    .new_job(toolchain, inputs)
+                                    .new_job(toolchain, inputs.into())
                                     .and_then(|res| mime.serialize(res))
                                     .map_err(|e| AppError(e).into_response())
                                     .await
@@ -712,7 +713,7 @@ mod scheduler {
                             // if a user ctrl-C's their build.
                             tokio::spawn(async move {
                                 service
-                                    .put_job(&job_id, inputs)
+                                    .put_job(&job_id, inputs.into())
                                     .and_then(|res| mime.serialize(res))
                                     .map_err(|e| AppError(e).into_response())
                                     .await

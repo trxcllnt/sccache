@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use bytes::Bytes;
 
 use std::{
     collections::HashMap,
@@ -22,7 +23,7 @@ use std::{
 };
 
 use crate::{
-    cache::{BufReadSeek, Cache, Storage},
+    cache::{Cache, Storage},
     dist::{
         self, BuildError, BuildResult, BuilderIncoming, CompileCommand, RunJobError,
         RunJobResponse, ServerService, StatusUpdate, Toolchain, ToolchainService, job_inputs_key,
@@ -441,7 +442,7 @@ impl RunJobFunc {
             })
     }
 
-    async fn get_job_inputs(&self, job_id: &str) -> Result<Box<dyn BufReadSeek>> {
+    async fn get_job_inputs(&self, job_id: &str) -> Result<Bytes> {
         // Record get_job_inputs time
         let _timer = self.state.metrics.get_job_inputs_timer();
         self.jobs_storage
@@ -465,7 +466,7 @@ impl RunJobFunc {
         &self,
         job_id: &str,
         toolchain_dir: PathBuf,
-        inputs: Box<dyn BufReadSeek>,
+        inputs: Bytes,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> std::result::Result<BuildResult, BuildError> {
@@ -488,7 +489,7 @@ impl RunJobFunc {
         &self,
         job_id: &str,
         toolchain: Toolchain,
-    ) -> std::result::Result<(PathBuf, Box<dyn BufReadSeek>), RunJobError> {
+    ) -> std::result::Result<(PathBuf, Bytes), RunJobError> {
         // Record load_job time
         let _timer = self.state.metrics.load_job_timer();
         let _loading = self.state.metrics.jobs_loading.increment();
@@ -806,10 +807,7 @@ impl Server {
             err
         })?;
         self.jobs_storage
-            .put(
-                &job_result_key(job_id),
-                &mut std::io::Cursor::new(&result[..]),
-            )
+            .put(&job_result_key(job_id), result.into())
             .await
             .map(|_| ())
             .map_err(|err| {
