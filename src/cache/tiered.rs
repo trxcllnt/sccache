@@ -43,23 +43,51 @@ impl Storage for TieredCache {
     async fn get(&self, key: &str) -> Result<Cache<Bytes>> {
         match self.0.get(key).await {
             Ok(Cache::Hit(entry)) => {
-                if !self.1.has(key).await {
-                    let _ = self.1.put(key, entry.clone()).await;
-                }
+                tokio::spawn({
+                    let key = key.to_owned();
+                    let entry = entry.clone();
+                    let cache = self.1.clone();
+                    async move {
+                        if !cache.has(&key).await {
+                            let _ = cache.put(&key, entry).await.inspect_err(|err| {
+                                warn!("Failed to put key {key:?} in secondary cache: {err}")
+                            });
+                        }
+                    }
+                });
                 Ok(Cache::Hit(entry))
             }
-            _ => match self.1.get(key).await {
+            res => match self.1.get(key).await {
                 Ok(Cache::Hit(entry)) => {
-                    let _ = self.0.put(key, entry.clone()).await;
+                    tokio::spawn({
+                        let key = key.to_owned();
+                        let entry = entry.clone();
+                        let cache = self.0.clone();
+                        async move {
+                            let _ = cache.put(&key, entry.clone()).await.inspect_err(|err| {
+                                warn!("Failed to put key {key:?} in primary cache: {err}")
+                            });
+                        }
+                    });
                     Ok(Cache::Hit(entry))
                 }
-                res => res,
+                _ => res,
             },
         }
     }
 
     async fn del(&self, key: &str) -> Result<()> {
-        tokio::join!(self.0.del(key), self.1.del(key)).0
+        self.0.del(key).await?;
+        tokio::spawn({
+            let key = key.to_owned();
+            let cache = self.1.clone();
+            async move {
+                let _ = cache.del(&key).await.inspect_err(|err| {
+                    warn!("Failed to delete key {key:?} from secondary cache: {err}")
+                });
+            }
+        });
+        Ok(())
     }
 
     async fn has(&self, key: &str) -> bool {
@@ -72,14 +100,18 @@ impl Storage for TieredCache {
 
     async fn put(&self, key: &str, entry: Bytes) -> Result<Duration> {
         let start = Instant::now();
-        let res1 = self.0.put(key, entry.clone()).await;
-        let res2 = self.1.put(key, entry.clone()).await;
-        match (res1, res2) {
-            (Err(err1), Err(err2)) => Err(anyhow!(
-                "Failed to put key {key:?} (err1={err1}, err2={err2})"
-            )),
-            _ => Ok(Instant::now() - start),
-        }
+        self.0.put(key, entry.clone()).await?;
+        tokio::spawn({
+            let key = key.to_owned();
+            let entry = entry.clone();
+            let cache = self.1.clone();
+            async move {
+                let _ = cache.put(&key, entry.clone()).await.inspect_err(|err| {
+                    warn!("Failed to put key {key:?} in secondary cache: {err}")
+                });
+            }
+        });
+        Ok(Instant::now() - start)
     }
 
     async fn size(&self, key: &str) -> Result<u64> {
@@ -163,11 +195,17 @@ mod test {
         Ok((cache1, cache2, cache3, cache4, cache5))
     }
 
+    async fn sleep_1s() {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_write_read() -> Result<()> {
         let (cache1, cache2, cache3, cache4, cache5) = make_disk_caches().await?;
         // Test writing to cache5 writes to the other 4 caches
         cache5.put("key", "val".into()).await?;
+
+        sleep_1s().await;
 
         // Verify we can read "key" from each cache
         for cache in [&cache1, &cache2, &cache3, &cache4, &cache5] {
@@ -187,12 +225,18 @@ mod test {
         // Test deleting from cache5 deletes from the other 4 caches
         cache5.put("key", "val".into()).await?;
 
+        sleep_1s().await;
+
         for cache in [&cache1, &cache2, &cache3, &cache4, &cache5] {
             let e = cache.get("key").await?;
             assert!(matches!(e, Cache::Hit(_)));
         }
 
+        sleep_1s().await;
+
         cache5.del("key").await?;
+
+        sleep_1s().await;
 
         for cache in [&cache1, &cache2, &cache3, &cache4, &cache5] {
             let e = cache.get("key").await?;
@@ -209,6 +253,7 @@ mod test {
         cache1.put("key", "val".into()).await?;
 
         for cache in [&cache5, &cache4, &cache3, &cache2, &cache1] {
+            sleep_1s().await;
             let e = cache.get("key").await?;
             assert!(matches!(e, Cache::Hit(_)));
         }
@@ -220,8 +265,10 @@ mod test {
     async fn test_read_primary_propagates_to_secondary() -> Result<()> {
         let (cache1, cache2, cache3, cache4, cache5) = make_disk_caches().await?;
 
-        // Test reading from cache5 falls back to reading from secondary caches
+        // Test writing to cache5 writes to secondary caches
         cache5.put("key", "val".into()).await?;
+
+        sleep_1s().await;
 
         cache2.del("key").await?;
         cache3.del("key").await?;
@@ -229,6 +276,7 @@ mod test {
         assert!(matches!(cache3.get("key").await?, Cache::Miss));
 
         for cache in [&cache5, &cache4, &cache3, &cache2, &cache1] {
+            sleep_1s().await;
             let e = cache.get("key").await?;
             assert!(matches!(e, Cache::Hit(_)));
         }
