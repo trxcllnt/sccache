@@ -501,7 +501,11 @@ impl SchedulerService for Scheduler {
                     info: server.info.clone(),
                     jobs: server.jobs.clone(),
                     u_time,
-                    max_job_age: server.max_job_age + u_time,
+                    max_job_age: if server.jobs.running == 0 {
+                        server.max_job_age
+                    } else {
+                        server.max_job_age + u_time
+                    },
                 });
             }
             server_statuses
