@@ -2426,17 +2426,36 @@ impl ServerInfo {
                 );
             }
         }
-        if self.cache_location.starts_with("Local disk") {
-            println!(
-                "{:<name_width$} {}",
-                "Use direct/preprocessor mode?",
-                if self.use_preprocessor_cache_mode {
-                    "yes"
+        println!(
+            "{:<name_width$} {}",
+            "Use direct/preprocessor mode?",
+            if self.use_preprocessor_cache_mode {
+                "yes"
+            } else {
+                "no"
+            },
+            name_width = name_width
+        );
+        if self.use_preprocessor_cache_mode {
+            for (i, preprocessor_cache_location) in
+                self.preprocessor_cache_location.split("\n").enumerate()
+            {
+                if i == 0 {
+                    println!(
+                        "{:<name_width$} {}",
+                        "Preprocessor cache location",
+                        preprocessor_cache_location,
+                        name_width = name_width
+                    );
                 } else {
-                    "no"
-                },
-                name_width = name_width
-            );
+                    println!(
+                        "{:<name_width$} {}",
+                        "              ",
+                        preprocessor_cache_location,
+                        name_width = name_width
+                    );
+                }
+            }
         }
         println!(
             "{:<name_width$} {}",
