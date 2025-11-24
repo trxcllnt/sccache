@@ -17,7 +17,6 @@ use bytes::Bytes;
 use fs_err as fs;
 use futures::{FutureExt, StreamExt, TryFutureExt};
 use itertools::Itertools;
-use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
@@ -542,8 +541,6 @@ impl PreprocessorCacheModeConfig {
     feature = "oss"
 ))]
 mod operator {
-    use futures::{AsyncWriteExt, SinkExt, TryStreamExt};
-
     use super::*;
 
     fn to_retry_err<E: Into<opendal::Error>>(kind: &str, err: E) -> RetryError<opendal::Error> {
@@ -581,60 +578,17 @@ mod operator {
         }
     }
 
-    struct IntoOpendalError(opendal::Error);
-
-    impl From<IntoOpendalError> for opendal::Error {
-        fn from(val: IntoOpendalError) -> Self {
-            val.0
-        }
-    }
-
-    impl From<anyhow::Error> for IntoOpendalError {
-        fn from(e: anyhow::Error) -> Self {
-            Self(
-                opendal::Error::new(opendal::ErrorKind::Unexpected, format!("{e:?}"))
-                    .set_permanent(),
-            )
-        }
-    }
-
-    impl From<std::io::Error> for IntoOpendalError {
-        fn from(e: std::io::Error) -> Self {
-            Self(match e.downcast::<opendal::Error>() {
-                Ok(err) => err,
-                Err(e) => opendal::Error::new(opendal::ErrorKind::Unexpected, format!("{e:?}"))
-                    .set_permanent(),
-            })
-        }
-    }
-
     pub async fn read_with_retry(
         storage: &opendal::Operator,
         key: &str,
-    ) -> std::result::Result<std::fs::File, opendal::Error> {
+    ) -> std::result::Result<Bytes, opendal::Error> {
         // TODO: Allow configuring the number of retries
         retry_with_jitter(usize::MAX, || async {
-            let mut f = crate::util::normal_tempfile()
-                .map_err(IntoOpendalError::from)
-                .map_err(|e| to_retry_err("lookup", e))?;
-
             storage
-                .reader(&normalize_key(key))
+                .read(&normalize_key(key))
                 .await
-                .map_err(|e| to_retry_err("lookup", e))?
-                .into_bytes_stream(..)
-                .await
-                .map_err(|e| to_retry_err("lookup", e))?
-                .map_err(IntoOpendalError::from)
-                .forward(
-                    futures::io::AllowStdIo::new(f.as_file_mut())
-                        .into_sink()
-                        .sink_map_err(IntoOpendalError::from),
-                )
-                .await
-                .map_err(|e| to_retry_err("lookup", e))?;
-
-            Ok(f.into_file())
+                .map(|buf| buf.to_bytes())
+                .map_err(|e| to_retry_err("lookup", e))
         })
         .await
     }
@@ -670,7 +624,7 @@ mod operator {
 impl Storage for opendal::Operator {
     async fn get(&self, key: &str) -> Result<Cache<Bytes>> {
         match operator::read_with_retry(self, key).await {
-            Ok(file) => Ok(Cache::Hit(Bytes::from_owner(unsafe { Mmap::map(&file) }?))),
+            Ok(data) => Ok(Cache::Hit(data)),
             Err(err) => match err.kind() {
                 opendal::ErrorKind::NotFound => Ok(Cache::Miss),
                 _ => Err(err.into()),
