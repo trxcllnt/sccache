@@ -708,6 +708,7 @@ pub trait OsStrExt {
     fn ends_with(&self, s: &str) -> bool;
     fn starts_with(&self, s: &str) -> bool;
     fn split_prefix(&self, s: &str) -> Option<OsString>;
+    fn trim(&self) -> &OsStr;
 }
 
 impl OsStrExt for OsStr {
@@ -754,6 +755,34 @@ impl OsStrExt for OsStr {
                 unsafe { OsStr::from_encoded_bytes_unchecked(b) }.to_owned()
             }
         })
+    }
+
+    fn trim(&self) -> &OsStr {
+        let mut buf = self.as_encoded_bytes();
+
+        loop {
+            buf = match buf {
+                #[cfg(windows)]
+                [b'\r', b'\n', ..] => &buf[2..],
+                [b'\n', ..] => &buf[1..],
+                [b'\t', ..] => &buf[1..],
+                [b' ', ..] => &buf[1..],
+                _ => break,
+            }
+        }
+
+        loop {
+            buf = match buf {
+                #[cfg(windows)]
+                [.., b'\r', b'\n'] => &buf[..buf.len() - 2],
+                [.., b'\n'] => &buf[..buf.len() - 1],
+                [.., b'\t'] => &buf[..buf.len() - 1],
+                [.., b' '] => &buf[..buf.len() - 1],
+                _ => break,
+            }
+        }
+
+        unsafe { OsStr::from_encoded_bytes_unchecked(buf) }
     }
 }
 

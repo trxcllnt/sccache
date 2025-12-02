@@ -13,16 +13,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compiler::{
-    Cacheable, CompileCommandImpl, CompilerArguments,
-    args::*,
-    c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput},
-    gcc::{self, ArgData::*},
+use crate::{
+    compiler::{
+        Cacheable, CompileCommandImpl, CompilerArguments,
+        args::*,
+        c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput},
+        gcc::{self, ArgData::*},
+    },
+    mock_command::{CommandCreatorSync, RunCommand},
+    util::run_input_output,
 };
-use crate::mock_command::CommandCreatorSync;
 use crate::{counted_array, dist};
 use async_trait::async_trait;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use tempfile::TempPath;
 
@@ -34,6 +37,75 @@ pub struct Nvhpc {
     /// true iff this is nvc++.
     pub nvcplusplus: bool,
     pub version: Option<String>,
+    pub native_arch: Option<String>,
+}
+
+impl Nvhpc {
+    pub async fn read_native_arch<T>(
+        creator: &mut T,
+        exe: &Path,
+        env_vars: &[(OsString, OsString)],
+    ) -> Option<String>
+    where
+        T: CommandCreatorSync,
+    {
+        use crate::util::OsStrExt;
+        use bytes::Buf;
+        use std::io::BufRead;
+
+        let mut cmd = creator.new_command_sync(exe);
+        cmd.env_clear()
+            .envs(env_vars.iter().map(|s| (&s.0, &s.1)))
+            .arg("-showme:command");
+
+        let exe = if let Ok(out) = run_input_output(cmd, None).await {
+            which::which(unsafe {
+                // Remove the trailing newlines (if present)
+                OsStr::from_encoded_bytes_unchecked(&out.stdout).trim()
+            })
+            .ok()
+            .unwrap_or_else(|| exe.to_path_buf())
+        } else {
+            exe.to_path_buf()
+        };
+
+        let mut cmd = creator.new_command_sync(&exe);
+        cmd.env_clear()
+            .envs(env_vars.iter().map(|s| (&s.0, &s.1)))
+            .arg("-show");
+
+        let output = run_input_output(cmd, None).await.ok()?;
+
+        output
+            .stdout
+            .reader()
+            .lines()
+            .map_while(|line| line.ok())
+            .find_map(|line| {
+                let line = line.trim();
+                // TESTTPVAL           =znver2
+                if line.starts_with("TESTTPVAL") {
+                    line.split_once('=')
+                }
+                // DEFTPVAL            =-tp znver2
+                // INFOTPVAL           =-tp znver2
+                // TPVAL               =-tp znver2
+                // USETPVAL            =-tp znver2
+                else if line.starts_with("DEFTPVAL")
+                    || line.starts_with("INFOTPVAL")
+                    || line.starts_with("TPVAL")
+                    || line.starts_with("USETPVAL")
+                {
+                    line.split_once('=')
+                        .and_then(|(_, args)| args.split_once(" "))
+                } else {
+                    None
+                }
+                .map(|(_, arch)| arch.trim())
+                .filter(|arch| !arch.is_empty())
+                .map(|arch| arch.to_owned())
+            })
+    }
 }
 
 #[async_trait]
@@ -53,13 +125,33 @@ impl CCompilerImpl for Nvhpc {
         cwd: &Path,
         _env_vars: &[(OsString, OsString)],
     ) -> CompilerArguments<ParsedArguments> {
-        gcc::parse_arguments(
+        let mut parsed_args = gcc::parse_arguments(
             arguments,
             cwd,
             (&gcc::ARGS[..], &ARGS[..]),
             self.nvcplusplus,
             self.kind(),
-        )
+        );
+        if let CompilerArguments::Ok(ref mut parsed_args) = parsed_args {
+            // Insert or rewrite -tp=native to the current CPU architecture
+            // to ensure the correct architecture is used if dist compiling
+            if let Some(native_arch) = self.native_arch.as_ref() {
+                if parsed_args.arch_args.is_empty() {
+                    parsed_args
+                        .arch_args
+                        .push(format!("-tp={native_arch}").into());
+                } else {
+                    for arch in parsed_args.arch_args.iter_mut() {
+                        if arch == "-tp=native" {
+                            *arch = format!("-tp={native_arch}").into();
+                        } else if arch == "-march=native" {
+                            *arch = format!("-march={native_arch}").into();
+                        }
+                    }
+                }
+            }
+        }
+        parsed_args
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -211,7 +303,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     flag!("-noswitcherror", PassThroughFlag),
     take_arg!("-ta", OsString, CanBeSeparated(b'='), PassThrough),
     take_arg!("-target", OsString, CanBeSeparated(b'='), PassThrough),
-    take_arg!("-tp", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("-tp", OsString, CanBeSeparated(b'='), Arch),
     take_arg!("-x", OsString, CanBeSeparated(b'='), Language)
 ]);
 
@@ -226,6 +318,7 @@ mod test {
         Nvhpc {
             nvcplusplus: false,
             version: None,
+            native_arch: None,
         }
         .parse_arguments(&arguments, ".".as_ref(), &[])
     }

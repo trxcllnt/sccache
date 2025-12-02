@@ -2460,10 +2460,12 @@ compiler_version=__VERSION__
             "nvhpc" => {
                 let version = version.map(|s| s.replace(' ', ""));
                 trace!("Found {kind} (version: {})", version.as_ref().unwrap());
+                let native_arch = Nvhpc::read_native_arch(&mut creator, &executable, &env).await;
                 return CCompiler::new(
                     Nvhpc {
                         nvcplusplus: kind == "nvc++",
                         version,
+                        native_arch,
                     },
                     executable,
                     vec![],
@@ -2806,6 +2808,25 @@ mod test {
         next_command(
             &creator,
             Ok(MockChild::new(exit_status(0), "compiler_id=nvhpc\n", "")),
+        );
+        // Try to read native -tp= value
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "nvc++", "")));
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                exit_status(0),
+                [
+                    "ABM                 =1",
+                    "ACCCGDEF            =-y 163 0xc0000000",
+                    "DEFTPVAL            =-tp znver2",
+                    "INFOTPVAL           =-tp znver2",
+                    "TPVAL               =-tp znver2",
+                    "TESTTPVAL           =znver2",
+                    "USETPVAL            =-tp znver2",
+                ]
+                .join("\n"),
+                "",
+            )),
         );
         let c = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
             .wait()
