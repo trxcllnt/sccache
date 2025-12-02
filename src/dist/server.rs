@@ -34,8 +34,6 @@ use crate::{
     util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
 };
 
-use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
-
 const CPU_USAGE_RATIO: &str = "sccache::server::cpu_usage_ratio";
 const MEM_AVAIL_BYTES: &str = "sccache::server::mem_avail_bytes";
 const MEM_TOTAL_BYTES: &str = "sccache::server::mem_total_bytes";
@@ -254,6 +252,8 @@ impl ServerMetrics {
 
 impl Default for ServerMetrics {
     fn default() -> Self {
+        use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+
         Self {
             jobs_accepted: Default::default(),
             jobs_loaded: Default::default(),

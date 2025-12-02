@@ -38,6 +38,10 @@ use std::{
 
 use crate::dist::{job_inputs_key, job_result_key};
 
+const CPU_USAGE_RATIO: &str = "sccache::scheduler::cpu_usage_ratio";
+const MEM_AVAIL_BYTES: &str = "sccache::scheduler::mem_avail_bytes";
+const MEM_TOTAL_BYTES: &str = "sccache::scheduler::mem_total_bytes";
+const MEM_USED_BYTES: &str = "sccache::scheduler::mem_used_bytes";
 const HAS_JOB_INPUTS_TIME: &str = "sccache::scheduler::has_job_inputs_time";
 const HAS_JOB_RESULT_TIME: &str = "sccache::scheduler::has_job_result_time";
 const GET_JOB_RESULT_TIME: &str = "sccache::scheduler::get_job_result_time";
@@ -51,10 +55,31 @@ const PUT_JOB_INPUTS_ERROR_COUNT: &str = "sccache::scheduler::put_job_inputs_err
 #[derive(Clone)]
 pub struct SchedulerMetrics {
     metrics: Metrics,
+    sysinfo: Arc<std::sync::Mutex<sysinfo::System>>,
 }
 
 impl SchedulerMetrics {
     pub fn new(metrics: Metrics) -> Self {
+        metrics::describe_histogram!(
+            CPU_USAGE_RATIO,
+            metrics::Unit::Percent,
+            "The current system CPU usage percent (0-100)"
+        );
+        metrics::describe_histogram!(
+            MEM_AVAIL_BYTES,
+            metrics::Unit::Bytes,
+            "The amount of free system memory"
+        );
+        metrics::describe_histogram!(
+            MEM_TOTAL_BYTES,
+            metrics::Unit::Bytes,
+            "The total amount of system memory"
+        );
+        metrics::describe_histogram!(
+            MEM_USED_BYTES,
+            metrics::Unit::Bytes,
+            "The amount of used system memory"
+        );
         metrics::describe_histogram!(
             HAS_JOB_INPUTS_TIME,
             metrics::Unit::Seconds,
@@ -100,7 +125,10 @@ impl SchedulerMetrics {
             metrics::Unit::Count,
             "The number of errors raised storing job inputs."
         );
-        Self { metrics }
+        Self {
+            metrics,
+            ..Default::default()
+        }
     }
 
     pub fn inc_put_job_inputs_error_count(&self) -> CountRecorder {
@@ -137,6 +165,39 @@ impl SchedulerMetrics {
 
     pub fn del_toolchain_timer(&self) -> TimeRecorder {
         self.metrics.timer(DEL_TOOLCHAIN_TIME, &[])
+    }
+
+    pub fn system_metrics(&self) -> (f32, u64, u64) {
+        let mut sys = self.sysinfo.lock().unwrap();
+        sys.refresh_cpu_specifics(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
+        sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+        let cpu_usage = sys.global_cpu_usage();
+        let mem_avail = sys.available_memory();
+        let mem_total = sys.total_memory();
+        self.metrics.histo(CPU_USAGE_RATIO, &[], cpu_usage);
+        self.metrics.histo(MEM_AVAIL_BYTES, &[], mem_avail as f64);
+        self.metrics.histo(MEM_TOTAL_BYTES, &[], mem_total as f64);
+        self.metrics.histo(
+            MEM_USED_BYTES,
+            &[],
+            mem_total.saturating_sub(mem_avail) as f64,
+        );
+        (cpu_usage, mem_avail, mem_total)
+    }
+}
+
+impl Default for SchedulerMetrics {
+    fn default() -> Self {
+        use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+
+        Self {
+            metrics: Metrics::default(),
+            sysinfo: Arc::new(std::sync::Mutex::new(System::new_with_specifics(
+                RefreshKind::nothing()
+                    .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
+                    .with_memory(MemoryRefreshKind::nothing().with_ram()),
+            ))),
+        }
     }
 }
 
@@ -348,11 +409,19 @@ impl Scheduler {
     }
 
     async fn send_heartbeat(&self) -> Result<()> {
+        let (cpu_usage, mem_avail, mem_total) = self.metrics.system_metrics();
         let status = self.get_status().await?;
         let status = StatusUpdate {
             id: self.scheduler_id.clone(),
             queue: self.tasks.app().default_queue.clone(),
-            info: status.info,
+            info: dist::SysStats {
+                cpu_usage,
+                mem_avail,
+                mem_total,
+                num_cpus: status.info.num_cpus,
+                occupancy: status.info.occupancy,
+                pre_fetch: status.info.pre_fetch,
+            },
             jobs: status.jobs,
             max_job_age: {
                 let max_job_age = status
@@ -516,7 +585,9 @@ impl SchedulerService for Scheduler {
                 servers
                     .iter()
                     .fold(dist::SysStats::default(), |mut info, server| {
-                        info.cpu_usage += server.info.cpu_usage;
+                        if server.info.cpu_usage.is_finite() {
+                            info.cpu_usage += server.info.cpu_usage;
+                        }
                         info.mem_avail += server.info.mem_avail;
                         info.mem_total += server.info.mem_total;
                         info.num_cpus += server.info.num_cpus;
@@ -526,7 +597,9 @@ impl SchedulerService for Scheduler {
                     }),
             )
             .map(|mut info| {
-                info.cpu_usage /= servers.len() as f32;
+                if !servers.is_empty() {
+                    info.cpu_usage /= servers.len() as f32;
+                }
                 info
             })
             .unwrap(),
