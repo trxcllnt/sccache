@@ -87,7 +87,7 @@ fn main() {
 }
 
 fn run(command: Command) -> Result<()> {
-    let num_cpus = std::thread::available_parallelism()?.get();
+    let num_cpus = sccache::util::num_cpus();
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
