@@ -25,7 +25,7 @@ use crate::compiler::{
     gcc,
 };
 use crate::mock_command::{CommandCreatorSync, RunCommand};
-use crate::util::{OsStrExt, run_input_output, temp_path};
+use crate::util::{OsStrExt, normal_temp_path, run_input_output};
 use crate::{counted_array, dist};
 use crate::{debug_if_trace, errors::*};
 use async_trait::async_trait;
@@ -467,7 +467,7 @@ where
                     cmd.arg("-Xmake-dependency");
                 }
                 // then write all dependencies to a tempfile
-                let temp = temp_path()?;
+                let temp = normal_temp_path()?;
                 cmd.arg("-Xmake-dependency-savefile");
                 cmd.arg(&temp);
                 (temp.to_path_buf(), Some(temp))
@@ -478,7 +478,7 @@ where
         let (path, temp) = if let Some(depfile) = parsed_args.depfile.as_deref() {
             (cwd.join(depfile), None)
         } else {
-            let temp = temp_path()?;
+            let temp = normal_temp_path()?;
             (temp.to_path_buf(), Some(temp))
         };
 
@@ -907,10 +907,7 @@ mod test {
 
     #[test]
     fn test_at_signs_file_not_readable() {
-        let td = tempfile::Builder::new()
-            .prefix("sccache")
-            .tempdir()
-            .unwrap();
+        let td = crate::util::normal_tempdir().unwrap();
         let arg = format!("-@{}", td.path().join("foo").display());
         // File foo doesn't exist.
         assert_eq!(
@@ -921,10 +918,7 @@ mod test {
 
     #[test]
     fn test_at_signs_file() {
-        let td = tempfile::Builder::new()
-            .prefix("sccache")
-            .tempdir()
-            .unwrap();
+        let td = crate::util::normal_tempdir().unwrap();
         File::create(td.path().join("foo"))
             .unwrap()
             .write_all(b"-c foo.c -o foo.o")

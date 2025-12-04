@@ -22,7 +22,7 @@ use crate::compiler::{
 };
 use crate::compiler::{CompileCommandImpl, args::*};
 use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
-use crate::util::{OsStrExt, encode_path, run_input_output, temp_path};
+use crate::util::{OsStrExt, encode_path, normal_temp_path, run_input_output};
 use crate::{counted_array, debug_if_trace, dist};
 use async_trait::async_trait;
 use fs::File;
@@ -1131,7 +1131,7 @@ where
     let (path, temp) = if let Some(depfile) = parsed_args.depfile.as_deref() {
         (cwd.join(depfile), None)
     } else {
-        let temp = temp_path()?;
+        let temp = normal_temp_path()?;
         (temp.to_path_buf(), Some(temp))
     };
 
@@ -2300,10 +2300,7 @@ mod test {
 
     #[test]
     fn test_responsefile_absolute_path() {
-        let td = tempfile::Builder::new()
-            .prefix("sccache")
-            .tempdir()
-            .unwrap();
+        let td = crate::util::normal_tempdir().unwrap();
         let cmd_file_path = td.path().join("foo");
         {
             let mut file = File::create(&cmd_file_path).unwrap();
@@ -2345,10 +2342,7 @@ mod test {
     fn test_responsefile_relative_path() {
         // Generate the tempdir in the currentdir so we can use a relative path in this test.
         // MSVC allows relative paths to response files, so we must support that.
-        let td = tempfile::Builder::new()
-            .prefix("sccache")
-            .tempdir_in("./")
-            .unwrap();
+        let td = crate::util::tempdir_in("./").unwrap();
         let relative_to_tmp = td
             .path()
             .strip_prefix(std::env::current_dir().unwrap())
@@ -2392,10 +2386,7 @@ mod test {
 
     #[test]
     fn test_responsefile_with_quotes() {
-        let td = tempfile::Builder::new()
-            .prefix("sccache")
-            .tempdir()
-            .unwrap();
+        let td = crate::util::normal_tempdir().unwrap();
         let cmd_file_path = td.path().join("foo");
         {
             let mut file = File::create(&cmd_file_path).unwrap();
@@ -2435,10 +2426,7 @@ mod test {
 
     #[test]
     fn test_responsefile_multiline() {
-        let td = tempfile::Builder::new()
-            .prefix("sccache")
-            .tempdir()
-            .unwrap();
+        let td = crate::util::normal_tempdir().unwrap();
         let cmd_file_path = td.path().join("foo");
         {
             let mut file = File::create(&cmd_file_path).unwrap();
@@ -2478,10 +2466,7 @@ mod test {
 
     #[test]
     fn test_responsefile_multiline_cr() {
-        let td = tempfile::Builder::new()
-            .prefix("sccache")
-            .tempdir()
-            .unwrap();
+        let td = crate::util::normal_tempdir().unwrap();
         let cmd_file_path = td.path().join("foo");
         {
             let mut file = File::create(&cmd_file_path).unwrap();
@@ -2521,10 +2506,7 @@ mod test {
 
     #[test]
     fn test_responsefile_encoding_utf16le() {
-        let td = tempfile::Builder::new()
-            .prefix("sccache")
-            .tempdir()
-            .unwrap();
+        let td = crate::util::normal_tempdir().unwrap();
         let cmd_file_path = td.path().join("foo");
         {
             let mut file = File::create(&cmd_file_path).unwrap();
@@ -2571,10 +2553,7 @@ mod test {
 
     #[test]
     fn test_responsefile_encoding_win1252() {
-        let td = tempfile::Builder::new()
-            .prefix("sccache")
-            .tempdir()
-            .unwrap();
+        let td = crate::util::normal_tempdir().unwrap();
         let cmd_file_path = td.path().join("foo");
         {
             let mut file = File::create(&cmd_file_path).unwrap();

@@ -24,7 +24,7 @@ use crate::{
         },
         clang,
     },
-    util::temp_path,
+    util::normal_temp_path,
 };
 use crate::{counted_array, debug_if_trace, dist};
 use async_trait::async_trait;
@@ -1023,7 +1023,7 @@ where
             // If `-MMD` (with or without `-MF <file>`)
             (_, None, Some("-MMD")) => {
                 // then generate and write all dependencies a tempfile
-                let temp = temp_path()?;
+                let temp = normal_temp_path()?;
                 run_input_output(
                     generate_all_dependencies_cmd(
                         creator,
@@ -1046,7 +1046,7 @@ where
                     cmd.arg("-MD");
                 }
                 // then write all dependencies to a tempfile
-                let temp = temp_path()?;
+                let temp = normal_temp_path()?;
                 cmd.arg("-MF");
                 cmd.arg(&temp);
                 (temp.to_path_buf(), Some(temp))
@@ -1057,7 +1057,7 @@ where
         let (path, temp) = if let Some(depfile) = parsed_args.depfile.as_deref() {
             (cwd.join(depfile), None)
         } else {
-            let temp = temp_path()?;
+            let temp = normal_temp_path()?;
             (temp.to_path_buf(), Some(temp))
         };
 
@@ -2588,10 +2588,7 @@ mod test {
 
     #[test]
     fn at_signs() {
-        let td = tempfile::Builder::new()
-            .prefix("sccache")
-            .tempdir()
-            .unwrap();
+        let td = crate::util::normal_tempdir().unwrap();
         File::create(td.path().join("foo"))
             .unwrap()
             .write_all(

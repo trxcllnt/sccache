@@ -1547,7 +1547,7 @@ where
                 let must_be_non_empty = out.must_be_non_empty;
 
                 // Create the output tempfile
-                let mut tmp = tempfile::NamedTempFile::new_in(dir).with_context(|| {
+                let mut tmp = crate::util::tempfile_in(dir).with_context(|| {
                     format!("Failed to create tempfile for output path {path:?}")
                 })?;
 
@@ -1908,7 +1908,7 @@ pub async fn write_temp_file(
 ) -> Result<(TempDir, PathBuf)> {
     let path = path.to_owned();
     pool.spawn_blocking(move || {
-        let dir = tempfile::Builder::new().prefix("sccache").tempdir()?;
+        let dir = crate::util::normal_tempdir().context("Failed to create temp dir")?;
         let src = dir.path().join(path);
         let mut file = File::create(&src)?;
         file.write_all(&contents)?;

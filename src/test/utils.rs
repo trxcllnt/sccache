@@ -199,10 +199,7 @@ pub fn mk_bin(dir: &Path, path: &str) -> io::Result<PathBuf> {
 
 impl TestFixture {
     pub fn new() -> TestFixture {
-        let tempdir = tempfile::Builder::new()
-            .prefix("sccache_test")
-            .tempdir()
-            .unwrap();
+        let tempdir = crate::util::normal_tempdir().unwrap();
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true);
         let mut paths = vec![];

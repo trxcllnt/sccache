@@ -131,11 +131,14 @@ pub enum Error {
     FileNotInCache,
     /// An IO Error occurred.
     Io(io::Error),
+    /// An unknown Error occurred.
+    Any(anyhow::Error),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Error::Any(e) => write!(f, "{}", e),
             Error::FileTooLarge => write!(f, "File too large"),
             Error::FileNotInCache => write!(f, "File not in cache"),
             Error::Io(e) => write!(f, "{}", e),
@@ -146,6 +149,7 @@ impl fmt::Display for Error {
 impl StdError for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Error::Any(e) => e.source(),
             Error::FileTooLarge => None,
             Error::FileNotInCache => None,
             Error::Io(e) => Some(e),
@@ -156,6 +160,15 @@ impl StdError for Error {
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Error {
         Error::Io(e)
+    }
+}
+
+impl From<anyhow::Error> for Error {
+    fn from(e: anyhow::Error) -> Error {
+        match e.downcast::<io::Error>() {
+            Ok(e) => Error::Io(e),
+            Err(e) => Error::Any(e),
+        }
     }
 }
 
@@ -461,10 +474,7 @@ impl LruDiskCache {
         self.pending.push(key.clone());
         self.pending_size += size;
         tokio::fs::create_dir_all(&self.root).await?;
-        tempfile::Builder::new()
-            .rand_bytes(16)
-            .prefix(TEMPFILE_PREFIX)
-            .tempfile_in(&self.root)
+        crate::util::tempfile_with_prefix_in(&self.root, TEMPFILE_PREFIX)
             .map(|file| LruDiskCacheAddEntry { file, key, size })
             .map_err(Into::into)
     }
@@ -482,10 +492,7 @@ impl LruDiskCache {
         self.pending.push(key.clone());
         self.pending_size += size;
         tokio::fs::create_dir_all(&self.root).await?;
-        tempfile::Builder::new()
-            .rand_bytes(16)
-            .prefix(TEMPFILE_PREFIX)
-            .tempdir_in(&self.root)
+        crate::util::tempdir_with_prefix_in(&self.root, TEMPFILE_PREFIX)
             .map(|file| LruDiskCacheDirEntry { file, key, size })
             .map_err(Into::into)
     }
@@ -658,10 +665,7 @@ mod tests {
     impl TestFixture {
         pub fn new() -> TestFixture {
             TestFixture {
-                tempdir: tempfile::Builder::new()
-                    .prefix("lru-disk-cache-test")
-                    .tempdir()
-                    .unwrap(),
+                tempdir: crate::util::normal_tempdir().unwrap(),
             }
         }
 

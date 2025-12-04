@@ -28,7 +28,7 @@ use crate::{
     counted_array, debug_if_trace, dist,
     errors::*,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
-    util::{run_input_output, temp_path},
+    util::{normal_temp_path, run_input_output},
 };
 use async_trait::async_trait;
 use std::{
@@ -387,7 +387,7 @@ where
     let (path, temp) = if let Some(depfile) = parsed_args.depfile.as_deref() {
         (cwd.join(depfile), None)
     } else {
-        let temp = temp_path()?;
+        let temp = normal_temp_path()?;
         (temp.to_path_buf(), Some(temp))
     };
 

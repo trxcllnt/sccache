@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::{
+    cache::{disk::DiskCache, readonly::ReadOnlyStorage, tiered::TieredCache},
+    config::{CacheType, DiskCacheConfig},
+    errors::*,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use fs_err as fs;
@@ -25,14 +30,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tempfile::NamedTempFile;
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::FileOptions};
-
-use crate::{
-    cache::{disk::DiskCache, readonly::ReadOnlyStorage, tiered::TieredCache},
-    config::{CacheType, DiskCacheConfig},
-    errors::*,
-};
 
 #[cfg(feature = "watcher")]
 use crate::cache::watch::WatchStorage;
@@ -262,7 +260,7 @@ impl CacheRead {
                 // Write the cache entry to a tempfile and then atomically
                 // move it to its final location so that other rustc invocations
                 // happening in parallel don't see a partially-written file.
-                let mut tmp = NamedTempFile::new_in(dir)?;
+                let mut tmp = crate::util::tempfile_in(dir)?;
                 match (self.get_object(&key, &mut tmp), optional) {
                     (Ok(mode), _) => {
                         if must_be_non_empty {
@@ -1347,9 +1345,7 @@ mod test {
             .unwrap();
 
         // Use disk cache.
-        let tempdir = tempfile::Builder::new()
-            .prefix("sccache_test_rust_cargo")
-            .tempdir()
+        let tempdir = crate::util::normal_tempdir()
             .context("Failed to create tempdir")
             .unwrap();
 

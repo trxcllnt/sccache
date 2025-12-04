@@ -86,13 +86,13 @@ metrics-exporter-prometheus = { git = "https://github.com/metrics-rs/metrics.git
   "http-listener",
   "push-gateway-no-tls-provider",
 ] }
+rustix = { version = "1", features = ["fs", "process"] }
 rustls = { version = "0.23", default-features = false, features = [
   "logging",
   "std",
   "tls12",
   "ring",
 ] }
-rustix = { version = "1", features = ["fs", "process"] }
 
 mime = "0.3"
 notify-debouncer-full = { version = "0.4", optional = true }

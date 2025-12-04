@@ -2071,9 +2071,7 @@ mod test {
             .unwrap();
 
         // Use disk cache.
-        let tempdir = tempfile::Builder::new()
-            .prefix("sccache_test_rust_cargo")
-            .tempdir()
+        let tempdir = crate::util::normal_tempdir()
             .context("Failed to create tempdir")
             .unwrap();
 

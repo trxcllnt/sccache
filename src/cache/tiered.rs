@@ -162,9 +162,7 @@ mod test {
         Arc<dyn Storage>,
     )> {
         // Use disk cache.
-        let tempdir = tempfile::Builder::new()
-            .prefix("sccache_test_tiered_cache")
-            .tempdir()
+        let tempdir = crate::util::normal_tempdir()
             .context("Failed to create tempdir")
             .unwrap();
 

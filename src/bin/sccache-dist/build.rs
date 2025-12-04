@@ -690,10 +690,7 @@ impl DockerBuilder {
         }
 
         // Should automatically get deleted when host_temp goes out of scope
-        let host_temp = tempfile::Builder::new()
-            .prefix("sccache_dist")
-            .tempdir()
-            .map_err(|e| BuildError::Unknown(e.into()))?;
+        let host_temp = sccache::util::normal_tempdir().map_err(BuildError::Unknown)?;
         let host_root = host_temp.path();
 
         let cwd = Path::new(&cwd);

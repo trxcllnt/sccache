@@ -269,10 +269,8 @@ mod client {
                 compiler_path.display(),
                 toolchain.archive_id,
             );
-            let (tmpfile, tmppath) = tempfile::Builder::new()
-                .rand_bytes(16)
-                .tempfile_in(self.cache_dir.join("toolchain_tmp"))?
-                .into_parts();
+            let (tmpfile, tmppath) =
+                crate::util::tempfile_in(self.cache_dir.join("toolchain_tmp"))?.into_parts();
 
             packaged
                 .write_tar_gz(fs_err::File::from_parts(tmpfile, &tmppath))
@@ -364,10 +362,7 @@ mod client {
 
         #[tokio::test]
         async fn test_client_toolchains_custom() {
-            let td = tempfile::Builder::new()
-                .prefix("sccache")
-                .tempdir()
-                .unwrap();
+            let td = crate::util::normal_tempdir().unwrap();
 
             let ct1 =
                 create_file(td.path(), "ct1", |mut f| f.write_all(b"toolchain_contents")).unwrap();
@@ -396,10 +391,7 @@ mod client {
 
         #[tokio::test]
         async fn test_client_toolchains_custom_multiuse_archive() {
-            let td = tempfile::Builder::new()
-                .prefix("sccache")
-                .tempdir()
-                .unwrap();
+            let td = crate::util::normal_tempdir().unwrap();
 
             let ct1 =
                 create_file(td.path(), "ct1", |mut f| f.write_all(b"toolchain_contents")).unwrap();
@@ -460,10 +452,7 @@ mod client {
 
         #[tokio::test]
         async fn test_client_toolchains_nodist() {
-            let td = tempfile::Builder::new()
-                .prefix("sccache")
-                .tempdir()
-                .unwrap();
+            let td = crate::util::normal_tempdir().unwrap();
 
             let client_toolchains = ClientToolchains::new(
                 &td.path().join("cache"),
@@ -496,10 +485,7 @@ mod client {
 
         #[test]
         fn test_client_toolchains_custom_nodist_conflict() {
-            let td = tempfile::Builder::new()
-                .prefix("sccache")
-                .tempdir()
-                .unwrap();
+            let td = crate::util::normal_tempdir().unwrap();
 
             let ct1 =
                 create_file(td.path(), "ct1", |mut f| f.write_all(b"toolchain_contents")).unwrap();

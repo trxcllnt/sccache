@@ -43,7 +43,6 @@ use std::{
     sync::Arc,
     time::{self, Duration, SystemTime},
 };
-use tempfile::TempPath;
 use tokio_retry2::Retry;
 use tokio_retry2::strategy::FibonacciBackoff;
 
@@ -1048,31 +1047,81 @@ pub static SCCACHE_NORMAL_TMPDIR: Lazy<std::result::Result<PathBuf, std::io::Err
         std::fs::create_dir_all(&tmpdir).map(|_| tmpdir)
     });
 
+pub fn tempdir_in<P: AsRef<Path>>(root: P) -> Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.rand_bytes(16);
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    builder.permissions(std::fs::Permissions::from_mode(0o777));
+    builder
+        .tempdir_in(root.as_ref())
+        .map_err(anyhow::Error::new)
+}
+
+pub fn tempdir_with_prefix_in<P: AsRef<Path>>(root: P, prefix: &str) -> Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.rand_bytes(16);
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    builder.permissions(std::fs::Permissions::from_mode(0o777));
+    builder
+        .prefix(prefix)
+        .tempdir_in(root.as_ref())
+        .map_err(anyhow::Error::new)
+}
+
+pub fn tempfile_in<P: AsRef<Path>>(root: P) -> Result<tempfile::NamedTempFile> {
+    let mut builder = tempfile::Builder::new();
+    builder.rand_bytes(16);
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    builder.permissions(std::fs::Permissions::from_mode(0o666));
+    builder
+        .tempfile_in(root.as_ref())
+        .map_err(anyhow::Error::new)
+}
+
+pub fn tempfile_with_prefix_in<P: AsRef<Path>>(
+    root: P,
+    prefix: &str,
+) -> Result<tempfile::NamedTempFile> {
+    let mut builder = tempfile::Builder::new();
+    builder.rand_bytes(16);
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    builder.permissions(std::fs::Permissions::from_mode(0o666));
+    builder
+        .prefix(prefix)
+        .tempfile_in(root.as_ref())
+        .map_err(anyhow::Error::new)
+}
+
 pub fn global_tempfile() -> Result<tempfile::NamedTempFile> {
     SCCACHE_GLOBAL_TMPDIR
         .as_ref()
         .map_err(anyhow::Error::new)
-        .and_then(|global_tempdir| {
-            tempfile::Builder::new()
-                .rand_bytes(16)
-                .tempfile_in(global_tempdir)
-                .map_err(anyhow::Error::new)
-        })
+        .and_then(tempfile_in)
+}
+
+pub fn normal_tempdir() -> Result<tempfile::TempDir> {
+    SCCACHE_NORMAL_TMPDIR
+        .as_ref()
+        .map_err(anyhow::Error::new)
+        .and_then(tempdir_in)
 }
 
 pub fn normal_tempfile() -> Result<tempfile::NamedTempFile> {
     SCCACHE_NORMAL_TMPDIR
         .as_ref()
         .map_err(anyhow::Error::new)
-        .and_then(|normal_tempdir| {
-            tempfile::Builder::new()
-                .rand_bytes(16)
-                .tempfile_in(normal_tempdir)
-                .map_err(anyhow::Error::new)
-        })
+        .and_then(tempfile_in)
 }
 
-pub fn temp_path() -> Result<TempPath> {
+pub fn normal_temp_path() -> Result<tempfile::TempPath> {
     normal_tempfile().map(|p| p.into_temp_path())
 }
 
@@ -1091,10 +1140,11 @@ pub fn daemonize() -> Result<()> {
             let mask = rustix::process::umask(rustix::fs::Mode::from_bits_truncate(0));
             // set it back
             rustix::process::umask(mask);
-            Daemonize::new()
-                .umask(mask.bits())
-                .start()
-                .context("failed to daemonize")?;
+            #[cfg(target_os = "linux")]
+            let daemon = Daemonize::new().umask(mask.bits());
+            #[cfg(not(target_os = "linux"))]
+            let daemon = Daemonize::new().umask(mask.bits() as u32);
+            daemon.start().context("failed to daemonize")?;
         }
     }
 
