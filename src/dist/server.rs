@@ -34,6 +34,7 @@ use crate::{
     util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
 };
 
+const NUM_CPUS_HISTO: &str = "sccache::server::num_cpus";
 const CPU_USAGE_RATIO: &str = "sccache::server::cpu_usage_ratio";
 const MEM_AVAIL_BYTES: &str = "sccache::server::mem_avail_bytes";
 const MEM_TOTAL_BYTES: &str = "sccache::server::mem_total_bytes";
@@ -76,6 +77,11 @@ impl ServerMetrics {
             JOB_PENDING_COUNT,
             metrics::Unit::Count,
             "The number of accepted jobs that are fully loaded and queued to run/are currently running."
+        );
+        metrics::describe_histogram!(
+            NUM_CPUS_HISTO,
+            metrics::Unit::Count,
+            "The total number of CPUs"
         );
         metrics::describe_histogram!(
             CPU_USAGE_RATIO,
@@ -314,6 +320,11 @@ impl Default for ServerState {
 impl From<&ServerState> for StatusUpdate {
     fn from(state: &ServerState) -> Self {
         let (cpu_usage, mem_avail, mem_total) = state.metrics.system_metrics();
+
+        state
+            .metrics
+            .metrics
+            .histo(NUM_CPUS_HISTO, &[], state.num_cpus as f64);
 
         let running = state
             .occupancy
