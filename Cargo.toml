@@ -92,6 +92,7 @@ rustls = { version = "0.23", default-features = false, features = [
   "tls12",
   "ring",
 ] }
+rustix = { version = "1", features = ["fs", "process"] }
 
 mime = "0.3"
 notify-debouncer-full = { version = "0.4", optional = true }

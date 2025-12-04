@@ -4478,6 +4478,7 @@ dependencies = [
  "regex_static",
  "reqsign 0.18.0",
  "reqwest 0.12.24",
+ "rustix 1.1.2",
  "rustls",
  "semver",
  "serde",

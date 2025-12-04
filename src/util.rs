@@ -1087,7 +1087,14 @@ pub fn daemonize() -> Result<()> {
     match env::var("SCCACHE_NO_DAEMON") {
         Ok(ref val) if val == "1" => {}
         _ => {
-            Daemonize::new().start().context("failed to daemonize")?;
+            // umask() gets the current mask and sets a new one.
+            let mask = rustix::process::umask(rustix::fs::Mode::from_bits_truncate(0));
+            // set it back
+            rustix::process::umask(mask);
+            Daemonize::new()
+                .umask(mask.bits())
+                .start()
+                .context("failed to daemonize")?;
         }
     }
 
