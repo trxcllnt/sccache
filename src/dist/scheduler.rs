@@ -586,7 +586,7 @@ impl SchedulerService for Scheduler {
                     .iter()
                     .fold(dist::SysStats::default(), |mut info, server| {
                         if server.info.cpu_usage.is_finite() {
-                            info.cpu_usage += server.info.cpu_usage;
+                            info.cpu_usage += server.info.cpu_usage * server.info.num_cpus as f32;
                         }
                         info.mem_avail += server.info.mem_avail;
                         info.mem_total += server.info.mem_total;
@@ -598,7 +598,7 @@ impl SchedulerService for Scheduler {
             )
             .map(|mut info| {
                 if !servers.is_empty() {
-                    info.cpu_usage /= servers.len() as f32;
+                    info.cpu_usage /= servers.iter().map(|s| s.info.num_cpus).sum::<usize>() as f32;
                 }
                 info
             })
