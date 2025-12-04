@@ -48,8 +48,8 @@ use super::Language;
 /// The current format is 1 header byte for the version + bincode encoding
 /// of the [`PreprocessorCacheEntry`] struct.
 const FORMAT_VERSION: u8 = 0;
-const MAX_PREPROCESSOR_CACHE_ENTRIES: usize = 100;
-const MAX_PREPROCESSOR_CACHE_FILE_INFO_ENTRIES: usize = 10000;
+const MAX_PREPROCESSOR_CACHE_ENTRIES: usize = 1_000;
+const MAX_PREPROCESSOR_CACHE_FILE_INFO_ENTRIES: usize = 100_000;
 
 #[derive(Deserialize, Serialize, Debug, Default, PartialEq, Eq)]
 pub struct PreprocessorCacheEntry {
