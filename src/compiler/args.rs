@@ -721,7 +721,7 @@ where
                             None
                         })
                         .and_then(|arg| arg)
-                        .map_or_else(|| arg, |arg| arg)
+                        .unwrap_or(arg)
                         .iter_os_strings(),
                 );
 
