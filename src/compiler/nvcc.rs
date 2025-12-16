@@ -13,8 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
-use crate::util::{Digest, OsStrExt, run_input_output};
 use crate::{
     compiler::{
         Cacheable, CompileCommandImpl, CompilerArguments,
@@ -24,9 +22,11 @@ use crate::{
         },
         gcc::{self, ArgData::*},
     },
-    util::SCCACHE_GLOBAL_TMPDIR,
+    counted_array, debug_if_trace, dist,
+    mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
+    protocol, server,
+    util::{Digest, OsStrExt, SCCACHE_GLOBAL_TMPDIR, run_input_output},
 };
-use crate::{counted_array, debug_if_trace, dist, protocol, server};
 use async_trait::async_trait;
 use fs_err as fs;
 use futures::{AsyncBufReadExt, StreamExt, TryFutureExt, TryStreamExt};
@@ -71,10 +71,97 @@ impl NvccHostCompiler {
 
 #[derive(Clone, Debug)]
 pub struct Nvcc {
+    pub archs_all: Vec<String>,
+    pub archs_major: Vec<String>,
+    pub archs_native: Vec<String>,
     pub host_compiler: NvccHostCompiler,
     pub host_compiler_version: Option<String>,
     pub specfiles: Vec<PathBuf>,
     pub version: Option<String>,
+}
+
+impl Nvcc {
+    pub async fn read_all_archs<T>(
+        creator: &mut T,
+        exe: &Path,
+        env_vars: &[(OsString, OsString)],
+        host_compiler: &NvccHostCompiler,
+    ) -> Result<Vec<String>>
+    where
+        T: CommandCreatorSync,
+    {
+        Self::read_archs(creator, exe, env_vars, host_compiler, "all").await
+    }
+
+    pub async fn read_major_archs<T>(
+        creator: &mut T,
+        exe: &Path,
+        env_vars: &[(OsString, OsString)],
+        host_compiler: &NvccHostCompiler,
+    ) -> Result<Vec<String>>
+    where
+        T: CommandCreatorSync,
+    {
+        Self::read_archs(creator, exe, env_vars, host_compiler, "all-major").await
+    }
+
+    pub async fn read_native_archs<T>(
+        creator: &mut T,
+        exe: &Path,
+        env_vars: &[(OsString, OsString)],
+        host_compiler: &NvccHostCompiler,
+    ) -> Result<Vec<String>>
+    where
+        T: CommandCreatorSync,
+    {
+        Self::read_archs(creator, exe, env_vars, host_compiler, "native").await
+    }
+
+    async fn read_archs<T>(
+        creator: &mut T,
+        exe: &Path,
+        env_vars: &[(OsString, OsString)],
+        host_compiler: &NvccHostCompiler,
+        meta_arch: &str,
+    ) -> Result<Vec<String>>
+    where
+        T: CommandCreatorSync,
+    {
+        let mut env_vars = env_vars.to_vec();
+        select_nvcc_subcommands(
+            creator,
+            exe,
+            Path::new("."),
+            &mut env_vars,
+            &[
+                "-x".into(),
+                "cu".into(),
+                "x.cu".into(),
+                "-o".into(),
+                "x.cu.o".into(),
+                format!("-arch={meta_arch}").into(),
+            ],
+            |exe, _| exe == "ptxas",
+            host_compiler,
+            Path::new("x.cu.o"),
+        )
+        .await?
+        .into_iter()
+        .filter_map(|(_, _, args)| {
+            for arg in args {
+                if arg.starts_with("-arch=") {
+                    return arg
+                        .split_once("sm_")
+                        .map(|(_, arch)| format!("-gencode=arch=compute_{arch},code=sm_{arch}"))
+                        .map(Ok);
+                }
+            }
+            Some(Err(anyhow!(
+                "ptxas command didn't include an `-arch=` argument"
+            )))
+        })
+        .try_collect()
+    }
 }
 
 #[async_trait]
@@ -128,6 +215,44 @@ impl CCompilerImpl for Nvcc {
                     .iter()
                     .map(|s| s.clone().into_arg_os_string()),
             );
+        }
+
+        // Rewrite `nvcc -arch=all|all-major|native` to the real client archs,
+        // otherwise users who do `-arch=native` with different GPUs will get
+        // cache hits for objects that don't include their GPU arch.
+
+        for flag in ["-arch=", "--gpu-architecture="] {
+            if let Some(idx) = arguments.iter().position(|x| x.starts_with(flag)) {
+                let meta_arch = arguments[idx]
+                    .split_prefix(flag)
+                    .and_then(|s| s.to_str().map(|s| s.to_owned()));
+                let real_archs = match meta_arch.as_deref() {
+                    Some("all") => &self.archs_all,
+                    Some("all-major") => &self.archs_major,
+                    Some("native") => &self.archs_native,
+                    _ => continue,
+                };
+                if !real_archs.is_empty() {
+                    arguments.splice(idx..(idx + 1), dist::strings_to_osstrings(real_archs));
+                }
+            }
+        }
+
+        for flag in ["-arch", "--gpu-architecture"] {
+            if let Some(idx) = arguments.iter().position(|x| x == flag) {
+                let meta_arch = arguments
+                    .get(idx + 1)
+                    .and_then(|s| s.to_str().map(|s| s.to_owned()));
+                let real_archs = match meta_arch.as_deref() {
+                    Some("all") => &self.archs_all,
+                    Some("all-major") => &self.archs_major,
+                    Some("native") => &self.archs_native,
+                    _ => continue,
+                };
+                if !real_archs.is_empty() {
+                    arguments.splice(idx..(idx + 2), dist::strings_to_osstrings(real_archs));
+                }
+            }
         }
 
         let parsed_args = gcc::parse_arguments(
@@ -2110,6 +2235,9 @@ mod test {
     fn parse_arguments_gcc(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
         Nvcc {
+            archs_all: vec![],
+            archs_major: vec![],
+            archs_native: vec![],
             host_compiler: NvccHostCompiler::Gcc,
             host_compiler_version: None,
             specfiles: vec![],
@@ -2120,6 +2248,9 @@ mod test {
     fn parse_arguments_msvc(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
         Nvcc {
+            archs_all: vec![],
+            archs_major: vec![],
+            archs_native: vec![],
             host_compiler: NvccHostCompiler::Msvc,
             host_compiler_version: None,
             specfiles: vec![],
@@ -2130,6 +2261,9 @@ mod test {
     fn parse_arguments_nvc(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
         Nvcc {
+            archs_all: vec![],
+            archs_major: vec![],
+            archs_native: vec![],
             host_compiler: NvccHostCompiler::Nvhpc,
             host_compiler_version: None,
             specfiles: vec![],

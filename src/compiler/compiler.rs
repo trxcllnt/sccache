@@ -2444,8 +2444,19 @@ compiler_version=__VERSION__
                     vec![]
                 };
 
+                let archs_all =
+                    Nvcc::read_all_archs(&mut creator, &executable, &env, &host_compiler).await?;
+                let archs_major =
+                    Nvcc::read_major_archs(&mut creator, &executable, &env, &host_compiler).await?;
+                let archs_native =
+                    Nvcc::read_native_archs(&mut creator, &executable, &env, &host_compiler)
+                        .await?;
+
                 return CCompiler::new(
                     Nvcc {
+                        archs_all,
+                        archs_major,
+                        archs_native,
                         host_compiler,
                         version,
                         host_compiler_version,
@@ -2790,6 +2801,10 @@ mod test {
                 "",
             )),
         );
+        // Try to read nvcc all, all-major, and native archs lists
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
         let c1 = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
             .wait()
             .unwrap()
