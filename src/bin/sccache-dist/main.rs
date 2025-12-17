@@ -31,7 +31,7 @@ use sccache::{
     target_os = "freebsd"
 )))]
 fn main() {
-    compile_error!("Distributed compilation is only support on Linux/x86_64 and FreeBSD!");
+    compile_error!("Distributed compilation is only supported on Linux/x86_64 and FreeBSD!");
 }
 
 // Only supported on x86_64/aarch64 Linux machines and on FreeBSD
