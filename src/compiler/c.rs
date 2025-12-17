@@ -401,7 +401,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
                 // Handle SCCACHE_EXTRAFILES
                 for (k, v) in env_vars.iter() {
                     if k.as_os_str() == OsStr::new("SCCACHE_EXTRAFILES") {
-                        args.extra_hash_files.extend(std::env::split_paths(&v))
+                        args.extra_hash_files.extend(std::env::split_paths(&v));
                     }
                 }
 
@@ -418,7 +418,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
                 // too much to handle on our side so we just hash every bitcode library we find.
                 if args.language == Language::Hip {
                     args.extra_hash_files
-                        .extend(Self::search_hip_device_libs(&args, env_vars))
+                        .extend(Self::search_hip_device_libs(&args, env_vars));
                 }
 
                 CompilerArguments::Ok(Box::new(CCompilerHasher {

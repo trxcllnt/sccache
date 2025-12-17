@@ -328,7 +328,7 @@ fn connect_or_start_server(
                     }
                 }
                 ServerStartup::AddrInUse => {
-                    debug!("AddrInUse: possible parallel server bootstraps, retrying..")
+                    debug!("AddrInUse: possible parallel server bootstraps, retrying..");
                 }
                 ServerStartup::TimedOut => bail!(
                     "Timed out waiting for server startup. Maybe the remote service is unreachable?\nRun with SCCACHE_LOG=debug SCCACHE_NO_DAEMON=1 to get more information"
@@ -577,7 +577,7 @@ where
         CompileResponse::UnhandledCompile => {
             debug!("Server sent UnhandledCompile");
         }
-    };
+    }
 
     let mut cmd = creator.new_command_sync(exe);
     cmd.args(&cmdline).current_dir(cwd);
@@ -752,7 +752,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
 
             match &config.dist.auth {
                 config::DistAuth::Token { .. } => {
-                    info!("No authentication needed for type 'token'")
+                    info!("No authentication needed for type 'token'");
                 }
                 config::DistAuth::Oauth2CodeGrantPKCE {
                     client_id,
@@ -774,7 +774,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                             c.dist.auth_tokens.insert(auth_url.to_owned(), token);
                         })
                         .context("Unable to save auth token")?;
-                    println!("Saved token")
+                    println!("Saved token");
                 }
                 config::DistAuth::Oauth2Implicit {
                     client_id,
@@ -792,9 +792,9 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                             c.dist.auth_tokens.insert(auth_url.to_owned(), token);
                         })
                         .context("Unable to save auth token")?;
-                    println!("Saved token")
+                    println!("Saved token");
                 }
-            };
+            }
         }
         #[cfg(not(feature = "dist-client"))]
         Command::DistAuth => bail!(
@@ -831,7 +831,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                     .await?
                     .write_tar_gz(out_file)
                     .await
-            })?
+            })?;
         }
         #[cfg(not(feature = "dist-client"))]
         Command::PackageToolchain(_executable, _out) => bail!(

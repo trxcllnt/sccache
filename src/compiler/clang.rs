@@ -130,7 +130,7 @@ impl CCompilerImpl for Clang {
 
         // Clang 14 and later support -fminimize-whitespace, which normalizes away non-semantic whitespace which in turn increases cache hit rate.
         if self.supports_fminimize_whitespace {
-            extra_preprocessor_flags.push("-fminimize-whitespace".to_string())
+            extra_preprocessor_flags.push("-fminimize-whitespace".to_string());
         }
 
         gcc::preprocess(

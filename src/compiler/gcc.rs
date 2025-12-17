@@ -548,7 +548,7 @@ where
                             )
                         }
                         _ => {}
-                    };
+                    }
                     seen_arch = Some(arch.clone());
                 }
             }
@@ -693,7 +693,7 @@ where
         };
         for arg in arg.normalize(norm).iter_os_strings() {
             args.push("-Xclang".into());
-            args.push(arg)
+            args.push(arg);
         }
     }
 
@@ -1202,7 +1202,7 @@ pub fn generate_compile_commands(
     // command line.
     let language = parsed_args.language.as_compiler_str(kind.clone().into());
     if let Some(lang) = &language {
-        arguments.extend(vec!["-x".into(), lang.into()])
+        arguments.extend(vec!["-x".into(), lang.into()]);
     }
     arguments.extend(vec![
         parsed_args.compilation_flag.clone(),
@@ -1282,7 +1282,7 @@ pub fn generate_compile_commands(
                     let mut arguments: Vec<String> = vec![];
                     // Language needs to be before input
                     if let Some(lang) = &language {
-                        arguments.extend_from_slice(&["-x".into(), lang.into()][..])
+                        arguments.extend_from_slice(&["-x".into(), lang.into()][..]);
                     }
 
                     if let CCompilerKind::Gcc = kind {

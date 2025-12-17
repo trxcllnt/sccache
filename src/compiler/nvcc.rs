@@ -691,7 +691,7 @@ fn parsed_to_nvcc_args(
                 keep = true;
                 unhashed_args.splice(idx..(idx + 1), []);
                 if keep_dir.is_none() {
-                    keep_dir = Some(cwd.to_path_buf())
+                    keep_dir = Some(cwd.to_path_buf());
                 }
                 continue;
             }
@@ -745,7 +745,7 @@ fn parsed_to_nvcc_args(
         .language
         .as_compiler_str(CCompilerKind::Nvcc.into())
     {
-        args.extend(vec!["-x".into(), lang.into()])
+        args.extend(vec!["-x".into(), lang.into()]);
     }
 
     let output = &parsed_args

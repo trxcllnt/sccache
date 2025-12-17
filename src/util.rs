@@ -330,10 +330,10 @@ impl TimeMacroFinder {
         }
         if memchr::memmem::find(buffer, b"__TIME__").is_some() {
             self.found_time.set(true);
-        };
+        }
         if memchr::memmem::find(buffer, b"__DATE__").is_some() {
             self.found_date.set(true);
-        };
+        }
     }
 
     pub fn found_time_macros(&self) -> bool {
@@ -957,7 +957,7 @@ impl From<std::time::SystemTime> for Timestamp {
                     nanoseconds = NSEC_PER_SEC - negative_nanos;
                 }
             }
-        };
+        }
         Self {
             seconds,
             nanoseconds,
@@ -1008,7 +1008,7 @@ pub struct HashToDigest<'a> {
 
 impl Hasher for HashToDigest<'_> {
     fn write(&mut self, bytes: &[u8]) {
-        self.digest.update(bytes)
+        self.digest.update(bytes);
     }
 
     fn finish(&self) -> u64 {

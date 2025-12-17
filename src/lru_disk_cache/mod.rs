@@ -279,14 +279,14 @@ impl LruDiskCache {
                 .starts_with(TEMPFILE_PREFIX)
             {
                 remove_entry_from_disk(&path).unwrap_or_else(|e| {
-                    error!("LruDiskCache: Error removing temporary entry {path:?}:\n{e:?}")
+                    error!("LruDiskCache: Error removing temporary entry {path:?}:\n{e:?}");
                 });
             } else if !self.can_store(size) {
                 warn!(
                     "LruDiskCache: Deleting entry that is too large for the cache at max_size={size}b: {path:?}"
                 );
                 remove_entry_from_disk(&path).unwrap_or_else(|e| {
-                    error!("LruDiskCache: Error removing entry {path:?}:\n{e:?}")
+                    error!("LruDiskCache: Error removing entry {path:?}:\n{e:?}");
                 });
             } else {
                 self.add_file(AddFile::AbsPath(path.clone()), size)
@@ -454,7 +454,7 @@ impl LruDiskCache {
                     error!(
                         "LruDiskCache: Error removing entry for failed insertion {:?}:\n{e:?}",
                         path.as_ref()
-                    )
+                    );
                 });
                 Ok(())
             })
