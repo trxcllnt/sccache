@@ -360,7 +360,7 @@ jobs:
           toolchain: ${{ matrix.target == 'aarch64-apple-darwin' && 'beta' || 'stable' }}
           target: ${{ matrix.target }}
         if: ${{ !matrix.container }}
-      
+
       - name: fix build openssl error on s390x
         if: ${{  matrix.target  == 's390x-unknown-linux-musl' }}
         run: |
@@ -467,7 +467,7 @@ jobs:
 
       - name: Check versions
         run: |
-          tag_name=${GITHUB_REF#refs/tags/}
+          tag_name="${GITHUB_REF#refs/tags/}"
           v=$(grep -m 1 "^version" Cargo.toml|sed -e "s|version = \"\(.*\)\"|\1|")
           if ! echo $tag_name|grep -q $v; then
              echo "Mistmatch of the version:"
@@ -485,7 +485,7 @@ jobs:
             cp README.md LICENSE "$d/"
             tar -zcvf "$d.tar.gz" "$d"
             echo -n "$(shasum -ba 256 "$d.tar.gz" | cut -d " " -f 1)" > "$d.tar.gz.sha256"
-            if [[ $d =~ (sccache-)(.*)?pc-windows)(.*)? ]]; then
+            if [[ $d =~ (sccache-)(.*)?pc-windows(.*)? ]]; then
               zip -r "$d.zip" "$d"
               echo -n "$(shasum -ba 256 "$d.zip" | cut -d " " -f 1)" > "$d.zip.sha256"
             fi
@@ -494,10 +494,11 @@ jobs:
       - name: Create release
         run: |
           files=()
-          tag_name=${GITHUB_REF#refs/tags/}
+          tag_name="${GITHUB_REF#refs/tags/}"
           for f in sccache-*.tar.gz* sccache-*.zip*; do
               if [[ -f "$f" ]]; then
-                files+=("$f");
+                cp "$f" "${f//"-$tag_name"/}";
+                files+=("$f" "${f//"-$tag_name"/}");
               fi
           done
           gh release create "$tag_name" \
