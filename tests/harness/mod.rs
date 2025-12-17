@@ -1,5 +1,4 @@
 use fs_err as fs;
-use once_cell::sync::Lazy;
 use regex::Regex;
 use std::{
     env,
@@ -7,6 +6,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
+    sync::LazyLock,
 };
 
 use serde::Serialize;
@@ -83,8 +83,9 @@ pub struct Compiler {
 }
 
 #[allow(dead_code)]
-static COMPILER_VERSION_RE: Lazy<Regex> =
-    regex_static::lazy_regex!(r"^.*?(?P<major>\d+).*?(?P<minor>\d+).*?(?P<patch>\d+).*?$");
+static COMPILER_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    regex_static::regex!(r"^.*?(?P<major>\d+).*?(?P<minor>\d+).*?(?P<patch>\d+).*?$")
+});
 
 impl Compiler {
     #[allow(dead_code)]

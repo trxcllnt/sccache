@@ -31,7 +31,6 @@ use harness::{
     find_compilers, find_cuda_compilers, write_json_cfg, write_source,
 };
 use log::Level::Trace;
-use once_cell::sync::Lazy;
 use paste::paste;
 use predicates::prelude::*;
 use regex::Regex;
