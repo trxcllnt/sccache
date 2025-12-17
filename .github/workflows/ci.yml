@@ -181,6 +181,7 @@ jobs:
       # Don't colorize logs
       NO_COLOR: 1
       NOTEST_CUDA_COMPILERS: ${{ matrix.notest_cuda_compilers || '' }}
+      CARGO_PROFILE_DEV_DEBUG: '0' # save disk space
     steps:
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
 
