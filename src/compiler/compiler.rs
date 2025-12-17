@@ -2445,12 +2445,17 @@ compiler_version=__VERSION__
                 };
 
                 let archs_all =
-                    Nvcc::read_all_archs(&mut creator, &executable, &env, &host_compiler).await?;
+                    Nvcc::read_all_archs(&mut creator, &executable, &env, &host_compiler)
+                        .await
+                        .unwrap_or_default();
                 let archs_major =
-                    Nvcc::read_major_archs(&mut creator, &executable, &env, &host_compiler).await?;
+                    Nvcc::read_major_archs(&mut creator, &executable, &env, &host_compiler)
+                        .await
+                        .unwrap_or_default();
                 let archs_native =
                     Nvcc::read_native_archs(&mut creator, &executable, &env, &host_compiler)
-                        .await?;
+                        .await
+                        .unwrap_or_default();
 
                 return CCompiler::new(
                     Nvcc {
