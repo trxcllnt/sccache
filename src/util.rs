@@ -1128,7 +1128,7 @@ pub fn normal_temp_path() -> Result<tempfile::TempPath> {
 #[cfg(not(windows))]
 pub fn daemonize() -> Result<()> {
     use crate::jobserver::discard_inherited_jobserver;
-    use daemonize::Daemonize;
+    use daemonix::Daemonize;
     use std::env;
     use std::mem;
 

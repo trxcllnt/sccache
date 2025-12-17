@@ -188,7 +188,7 @@ thirtyfour_sync = "0.27"
 version-compare = { version = "0.1.1" }
 
 [target.'cfg(unix)'.dependencies]
-daemonize = "0.5"
+daemonix = "0.1"
 
 [target.'cfg(not(target_os = "freebsd"))'.dependencies.libmount]
 optional = true
