@@ -218,7 +218,7 @@ jobs:
           echo 'clang version:'
           clang --version
 
-      - if: matrix.cuda != '' && contains(fromJSON('["Linux", "Windows"]'), runner.os)
+      - if: ${{ matrix.cuda != '' && (runner.os == 'Linux' || runner.os == 'Windows') }}
         name: Install nvcc
         uses: ./.github/actions/nvcc-toolchain
         with:
@@ -248,6 +248,12 @@ jobs:
           key: toolchain-cache-${{ matrix.os }}-rustc-${{ matrix.rustc }}-${{ matrix.extra_desc }}-${{ env.TOOLCHAIN_CACHE_KEY }}
           restore-keys: |
             toolchain-cache-${{ matrix.os }}-rustc-${{ matrix.rustc }}-${{ matrix.extra_desc }}
+
+      - if: ${{ matrix.cuda != '' && runner.os == 'Linux' }}
+        name: Free disk space for CUDA tests
+        run: |
+          apt clean
+          rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost /usr/share/swift /var/lib/apt/lists/*
 
       - name: Execute tests
         run: cargo test --locked --all-targets ${{ matrix.extra_args }}
