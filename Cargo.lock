@@ -4468,7 +4468,6 @@ dependencies = [
  "notify-debouncer-full",
  "number_prefix",
  "object 0.37.3",
- "once_cell",
  "opendal",
  "openssl",
  "paste",

@@ -32,7 +32,6 @@ use crate::{counted_array, debug_if_trace, dist};
 use async_trait::async_trait;
 use filetime::FileTime;
 use fs_err as fs;
-use once_cell::sync::Lazy;
 #[cfg(feature = "dist-client")]
 use semver::Version;
 #[cfg(feature = "dist-client")]
@@ -55,9 +54,9 @@ use std::iter;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process;
-use std::sync::Arc;
 #[cfg(feature = "dist-client")]
 use std::sync::Mutex;
+use std::sync::{Arc, LazyLock};
 use std::time;
 
 use crate::errors::*;
@@ -231,8 +230,8 @@ pub struct CrateTypes {
 }
 
 /// Emit types that we will cache.
-static ALLOWED_EMIT: Lazy<HashSet<&'static str>> =
-    Lazy::new(|| ["link", "metadata", "dep-info"].iter().copied().collect());
+static ALLOWED_EMIT: LazyLock<HashSet<&'static str>> =
+    LazyLock::new(|| ["link", "metadata", "dep-info"].iter().copied().collect());
 
 /// Version number for cache key.
 const CACHE_VERSION: &[u8] = b"6";

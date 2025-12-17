@@ -34,7 +34,6 @@ use async_trait::async_trait;
 use bytes::Buf;
 use fs_err as fs;
 use itertools::Itertools;
-use once_cell::sync::Lazy;
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
@@ -43,7 +42,7 @@ use std::{
     hash::Hash,
     io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 use tempfile::TempPath;
 
@@ -1644,7 +1643,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 pub const CACHE_VERSION: &[u8] = b"11";
 
 /// Environment variables that are factored into the cache key.
-static CACHED_ENV_VARS: Lazy<HashSet<&'static OsStr>> = Lazy::new(|| {
+static CACHED_ENV_VARS: LazyLock<HashSet<&'static OsStr>> = LazyLock::new(|| {
     [
         // SCCACHE_C_CUSTOM_CACHE_BUSTER has no particular meaning behind it,
         // serving as a way for the user to factor custom data into the hash.

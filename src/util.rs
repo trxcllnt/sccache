@@ -26,7 +26,6 @@ use object::read::{
     archive::ArchiveFile,
     macho::{FatArch, MachOFatFile32, MachOFatFile64},
 };
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{
     cell::Cell,
@@ -40,7 +39,7 @@ use std::{
     pin::Pin,
     process::{self, Stdio},
     str,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::{self, Duration, SystemTime},
 };
 use tokio_retry2::Retry;
@@ -1035,14 +1034,14 @@ fn tempdir_path(global: bool) -> PathBuf {
     .join(".sccache_temp")
 }
 
-pub static SCCACHE_GLOBAL_TMPDIR: Lazy<std::result::Result<PathBuf, std::io::Error>> =
-    Lazy::new(|| {
+pub static SCCACHE_GLOBAL_TMPDIR: LazyLock<std::result::Result<PathBuf, std::io::Error>> =
+    LazyLock::new(|| {
         let tmpdir = tempdir_path(true);
         std::fs::create_dir_all(&tmpdir).map(|_| tmpdir)
     });
 
-pub static SCCACHE_NORMAL_TMPDIR: Lazy<std::result::Result<PathBuf, std::io::Error>> =
-    Lazy::new(|| {
+pub static SCCACHE_NORMAL_TMPDIR: LazyLock<std::result::Result<PathBuf, std::io::Error>> =
+    LazyLock::new(|| {
         let tmpdir = tempdir_path(false);
         std::fs::create_dir_all(&tmpdir).map(|_| tmpdir)
     });

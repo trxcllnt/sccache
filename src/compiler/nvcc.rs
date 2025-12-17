@@ -31,24 +31,26 @@ use async_trait::async_trait;
 use fs_err as fs;
 use futures::{AsyncBufReadExt, StreamExt, TryFutureExt, TryStreamExt};
 use itertools::Itertools;
-use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use tempfile::TempPath;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use which::which_in;
 
 use crate::errors::*;
 
-static IS_VALID_LINE_RE: Lazy<Regex> = regex_static::lazy_regex!(r"^#\$ (.*)$");
-static IS_ENVVAR_LINE_RE: Lazy<Regex> = regex_static::lazy_regex!(r"^([_A-Z]+)=(.*)$");
-static HAS_SM_IN_NAME_RE: Lazy<Regex> =
-    regex_static::lazy_regex!(r"^(.*)\.sm_([0-9A-Za-z]+)\.(.*)$");
-static HAS_COMPUTE_IN_NAME_RE: Lazy<Regex> =
-    regex_static::lazy_regex!(r"^(.*)\.compute_([0-9A-Za-z]+)\.(.*)$");
-static ARG_HAS_FILE_WITH_EXTENSION_RE: Lazy<Regex> = regex_static::lazy_regex!(r"-.*=(.*)");
+static IS_VALID_LINE_RE: LazyLock<Regex> = LazyLock::new(|| regex_static::regex!(r"^#\$ (.*)$"));
+static IS_ENVVAR_LINE_RE: LazyLock<Regex> =
+    LazyLock::new(|| regex_static::regex!(r"^([_A-Z]+)=(.*)$"));
+static HAS_SM_IN_NAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| regex_static::regex!(r"^(.*)\.sm_([0-9A-Za-z]+)\.(.*)$"));
+static HAS_COMPUTE_IN_NAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| regex_static::regex!(r"^(.*)\.compute_([0-9A-Za-z]+)\.(.*)$"));
+static ARG_HAS_FILE_WITH_EXTENSION_RE: LazyLock<Regex> =
+    LazyLock::new(|| regex_static::regex!(r"-.*=(.*)"));
 
 /// A unit struct on which to implement `CCompilerImpl`.
 #[derive(Clone, Debug)]

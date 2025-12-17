@@ -17,7 +17,6 @@ use directories::ProjectDirs;
 use fs::File;
 use fs_err as fs;
 use itertools::Itertools;
-use once_cell::sync::Lazy;
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 use serde::ser::Serializer;
 use serde::{
@@ -32,13 +31,13 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::result::Result as StdResult;
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 pub use crate::cache::PreprocessorCacheModeConfig;
 use crate::errors::*;
 
-static CACHED_CONFIG_PATH: Lazy<PathBuf> = Lazy::new(CachedConfig::file_config_path);
+static CACHED_CONFIG_PATH: LazyLock<PathBuf> = LazyLock::new(CachedConfig::file_config_path);
 static CACHED_CONFIG: Mutex<Option<CachedFileConfig>> = Mutex::new(None);
 
 const ORGANIZATION: &str = "Mozilla";
