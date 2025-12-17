@@ -57,7 +57,7 @@ pub fn cargo_command() -> Command {
 }
 
 pub fn sccache_dist_path() -> PathBuf {
-    assert_cmd::cargo::cargo_bin("sccache-dist")
+    env!("CARGO_BIN_EXE_sccache-dist").into()
 }
 
 fn sccache_scheduler_cfg(message_broker: &MessageBroker) -> SchedulerConfig {

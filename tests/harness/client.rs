@@ -67,7 +67,7 @@ pub struct SccacheClient {
 #[allow(unused)]
 impl SccacheClient {
     pub fn new_no_cfg() -> Self {
-        let path = assert_cmd::cargo::cargo_bin("sccache");
+        let path = env!("CARGO_BIN_EXE_sccache").into();
         let port = CLIENT_PORT.fetch_add(1, Ordering::SeqCst);
 
         let mut envvars = vec![
@@ -137,7 +137,7 @@ impl SccacheClient {
     }
 
     pub fn cmd(&self) -> Command {
-        let mut cmd = prune_command(Command::new(assert_cmd::cargo::cargo_bin("sccache")));
+        let mut cmd = prune_command(Command::new(env!("CARGO_BIN_EXE_sccache")));
         cmd.envs(
             self.envvars
                 .iter()
