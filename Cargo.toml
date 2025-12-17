@@ -102,8 +102,7 @@ notify-debouncer-full = { version = "0.4", optional = true }
 number_prefix = "0.4"
 object = "0.37"
 opendal = { version = "0.55.0", optional = true, default-features = false }
-# opendal = { git = "https://github.com/trxcllnt/opendal.git", branch = "fix/connection-pool-size", optional = true, default-features = false }
-openssl = { version = "0.10.72", optional = true }
+openssl = { version = "0.10.75", optional = true }
 rand = "0.8.4"
 regex = "1.10.3"
 regex_static = "0.1.1"
