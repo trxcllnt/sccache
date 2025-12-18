@@ -1339,7 +1339,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         Some(GHACacheConfig {
             enabled: true,
             version,
-            key_prefix: key_prefix_from_env_var(&envvar("GHA_PREPROCESSOR_CACHE_KEY_PREFIX"))
+            key_prefix: key_prefix_from_env_var(&envvar("GHA_CACHE_KEY_PREFIX"))
                 .unwrap_or_default(),
             preprocessor_cache_mode: Some(PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: bool_from_env_var(&envvar(
@@ -1360,7 +1360,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         Some(GHACacheConfig {
             enabled: true,
             version: "".to_string(),
-            key_prefix: key_prefix_from_env_var(&envvar("GHA_PREPROCESSOR_CACHE_KEY_PREFIX"))
+            key_prefix: key_prefix_from_env_var(&envvar("GHA_CACHE_KEY_PREFIX"))
                 .unwrap_or_default(),
             preprocessor_cache_mode: Some(PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: bool_from_env_var(&envvar(
