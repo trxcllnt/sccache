@@ -70,9 +70,6 @@ use tower::Service;
 
 use crate::errors::*;
 
-/// If the server is idle for this many seconds, shut down.
-const DEFAULT_IDLE_TIMEOUT: u64 = 600;
-
 /// If the dist client couldn't be created, retry creation at this number
 /// of seconds from now (or later)
 #[cfg(feature = "dist-client")]
@@ -97,7 +94,7 @@ fn get_idle_timeout() -> u64 {
     env::var("SCCACHE_IDLE_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_IDLE_TIMEOUT)
+        .unwrap_or(0)
 }
 
 fn notify_server_startup_internal<W: Write>(mut w: W, status: ServerStartup) -> Result<()> {
