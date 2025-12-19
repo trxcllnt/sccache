@@ -659,53 +659,10 @@ impl ProcessOutput {
 
 impl From<std::process::Output> for ProcessOutput {
     fn from(output: std::process::Output) -> Self {
-        let std::process::Output {
-            status,
-            stdout,
-            stderr,
-        } = output;
-
-        #[cfg(windows)]
-        let signal = Option::<i32>::None;
-        #[cfg(not(windows))]
-        let signal = status.signal();
-
-        let status = if let Some(code) = status.code() {
-            let desc = signal
-                // Use ExitStatus's fmt::Display implementation if signal is Some()
-                .map(|_| format!("{status}"))
-                .unwrap_or_default();
-            ProcessStatus::Exit {
-                flag: code as i64,
-                desc: if desc.is_empty() {
-                    // Otherwise, just print the exit code
-                    format!("exit: (code {code})")
-                } else {
-                    desc
-                },
-            }
-        } else if let Some(signal) = signal {
-            let desc = format!("{status}");
-            ProcessStatus::Term {
-                flag: signal as i64,
-                desc: if desc.is_empty() {
-                    format!("killed: (signal {signal})")
-                } else {
-                    desc
-                },
-            }
-        } else {
-            let desc = format!("{status}");
-            ProcessStatus::Died {
-                flag: -1,
-                desc: if desc.is_empty() { "died".into() } else { desc },
-            }
-        };
-
         Self {
-            status,
-            stdout,
-            stderr,
+            status: output.status.into(),
+            stdout: output.stdout,
+            stderr: output.stderr,
         }
     }
 }
@@ -812,6 +769,47 @@ impl Default for ProcessStatus {
         Self::Exit {
             flag: 0,
             desc: String::new(),
+        }
+    }
+}
+
+impl From<ExitStatus> for ProcessStatus {
+    fn from(status: ExitStatus) -> Self {
+        #[cfg(windows)]
+        let signal = Option::<i32>::None;
+        #[cfg(not(windows))]
+        let signal = status.signal();
+
+        if let Some(code) = status.code() {
+            let desc = signal
+                // Use ExitStatus's fmt::Display implementation if signal is Some()
+                .map(|_| format!("{status}"))
+                .unwrap_or_default();
+            ProcessStatus::Exit {
+                flag: code as i64,
+                desc: if desc.is_empty() {
+                    // Otherwise, just print the exit code
+                    format!("exit: (code {code})")
+                } else {
+                    desc
+                },
+            }
+        } else if let Some(signal) = signal {
+            let desc = format!("{status}");
+            ProcessStatus::Term {
+                flag: signal as i64,
+                desc: if desc.is_empty() {
+                    format!("killed: (signal {signal})")
+                } else {
+                    desc
+                },
+            }
+        } else {
+            let desc = format!("{status}");
+            ProcessStatus::Died {
+                flag: -1,
+                desc: if desc.is_empty() { "died".into() } else { desc },
+            }
         }
     }
 }
