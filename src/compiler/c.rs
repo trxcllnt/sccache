@@ -762,25 +762,29 @@ where
             }};
         }
 
-        let preprocessor_output = try_or_cleanup!(
-            compiler
-                .preprocess(
-                    service,
-                    creator,
-                    executable,
-                    parsed_args,
-                    &cwd,
-                    &env_vars,
-                    rewrite_includes_only,
-                    // Generate dependencies if we're going to read them below
-                    !matches!(preprocessor_cache_lookup, PreprocessorCacheLookup::Disabled),
-                    // include line numbers when `-fprofile-generate` is enabled
-                    // to guarantee the profile data embedded in the cached object
-                    // matches the line numbers in this source file
-                    parsed_args.profile_generate,
-                )
-                .await
-        );
+        let preprocessor_output = if !parsed_args.language.needs_c_preprocessing() {
+            PreprocessorOutput::File(fs::File::open(cwd.join(&parsed_args.input))?)
+        } else {
+            try_or_cleanup!(
+                compiler
+                    .preprocess(
+                        service,
+                        creator,
+                        executable,
+                        parsed_args,
+                        &cwd,
+                        &env_vars,
+                        rewrite_includes_only,
+                        // Generate dependencies if we're going to read them below
+                        !matches!(preprocessor_cache_lookup, PreprocessorCacheLookup::Disabled),
+                        // include line numbers when `-fprofile-generate` is enabled
+                        // to guarantee the profile data embedded in the cached object
+                        // matches the line numbers in this source file
+                        parsed_args.profile_generate,
+                    )
+                    .await
+            )
+        };
 
         // Create an argument vector containing both common and arch args, to
         // use in creating a hash key
@@ -928,6 +932,14 @@ fn use_preprocessor_cache_mode(
     preprocessor_cache_mode_config: &PreprocessorCacheModeConfig,
 ) -> bool {
     let out_pretty = parsed_args.output_pretty();
+
+    if !parsed_args.language.needs_c_preprocessing() {
+        debug!(
+            "parse_arguments: Disabling preprocessor cache because {} language doesn't need C preprocessing",
+            parsed_args.language.as_str()
+        );
+        return false;
+    }
 
     // Try to look for a cached preprocessing step for this compilation
     // request.
@@ -2111,6 +2123,8 @@ mod test {
 
         t("c", Language::C);
 
+        t("i", Language::CPreprocessed);
+
         t("C", Language::Cxx);
         t("cc", Language::Cxx);
         t("cp", Language::Cxx);
@@ -2118,6 +2132,8 @@ mod test {
         t("CPP", Language::Cxx);
         t("cxx", Language::Cxx);
         t("c++", Language::Cxx);
+
+        t("ii", Language::CxxPreprocessed);
 
         t("h", Language::GenericHeader);
 
@@ -2132,8 +2148,12 @@ mod test {
 
         t("m", Language::ObjectiveC);
 
+        t("mi", Language::ObjectiveCPreprocessed);
+
         t("M", Language::ObjectiveCxx);
         t("mm", Language::ObjectiveCxx);
+
+        t("mii", Language::ObjectiveCxxPreprocessed);
 
         t("cu", Language::Cuda);
         t("hip", Language::Hip);

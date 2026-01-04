@@ -1276,7 +1276,10 @@ pub fn generate_compile_commands(
                                 Language::GenericHeader
                                 | Language::CHeader
                                 | Language::CxxHeader => {}
-                                Language::C | Language::Cxx => language = Some("cpp-output".into()),
+                                Language::C
+                                | Language::CPreprocessed
+                                | Language::Cxx
+                                | Language::CxxPreprocessed => language = Some("cpp-output".into()),
                                 _ => language = Some("none".into()),
                             }
                         } else {
