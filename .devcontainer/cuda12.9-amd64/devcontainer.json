@@ -54,6 +54,7 @@
     "HISTFILE": "${localWorkspaceFolder}/.devcontainer/._bash_history",
     "HISTSIZE": "",
     "HISTFILESIZE": "",
+    "RUSTFLAGS": "--cfg tokio_unstable",
     "SCCACHE_DIR": "/opt/sccache/.devcontainer/.cache/sccache",
     "SCCACHE_REPO": "${localWorkspaceFolder}",
     "SCCACHE_SERVER_PORT": "4225",
