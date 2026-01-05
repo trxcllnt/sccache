@@ -493,6 +493,9 @@ pub struct PreprocessorCacheModeConfig {
     pub ignore_time_macros: bool,
     /// If true, preprocessor cache mode will not cache system headers, only
     /// add them to the hash.
+    /// Do not use.
+    /// This is only used in sccache tests, it is ignored in release builds.
+    /// System headers are _always_ included in shared preprocessor caches.
     pub skip_system_headers: bool,
     /// The prefix in cache storage where the preprocessor cache files are stored.
     /// For example, the disk preprocessor cache will be `$SCCACHE_DIR/{key_prefix}`,
