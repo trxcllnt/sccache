@@ -29,6 +29,7 @@ strip = true
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 ar = "0.9"
+async-stream = "0.3"
 async-trait = "0.1"
 backon = { version = "1", default-features = false, features = [
   "std-blocking-sleep",

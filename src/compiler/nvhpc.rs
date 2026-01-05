@@ -21,10 +21,12 @@ use crate::{
         gcc::{self, ArgData::*},
     },
     mock_command::{CommandCreatorSync, RunCommand},
+    server::SccacheService,
     util::run_input_output,
 };
 use crate::{counted_array, dist};
 use async_trait::async_trait;
+use futures::FutureExt;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use tempfile::TempPath;
@@ -157,7 +159,7 @@ impl CCompilerImpl for Nvhpc {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        _service: &crate::server::SccacheService<T>,
+        _service: &SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
@@ -172,14 +174,12 @@ impl CCompilerImpl for Nvhpc {
     {
         // Chain the dependency generation and preprocessor commands to emulate a `proper` front end
         let dependencies = if generate_dependencies || !parsed_args.dependency_args.is_empty() {
-            if let Some((depfile, _)) = self
-                .generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
+            self.generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
                 .await?
-            {
-                Some(gcc::parse_dependencies(parsed_args, cwd, &depfile).await?)
-            } else {
-                None
-            }
+                .map(|depfile| {
+                    gcc::parse_dependencies(cwd.to_owned(), cwd.join(&parsed_args.input), depfile)
+                        .boxed()
+                })
         } else {
             None
         };

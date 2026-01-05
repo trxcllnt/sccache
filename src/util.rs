@@ -21,7 +21,7 @@ use blake3::Hasher as blake3_Hasher;
 use byteorder::{BigEndian, ByteOrder};
 use fs::File;
 use fs_err as fs;
-use futures::{AsyncRead, AsyncReadExt, lock::Mutex};
+use futures::{AsyncRead, AsyncReadExt, FutureExt, StreamExt, lock::Mutex};
 use object::read::{
     archive::ArchiveFile,
     macho::{FatArch, MachOFatFile32, MachOFatFile64},
@@ -130,9 +130,14 @@ impl Digest {
         self.inner.update(bytes);
     }
 
-    pub async fn update_from_reader<R: AsyncRead>(
+    pub async fn update_from_reader<R: AsyncRead>(&mut self, reader: Pin<&mut R>) -> Result<()> {
+        self.update_from_reader_with(reader, |_| {}).await
+    }
+
+    pub async fn update_from_reader_with<R: AsyncRead, F: FnMut(&[u8])>(
         &mut self,
         mut reader: Pin<&mut R>,
+        mut each: F,
     ) -> Result<()> {
         // A buffer of 128KB should give us the best performance.
         // See https://eklitzke.org/efficient-file-copying-on-linux.
@@ -142,12 +147,21 @@ impl Digest {
             if count == 0 {
                 break;
             }
+            each(&buffer[..count]);
             self.inner.update(&buffer[..count]);
         }
         Ok(())
     }
 
-    pub fn update_from_reader_sync<R: Read>(&mut self, mut reader: R) -> Result<()> {
+    pub fn update_from_reader_sync<R: Read>(&mut self, reader: R) -> Result<()> {
+        self.update_from_reader_sync_with(reader, |_| {})
+    }
+
+    pub fn update_from_reader_sync_with<R: Read, F: FnMut(&[u8])>(
+        &mut self,
+        mut reader: R,
+        mut each: F,
+    ) -> Result<()> {
         // A buffer of 128KB should give us the best performance.
         // See https://eklitzke.org/efficient-file-copying-on-linux.
         let mut buffer = [0; HASH_BUFFER_SIZE];
@@ -156,6 +170,7 @@ impl Digest {
             if count == 0 {
                 break;
             }
+            each(&buffer[..count]);
             self.inner.update(&buffer[..count]);
         }
         Ok(())
@@ -633,6 +648,59 @@ where
     wait_with_input_output(child, input)
         .await
         .and_then(|output| output.into())
+}
+
+/// Run a command and return a Stream of Result<Bytes, ProcessError>.
+///
+/// * Each Ok(Bytes) value is a chunk of the child process's stdout.
+/// * An Err(ProcessError) value is the exit status and buffered stderr.
+///
+/// If the process exits cleanly, the stream will complete without yielding
+/// any Err results. If the process exits uncleanly, the stream will yield
+/// a Err(ProcessError) and then complete.
+///
+/// This method allows computing a rolling value (such as a hash) on the stdout
+/// without needing to buffer it all in memory (and potentially OOM'ing in
+/// high-concurrency scenarios).
+pub async fn run_input_stream_output<C>(
+    command: C,
+    input: Option<Vec<u8>>,
+) -> Result<impl futures::Stream<Item = Result<bytes::Bytes>>>
+where
+    C: RunCommand + 'static,
+{
+    let (status, stdout, stderr) = run_with_input_buffer_stderr(command, input).await?;
+
+    let status = async move {
+        let (status, stderr) = tokio::try_join!(status, stderr)?;
+        if status.success() {
+            // Never complete on success
+            futures::future::pending::<Result<()>>().await
+        } else {
+            Result::Err(
+                ProcessError(ProcessOutput {
+                    status: status.into(),
+                    stdout: vec![],
+                    stderr,
+                })
+                .into(),
+            )
+        }
+    }
+    .boxed();
+
+    let mut stdout = tokio_util::io::ReaderStream::new(stdout).take_until(status);
+
+    Ok(async_stream::try_stream! {
+        // Yield each stdout bytes chunk
+        for await bytes in stdout.by_ref() {
+            yield bytes?;
+        }
+        // Yield the ProcessError (if any)
+        if let Some(res) = stdout.take_result() {
+            res?;
+        }
+    })
 }
 
 pub async fn run_with_input_buffer_stderr<C>(

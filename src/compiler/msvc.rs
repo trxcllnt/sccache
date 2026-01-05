@@ -23,10 +23,11 @@ use crate::compiler::{
 use crate::compiler::{CompileCommandImpl, args::*};
 use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::util::{OsStrExt, encode_path, normal_temp_path, run_input_output};
-use crate::{counted_array, debug_if_trace, dist};
+use crate::{counted_array, debug_if_trace, dist, server::SccacheService};
 use async_trait::async_trait;
 use fs::File;
 use fs_err as fs;
+use futures::FutureExt;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufWriter, Read, Write};
@@ -70,7 +71,7 @@ impl CCompilerImpl for Msvc {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        _service: &crate::server::SccacheService<T>,
+        _service: &SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
@@ -1085,15 +1086,15 @@ where
                     "[{}]: Failed to parse dependencies from preprocessor result: {err:?}",
                     parsed_args.output_pretty()
                 );
-                Ok(PreprocessorOutput::Output(output))
+                Ok(PreprocessorOutput::Output(output.into()))
             }
             (output, Ok(dependencies)) => Ok(PreprocessorOutput::OutputWithDepedencies(
-                output,
-                dependencies,
+                output.into(),
+                futures::future::ok(dependencies).boxed(),
             )),
         }
     } else {
-        Ok(PreprocessorOutput::Output(output))
+        Ok(PreprocessorOutput::Output(output.into()))
     }
 }
 async fn generate_dependencies<T>(
@@ -1524,7 +1525,6 @@ mod test {
     use super::*;
     use crate::compiler::*;
     use crate::mock_command::*;
-    use crate::server;
     use crate::test::mock_storage::MockStorage;
     use crate::test::utils::*;
 
@@ -2661,11 +2661,8 @@ mod test {
         let runtime = single_threaded_runtime();
         let storage = MockStorage::new(None, false);
         let storage: std::sync::Arc<MockStorage> = std::sync::Arc::new(storage);
-        let service = server::SccacheService::mock_with_storage(
-            storage.clone(),
-            storage,
-            runtime.handle().clone(),
-        );
+        let service =
+            SccacheService::mock_with_storage(storage.clone(), storage, runtime.handle().clone());
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
@@ -2747,11 +2744,8 @@ mod test {
         let runtime = single_threaded_runtime();
         let storage = MockStorage::new(None, false);
         let storage: std::sync::Arc<MockStorage> = std::sync::Arc::new(storage);
-        let service = server::SccacheService::mock_with_storage(
-            storage.clone(),
-            storage,
-            runtime.handle().clone(),
-        );
+        let service =
+            SccacheService::mock_with_storage(storage.clone(), storage, runtime.handle().clone());
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));

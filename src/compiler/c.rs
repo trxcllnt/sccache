@@ -33,6 +33,7 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Buf;
 use fs_err as fs;
+use futures::TryStreamExt;
 use itertools::Itertools;
 use std::{
     borrow::Cow,
@@ -40,8 +41,8 @@ use std::{
     ffi::{OsStr, OsString},
     fmt,
     hash::Hash,
-    io,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{Arc, LazyLock},
 };
 use tempfile::TempPath;
@@ -209,14 +210,29 @@ impl From<&CCompilerKind> for CompilerKind {
     }
 }
 
-#[derive(Debug)]
+pub type ProcessOutputStream = dyn futures::stream::Stream<Item = Result<bytes::Bytes>> + Send;
+pub type DependenciesFuture = dyn futures::Future<Output = Result<Vec<PathBuf>>> + Send;
+
 pub enum PreprocessorOutput {
     // cudafe++, cicc, and ptxas return this. Their output is always
     // saved to an intermediate file, and no preprocessor caching should
     // be done on them.
     File(fs::File),
-    Output(ProcessOutput),
-    OutputWithDepedencies(ProcessOutput, Vec<PathBuf>),
+    Output(Pin<Box<ProcessOutputStream>>),
+    OutputWithDepedencies(Pin<Box<ProcessOutputStream>>, Pin<Box<DependenciesFuture>>),
+}
+
+impl From<ProcessOutput> for Pin<Box<ProcessOutputStream>> {
+    fn from(mut res: ProcessOutput) -> Self {
+        if !res.success() {
+            // Drop the stdout since it's the preprocessor output,
+            // just hand back stderr and the exit status.
+            res.stdout = vec![];
+            Box::pin(futures::stream::iter([Err(ProcessError(res).into())]))
+        } else {
+            Box::pin(futures::stream::iter([Ok(bytes::Bytes::from(res.stdout))]))
+        }
+    }
 }
 
 /// An interface to a specific C compiler.
@@ -523,7 +539,8 @@ where
             &cwd.join(&parsed_args.input),
             compiler.plusplus(),
             &preprocessor_cache_mode_config,
-        )?
+        )
+        .await?
         .filter(|_| !matches!(cache_control, CacheControl::ForceNoCache));
 
         if let Some(preprocessor_key) = preprocessor_key {
@@ -704,176 +721,181 @@ where
             });
         }
 
-        let result = compiler
-            .preprocess(
-                service,
-                creator,
-                executable,
-                parsed_args,
-                &cwd,
-                &env_vars,
-                rewrite_includes_only,
-                // Generate dependencies if we're going to read them below
-                preprocessor_cache_lookup != PreprocessorCacheLookup::Disabled,
-                // include line numbers when `-fprofile-generate` is enabled
-                // to guarantee the profile data embedded in the cached object
-                // matches the line numbers in this source file
-                parsed_args.profile_generate,
-            )
-            .await;
-
         let out_pretty = parsed_args.output_pretty();
 
-        let mut preprocessor_output = match result {
-            Ok(out) => out,
-            Err(err) => {
-                let outputs = &parsed_args.outputs;
-                // Errors remove all traces of potential output.
-                trace!("[{out_pretty}]: removing files {outputs:?}");
-
-                let v = outputs.values().try_for_each(|output| {
-                    let path = cwd.join(&output.path);
-                    match fs::metadata(&path) {
-                        // File exists, remove it.
-                        Ok(_) => fs::remove_file(&path),
-                        _ => Ok(()),
-                    }
-                });
-
-                if v.is_err() {
-                    warn!(
-                        "[{out_pretty}]: Could not remove files after preprocessing failed: {outputs:?}"
-                    );
-                }
-
-                match err.downcast::<ProcessError>() {
-                    Ok(ProcessError(mut output)) => {
-                        debug!(
-                            "[{out_pretty}]: preprocessor returned error (code={:?}, desc={:?})",
-                            output.code(),
-                            output.desc()
-                        );
-                        // Drop the stdout since it's the preprocessor output,
-                        // just hand back stderr and the exit status.
-                        output.stdout = vec![];
-                        bail!(ProcessError(output));
-                    }
+        macro_rules! try_or_cleanup {
+            ($res:expr) => {{
+                match $res {
+                    Ok(res) => res,
                     Err(err) => {
-                        warn!("[{out_pretty}]: preprocessor failed: {err:?}");
-                        return Err(err);
+                        let outputs = &parsed_args.outputs;
+                        // Errors remove all traces of potential output.
+                        trace!("[{out_pretty}]: removing files {outputs:?}");
+
+                        let v = outputs.values().try_for_each(|output| {
+                            let path = cwd.join(&output.path);
+                            match fs::metadata(&path) {
+                                // File exists, remove it.
+                                Ok(_) => fs::remove_file(&path),
+                                _ => Ok(()),
+                            }
+                        });
+
+                        if v.is_err() {
+                            warn!(
+                                "[{out_pretty}]: Could not remove files after preprocessing failed: {outputs:?}"
+                            );
+                        }
+
+                        match err.downcast::<ProcessError>() {
+                            Ok(ProcessError(mut output)) => {
+                                debug!(
+                                    "[{out_pretty}]: preprocessor returned error (code={:?}, desc={:?})",
+                                    output.code(),
+                                    output.desc()
+                                );
+                                // Drop the stdout since it's the preprocessor output,
+                                // just hand back stderr and the exit status.
+                                output.stdout = vec![];
+                                bail!(ProcessError(output));
+                            }
+                            Err(err) => {
+                                warn!("[{out_pretty}]: preprocessor failed: {err:?}");
+                                return Err(err);
+                            }
+                        }
                     }
                 }
-            }
-        };
+            }};
+        }
+
+        let preprocessor_output = try_or_cleanup!(
+            compiler
+                .preprocess(
+                    service,
+                    creator,
+                    executable,
+                    parsed_args,
+                    &cwd,
+                    &env_vars,
+                    rewrite_includes_only,
+                    // Generate dependencies if we're going to read them below
+                    preprocessor_cache_lookup != PreprocessorCacheLookup::Disabled,
+                    // include line numbers when `-fprofile-generate` is enabled
+                    // to guarantee the profile data embedded in the cached object
+                    // matches the line numbers in this source file
+                    parsed_args.profile_generate,
+                )
+                .await
+        );
 
         // Create an argument vector containing both common and arch args, to
         // use in creating a hash key
         let mut common_and_arch_args = parsed_args.common_args.clone();
         common_and_arch_args.extend_from_slice(&parsed_args.arch_args[..]);
 
-        let key = match preprocessor_output {
-            PreprocessorOutput::File(ref res) => hash_key(
-                executable_digest,
-                parsed_args.language,
-                &common_and_arch_args,
-                &extra_hashes,
-                &env_vars,
-                &mut fs::File::open(res.path())?,
-                compiler.plusplus(),
-            ),
-            PreprocessorOutput::Output(ref mut res) => hash_key(
-                executable_digest,
-                parsed_args.language,
-                &common_and_arch_args,
-                &extra_hashes,
-                &env_vars,
-                &mut res.stdout.reader(),
-                compiler.plusplus(),
-            ),
-            PreprocessorOutput::OutputWithDepedencies(ref mut res, dependencies) => {
-                // Remember include files needed in this preprocessing step
-                let included_files = if let PreprocessorCacheLookup::Miss(_) =
-                    preprocessor_cache_lookup
-                {
-                    let paths_and_digests = dependencies.into_iter().map(|path| {
-                        tokio::task::spawn_blocking(move || -> Result<Option<(PathBuf, String)>> {
-                            let file = fs::File::open(&path).map_err(anyhow::Error::new)?;
-                            let (digest, finder) =
-                                if preprocessor_cache_mode_config.ignore_time_macros {
-                                    (Digest::reader_sync(file)?, TimeMacroFinder::new())
-                                } else {
-                                    Digest::reader_sync_time_macros(file)?
-                                };
-                            if finder.found_time() {
-                                Ok(None)
-                            } else {
-                                Ok(Some((path, digest)))
-                            }
-                        })
-                    });
-
-                    futures::future::try_join_all(paths_and_digests)
-                        .await?
-                        .into_iter()
-                        .filter_map_ok(|x| x)
-                        .fold_ok(HashMap::new(), |mut deps, (path, digest)| {
-                            deps.insert(path, digest);
-                            deps
-                        })
-                } else {
-                    Ok(HashMap::new())
-                };
-
-                let included_files = match included_files {
-                    Ok(included_files) => included_files,
-                    Err(err) => {
-                        debug!("[{out_pretty}]: Disabling preprocessor cache mode: {err}");
-                        preprocessor_cache_lookup = PreprocessorCacheLookup::Disabled;
-                        HashMap::new()
-                    }
-                };
-
-                let key = hash_key(
-                    executable_digest,
-                    parsed_args.language,
-                    &common_and_arch_args,
-                    &extra_hashes,
-                    &env_vars,
-                    &mut res.stdout.reader(),
-                    compiler.plusplus(),
-                );
-
-                // Cache the preprocessing step
-                if let PreprocessorCacheLookup::Miss(preprocessor_key) = preprocessor_cache_lookup {
-                    if !included_files.is_empty() {
-                        let mut preprocessor_cache_entry = PreprocessorCacheEntry::new();
-                        let mut included_files = included_files
-                            .into_iter()
-                            .map(|(path, digest)| (digest, path))
-                            .collect::<Vec<_>>();
-                        included_files.sort_unstable_by(|a, b| a.1.cmp(&b.1));
-                        preprocessor_cache_entry.add_result(
-                            start_of_compilation,
-                            &preprocessor_key,
-                            &key,
-                            included_files,
-                        );
-
-                        if let Err(err) = put_preprocessor_cache_entry(
-                            storage.as_ref(),
-                            &preprocessor_key,
-                            preprocessor_cache_entry,
-                        )
-                        .await
-                        {
-                            debug!("[{out_pretty}]: Failed to update preprocessor cache: {err}");
-                        }
-                    }
-                }
-
-                key
+        let (preprocessor_output, dependencies) = match preprocessor_output {
+            PreprocessorOutput::File(res) => {
+                let file = tokio::fs::File::open(res.path()).await?;
+                let bytes = tokio_util::io::ReaderStream::new(file);
+                let bytes = bytes.map_err(|e| e.into());
+                (Box::pin(bytes) as Pin<Box<ProcessOutputStream>>, None)
+            }
+            PreprocessorOutput::Output(res) => (res, None),
+            PreprocessorOutput::OutputWithDepedencies(res, dependencies) => {
+                (res, Some(dependencies))
             }
         };
+
+        let key = try_or_cleanup!(
+            hash_key_async(
+                executable_digest,
+                parsed_args.language,
+                &common_and_arch_args,
+                &extra_hashes,
+                &env_vars,
+                preprocessor_output,
+                compiler.plusplus(),
+            )
+            .await
+        );
+
+        drop(common_and_arch_args);
+
+        if let Some(dependencies) = dependencies {
+            // Remember include files needed in this preprocessing step
+            let included_files = if let PreprocessorCacheLookup::Miss(_) = preprocessor_cache_lookup
+            {
+                let dependencies = try_or_cleanup!(dependencies.await);
+                let paths_and_digests = dependencies.into_iter().map(|path| {
+                    tokio::task::spawn_blocking(move || -> Result<Option<(PathBuf, String)>> {
+                        let file = fs::File::open(&path).map_err(anyhow::Error::new)?;
+                        let (digest, finder) = if preprocessor_cache_mode_config.ignore_time_macros
+                        {
+                            (Digest::reader_sync(file)?, TimeMacroFinder::new())
+                        } else {
+                            Digest::reader_sync_time_macros(file)?
+                        };
+                        if finder.found_time() {
+                            Ok(None)
+                        } else {
+                            Ok(Some((path, digest)))
+                        }
+                    })
+                });
+
+                try_or_cleanup!(
+                    futures::future::try_join_all(paths_and_digests)
+                        .await
+                        .map_err(anyhow::Error::new)
+                )
+                .into_iter()
+                .filter_map_ok(|x| x)
+                .fold_ok(HashMap::new(), |mut deps, (path, digest)| {
+                    deps.insert(path, digest);
+                    deps
+                })
+            } else {
+                Ok(HashMap::new())
+            };
+
+            let included_files = match included_files {
+                Ok(included_files) => included_files,
+                Err(err) => {
+                    debug!("[{out_pretty}]: Disabling preprocessor cache mode: {err}");
+                    preprocessor_cache_lookup = PreprocessorCacheLookup::Disabled;
+                    HashMap::new()
+                }
+            };
+
+            // Cache the preprocessing step
+            if let PreprocessorCacheLookup::Miss(preprocessor_key) = preprocessor_cache_lookup {
+                if !included_files.is_empty() {
+                    let mut preprocessor_cache_entry = PreprocessorCacheEntry::new();
+                    let mut included_files = included_files
+                        .into_iter()
+                        .map(|(path, digest)| (digest, path))
+                        .collect::<Vec<_>>();
+                    included_files.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+                    preprocessor_cache_entry.add_result(
+                        start_of_compilation,
+                        &preprocessor_key,
+                        &key,
+                        included_files,
+                    );
+
+                    if let Err(err) = put_preprocessor_cache_entry(
+                        storage.as_ref(),
+                        &preprocessor_key,
+                        preprocessor_cache_entry,
+                    )
+                    .await
+                    {
+                        debug!("[{out_pretty}]: Failed to update preprocessor cache: {err}");
+                    }
+                }
+            }
+        }
 
         Ok(HashResult {
             key,
@@ -1169,48 +1191,47 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
         let mut path_transformer = path_transformer.clone();
         let mut symlinks = BTreeMap::<PathBuf, PathBuf>::new();
 
-        tokio::task::spawn_blocking(move || -> Result<_> {
-            let dependencies = {
-                let input_path = cwd.join(&parsed_args.input);
-                let input_path = pkg::tarify_path(&mut symlinks, &input_path)?;
+        let dependencies = {
+            let input_path = cwd.join(&parsed_args.input);
+            let input_path = pkg::tarify_path(&mut symlinks, &input_path)?;
 
-                match preprocessor_output {
-                    PreprocessorOutput::File(file) => {
-                        builder.append_path_with_name(
-                            file.path(),
-                            path_transformer
-                                .as_dist(&input_path)
-                                .map(pkg::tar_safe_path)
-                                .with_context(|| {
-                                    format!(
-                                        "unable to transform input path {}",
-                                        input_path.display()
-                                    )
-                                })?,
-                        )?;
-                        vec![]
-                    }
-                    PreprocessorOutput::OutputWithDepedencies(output, dependencies) => {
-                        let dist_input_path = path_transformer
-                            .as_dist_input_path(&input_path)
+            match preprocessor_output {
+                PreprocessorOutput::File(file) => {
+                    builder.append_path_with_name(
+                        file.path(),
+                        path_transformer
+                            .as_dist(&input_path)
+                            .map(pkg::tar_safe_path)
                             .with_context(|| {
                                 format!("unable to transform input path {}", input_path.display())
-                            })?;
-                        let (mut file_header, dist_input_path) =
-                            pkg::make_tar_header(&input_path, &dist_input_path)?;
-                        file_header.set_size(output.stdout.len() as u64); // The metadata is from non-preprocessed
-                        file_header.set_cksum();
-                        builder.append_data(
-                            &mut file_header,
-                            dist_input_path,
-                            output.stdout.as_slice(),
-                        )?;
-                        dependencies
-                    }
-                    _ => unreachable!(),
+                            })?,
+                    )?;
+                    vec![]
                 }
-            };
+                PreprocessorOutput::OutputWithDepedencies(output, dependencies) => {
+                    let dist_input_path = path_transformer
+                        .as_dist_input_path(&input_path)
+                        .with_context(|| {
+                            format!("unable to transform input path {}", input_path.display())
+                        })?;
+                    let (mut file_header, dist_input_path) =
+                        pkg::make_tar_header(&input_path, &dist_input_path)?;
+                    let stdout = output
+                        .try_collect::<Vec<bytes::Bytes>>()
+                        .await?
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>();
+                    file_header.set_size(stdout.len() as u64); // The metadata is from non-preprocessed
+                    file_header.set_cksum();
+                    builder.append_data(&mut file_header, dist_input_path, stdout.as_slice())?;
+                    dependencies.await?
+                }
+                _ => unreachable!(),
+            }
+        };
 
+        tokio::task::spawn_blocking(move || -> Result<_> {
             let extra_dist_files = parsed_args.extra_dist_files;
             let extra_hash_files = parsed_args.extra_hash_files;
 
@@ -1639,7 +1660,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
     }
 }
 
-/// The cache is versioned by the inputs to `hash_key`.
+/// The cache is versioned by the inputs to `hash_key_async`.
 pub const CACHE_VERSION: &[u8] = b"11";
 
 /// Environment variables that are factored into the cache key.
@@ -1663,15 +1684,15 @@ static CACHED_ENV_VARS: LazyLock<HashSet<&'static OsStr>> = LazyLock::new(|| {
 });
 
 /// Compute the hash key of `compiler` compiling `preprocessor_output` with `args`.
-pub fn hash_key<R: io::Read>(
+pub async fn hash_key_async(
     compiler_digest: &str,
     language: Language,
     arguments: &[OsString],
     extra_hashes: &[String],
     env_vars: &[(OsString, OsString)],
-    preprocessor_output: &mut R,
+    mut preprocessor_output: Pin<Box<ProcessOutputStream>>,
     plusplus: bool,
-) -> String {
+) -> Result<String> {
     // If you change any of the inputs to the hash, you should change `CACHE_VERSION`.
     let mut m = Digest::new();
     m.update(compiler_digest.as_bytes());
@@ -1680,9 +1701,11 @@ pub fn hash_key<R: io::Read>(
     m.update(&[plusplus as u8]);
     m.update(CACHE_VERSION);
     m.update(language.as_str().as_bytes());
+
     for arg in arguments {
         arg.hash(&mut HashToDigest { digest: &mut m });
     }
+
     for hash in extra_hashes {
         m.update(hash.as_bytes());
     }
@@ -1694,8 +1717,14 @@ pub fn hash_key<R: io::Read>(
             val.hash(&mut HashToDigest { digest: &mut m });
         }
     }
-    let _ = m.update_from_reader_sync(preprocessor_output);
-    m.finish()
+
+    while let Some(bytes) = preprocessor_output.try_next().await? {
+        let reader = futures::io::AllowStdIo::new(bytes.reader());
+        let reader = std::pin::pin!(reader);
+        m.update_from_reader(reader).await?;
+    }
+
+    Ok(m.finish())
 }
 
 #[cfg(test)]
@@ -1703,33 +1732,44 @@ mod test {
     use crate::{
         cache::StorageKind,
         config::{CacheModeConfig, CacheType, Config, DiskCacheConfig},
+        test::utils::*,
     };
 
     use super::*;
+
+    fn into_process_output_stream(buf: &[u8]) -> Pin<Box<ProcessOutputStream>> {
+        Box::pin(futures::stream::iter([Ok(bytes::Bytes::copy_from_slice(
+            buf,
+        ))]))
+    }
 
     #[test]
     fn test_same_content() {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
         assert_eq!(
-            hash_key(
+            hash_key_async(
                 "abcd",
                 Language::C,
                 &args,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
-                false
-            ),
-            hash_key(
-                "abcd",
-                Language::C,
-                &args,
-                &[],
-                &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false
             )
+            .wait()
+            .unwrap(),
+            hash_key_async(
+                "abcd",
+                Language::C,
+                &args,
+                &[],
+                &[],
+                into_process_output_stream(PREPROCESSED),
+                false
+            )
+            .wait()
+            .unwrap()
         );
     }
 
@@ -1738,24 +1778,28 @@ mod test {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
         assert_neq!(
-            hash_key(
+            hash_key_async(
                 "abcd",
                 Language::C,
                 &args,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false
-            ),
-            hash_key(
+            )
+            .wait()
+            .unwrap(),
+            hash_key_async(
                 "abcd",
                 Language::C,
                 &args,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 true
             )
+            .wait()
+            .unwrap()
         );
     }
 
@@ -1764,24 +1808,28 @@ mod test {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
         assert_neq!(
-            hash_key(
+            hash_key_async(
                 "abcd",
                 Language::C,
                 &args,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false
-            ),
-            hash_key(
+            )
+            .wait()
+            .unwrap(),
+            hash_key_async(
                 "abcd",
                 Language::CHeader,
                 &args,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false
             )
+            .wait()
+            .unwrap()
         );
     }
 
@@ -1790,24 +1838,28 @@ mod test {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
         assert_neq!(
-            hash_key(
+            hash_key_async(
                 "abcd",
                 Language::Cxx,
                 &args,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 true
-            ),
-            hash_key(
+            )
+            .wait()
+            .unwrap(),
+            hash_key_async(
                 "abcd",
                 Language::CxxHeader,
                 &args,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 true
             )
+            .wait()
+            .unwrap()
         );
     }
 
@@ -1816,24 +1868,28 @@ mod test {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
         assert_neq!(
-            hash_key(
+            hash_key_async(
                 "abcd",
                 Language::C,
                 &args,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false
-            ),
-            hash_key(
+            )
+            .wait()
+            .unwrap(),
+            hash_key_async(
                 "wxyz",
                 Language::C,
                 &args,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false
             )
+            .wait()
+            .unwrap()
         );
     }
 
@@ -1846,66 +1902,78 @@ mod test {
         let a = ovec!["a"];
         const PREPROCESSED: &[u8] = b"hello world";
         assert_neq!(
-            hash_key(
+            hash_key_async(
                 digest,
                 Language::C,
                 &abc,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false
-            ),
-            hash_key(
+            )
+            .wait()
+            .unwrap(),
+            hash_key_async(
                 digest,
                 Language::C,
                 &xyz,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false
             )
+            .wait()
+            .unwrap()
         );
 
         assert_neq!(
-            hash_key(
+            hash_key_async(
                 digest,
                 Language::C,
                 &abc,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false
-            ),
-            hash_key(
+            )
+            .wait()
+            .unwrap(),
+            hash_key_async(
                 digest,
                 Language::C,
                 &ab,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false
             )
+            .wait()
+            .unwrap()
         );
 
         assert_neq!(
-            hash_key(
+            hash_key_async(
                 digest,
                 Language::C,
                 &abc,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false
-            ),
-            hash_key(
+            )
+            .wait()
+            .unwrap(),
+            hash_key_async(
                 digest,
                 Language::C,
                 &a,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false
             )
+            .wait()
+            .unwrap()
         );
     }
 
@@ -1913,24 +1981,28 @@ mod test {
     fn test_hash_key_preprocessed_content_differs() {
         let args = ovec!["a", "b", "c"];
         assert_neq!(
-            hash_key(
+            hash_key_async(
                 "abcd",
                 Language::C,
                 &args,
                 &[],
                 &[],
-                &mut b"hello world"[..].reader(),
-                false
-            ),
-            hash_key(
-                "abcd",
-                Language::C,
-                &args,
-                &[],
-                &[],
-                &mut b"goodbye"[..].reader(),
+                into_process_output_stream(b"hello world"),
                 false
             )
+            .wait()
+            .unwrap(),
+            hash_key_async(
+                "abcd",
+                Language::C,
+                &args,
+                &[],
+                &[],
+                into_process_output_stream(b"goodbye"),
+                false
+            )
+            .wait()
+            .unwrap()
         );
     }
 
@@ -1940,35 +2012,41 @@ mod test {
         let digest = "abcd";
         const PREPROCESSED: &[u8] = b"hello world";
         for var in CACHED_ENV_VARS.iter() {
-            let h1 = hash_key(
+            let h1 = hash_key_async(
                 digest,
                 Language::C,
                 &args,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false,
-            );
+            )
+            .wait()
+            .unwrap();
             let vars = vec![(OsString::from(var), OsString::from("something"))];
-            let h2 = hash_key(
+            let h2 = hash_key_async(
                 digest,
                 Language::C,
                 &args,
                 &[],
                 &vars,
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false,
-            );
+            )
+            .wait()
+            .unwrap();
             let vars = vec![(OsString::from(var), OsString::from("something else"))];
-            let h3 = hash_key(
+            let h3 = hash_key_async(
                 digest,
                 Language::C,
                 &args,
                 &[],
                 &vars,
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false,
-            );
+            )
+            .wait()
+            .unwrap();
             assert_neq!(h1, h2);
             assert_neq!(h2, h3);
         }
@@ -1982,24 +2060,28 @@ mod test {
         let extra_data = stringvec!["hello", "world"];
 
         assert_neq!(
-            hash_key(
+            hash_key_async(
                 digest,
                 Language::C,
                 &args,
                 &extra_data,
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false
-            ),
-            hash_key(
+            )
+            .wait()
+            .unwrap(),
+            hash_key_async(
                 digest,
                 Language::C,
                 &args,
                 &[],
                 &[],
-                &mut PREPROCESSED[..].reader(),
+                into_process_output_stream(PREPROCESSED),
                 false
             )
+            .wait()
+            .unwrap()
         );
     }
 

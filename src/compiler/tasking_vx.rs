@@ -28,9 +28,11 @@ use crate::{
     counted_array, debug_if_trace, dist,
     errors::*,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
+    server::SccacheService,
     util::{normal_temp_path, run_input_output},
 };
 use async_trait::async_trait;
+use futures::FutureExt;
 use std::{
     collections::HashMap,
     ffi::OsString,
@@ -66,7 +68,7 @@ impl CCompilerImpl for TaskingVX {
 
     async fn preprocess<T>(
         &self,
-        _service: &crate::server::SccacheService<T>,
+        _service: &SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
@@ -90,14 +92,12 @@ impl CCompilerImpl for TaskingVX {
         // of the input file, with the extension .o. With the option --make-target
         // you can specify a target name which overrules the default target name.
         let dependencies = if generate_dependencies || parsed_args.depfile.is_some() {
-            if let Some((depfile, _)) = self
-                .generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
+            self.generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
                 .await?
-            {
-                Some(gcc::parse_dependencies(parsed_args, cwd, &depfile).await?)
-            } else {
-                None
-            }
+                .map(|depfile| {
+                    gcc::parse_dependencies(cwd.to_owned(), cwd.join(&parsed_args.input), depfile)
+                        .boxed()
+                })
         } else {
             None
         };
@@ -106,9 +106,9 @@ impl CCompilerImpl for TaskingVX {
             .await
             .map(|output| {
                 if let Some(dependencies) = dependencies {
-                    PreprocessorOutput::OutputWithDepedencies(output, dependencies)
+                    PreprocessorOutput::OutputWithDepedencies(output.into(), dependencies)
                 } else {
-                    PreprocessorOutput::Output(output)
+                    PreprocessorOutput::Output(output.into())
                 }
             })
     }
@@ -449,13 +449,12 @@ fn generate_compile_commands(
 #[cfg(test)]
 mod test {
     use super::{
-        ARGS, Language, OsString, ParsedArguments, PathBuf, dist, generate_compile_commands,
-        parse_arguments,
+        ARGS, Language, OsString, ParsedArguments, PathBuf, SccacheService, dist,
+        generate_compile_commands, parse_arguments,
     };
     use crate::compiler::c::ArtifactDescriptor;
     use crate::compiler::*;
     use crate::mock_command::*;
-    use crate::server;
     use crate::test::mock_storage::MockStorage;
     use crate::test::utils::*;
 
@@ -794,11 +793,8 @@ mod test {
         let runtime = single_threaded_runtime();
         let storage = MockStorage::new(None, false);
         let storage: std::sync::Arc<MockStorage> = std::sync::Arc::new(storage);
-        let service = server::SccacheService::mock_with_storage(
-            storage.clone(),
-            storage,
-            runtime.handle().clone(),
-        );
+        let service =
+            SccacheService::mock_with_storage(storage.clone(), storage, runtime.handle().clone());
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
@@ -844,11 +840,8 @@ mod test {
         let runtime = single_threaded_runtime();
         let storage = MockStorage::new(None, false);
         let storage: std::sync::Arc<MockStorage> = std::sync::Arc::new(storage);
-        let service = server::SccacheService::mock_with_storage(
-            storage.clone(),
-            storage,
-            runtime.handle().clone(),
-        );
+        let service =
+            SccacheService::mock_with_storage(storage.clone(), storage, runtime.handle().clone());
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));

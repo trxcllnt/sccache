@@ -611,7 +611,7 @@ impl<T: CommandCreator + 'static + Send> CommandCreatorSync for Arc<Mutex<T>> {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessOutput {
-    status: ProcessStatus,
+    pub status: ProcessStatus,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
 }

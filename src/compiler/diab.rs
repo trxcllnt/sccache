@@ -26,10 +26,11 @@ use crate::compiler::{
 };
 use crate::mock_command::{CommandCreatorSync, RunCommand};
 use crate::util::{OsStrExt, normal_temp_path, run_input_output};
-use crate::{counted_array, dist};
+use crate::{counted_array, dist, server::SccacheService};
 use crate::{debug_if_trace, errors::*};
 use async_trait::async_trait;
 use fs_err as fs;
+use futures::FutureExt;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::Read;
@@ -67,7 +68,7 @@ impl CCompilerImpl for Diab {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        _service: &crate::server::SccacheService<T>,
+        _service: &SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
@@ -398,13 +399,13 @@ where
 
     let output = run_input_output(cmd, None).await?;
 
-    if let Some((depfile, _)) = depfile {
+    if let Some(depfile) = depfile {
         Ok(PreprocessorOutput::OutputWithDepedencies(
-            output,
-            gcc::parse_dependencies(parsed_args, cwd, &depfile).await?,
+            output.into(),
+            gcc::parse_dependencies(cwd.to_owned(), cwd.join(&parsed_args.input), depfile).boxed(),
         ))
     } else {
-        Ok(PreprocessorOutput::Output(output))
+        Ok(PreprocessorOutput::Output(output.into()))
     }
 }
 

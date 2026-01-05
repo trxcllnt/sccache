@@ -426,7 +426,7 @@ static CACHED_ENV_VARS: LazyLock<HashSet<&'static OsStr>> = LazyLock::new(|| {
 
 /// Compute the hash key of compiler preprocessing `input` with `args`.
 #[allow(clippy::too_many_arguments)]
-pub fn preprocessor_cache_entry_hash_key(
+pub async fn preprocessor_cache_entry_hash_key(
     compiler_digest: &str,
     language: Language,
     arguments: &[OsString],
@@ -459,31 +459,38 @@ pub fn preprocessor_cache_entry_hash_key(
         }
     }
 
-    // Hash the input file otherwise:
-    // - a/r.h exists.
-    // - a/x.c has #include "r.h".
-    // - b/x.c is identical to a/x.c.
-    // - Compiling a/x.c records a/r.h in the preprocessor cache entry.
-    // - Compiling b/x.c results in a false cache hit since a/x.c and b/x.c
-    // share preprocessor cache entries and a/r.h exists.
-    let mut buf = vec![];
-    encode_path(&mut buf, input_file)?;
-    m.update(&buf);
-    let reader = std::fs::File::open(input_file)
-        .with_context(|| format!("while hashing the input file '{}'", input_file.display()))?;
+    {
+        // Hash the input file path, otherwise:
+        // - a/r.h exists.
+        // - a/x.c has #include "r.h".
+        // - b/x.c is identical to a/x.c.
+        // - Compiling a/x.c records a/r.h in the preprocessor cache entry.
+        // - Compiling b/x.c results in a false cache hit since a/x.c and b/x.c
+        // share preprocessor cache entries and a/r.h exists.
+        let mut buf = vec![];
+        encode_path(&mut buf, input_file)?;
+        m.update(&buf);
+    }
 
-    let digest = if config.ignore_time_macros {
-        Digest::reader_sync(reader)?
+    use tokio_util::compat::TokioAsyncReadCompatExt;
+    let reader = tokio::fs::File::open(input_file)
+        .await
+        .with_context(|| format!("while hashing the input file '{}'", input_file.display()))?;
+    let reader = std::pin::pin!(reader.compat());
+
+    if config.ignore_time_macros {
+        m.update_from_reader(reader).await?;
     } else {
-        let (digest, finder) = Digest::reader_sync_time_macros(reader)?;
+        let mut finder = TimeMacroFinder::new();
+        m.update_from_reader_with(reader, |chunk| finder.find_time_macros(chunk))
+            .await?;
         if finder.found_time() {
             // Disable preprocessor cache mode
             debug!("Found __TIME__ in {}", input_file.display());
             return Ok(None);
         }
-        digest
-    };
-    m.update(digest.as_bytes());
+    }
+
     Ok(Some(m.finish()))
 }
 
