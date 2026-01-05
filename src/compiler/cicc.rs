@@ -314,36 +314,40 @@ pub fn generate_compile_commands(
 
     debug_if_trace!("[{out_pretty}]: {language} command: {command}");
 
-    Ok((
-        command,
-        #[cfg(not(feature = "dist-client"))]
-        None,
-        #[cfg(feature = "dist-client")]
-        (|| {
-            let command = dist::CompileCommand {
-                arguments: [
-                    &dist::osstrings_to_strings(&parsed_args.common_args)?[..],
-                    // Don't send unhashed args (i.e. `-split-compile`) to the build cluster
-                    // &dist::osstrings_to_strings(&parsed_args.unhashed_args)?[..],
-                    &[
-                        output_flag.into(),
-                        path_transformer.as_dist(output)?,
-                        path_transformer.as_dist(input)?,
-                    ],
-                ]
-                .concat(),
-                cwd: path_transformer.as_dist_abs(cwd)?,
-                env_vars: dist::osstring_tuples_to_strings(env_vars)?,
-                executable: path_transformer
-                    .as_dist(dunce::canonicalize(executable).ok()?.as_path())?,
-            };
+    #[cfg(not(feature = "dist-client"))]
+    {
+        Ok((command, None, Cacheable::Yes))
+    }
+    #[cfg(feature = "dist-client")]
+    {
+        Ok((
+            command,
+            (|| {
+                let command = dist::CompileCommand {
+                    arguments: [
+                        &dist::osstrings_to_strings(&parsed_args.common_args)?[..],
+                        // Don't send unhashed args (i.e. `-split-compile`) to the build cluster
+                        // &dist::osstrings_to_strings(&parsed_args.unhashed_args)?[..],
+                        &[
+                            output_flag.into(),
+                            path_transformer.as_dist(output)?,
+                            path_transformer.as_dist(input)?,
+                        ],
+                    ]
+                    .concat(),
+                    cwd: path_transformer.as_dist_abs(cwd)?,
+                    env_vars: dist::osstring_tuples_to_strings(env_vars)?,
+                    executable: path_transformer
+                        .as_dist(dunce::canonicalize(executable).ok()?.as_path())?,
+                };
 
-            debug_if_trace!("[{out_pretty}]: {language} dist_command: {command}");
+                debug_if_trace!("[{out_pretty}]: {language} dist_command: {command}");
 
-            Some(command)
-        })(),
-        Cacheable::Yes,
-    ))
+                Some(command)
+            })(),
+            Cacheable::Yes,
+        ))
+    }
 }
 
 ArgData! { pub
