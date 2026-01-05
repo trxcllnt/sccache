@@ -785,7 +785,9 @@ pub fn parse_arguments(
         Some(o) => {
             if o.as_os_str()
                 .to_string_lossy()
-                .ends_with(std::path::MAIN_SEPARATOR)
+                // On Windows, both '\' and '/' are valid path separators
+                // and accepted by `cl.exe` as a delimiter
+                .ends_with(['\\', '/'])
             {
                 match Path::new(&input).file_name() {
                     Some(i) => outputs.insert(
@@ -2049,6 +2051,40 @@ mod test {
                     path: PathBuf::from("myrelease/folder/foo.obj"),
                     optional: false,
                     must_be_non_empty: false
+                }
+            )
+        );
+        assert!(preprocessor_args.is_empty());
+        assert!(common_args.is_empty());
+        assert!(!msvc_show_includes);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn parse_argument_output_file_trailing_slash_multi_extension() {
+        let args = ovec!["/c", "foo.pb.c", "-Fomyrelease\\folder/"];
+        let ParsedArguments {
+            input,
+            language,
+            outputs,
+            preprocessor_args,
+            msvc_show_includes,
+            common_args,
+            ..
+        } = match parse_arguments(args) {
+            CompilerArguments::Ok(args) => args,
+            o => panic!("Got unexpected parse result: {:?}", o),
+        };
+        assert_eq!(Some("foo.pb.c"), input.to_str());
+        assert_eq!(Language::C, language);
+        assert_map_contains!(
+            outputs,
+            (
+                "obj",
+                ArtifactDescriptor {
+                    path: PathBuf::from("myrelease/folder/foo.pb.obj"),
+                    optional: false,
+                    must_be_non_empty: false,
                 }
             )
         );

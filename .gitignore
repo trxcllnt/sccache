@@ -46,3 +46,5 @@ target
 # Don't ignore VSCode debugger launch config
 /.vscode/*
 !/.vscode/launch.json
+.direnv/
+result
