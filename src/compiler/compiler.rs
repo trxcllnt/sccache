@@ -1454,6 +1454,10 @@ where
                     .collect::<Vec<_>>()
             );
 
+            if !build_result.output.success() {
+                break Ok((DistType::Ok(server_id), build_result.output));
+            }
+
             let mut outputs = outputs.iter().collect::<Vec<_>>();
             let build_outputs_count = build_result.outputs.len();
             let build_outputs = build_result.outputs.into_iter();
