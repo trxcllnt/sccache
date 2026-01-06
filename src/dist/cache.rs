@@ -12,7 +12,7 @@ mod client {
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
+    use std::sync::{Arc, Weak};
 
     use crate::config;
     use crate::dist::Toolchain;
@@ -42,6 +42,7 @@ mod client {
         custom_toolchain_paths: Mutex<HashMap<PathBuf, (CustomToolchain, Option<Toolchain>)>>,
         // Toolchains configured to not be distributed
         disabled_toolchains: HashSet<PathBuf>,
+        packaged_toolchains: Mutex<HashMap<String, Weak<dyn PackagedToolchain>>>,
         // Local machine mapping from 'weak' hashes to strong toolchain hashes
         // - Weak hashes are what sccache uses to determine if a compiler has changed
         //   on the local machine - they're fast and 'good enough' (assuming we trust
@@ -157,6 +158,7 @@ mod client {
                 custom_toolchain_archives: Mutex::new(HashMap::new()),
                 custom_toolchain_paths,
                 disabled_toolchains,
+                packaged_toolchains: Default::default(),
                 // TODO: shouldn't clear on restart, but also should have some
                 // form of pruning
                 weak_map: Mutex::new(weak_map),
@@ -199,7 +201,7 @@ mod client {
         )> {
             if self.disabled_toolchains.contains(compiler_path) {
                 bail!(
-                    "Toolchain distribution for {} is disabled",
+                    "Toolchain distribution for {:?} is disabled",
                     compiler_path.display()
                 )
             }
@@ -212,22 +214,30 @@ mod client {
             // Only hash one toolchain at a time.
             // Not an issue if there are multiple attempts to
             // create the same toolchain, just a waste of time
+            let cache = self.cache.lock().await;
             let mut weak_map = self.weak_map.lock().await;
+            let mut packaged_toolchains = self.packaged_toolchains.lock().await;
 
             if let Some(archive_id) = weak_map.get(weak_key) {
-                trace!("Using cached toolchain {} -> {}", weak_key, archive_id);
-                return Ok((
-                    Toolchain {
-                        archive_id: archive_id.to_owned(),
-                    },
-                    None,
-                    None,
-                ));
+                let packaged = packaged_toolchains.get(archive_id).and_then(Weak::upgrade);
+                if packaged.is_some() || cache.contains_key(archive_id) {
+                    trace!("Using cached toolchain {:?} -> {:?}", weak_key, archive_id);
+                    return Ok((
+                        Toolchain {
+                            archive_id: archive_id.to_owned(),
+                        },
+                        None,
+                        packaged,
+                    ));
+                }
             }
 
-            debug!("Weak key {weak_key} appears to be new");
+            debug!("Weak key appears to be new: {weak_key:?}");
 
-            let packaged = toolchain_packager.package().await?;
+            let packaged = toolchain_packager
+                .package()
+                .await
+                .context("Could not package toolchain")?;
 
             let archive_id = packaged
                 .compute_hash()
@@ -235,6 +245,7 @@ mod client {
                 .context("Could not hash toolchain")?;
 
             weak_map.insert(weak_key.to_owned(), archive_id.clone());
+            packaged_toolchains.insert(archive_id.clone(), Arc::downgrade(&packaged));
 
             let weak_map_path = self.cache_dir.join("weak_map.json");
             fs::File::create(weak_map_path)
@@ -248,7 +259,6 @@ mod client {
         // If the toolchain doesn't already exist, compress it and insert into the local cache
         pub async fn put_toolchain(
             &self,
-            compiler_path: &Path,
             toolchain: &Toolchain,
             packaged: &dyn PackagedToolchain,
         ) -> Result<()> {
@@ -257,23 +267,18 @@ mod client {
 
             if let Ok(file) = cache.get_file(&toolchain.archive_id) {
                 trace!(
-                    "Using cached toolchain {} -> {}",
+                    "Using cached toolchain {:?} -> {:?}",
                     toolchain.archive_id,
                     file.path().display()
                 );
                 return Ok(());
             }
 
-            debug!(
-                "Compressing toolchain {} -> {}",
-                compiler_path.display(),
-                toolchain.archive_id,
-            );
             let (tmpfile, tmppath) =
                 crate::util::tempfile_in(self.cache_dir.join("toolchain_tmp"))?.into_parts();
 
             packaged
-                .write_tar_gz(fs_err::File::from_parts(tmpfile, &tmppath))
+                .write_tar_gz(toolchain, fs_err::File::from_parts(tmpfile, &tmppath))
                 .await
                 .context("Could not compress toolchain")?;
 

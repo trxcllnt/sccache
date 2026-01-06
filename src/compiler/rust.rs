@@ -2246,17 +2246,16 @@ struct RustToolchainPackager {
 ))]
 impl pkg::ToolchainPackager for RustToolchainPackager {
     async fn package(&self) -> Result<Arc<dyn pkg::PackagedToolchain>> {
-        info!(
-            "Packaging Rust compiler for sysroot {}",
+        debug!(
+            "Packaging Rust compiler for sysroot {:?}",
             self.sysroot.display()
         );
         let RustToolchainPackager { sysroot } = self;
 
-        let mut package_builder = pkg::ToolchainPackaged::new();
-        package_builder.add_common()?;
-
         let bins_path = sysroot.join(BINS_DIR);
         let sysroot_executable = bins_path.join("rustc").with_extension(EXE_EXTENSION);
+        let mut package_builder = pkg::ToolchainPackaged::new(sysroot_executable.clone());
+        package_builder.add_common()?;
         package_builder.add_executable_and_deps(&[], &sysroot_executable)?;
 
         package_builder.add_dir_contents(&[], &bins_path)?;

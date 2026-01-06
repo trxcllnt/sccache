@@ -871,6 +871,13 @@ mod client {
         util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc, new_reqwest_client},
     };
 
+    impl AsyncMulticastArgs for (Toolchain, Option<Arc<dyn PackagedToolchain + '_>>) {
+        type Key = String;
+        fn hash(&self) -> Self::Key {
+            self.0.archive_id.clone()
+        }
+    }
+
     struct SubmitToolchainFn {
         client: Arc<ReqwestClients>,
         auth_token: String,
@@ -878,30 +885,15 @@ mod client {
         client_toolchains: Arc<cache::ClientToolchains>,
     }
 
-    impl AsyncMulticastArgs
-        for (
-            PathBuf,
-            crate::dist::Toolchain,
-            Arc<dyn PackagedToolchain + '_>,
-        )
-    {
-        type Key = String;
-        fn hash(&self) -> Self::Key {
-            self.1.archive_id.clone()
-        }
-    }
-
     #[async_trait]
-    impl AsyncMulticastFunc<(PathBuf, Toolchain, Arc<dyn PackagedToolchain>), SubmitToolchainResult>
+    impl AsyncMulticastFunc<(Toolchain, Option<Arc<dyn PackagedToolchain>>), SubmitToolchainResult>
         for SubmitToolchainFn
     {
         async fn call(
             &self,
-            (compiler_path, tc, packaged): &(PathBuf, Toolchain, Arc<dyn PackagedToolchain>),
+            (tc, packaged): &(Toolchain, Option<Arc<dyn PackagedToolchain>>),
         ) -> Result<SubmitToolchainResult> {
             let id = &tc.archive_id;
-
-            debug!("Submitting toolchain {id:?}");
 
             let Self {
                 client,
@@ -910,14 +902,17 @@ mod client {
                 client_toolchains,
             } = self;
 
-            client_toolchains
-                .put_toolchain(compiler_path, tc, packaged.as_ref())
-                .await?;
+            if let Some(packaged) = packaged {
+                client_toolchains
+                    .put_toolchain(tc, packaged.as_ref())
+                    .await?;
+            }
 
             let res = match client_toolchains.get_toolchain(tc).await {
                 Err(e) => Err(e),
                 Ok(None) => Err(anyhow!("Couldn't find toolchain locally")),
                 Ok(Some(file)) => {
+                    debug!("Uploading toolchain {id:?}");
                     let body = futures::io::AllowStdIo::new(file);
                     let body = tokio_util::io::ReaderStream::new(body.compat());
                     let req = client
@@ -1007,7 +1002,7 @@ mod client {
         rewrite_includes_only: bool,
         scheduler_url: reqwest::Url,
         submit_toolchain_reqs:
-            AsyncMulticast<(PathBuf, Toolchain, Arc<dyn PackagedToolchain>), SubmitToolchainResult>,
+            AsyncMulticast<(Toolchain, Option<Arc<dyn PackagedToolchain>>), SubmitToolchainResult>,
         tc_cache: Arc<cache::ClientToolchains>,
     }
 
@@ -1142,16 +1137,13 @@ mod client {
 
         async fn put_toolchain(
             &self,
-            compiler_path: &Path,
-            tc: Toolchain,
-            packaged: Arc<dyn PackagedToolchain>,
+            toolchain: Toolchain,
+            packaged: Option<Arc<dyn PackagedToolchain>>,
         ) -> Result<SubmitToolchainResult> {
-            let id = tc.archive_id.clone();
             self.submit_toolchain_reqs
-                .call((compiler_path.to_owned(), tc, packaged))
+                .call((toolchain, packaged))
                 .await
                 .map(|(_, res)| res)
-                .map_err(|_| anyhow!("Failed to submit toolchain {id:?}"))
         }
 
         async fn hash_toolchain(

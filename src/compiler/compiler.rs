@@ -1241,10 +1241,9 @@ where
 
         trace!("[{out_pretty}]: Identifying dist toolchain for {executable:?}");
 
-        let (dist_toolchain, maybe_dist_compile_executable, mut maybe_packaged_toolchain) =
-            dist_client
-                .hash_toolchain(executable, &weak_toolchain_key, toolchain_packager.as_ref())
-                .await?;
+        let (dist_toolchain, maybe_dist_compile_executable, packaged_toolchain) = dist_client
+            .hash_toolchain(executable, &weak_toolchain_key, toolchain_packager.as_ref())
+            .await?;
 
         let tc_archive =
             maybe_dist_compile_executable.map(|(dist_compile_executable, archive_path)| {
@@ -1352,15 +1351,8 @@ where
             }
 
             if !has_toolchain {
-                if maybe_packaged_toolchain.is_none() {
-                    maybe_packaged_toolchain = Some(toolchain_packager.package().await?);
-                }
                 match dist_client
-                    .put_toolchain(
-                        executable,
-                        dist_toolchain.clone(),
-                        maybe_packaged_toolchain.as_ref().unwrap().clone(),
-                    )
+                    .put_toolchain(dist_toolchain.clone(), packaged_toolchain.clone())
                     .await
                     .map_err(|e| e.context("Could not submit toolchain"))
                 {
@@ -4222,7 +4214,10 @@ mod test_dist {
         self, CompileCommand, NewJobResponse, OutputData, RunJobResponse, SchedulerStatus,
         SubmitToolchainResult, Toolchain,
     };
-    use crate::dist::{BuildResult, pkg};
+    use crate::dist::{
+        BuildResult,
+        pkg::{PackagedToolchain, ToolchainPackager},
+    };
     use crate::mock_command::ProcessOutput;
     use async_trait::async_trait;
     use std::path::{Path, PathBuf};
@@ -4234,11 +4229,11 @@ mod test_dist {
     struct PanicPackagedToolchain;
 
     #[async_trait]
-    impl pkg::PackagedToolchain for PanicPackagedToolchain {
+    impl PackagedToolchain for PanicPackagedToolchain {
         async fn compute_hash(&self) -> Result<String> {
             panic!("PackagedToolchain::compute_hash should not have called packager")
         }
-        async fn write_tar_gz(&self, _: fs_err::File) -> Result<()> {
+        async fn write_tar_gz(&self, _: &Toolchain, _: fs_err::File) -> Result<()> {
             panic!("PackagedToolchain::write_compressed_tar should not have called packager")
         }
     }
@@ -4266,9 +4261,8 @@ mod test_dist {
         }
         async fn put_toolchain(
             &self,
-            _: &Path,
             _: Toolchain,
-            _: Arc<dyn pkg::PackagedToolchain>,
+            _: Option<Arc<dyn PackagedToolchain>>,
         ) -> Result<SubmitToolchainResult> {
             unreachable!()
         }
@@ -4286,13 +4280,13 @@ mod test_dist {
             &self,
             _: &Path,
             _: &str,
-            _: &dyn pkg::ToolchainPackager,
+            _: &dyn ToolchainPackager,
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
-            Option<Arc<dyn pkg::PackagedToolchain>>,
+            Option<Arc<dyn PackagedToolchain>>,
         )> {
-            Err(anyhow!("MOCK: get_toolchain_local failure"))
+            Err(anyhow!("MOCK: hash_toolchain failure"))
         }
         fn fallback_to_local_compile(&self) -> bool {
             true
@@ -4341,9 +4335,8 @@ mod test_dist {
         }
         async fn put_toolchain(
             &self,
-            _: &Path,
             _: Toolchain,
-            _: Arc<dyn pkg::PackagedToolchain>,
+            _: Option<Arc<dyn PackagedToolchain>>,
         ) -> Result<SubmitToolchainResult> {
             unreachable!()
         }
@@ -4361,13 +4354,17 @@ mod test_dist {
             &self,
             _: &Path,
             _: &str,
-            _: &dyn pkg::ToolchainPackager,
+            _: &dyn ToolchainPackager,
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
-            Option<Arc<dyn pkg::PackagedToolchain>>,
+            Option<Arc<dyn PackagedToolchain>>,
         )> {
-            Ok((self.tc.clone(), None, None))
+            Ok((
+                self.tc.clone(),
+                None,
+                Some(Arc::new(PanicPackagedToolchain)),
+            ))
         }
         fn fallback_to_local_compile(&self) -> bool {
             true
@@ -4430,9 +4427,8 @@ mod test_dist {
         }
         async fn put_toolchain(
             &self,
-            _: &Path,
             tc: Toolchain,
-            _: Arc<dyn pkg::PackagedToolchain>,
+            _: Option<Arc<dyn PackagedToolchain>>,
         ) -> Result<SubmitToolchainResult> {
             assert_eq!(self.tc, tc);
             Err(anyhow!("MOCK: submit toolchain failure"))
@@ -4451,11 +4447,11 @@ mod test_dist {
             &self,
             _: &Path,
             _: &str,
-            _: &dyn pkg::ToolchainPackager,
+            _: &dyn ToolchainPackager,
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
-            Option<Arc<dyn pkg::PackagedToolchain>>,
+            Option<Arc<dyn PackagedToolchain>>,
         )> {
             Ok((
                 self.tc.clone(),
@@ -4524,9 +4520,8 @@ mod test_dist {
         }
         async fn put_toolchain(
             &self,
-            _: &Path,
             tc: Toolchain,
-            _: Arc<dyn pkg::PackagedToolchain>,
+            _: Option<Arc<dyn PackagedToolchain>>,
         ) -> Result<SubmitToolchainResult> {
             assert_eq!(self.tc, tc);
             Ok(SubmitToolchainResult::Success)
@@ -4549,11 +4544,11 @@ mod test_dist {
             &self,
             _: &Path,
             _: &str,
-            _: &dyn pkg::ToolchainPackager,
+            _: &dyn ToolchainPackager,
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
-            Option<Arc<dyn pkg::PackagedToolchain>>,
+            Option<Arc<dyn PackagedToolchain>>,
         )> {
             Ok((
                 self.tc.clone(),
@@ -4634,9 +4629,8 @@ mod test_dist {
         }
         async fn put_toolchain(
             &self,
-            _: &Path,
             tc: Toolchain,
-            _: Arc<dyn pkg::PackagedToolchain>,
+            _: Option<Arc<dyn PackagedToolchain>>,
         ) -> Result<SubmitToolchainResult> {
             if self.has_toolchain {
                 panic!("DistClient::put_toolchain should not have been called!")
@@ -4679,11 +4673,11 @@ mod test_dist {
             &self,
             _: &Path,
             _: &str,
-            _: &dyn pkg::ToolchainPackager,
+            _: &dyn ToolchainPackager,
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
-            Option<Arc<dyn pkg::PackagedToolchain>>,
+            Option<Arc<dyn PackagedToolchain>>,
         )> {
             Ok((
                 self.tc.clone(),

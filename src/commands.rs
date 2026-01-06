@@ -811,6 +811,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
         #[cfg(feature = "dist-client")]
         Command::PackageToolchain(executable, out) => {
             use crate::compiler;
+            use crate::dist::Toolchain;
 
             trace!("Command::PackageToolchain({})", executable.display());
             let runtime = Runtime::new()?;
@@ -823,13 +824,28 @@ pub fn run_command(cmd: Command) -> Result<i32> {
 
             let pool = runtime.handle().clone();
             runtime.block_on(async move {
-                compiler::get_compiler_info(creator, &executable, &cwd, &args, &env, &pool, None)
-                    .await?
-                    .0
-                    .get_toolchain_packager()
-                    .package()
-                    .await?
-                    .write_tar_gz(out_file)
+                let packaged = compiler::get_compiler_info(
+                    creator,
+                    &executable,
+                    &cwd,
+                    &args,
+                    &env,
+                    &pool,
+                    None,
+                )
+                .await?
+                .0
+                .get_toolchain_packager()
+                .package()
+                .await?;
+
+                packaged
+                    .write_tar_gz(
+                        &Toolchain {
+                            archive_id: packaged.compute_hash().await?,
+                        },
+                        out_file,
+                    )
                     .await
             })?;
         }

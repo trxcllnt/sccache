@@ -1306,8 +1306,11 @@ impl pkg::ToolchainPackager for CToolchainPackager {
     async fn package(&self) -> Result<Arc<dyn pkg::PackagedToolchain>> {
         use std::os::unix::ffi::OsStringExt;
 
-        debug!("Generating toolchain {}", self.executable.display());
-        let mut package_builder = pkg::ToolchainPackaged::new();
+        debug!(
+            "Packaging toolchain for executable {:?}",
+            self.executable.display()
+        );
+        let mut package_builder = pkg::ToolchainPackaged::new(self.executable.clone());
         package_builder.add_common()?;
 
         // Helper to use -print-file-name and -print-prog-name to look up

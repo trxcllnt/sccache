@@ -36,7 +36,7 @@ pub trait ToolchainPackager: Send + Sync {
 #[async_trait]
 pub trait PackagedToolchain: Send + Sync {
     async fn compute_hash(&self) -> Result<String>;
-    async fn write_tar_gz(&self, f: fs::File) -> Result<()>;
+    async fn write_tar_gz(&self, toolchain: &dist::Toolchain, f: fs::File) -> Result<()>;
 }
 
 pub trait InputsWriter: Write + Send {
@@ -122,10 +122,11 @@ mod toolchain_imp {
     use std::str;
     use walkdir::WalkDir;
 
-    use super::{PackagedToolchain, tar_safe_path};
+    use super::{PackagedToolchain, dist::Toolchain, tar_safe_path};
     use crate::errors::*;
 
     pub struct ToolchainPackaged {
+        executable: PathBuf,
         // Put dirs and file in a deterministic order (map from tar_path -> real_path)
         dir_set: BTreeMap<PathBuf, PathBuf>,
         file_set: BTreeMap<PathBuf, PathBuf>,
@@ -136,8 +137,9 @@ mod toolchain_imp {
     }
 
     impl ToolchainPackaged {
-        pub fn new() -> Self {
+        pub fn new(executable: PathBuf) -> Self {
             Self {
+                executable,
                 dir_set: BTreeMap::new(),
                 file_set: BTreeMap::new(),
                 symlinks: BTreeMap::new(),
@@ -325,7 +327,7 @@ mod toolchain_imp {
             .await?
         }
 
-        async fn write_tar_gz(&self, writer: fs::File) -> Result<()> {
+        async fn write_tar_gz(&self, toolchain: &Toolchain, writer: fs::File) -> Result<()> {
             use crate::util::num_cpus;
 
             use gzp::{
@@ -336,6 +338,12 @@ mod toolchain_imp {
             let dir_set = self.dir_set.clone();
             let file_set = self.file_set.clone();
             let symlinks = self.symlinks.clone();
+
+            debug!(
+                "Compressing toolchain for {:?} -> {:?}",
+                self.executable.display(),
+                toolchain.archive_id,
+            );
 
             tokio::task::spawn_blocking(move || {
                 let compressor = ParCompressBuilder::<Gzip>::new()

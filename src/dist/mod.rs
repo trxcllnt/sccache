@@ -882,9 +882,8 @@ pub trait Client: Send + Sync {
     // Write to local toolchain cache if not already written, then upload to Scheduler
     async fn put_toolchain(
         &self,
-        compiler_path: &Path,
-        tc: Toolchain,
-        packager: Arc<dyn pkg::PackagedToolchain>,
+        toolchain: Toolchain,
+        packaged: Option<Arc<dyn pkg::PackagedToolchain>>,
     ) -> Result<SubmitToolchainResult>;
     async fn hash_toolchain(
         &self,
