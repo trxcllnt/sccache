@@ -175,14 +175,6 @@ tracing-subscriber = { version = "0.3", features = [
 ], optional = true }
 version-compare = { version = "0.1.1", optional = true }
 
-[target.'cfg(not(tokio_unstable))'.dependencies.tokio]
-features = ["full"]
-version = "1"
-
-[target.'cfg(tokio_unstable)'.dependencies.tokio]
-features = ["full", "io-uring"]
-version = "1"
-
 [dev-dependencies]
 assert_cmd = "2.0.13"
 cc = "1.0"
