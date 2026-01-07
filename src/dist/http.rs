@@ -190,7 +190,7 @@ mod scheduler {
         time::{Duration, Instant},
     };
 
-    use tokio::io::AsyncReadExt;
+    use tokio::{io::AsyncReadExt, task_local};
     use tokio_util::{compat::TokioAsyncReadCompatExt, io::StreamReader};
     use tower::ServiceBuilder;
     use tower_http::{
@@ -213,7 +213,7 @@ mod scheduler {
 
     #[async_trait]
     pub trait ClientAuthCheck: Send + Sync {
-        async fn check(&self, token: &str) -> Result<ClientClaims>;
+        async fn check(&self, remote_addr: &SocketAddr, token: &str) -> Result<ClientClaims>;
     }
 
     // Make our own error that wraps `anyhow::Error`.
@@ -347,9 +347,13 @@ mod scheduler {
         }
     }
 
+    task_local! {
+        static CLIENT_AUTH: std::result::Result<RequireAuth, (StatusCode, String)>;
+    }
+
     // Verify authenticated sccache clients
-    #[derive(Debug)]
-    struct RequireAuth(HashMap<String, String>);
+    #[derive(Clone, Debug, Default)]
+    struct RequireAuth(ClientClaims);
 
     #[async_trait]
     impl<S> FromRequestParts<S> for RequireAuth
@@ -362,6 +366,10 @@ mod scheduler {
             parts: &mut Parts,
             _state: &S,
         ) -> std::result::Result<Self, Self::Rejection> {
+            if let Ok(auth_result) = CLIENT_AUTH.try_get() {
+                return auth_result;
+            }
+
             let TypedHeader(Authorization(bearer)) = parts
                 .extract::<TypedHeader<Authorization<Bearer>>>()
                 .await
@@ -388,7 +396,7 @@ mod scheduler {
                 })?;
 
             this.client_auth
-                .check(bearer.token())
+                .check(&remote_addr, bearer.token())
                 .await
                 .map(RequireAuth)
                 .map_err(|err| {
@@ -493,15 +501,14 @@ mod scheduler {
             ) -> impl IntoResponse {
                 let start = Instant::now();
 
+                // Check auth status before routing
                 let auth = req.extract_parts::<RequireAuth>().await;
-                let authorized = auth.is_ok();
 
                 // Labels include auth claims to support `GROUPBY "user_id"` etc.
-                let mut labels = auth.map(|auth| auth.0.clone()).unwrap_or_default();
-
-                labels.insert("authorized".into(), authorized.to_string());
-                labels.insert("method".into(), req.method().to_string());
-                labels.insert(
+                let mut claims = auth.as_ref().map(|auth| auth.0.clone()).unwrap_or_default();
+                claims.insert("authorized".into(), auth.is_ok().to_string());
+                claims.insert("method".into(), req.method().to_string());
+                claims.insert(
                     "path".into(),
                     req.extensions()
                         .get::<MatchedPath>()
@@ -509,13 +516,12 @@ mod scheduler {
                         .unwrap_or_else(|| req.uri().path().to_owned()),
                 );
 
-                let res = next.run(req).await;
+                let res = CLIENT_AUTH.scope(auth, next.run(req)).await;
 
-                // Labels include auth claims to support `GROUPBY "user_id"` etc.
-                labels.insert("status".into(), res.status().as_u16().to_string());
+                claims.insert("status".into(), res.status().as_u16().to_string());
 
-                metrics::counter!("sccache::scheduler::http::request_count", &labels).increment(1);
-                metrics::histogram!("sccache::scheduler::http::request_time", &labels)
+                metrics::counter!("sccache::scheduler::http::request_count", &claims).increment(1);
+                metrics::histogram!("sccache::scheduler::http::request_time", &claims)
                     .record(start.elapsed().as_secs_f64());
 
                 res

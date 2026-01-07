@@ -9,11 +9,12 @@ use crate::{
 };
 use anyhow::{Context, bail};
 use async_trait::async_trait;
-use futures::lock::Mutex;
+use futures::{TryFutureExt, lock::Mutex};
 use jwt::jwk::JwkSet;
 
 use std::{
     collections::HashMap,
+    net::{IpAddr, SocketAddr},
     time::{Duration, Instant},
 };
 
@@ -24,7 +25,7 @@ pub struct EqCheck {
 
 #[async_trait]
 impl ClientAuthCheck for EqCheck {
-    async fn check(&self, token: &str) -> Result<ClientClaims> {
+    async fn check(&self, _: &SocketAddr, token: &str) -> Result<ClientClaims> {
         if self.s == token {
             Ok(HashMap::with_capacity(0))
         } else {
@@ -47,9 +48,60 @@ enum ProxyTokenDecoder {
 impl ProxyTokenDecoder {
     async fn decode(&self, response: &str) -> Result<ClientClaims> {
         match self {
-            Self::Jwt(jwt) => jwt.check(response).await,
+            Self::Jwt(jwt) => jwt
+                .check_jwt_validity(response)
+                .await
+                .inspect_err(|e| tracing::warn!("JWT validation failed: {}", e)),
             _ => Ok(HashMap::with_capacity(0)),
         }
+    }
+}
+
+struct ProxyTokenErrorRateLimiter {
+    errors: Mutex<HashMap<IpAddr, Vec<Instant>>>,
+    rate_limit_on_error_count: usize,
+    rate_limit_on_error_window_size_secs: Duration,
+}
+
+impl ProxyTokenErrorRateLimiter {
+    pub fn new(
+        rate_limit_on_error_count: usize,
+        rate_limit_on_error_window_size_secs: Duration,
+    ) -> Self {
+        Self {
+            errors: Default::default(),
+            rate_limit_on_error_window_size_secs,
+            rate_limit_on_error_count,
+        }
+    }
+
+    pub async fn check(&self, remote_addr: &IpAddr) -> Result<()> {
+        let now = Instant::now();
+        let mut errors = self.errors.lock().await;
+        if let Some(window) = errors.get_mut(remote_addr) {
+            self.truncate_window(&now, window);
+            if window.is_empty() {
+                errors.remove(remote_addr);
+            } else if window.len() >= self.rate_limit_on_error_count {
+                bail!("Too many unauthenticated requests within time window")
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn record(&self, remote_addr: IpAddr) {
+        let now = Instant::now();
+        let mut errors = self.errors.lock().await;
+        let window = errors.entry(remote_addr).or_default();
+        self.truncate_window(&now, window);
+        window.push(now);
+    }
+
+    fn truncate_window(&self, now: &Instant, window: &mut Vec<Instant>) {
+        // Drop all error timestamps older than `rate_limit_on_error_window_size_secs`
+        window.retain(|then| now.duration_since(*then) < self.rate_limit_on_error_window_size_secs);
+        // Drop all but the last `rate_limit_on_error_count` number of error timestamps
+        window.drain(0..window.len().saturating_sub(self.rate_limit_on_error_count));
     }
 }
 
@@ -59,17 +111,25 @@ pub struct ProxyTokenCheck {
     cache: Mutex<HashMap<String, (Instant, ClientClaims)>>,
     client: reqwest::Client,
     decoder: ProxyTokenDecoder,
+    rate_limiter: ProxyTokenErrorRateLimiter,
     token_ttl: Option<Duration>,
     url: String,
 }
 
 #[async_trait]
 impl ClientAuthCheck for ProxyTokenCheck {
-    async fn check(&self, token: &str) -> Result<ClientClaims> {
-        match self.check_token_with_forwarding(token).await {
+    async fn check(&self, remote_addr: &SocketAddr, token: &str) -> Result<ClientClaims> {
+        let remote_addr = remote_addr.ip();
+        match self
+            .rate_limiter
+            .check(&remote_addr)
+            .and_then(|_| self.check_token_with_forwarding(token))
+            .await
+        {
             Ok(claims) => Ok(claims),
             Err(err) => {
                 tracing::warn!("Proxying token validation failed: {err}");
+                self.rate_limiter.record(remote_addr).await;
                 Err(err)
             }
         }
@@ -80,6 +140,8 @@ impl ProxyTokenCheck {
     pub async fn new(
         url: String,
         token_ttl: Option<u64>,
+        rate_limit_on_error_count: Option<usize>,
+        rate_limit_on_error_window_size_secs: Option<u64>,
         decode: Option<ProxyTokenDecodeConfig>,
     ) -> Result<Self> {
         let decoder = match decode {
@@ -99,9 +161,13 @@ impl ProxyTokenCheck {
         Ok(Self {
             cache: Mutex::new(HashMap::new()),
             client: new_reqwest_client(None),
+            decoder,
+            rate_limiter: ProxyTokenErrorRateLimiter::new(
+                rate_limit_on_error_count.unwrap_or(5),
+                Duration::from_secs(rate_limit_on_error_window_size_secs.unwrap_or(60)),
+            ),
             token_ttl: token_ttl.map(Duration::from_secs),
             url,
-            decoder,
         })
     }
 
@@ -179,7 +245,7 @@ pub struct ValidJWTCheck {
 
 #[async_trait]
 impl ClientAuthCheck for ValidJWTCheck {
-    async fn check(&self, token: &str) -> Result<ClientClaims> {
+    async fn check(&self, _: &SocketAddr, token: &str) -> Result<ClientClaims> {
         match self.check_jwt_validity(token).await {
             Ok(claims) => Ok(claims),
             Err(e) => {
@@ -299,6 +365,17 @@ pub async fn new_client_auth_check(client_auth: ClientAuth) -> Result<Box<dyn Cl
             url,
             cache_secs,
             decode,
-        } => Box::new(ProxyTokenCheck::new(url, cache_secs, decode).await?),
+            rate_limit_on_error_count,
+            rate_limit_on_error_window_size_secs,
+        } => Box::new(
+            ProxyTokenCheck::new(
+                url,
+                cache_secs,
+                rate_limit_on_error_count,
+                rate_limit_on_error_window_size_secs,
+                decode,
+            )
+            .await?,
+        ),
     })
 }

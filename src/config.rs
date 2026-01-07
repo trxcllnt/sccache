@@ -1824,6 +1824,8 @@ pub mod scheduler {
             url: String,
             cache_secs: Option<u64>,
             decode: Option<ProxyTokenDecodeConfig>,
+            rate_limit_on_error_count: Option<usize>,
+            rate_limit_on_error_window_size_secs: Option<u64>,
         },
     }
 
