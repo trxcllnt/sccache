@@ -18,7 +18,7 @@ use crate::compiler::c::{
 };
 use crate::compiler::{Cacheable, CompilerArguments, Language, SingleCompileCommand};
 use crate::compiler::{CompileCommandImpl, args::*};
-use crate::{counted_array, dist, util::OsStrExt};
+use crate::{counted_array, dist, server::SccacheService, util::OsStrExt};
 
 use crate::mock_command::CommandCreatorSync;
 
@@ -60,7 +60,7 @@ impl CCompilerImpl for Cicc {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        _service: &crate::server::SccacheService<T>,
+        _service: &SccacheService<T>,
         _creator: &T,
         _executable: &Path,
         parsed_args: &ParsedArguments,

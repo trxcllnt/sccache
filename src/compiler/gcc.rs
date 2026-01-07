@@ -36,6 +36,7 @@ use std::env;
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tempfile::TempPath;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
@@ -179,7 +180,7 @@ impl CCompilerImpl for Gcc {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        _service: &SccacheService<T>,
+        service: &SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
@@ -199,6 +200,7 @@ impl CCompilerImpl for Gcc {
         };
 
         preprocess(
+            service,
             creator,
             executable,
             parsed_args,
@@ -923,6 +925,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 pub async fn preprocess<T>(
+    service: &SccacheService<T>,
     creator: &T,
     executable: &Path,
     parsed_args: &ParsedArguments,
@@ -936,6 +939,8 @@ pub async fn preprocess<T>(
 where
     T: CommandCreatorSync,
 {
+    let preprocessor_start = Instant::now();
+
     let cmd = preprocess_cmd(
         creator.clone().new_command_sync(executable),
         parsed_args,
@@ -965,7 +970,16 @@ where
     debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
     debug_if_trace!("[{}]: depfile: {depfile:?}", parsed_args.output_pretty());
 
-    let output = run_input_stream_output(cmd, None).await?.boxed();
+    let stats = service.stats.clone();
+    let output = run_input_stream_output(cmd, None)
+        .await?
+        .chain(async_stream::stream! {
+            let mut stats = stats.lock().await;
+            stats.preprocessed += 1;
+            stats.preprocessor_duration += preprocessor_start.elapsed();
+            yield Ok(bytes::Bytes::new());
+        })
+        .boxed();
 
     if let Some(depfile) = depfile {
         Ok(PreprocessorOutput::OutputWithDepedencies(

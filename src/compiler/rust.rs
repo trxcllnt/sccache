@@ -28,7 +28,7 @@ use crate::lru_disk_cache::{LruCache, Meter};
 use crate::mock_command::{CommandCreatorSync, RunCommand};
 use crate::util::{Digest, fmt_duration_as_secs, hash_all, hash_all_archives, run_input_output};
 use crate::util::{HashToDigest, OsStrExt};
-use crate::{counted_array, debug_if_trace, dist};
+use crate::{counted_array, debug_if_trace, dist, server::SccacheService};
 use async_trait::async_trait;
 use filetime::FileTime;
 use fs_err as fs;
@@ -1330,7 +1330,7 @@ where
 
     async fn generate_hash_key(
         self: Box<Self>,
-        _service: &crate::server::SccacheService<T>,
+        _service: &SccacheService<T>,
         creator: &T,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,

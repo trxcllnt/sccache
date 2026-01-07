@@ -19,7 +19,7 @@ use crate::compiler::{
     gcc::{self, ArgData::*},
 };
 use crate::mock_command::CommandCreatorSync;
-use crate::{counted_array, dist};
+use crate::{counted_array, dist, server::SccacheService};
 use async_trait::async_trait;
 use semver::{BuildMetadata, Prerelease, Version};
 use std::ffi::OsString;
@@ -109,7 +109,7 @@ impl CCompilerImpl for Clang {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        _service: &crate::server::SccacheService<T>,
+        service: &SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
@@ -134,6 +134,7 @@ impl CCompilerImpl for Clang {
         }
 
         gcc::preprocess(
+            service,
             creator,
             executable,
             parsed_args,

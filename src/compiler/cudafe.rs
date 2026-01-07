@@ -17,7 +17,7 @@ use crate::compiler::c::{CCompilerImpl, CCompilerKind, ParsedArguments, Preproce
 use crate::compiler::cicc;
 use crate::compiler::{Cacheable, CompilerArguments, Language};
 use crate::compiler::{CompileCommandImpl, args::*};
-use crate::{counted_array, dist};
+use crate::{counted_array, dist, server::SccacheService};
 
 use crate::mock_command::CommandCreatorSync;
 
@@ -57,7 +57,7 @@ impl CCompilerImpl for CudaFE {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        _service: &crate::server::SccacheService<T>,
+        _service: &SccacheService<T>,
         _creator: &T,
         _executable: &Path,
         parsed_args: &ParsedArguments,

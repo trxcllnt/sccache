@@ -30,11 +30,12 @@ use crate::{counted_array, dist, server::SccacheService};
 use crate::{debug_if_trace, errors::*};
 use async_trait::async_trait;
 use fs_err as fs;
-use futures::FutureExt;
+use futures::{FutureExt, TryFutureExt};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tempfile::TempPath;
 
 #[derive(Clone, Debug)]
@@ -68,7 +69,7 @@ impl CCompilerImpl for Diab {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        _service: &SccacheService<T>,
+        service: &SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
@@ -81,6 +82,8 @@ impl CCompilerImpl for Diab {
     where
         T: CommandCreatorSync,
     {
+        let preprocessor_start = Instant::now();
+        let stats = service.stats.clone();
         preprocess(
             creator,
             executable,
@@ -89,6 +92,12 @@ impl CCompilerImpl for Diab {
             env_vars,
             generate_dependencies,
         )
+        .and_then(|res| async move {
+            let mut stats = stats.lock().await;
+            stats.preprocessed += 1;
+            stats.preprocessor_duration += preprocessor_start.elapsed();
+            Ok(res)
+        })
         .await
     }
 

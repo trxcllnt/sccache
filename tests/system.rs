@@ -743,6 +743,7 @@ fn run_sccache_command_tests(
 #[derive(Clone, Debug, Default)]
 struct AdditionalStats {
     cache_writes: Option<u64>,
+    preprocessed: Option<u64>,
     compilations: Option<u64>,
     compile_requests: Option<u64>,
     non_cacheable_compilations: Option<u64>,
@@ -826,6 +827,7 @@ fn test_nvcc_cuda_compiles(
         fs::remove_file(tempdir.join(output)).unwrap();
 
         stats.cache_writes += additional_stats.cache_writes.unwrap_or(0);
+        stats.preprocessed += additional_stats.preprocessed.unwrap_or(0);
         stats.compilations += additional_stats.compilations.unwrap_or(0);
         stats.compile_requests += additional_stats.compile_requests.unwrap_or(0);
         stats.requests_executed += additional_stats.requests_executed.unwrap_or(0);
@@ -868,15 +870,14 @@ fn test_nvcc_cuda_compiles(
             }
         }
 
-        assert_eq!(
-            stats,
-            ServerStats {
-                cache_write_duration: stats.cache_write_duration,
-                cache_read_hit_duration: stats.cache_read_hit_duration,
-                compiler_write_duration: stats.compiler_write_duration,
-                ..client.stats().unwrap()
-            }
-        );
+        let actual = client.stats().unwrap();
+
+        stats.cache_write_duration = actual.cache_write_duration;
+        stats.cache_read_hit_duration = actual.cache_read_hit_duration;
+        stats.compiler_write_duration = actual.compiler_write_duration;
+        stats.preprocessor_duration = actual.preprocessor_duration;
+
+        assert_eq!(stats, actual);
     };
 
     trace!("compile A ptx");
@@ -886,6 +887,7 @@ fn test_nvcc_cuda_compiles(
         &build_dir.join("test.ptx"), // relative path for output
         &extra_args,
         AdditionalStats {
+            preprocessed: Some(1),
             cache_writes: Some(1),
             compilations: Some(1),
             compile_requests: Some(1),
@@ -904,6 +906,7 @@ fn test_nvcc_cuda_compiles(
         &tempdir.join(&build_dir).join("test.cubin"), // absolute path for output
         &extra_args,
         AdditionalStats {
+            preprocessed: Some(1),
             cache_writes: Some(1),
             compilations: Some(1),
             compile_requests: Some(1),
@@ -923,6 +926,7 @@ fn test_nvcc_cuda_compiles(
         &build_dir.join(OUTPUT),     // relative path for output
         &extra_args,
         AdditionalStats {
+            preprocessed: Some(2),
             cache_writes: Some(3 + with_debug_flags as u64),
             compilations: Some(4 + with_debug_flags as u64),
             compile_requests: Some(1),
@@ -954,6 +958,7 @@ fn test_nvcc_cuda_compiles(
         &tempdir.join(&build_dir).join(OUTPUT), // absolute path for output
         &extra_args,
         AdditionalStats {
+            preprocessed: Some(2 * !preprocessor_cache_mode as u64),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
@@ -972,6 +977,7 @@ fn test_nvcc_cuda_compiles(
         // Since `test_a_copy.cu` is a copy of `test_a.cu`, its PTX will be identical when *not* using -G.
         // But -G causes cudafe++ and cicc to embed the source path their output, and we get cache misses.
         AdditionalStats {
+            preprocessed: Some(2),
             cache_writes: Some(3 + with_debug_flags as u64),
             compilations: Some(4 + with_debug_flags as u64),
             compile_requests: Some(1),
@@ -1003,6 +1009,7 @@ fn test_nvcc_cuda_compiles(
         &tempdir.join(&build_dir).join(OUTPUT), // absolute path for output
         &extra_args,
         AdditionalStats {
+            preprocessed: Some(2 * !preprocessor_cache_mode as u64),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
@@ -1018,6 +1025,7 @@ fn test_nvcc_cuda_compiles(
         &build_dir.join(OUTPUT),                      // relative path for output
         &extra_args,
         AdditionalStats {
+            preprocessed: Some(2),
             cache_writes: Some(4),
             compilations: Some(5),
             compile_requests: Some(1),
@@ -1040,6 +1048,7 @@ fn test_nvcc_cuda_compiles(
         &tempdir.join(&build_dir).join(OUTPUT),           // absolute path for output
         &extra_args,
         AdditionalStats {
+            preprocessed: Some(2 * !preprocessor_cache_mode as u64),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
@@ -1057,6 +1066,7 @@ fn test_nvcc_cuda_compiles(
         &build_dir.join(OUTPUT),     // relative path for output
         &extra_args,
         AdditionalStats {
+            preprocessed: Some(2),
             cache_writes: Some(4),
             compilations: Some(5),
             compile_requests: Some(1),
@@ -1079,6 +1089,7 @@ fn test_nvcc_cuda_compiles(
         &tempdir.join(&build_dir).join(OUTPUT), // absolute path for output
         &extra_args,
         AdditionalStats {
+            preprocessed: Some(2 * !preprocessor_cache_mode as u64),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
@@ -1114,6 +1125,7 @@ int main(int argc, char** argv) {
         &build_dir.join(test_2299_out_name), // relative path for output
         &extra_args,
         AdditionalStats {
+            preprocessed: Some(2),
             cache_writes: Some(4),
             compilations: Some(5),
             compile_requests: Some(1),
@@ -1137,6 +1149,7 @@ int main(int argc, char** argv) {
         &build_dir.join(test_2299_out_name), // relative path for output
         &extra_args,
         AdditionalStats {
+            preprocessed: Some(2),
             cache_writes: Some(2),
             compilations: Some(3),
             compile_requests: Some(1),
@@ -1163,6 +1176,7 @@ int main(int argc, char** argv) {
         &tempdir.join(&build_dir).join(test_2299_out_name), // absolute path for output
         &extra_args,
         AdditionalStats {
+            preprocessed: Some(2 * !preprocessor_cache_mode as u64),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
@@ -1183,6 +1197,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
+            preprocessed: Some(1),
             cache_writes: Some(2),
             compilations: Some(2),
             compile_requests: Some(1),
@@ -1209,6 +1224,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
+            preprocessed: Some(1),
             cache_writes: Some(2),
             compilations: Some(2),
             compile_requests: Some(1),
@@ -1235,6 +1251,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
+            preprocessed: Some(1),
             cache_writes: Some(1 + with_debug_flags as u64),
             compilations: Some(1 + with_debug_flags as u64),
             compile_requests: Some(1),
@@ -1273,6 +1290,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
+            preprocessed: Some(3),
             cache_writes: Some(5 + with_debug_flags as u64),
             compilations: Some(6 + with_debug_flags as u64),
             compile_requests: Some(1),
@@ -1313,6 +1331,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
+            preprocessed: Some(3),
             cache_writes: Some(4 + 2 * with_debug_flags as u64),
             compilations: Some(5 + 2 * with_debug_flags as u64),
             compile_requests: Some(1),
@@ -1352,6 +1371,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
+            preprocessed: Some(3),
             cache_writes: Some(5 + with_debug_flags as u64),
             compilations: Some(6 + with_debug_flags as u64),
             compile_requests: Some(1),
@@ -1390,6 +1410,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
+            preprocessed: Some(3),
             cache_writes: Some(5 + with_debug_flags as u64),
             compilations: Some(6 + with_debug_flags as u64),
             compile_requests: Some(1),
@@ -1428,6 +1449,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
+            preprocessed: Some(2),
             cache_writes: Some(2),
             compilations: Some(3),
             compile_requests: Some(1),
@@ -1456,6 +1478,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
+            preprocessed: Some(2),
             cache_writes: Some(2),
             compilations: Some(3),
             compile_requests: Some(1),
@@ -1487,6 +1510,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
+            preprocessed: Some(1),
             cache_writes: Some(1 + with_debug_flags as u64),
             compilations: Some(1 + with_debug_flags as u64),
             compile_requests: Some(1),
@@ -1521,6 +1545,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
+            preprocessed: Some(1),
             cache_writes: Some(1 + with_debug_flags as u64),
             compilations: Some(1 + with_debug_flags as u64),
             compile_requests: Some(1),
@@ -1557,6 +1582,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
+            preprocessed: Some(2),
             cache_writes: Some(2),
             compilations: Some(3),
             compile_requests: Some(1),
@@ -1590,6 +1616,7 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
+                preprocessed: Some(5),
                 cache_writes: Some(2),
                 compilations: Some(2),
                 compile_requests: Some(1),
@@ -1624,6 +1651,7 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
+                preprocessed: Some(5),
                 cache_writes: Some(2),
                 compilations: Some(2),
                 compile_requests: Some(1),
@@ -1658,6 +1686,7 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
+                preprocessed: Some(5),
                 cache_writes: Some(2),
                 compilations: Some(2),
                 compile_requests: Some(1),
@@ -1692,6 +1721,7 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
+                preprocessed: Some(5),
                 cache_writes: Some(2),
                 compilations: Some(2),
                 compile_requests: Some(1),
@@ -1735,6 +1765,7 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
+                preprocessed: Some(1),
                 cache_writes: Some(1),
                 compilations: Some(1),
                 compile_requests: Some(1),
@@ -1763,6 +1794,7 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
+                preprocessed: Some(1),
                 cache_writes: Some(1),
                 compilations: Some(1),
                 compile_requests: Some(1),
@@ -1789,6 +1821,7 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
+                preprocessed: Some(3),
                 cache_writes: Some(3),
                 compilations: Some(4),
                 compile_requests: Some(1),
@@ -1818,6 +1851,7 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
+                preprocessed: Some(3),
                 cache_writes: Some(2),
                 compilations: Some(3),
                 compile_requests: Some(1),
@@ -1895,6 +1929,7 @@ fn test_nvcc_proper_lang_stat_tracking(
     fs::remove_file(&out_file).unwrap();
 
     stats.cache_writes += 4;
+    stats.preprocessed += 2;
     stats.compilations += 5;
     stats.compile_requests += 1;
     stats.requests_executed += 5;
@@ -1921,6 +1956,7 @@ fn test_nvcc_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
+            preprocessor_duration: stats.preprocessor_duration,
             ..client.stats().unwrap()
         }
     );
@@ -1952,6 +1988,8 @@ fn test_nvcc_proper_lang_stat_tracking(
         stats
             .preprocessor_cache_hits
             .increment(&CompilerKind::C(CCompilerKind::Nvcc), &Language::Cuda);
+    } else {
+        stats.preprocessed += 2;
     }
     assert_eq!(
         stats,
@@ -1959,6 +1997,7 @@ fn test_nvcc_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
+            preprocessor_duration: stats.preprocessor_duration,
             ..client.stats().unwrap()
         }
     );
@@ -1999,6 +2038,7 @@ fn test_nvcc_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
+            preprocessor_duration: stats.preprocessor_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2037,6 +2077,7 @@ fn test_nvcc_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
+            preprocessor_duration: stats.preprocessor_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2121,6 +2162,7 @@ fn test_clang_cuda_compiles(
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
     fs::remove_file(&out_file).unwrap();
     stats.cache_writes += 1;
+    stats.preprocessed += 1;
     stats.compilations += 1;
     stats.compile_requests += 1;
     stats.requests_executed += 1;
@@ -2138,6 +2180,7 @@ fn test_clang_cuda_compiles(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
+            preprocessor_duration: stats.preprocessor_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2168,6 +2211,8 @@ fn test_clang_cuda_compiles(
         stats
             .preprocessor_cache_hits
             .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cuda);
+    } else {
+        stats.preprocessed += 1;
     }
     assert_eq!(
         stats,
@@ -2175,6 +2220,7 @@ fn test_clang_cuda_compiles(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
+            preprocessor_duration: stats.preprocessor_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2199,6 +2245,7 @@ fn test_clang_cuda_compiles(
     assert!(fs::metadata(&out_file).map(|m| m.len() > 0).unwrap());
     fs::remove_file(&out_file).unwrap();
     stats.cache_writes += 1;
+    stats.preprocessed += 1;
     stats.compilations += 1;
     stats.compile_requests += 1;
     stats.requests_executed += 1;
@@ -2216,6 +2263,7 @@ fn test_clang_cuda_compiles(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
+            preprocessor_duration: stats.preprocessor_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2246,6 +2294,8 @@ fn test_clang_cuda_compiles(
         stats
             .preprocessor_cache_hits
             .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cuda);
+    } else {
+        stats.preprocessed += 1;
     }
     assert_eq!(
         stats,
@@ -2253,6 +2303,7 @@ fn test_clang_cuda_compiles(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
+            preprocessor_duration: stats.preprocessor_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2308,6 +2359,7 @@ fn test_clang_proper_lang_stat_tracking(
         .success();
     fs::remove_file(&out_file).unwrap();
     stats.cache_writes += 1;
+    stats.preprocessed += 1;
     stats.compilations += 1;
     stats.compile_requests += 1;
     stats.requests_executed += 1;
@@ -2325,6 +2377,7 @@ fn test_clang_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
+            preprocessor_duration: stats.preprocessor_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2354,6 +2407,8 @@ fn test_clang_proper_lang_stat_tracking(
         stats
             .preprocessor_cache_hits
             .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cuda);
+    } else {
+        stats.preprocessed += 1;
     }
     assert_eq!(
         stats,
@@ -2361,6 +2416,7 @@ fn test_clang_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
+            preprocessor_duration: stats.preprocessor_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2381,6 +2437,7 @@ fn test_clang_proper_lang_stat_tracking(
         .success();
     fs::remove_file(&out_file).unwrap();
     stats.cache_writes += 1;
+    stats.preprocessed += 1;
     stats.compilations += 1;
     stats.compile_requests += 1;
     stats.requests_executed += 1;
@@ -2398,6 +2455,7 @@ fn test_clang_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
+            preprocessor_duration: stats.preprocessor_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2426,6 +2484,8 @@ fn test_clang_proper_lang_stat_tracking(
         stats
             .preprocessor_cache_hits
             .increment(&CompilerKind::C(CCompilerKind::Clang), &Language::Cxx);
+    } else {
+        stats.preprocessed += 1;
     }
     assert_eq!(
         stats,
@@ -2433,6 +2493,7 @@ fn test_clang_proper_lang_stat_tracking(
             cache_write_duration: stats.cache_write_duration,
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
+            preprocessor_duration: stats.preprocessor_duration,
             ..client.stats().unwrap()
         }
     );

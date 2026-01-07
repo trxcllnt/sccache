@@ -159,7 +159,7 @@ impl CCompilerImpl for Nvhpc {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        _service: &SccacheService<T>,
+        service: &SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
@@ -196,6 +196,7 @@ impl CCompilerImpl for Nvhpc {
         .concat();
 
         gcc::preprocess(
+            service,
             creator,
             executable,
             // nvc++ only preprocesses when there's no dependency flags

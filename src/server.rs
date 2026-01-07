@@ -1976,8 +1976,12 @@ pub struct ServerStats {
     pub cache_write_duration: Duration,
     /// The total time spent reading cache hits.
     pub cache_read_hit_duration: Duration,
+    /// The number of files successful preprocessor calls.
+    pub preprocessed: u64,
     /// The number of successful compilations performed.
     pub compilations: u64,
+    /// The total time spent preprocessing.
+    pub preprocessor_duration: Duration,
     /// The total time spent compiling.
     pub compiler_write_duration: Duration,
     /// The count of compilation failures.
@@ -2042,7 +2046,9 @@ impl Default for ServerStats {
             cache_writes: u64::default(),
             cache_write_duration: Duration::new(0, 0),
             cache_read_hit_duration: Duration::new(0, 0),
+            preprocessed: u64::default(),
             compilations: u64::default(),
+            preprocessor_duration: Duration::new(0, 0),
             compiler_write_duration: Duration::new(0, 0),
             compile_fails: u64::default(),
             not_cached: HashMap::new(),
@@ -2198,10 +2204,24 @@ impl ServerStats {
         );
         set_duration_stat!(
             stats_vec,
+            self.cache_read_hit_duration,
+            self.cache_hits.all(),
+            "Average cache read hit"
+        );
+        set_duration_stat!(
+            stats_vec,
             self.cache_write_duration,
             self.cache_writes,
             "Average cache write"
         );
+        if self.preprocessed > 0 {
+            set_duration_stat!(
+                stats_vec,
+                self.preprocessor_duration,
+                self.preprocessed,
+                "Average preprocessor"
+            );
+        }
         set_duration_stat!(
             stats_vec,
             self.compiler_write_duration,
@@ -2210,12 +2230,6 @@ impl ServerStats {
                 + self.non_cacheable_compilations
                 + self.compile_request_errors.all(),
             "Average compiler"
-        );
-        set_duration_stat!(
-            stats_vec,
-            self.cache_read_hit_duration,
-            self.cache_hits.all(),
-            "Average cache read hit"
         );
         set_counted_stat!(stats_vec, self.fatal_errors, "Fatal errors");
         set_stat!(

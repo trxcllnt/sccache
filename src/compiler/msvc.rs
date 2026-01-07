@@ -27,12 +27,13 @@ use crate::{counted_array, debug_if_trace, dist, server::SccacheService};
 use async_trait::async_trait;
 use fs::File;
 use fs_err as fs;
-use futures::FutureExt;
+use futures::{FutureExt, TryFutureExt};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Instant;
 use tempfile::TempPath;
 
 use crate::errors::*;
@@ -71,7 +72,7 @@ impl CCompilerImpl for Msvc {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        _service: &SccacheService<T>,
+        service: &SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
@@ -85,6 +86,8 @@ impl CCompilerImpl for Msvc {
     where
         T: CommandCreatorSync,
     {
+        let preprocessor_start = Instant::now();
+        let stats = service.stats.clone();
         preprocess(
             creator,
             executable,
@@ -97,6 +100,12 @@ impl CCompilerImpl for Msvc {
             include_line_numbers,
             self.is_clang,
         )
+        .and_then(|res| async move {
+            let mut stats = stats.lock().await;
+            stats.preprocessed += 1;
+            stats.preprocessor_duration += preprocessor_start.elapsed();
+            Ok(res)
+        })
         .await
     }
 

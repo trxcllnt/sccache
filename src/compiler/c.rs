@@ -21,6 +21,7 @@ use crate::{
     },
     dist,
     mock_command::{CommandCreatorSync, ProcessOutput},
+    server::SccacheService,
     util::{Digest, HashToDigest, TimeMacroFinder, hash_all},
 };
 
@@ -144,7 +145,7 @@ impl ParsedArguments {
 /// A generic implementation of the `Compilation` trait for C/C++ compilers.
 #[derive(Clone, Debug)]
 struct CCompilation<T: CommandCreatorSync, I: CCompilerImpl> {
-    service: crate::server::SccacheService<T>,
+    service: SccacheService<T>,
     creator: T,
     parsed_args: ParsedArguments,
     is_locally_preprocessed: bool,
@@ -255,7 +256,7 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        service: &crate::server::SccacheService<T>,
+        service: &SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
@@ -614,7 +615,7 @@ where
 
     async fn generate_hash_key(
         self: Box<Self>,
-        service: &crate::server::SccacheService<T>,
+        service: &SccacheService<T>,
         creator: &T,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
@@ -1019,7 +1020,7 @@ where
 
     async fn execute(
         &self,
-        service: &crate::server::SccacheService<T>,
+        service: &SccacheService<T>,
         creator: &T,
         active: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput> {
