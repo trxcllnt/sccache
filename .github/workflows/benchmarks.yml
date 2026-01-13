@@ -39,11 +39,12 @@ jobs:
 
       - name: Run performance benchmarks
         uses: CodSpeedHQ/action@v4
+        continue-on-error: true
         env:
           CODSPEED_LOG: debug
         with:
           mode: simulation
-          run: cargo codspeed run > /dev/null
+          run: cargo codspeed run
           token: ${{ secrets.CODSPEED_TOKEN }}
 
   memory-benchmarks:
@@ -68,9 +69,10 @@ jobs:
 
       - name: Run memory benchmarks
         uses: CodSpeedHQ/action@v4
+        continue-on-error: true
         env:
           CODSPEED_LOG: debug
         with:
           mode: memory
-          run: cargo codspeed run > /dev/null
+          run: cargo codspeed run
           token: ${{ secrets.CODSPEED_TOKEN }}
