@@ -22,11 +22,19 @@
 use divan::{Bencher, black_box};
 use sccache::lru_disk_cache::LruCache;
 use sccache::util::{Digest, TimeMacroFinder};
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+fn single_threaded_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .worker_threads(1)
+        .build()
+        .unwrap()
+}
 
 /// Generate test data of specified size
 fn generate_test_data(size: usize) -> Vec<u8> {
@@ -84,10 +92,14 @@ fn generate_data_with_time_macros(size: usize) -> Vec<u8> {
 #[divan::bench]
 fn hash_large_data(bencher: Bencher) {
     let data = generate_test_data(4 * 1024 * 1024); // 4MB
+    let rt = single_threaded_runtime();
 
-    bencher.bench(|| {
-        let cursor = Cursor::new(black_box(&data));
-        black_box(Digest::reader_sync(cursor).unwrap())
+    bencher.bench_local(|| {
+        rt.block_on(async {
+            let cursor = Cursor::new(black_box(&data));
+            let cursor = futures::io::AllowStdIo::new(cursor);
+            black_box(Digest::new().with_reader(cursor).await.unwrap())
+        });
     });
 }
 
@@ -141,22 +153,44 @@ fn digest_with_delimiters(bencher: Bencher) {
 /// Benchmark time macro detection on data without macros (~1MB)
 #[divan::bench]
 fn time_macro_finder_no_macros(bencher: Bencher) {
-    let data = generate_test_data(1024 * 1024); // 1MB
+    let file = {
+        let data = generate_test_data(1024 * 1024); // 1MB
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&data[..]).unwrap();
+        file
+    };
+    let rt = single_threaded_runtime();
 
-    bencher.bench(|| {
-        let cursor = Cursor::new(black_box(&data));
-        black_box(Digest::reader_sync_time_macros(cursor).unwrap())
+    bencher.bench_local(|| {
+        rt.block_on(async {
+            black_box(
+                Digest::from_file_with_time_macros(file.path(), &[])
+                    .await
+                    .unwrap(),
+            )
+        });
     });
 }
 
 /// Benchmark time macro detection on data with __TIME__ and __DATE__
 #[divan::bench]
 fn time_macro_finder_with_macros(bencher: Bencher) {
-    let data = generate_data_with_time_macros(1024 * 1024); // 1MB
+    let file = {
+        let data = generate_data_with_time_macros(1024 * 1024); // 1MB
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&data[..]).unwrap();
+        file
+    };
+    let rt = single_threaded_runtime();
 
-    bencher.bench(|| {
-        let cursor = Cursor::new(black_box(&data));
-        black_box(Digest::reader_sync_time_macros(cursor).unwrap())
+    bencher.bench_local(|| {
+        rt.block_on(async {
+            black_box(
+                Digest::from_file_with_time_macros(file.path(), &[])
+                    .await
+                    .unwrap(),
+            )
+        });
     });
 }
 
