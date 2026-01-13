@@ -30,7 +30,7 @@ use crate::errors::*;
 // Unfortunately, that doesn't absolve us from having to deal with the original
 // jobserver, because make may give us file descriptors to its pipes, and the
 // simple fact of keeping them open can block it.
-// So if it does give us those file descriptors, close the preemptively.
+// So if it does give us those file descriptors, close them preemptively.
 //
 // unsafe because it can use the wrong fds.
 #[cfg(not(windows))]
