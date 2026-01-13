@@ -17,12 +17,12 @@ use crate::{
     compiler::{
         Cacheable, ColorMode, Compilation, CompileCommand, CompileCommandImpl, Compiler,
         CompilerArguments, CompilerHasher, CompilerKind, HashResult, Language,
-        preprocessor_cache::preprocessor_cache_entry_hash_key,
+        preprocessor_cache::{include_is_too_new, preprocessor_cache_entry_hash_key},
     },
     dist,
     mock_command::{CommandCreatorSync, ProcessOutput},
     server::SccacheService,
-    util::{Digest, HashToDigest, TimeMacroFinder, hash_all},
+    util::{Digest, HashToDigest, hash_all},
 };
 
 #[cfg(feature = "dist-client")]
@@ -32,9 +32,9 @@ use crate::{
 };
 
 use async_trait::async_trait;
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use fs_err as fs;
-use futures::TryStreamExt;
+use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt};
 use itertools::Itertools;
 use std::{
     borrow::Cow,
@@ -47,6 +47,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 use tempfile::TempPath;
+use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::errors::*;
 
@@ -157,7 +158,7 @@ struct CCompilation<T: CommandCreatorSync, I: CCompilerImpl> {
 }
 
 /// Supported C compilers.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CCompilerKind {
     /// GCC
     Gcc,
@@ -207,11 +208,11 @@ impl From<CCompilerKind> for CompilerKind {
 
 impl From<&CCompilerKind> for CompilerKind {
     fn from(kind: &CCompilerKind) -> Self {
-        CompilerKind::C(kind.clone())
+        CompilerKind::C(*kind)
     }
 }
 
-pub type ProcessOutputStream = dyn futures::stream::Stream<Item = Result<bytes::Bytes>> + Send;
+pub type ProcessOutputStream = dyn futures::stream::Stream<Item = Result<Bytes>> + Send;
 pub type DependenciesFuture = dyn futures::Future<Output = Result<Vec<PathBuf>>> + Send;
 
 pub enum PreprocessorOutput {
@@ -231,7 +232,7 @@ impl From<ProcessOutput> for Pin<Box<ProcessOutputStream>> {
             res.stdout = vec![];
             Box::pin(futures::stream::iter([Err(ProcessError(res).into())]))
         } else {
-            Box::pin(futures::stream::iter([Ok(bytes::Bytes::from(res.stdout))]))
+            Box::pin(futures::stream::iter([Ok(Bytes::from(res.stdout))]))
         }
     }
 }
@@ -309,27 +310,29 @@ where
         executable: PathBuf,
         extra_hash_files: Vec<PathBuf>,
     ) -> Result<CCompiler<I>> {
-        let mut digests = vec![];
-        for path in std::iter::once(&executable).chain(extra_hash_files.iter()) {
-            if path.exists() {
-                digests.push(Digest::file(path).await?);
-            }
-        }
+        trace!(
+            "[CCompiler::new]: compiler={compiler:?}, executable={executable:?}, extra_hash_files={extra_hash_files:?}"
+        );
 
-        let mut digest = Digest::new();
-        for hash in digests {
-            digest.update(hash.as_bytes());
-        }
+        let paths = std::iter::once(executable.as_path())
+            .chain(extra_hash_files.iter().map(|p| p.as_path()))
+            .filter(|path| path.exists())
+            .map(Ok);
 
-        Ok(CCompiler {
-            executable,
-            executable_digest: {
+        let executable_digest = futures::stream::iter(paths)
+            .try_fold(Digest::new(), |digest, path| digest.with_file(path))
+            .await
+            .map(|mut digest| {
                 if let Some(version) = compiler.version() {
                     digest.update(version.as_bytes());
                 }
                 digest.finish()
-            },
+            })?;
+
+        Ok(CCompiler {
             compiler,
+            executable,
+            executable_digest,
         })
     }
 
@@ -460,7 +463,6 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
     }
 }
 
-#[derive(PartialEq)]
 enum PreprocessorCacheLookup {
     Disabled,
     Hit(String),
@@ -489,10 +491,10 @@ async fn get_preprocessor_cache_entry(
 async fn put_preprocessor_cache_entry(
     storage: &dyn Storage,
     key: &str,
-    preprocessor_cache_entry: PreprocessorCacheEntry,
+    preprocessor_cache_entry: &PreprocessorCacheEntry,
 ) -> Result<()> {
     storage
-        .put(key, preprocessor_cache_entry.serialize_into().await?)
+        .put(key, preprocessor_cache_entry.to_bytes()?)
         .await
         .map(|_| ())
 }
@@ -537,7 +539,8 @@ where
             &preprocessor_args,
             extra_hashes,
             env_vars,
-            &cwd.join(&parsed_args.input),
+            cwd,
+            &parsed_args.input,
             compiler.plusplus(),
             &preprocessor_cache_mode_config,
         )
@@ -553,23 +556,16 @@ where
             if let Cache::Hit(mut preprocessor_cache_entry) =
                 get_preprocessor_cache_entry(storage, &preprocessor_key).await?
             {
-                let (hit, updated, preprocessor_cache_entry) =
-                    tokio::task::spawn_blocking(move || {
-                        let mut updated = false;
-                        let hit = preprocessor_cache_entry
-                            .lookup_result_digest(&preprocessor_cache_mode_config, &mut updated);
-                        Ok::<(Option<String>, bool, PreprocessorCacheEntry), anyhow::Error>((
-                            hit,
-                            updated,
-                            preprocessor_cache_entry,
-                        ))
-                    })
-                    .await??;
+                let mut updated = false;
+
+                let hit = preprocessor_cache_entry
+                    .lookup_result_digest(&preprocessor_cache_mode_config, env_vars, &mut updated)
+                    .await;
 
                 let mut update_failed = false;
                 if updated {
-                    // Time macros have been found, we need to update
-                    // the preprocessor cache entry. See [`PreprocessorCacheEntry::result_matches`].
+                    // Time macros have been found, we need to update the preprocessor cache entry.
+                    // See [`PreprocessorCacheEntry::result_matches`].
                     debug!(
                         "[{out_pretty}]: Preprocessor cache updated because of time macros: {preprocessor_key}"
                     );
@@ -577,7 +573,7 @@ where
                     if let Err(e) = put_preprocessor_cache_entry(
                         storage,
                         &preprocessor_key,
-                        preprocessor_cache_entry,
+                        &preprocessor_cache_entry,
                     )
                     .await
                     {
@@ -666,8 +662,7 @@ where
         };
 
         // Try to look for a cached preprocessing step for this compilation request.
-        let preprocessor_cache_mode_config = storage.preprocessor_cache_mode_config();
-        let mut preprocessor_cache_lookup = self
+        let preprocessor_cache_lookup = self
             .preprocessor_cache_lookup(
                 &cwd,
                 &env_vars,
@@ -678,7 +673,7 @@ where
             .await?;
 
         match preprocessor_cache_lookup {
-            PreprocessorCacheLookup::Hit(_) => {
+            PreprocessorCacheLookup::Hit(key) => {
                 service
                     .stats
                     .lock()
@@ -688,6 +683,23 @@ where
                         &CompilerKind::C(compiler.kind()),
                         &<CCompilerHasher<I> as CompilerHasher<T>>::language(&*self),
                     );
+
+                // Skip preprocessing if it's a preprocessor cache hit
+                return Ok(HashResult {
+                    key,
+                    compilation: Box::new(CCompilation {
+                        compiler: self.compiler,
+                        creator: creator.to_owned(),
+                        cwd,
+                        env_vars,
+                        executable: self.executable,
+                        is_locally_preprocessed: false,
+                        parsed_args: self.parsed_args,
+                        rewrite_includes_only,
+                        service: service.to_owned(),
+                    }),
+                    weak_toolchain_key,
+                });
             }
             PreprocessorCacheLookup::Miss(_) => {
                 service
@@ -702,25 +714,6 @@ where
             }
             _ => {}
         };
-
-        // Skip preprocessing if it's a preprocessor cache hit
-        if let PreprocessorCacheLookup::Hit(key) = preprocessor_cache_lookup {
-            return Ok(HashResult {
-                key,
-                compilation: Box::new(CCompilation {
-                    compiler: self.compiler,
-                    creator: creator.to_owned(),
-                    cwd,
-                    env_vars,
-                    executable: self.executable,
-                    is_locally_preprocessed: false,
-                    parsed_args: self.parsed_args,
-                    rewrite_includes_only,
-                    service: service.to_owned(),
-                }),
-                weak_toolchain_key,
-            });
-        }
 
         let out_pretty = parsed_args.output_pretty();
 
@@ -781,7 +774,7 @@ where
                     &env_vars,
                     rewrite_includes_only,
                     // Generate dependencies if we're going to read them below
-                    preprocessor_cache_lookup != PreprocessorCacheLookup::Disabled,
+                    !matches!(preprocessor_cache_lookup, PreprocessorCacheLookup::Disabled),
                     // include line numbers when `-fprofile-generate` is enabled
                     // to guarantee the profile data embedded in the cached object
                     // matches the line numbers in this source file
@@ -823,79 +816,77 @@ where
 
         drop(common_and_arch_args);
 
-        if let Some(dependencies) = dependencies {
-            // Remember include files needed in this preprocessing step
-            let included_files = if let PreprocessorCacheLookup::Miss(_) = preprocessor_cache_lookup
-            {
-                let dependencies = try_or_cleanup!(dependencies.await);
-                let paths_and_digests = dependencies.into_iter().map(|path| {
-                    tokio::task::spawn_blocking(move || -> Result<Option<(PathBuf, String)>> {
-                        let file = fs::File::open(&path).map_err(anyhow::Error::new)?;
-                        let (digest, finder) = if preprocessor_cache_mode_config.ignore_time_macros
-                        {
-                            (Digest::reader_sync(file)?, TimeMacroFinder::new())
-                        } else {
-                            Digest::reader_sync_time_macros(file)?
-                        };
-                        if finder.found_time() {
-                            Ok(None)
-                        } else {
-                            Ok(Some((path, digest)))
-                        }
-                    })
-                });
-
-                try_or_cleanup!(
-                    futures::future::try_join_all(paths_and_digests)
-                        .await
-                        .map_err(anyhow::Error::new)
-                )
-                .into_iter()
-                .filter_map_ok(|x| x)
-                .fold_ok(HashMap::new(), |mut deps, (path, digest)| {
-                    deps.insert(path, digest);
-                    deps
-                })
-            } else {
-                Ok(HashMap::new())
-            };
-
-            let included_files = match included_files {
-                Ok(included_files) => included_files,
-                Err(err) => {
-                    debug!("[{out_pretty}]: Disabling preprocessor cache mode: {err}");
-                    preprocessor_cache_lookup = PreprocessorCacheLookup::Disabled;
-                    HashMap::new()
-                }
-            };
-
-            // Cache the preprocessing step
+        let deps_and_preprocessor = dependencies.and_then(|deps| {
             if let PreprocessorCacheLookup::Miss(preprocessor_key) = preprocessor_cache_lookup {
-                if !included_files.is_empty() {
-                    let mut preprocessor_cache_entry = PreprocessorCacheEntry::new();
-                    let mut included_files = included_files
-                        .into_iter()
-                        .map(|(path, digest)| (digest, path))
-                        .collect::<Vec<_>>();
-                    included_files.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+                Some((deps, preprocessor_key))
+            } else {
+                None
+            }
+        });
+
+        if let Some((dependencies, preprocessor_key)) = deps_and_preprocessor {
+            let dependencies = try_or_cleanup!(dependencies.await);
+
+            // Dedupe first to ensure we only hash each file once
+            let dependencies = dependencies
+                .into_iter()
+                .sorted_unstable_by(|a, b| a.cmp(b))
+                .dedup();
+
+            futures::stream::iter(dependencies)
+                .map(|path| {
+                    Digest::from_file_with_time_macros(path.clone(), &env_vars)
+                        .and_then(|(digest, finder)| async move {
+                            if finder.found_time() {
+                                // Write an entry for this dependency, even though it has __TIME__ macros.
+                                // If it's still present next time, preprocessor cache mode will be disabled.
+                                // If it's not present next time, the new object key will be added to this cache entry.
+                                debug!("Found __TIME__ in {path:?}");
+                            }
+                            let meta = tokio::fs::symlink_metadata(&path).await?;
+                            if include_is_too_new(&path, &(&meta).into(), start_of_compilation) {
+                                bail!("Dependency {path:?} changed after preprocessor invoked");
+                            }
+                            Ok((digest.finish(), path, meta))
+                        })
+                        .into_stream()
+                        .boxed()
+                })
+                .flatten_unordered(None)
+                .try_collect::<Vec<_>>()
+                .and_then(|dependencies| async {
+                    // Load the latest cache entry for this preprocessor key
+                    // This helps minimize races if other clients write more
+                    // entries while this client is preprocessing.
+                    let mut preprocessor_cache_entry = if let Cache::Hit(preprocessor_cache_entry) =
+                        get_preprocessor_cache_entry(storage.as_ref(), &preprocessor_key).await?
+                    {
+                        preprocessor_cache_entry
+                    } else {
+                        Default::default()
+                    };
+
+                    // Add the object key to the preprocessor cache entry
                     preprocessor_cache_entry.add_result(
                         start_of_compilation,
                         &preprocessor_key,
                         &key,
-                        included_files,
+                        dependencies,
                     );
 
-                    if let Err(err) = put_preprocessor_cache_entry(
+                    // Write the cache entry back to the preprocessor cache
+                    put_preprocessor_cache_entry(
                         storage.as_ref(),
                         &preprocessor_key,
-                        preprocessor_cache_entry,
+                        &preprocessor_cache_entry,
                     )
                     .await
-                    {
-                        debug!("[{out_pretty}]: Failed to update preprocessor cache: {err}");
-                    }
-                }
-            }
+                })
+                .await
+                .inspect_err(|err| {
+                    debug!("[{out_pretty}]: Failed to update preprocessor cache entry: {err}")
+                })
+                .ok();
         }
 
         Ok(HashResult {
@@ -1218,7 +1209,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                     let (mut file_header, dist_input_path) =
                         pkg::make_tar_header(&input_path, &dist_input_path)?;
                     let stdout = output
-                        .try_collect::<Vec<bytes::Bytes>>()
+                        .try_collect::<Vec<Bytes>>()
                         .await?
                         .into_iter()
                         .flatten()
@@ -1451,9 +1442,8 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                 };
 
                 let (contents, dirs, mut files): (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) = {
-                    use futures::{AsyncBufReadExt, TryStreamExt, future, io::BufReader};
+                    use futures::{AsyncBufReadExt, future, io::BufReader};
                     use std::process::Stdio;
-                    use tokio_util::compat::TokioAsyncReadCompatExt;
 
                     let mut child = tokio::process::Command::new(&executable)
                         .arg("-show")
@@ -1694,41 +1684,47 @@ pub async fn hash_key_async(
     arguments: &[OsString],
     extra_hashes: &[String],
     env_vars: &[(OsString, OsString)],
-    mut preprocessor_output: Pin<Box<ProcessOutputStream>>,
+    preprocessor_output: Pin<Box<ProcessOutputStream>>,
     plusplus: bool,
 ) -> Result<String> {
     // If you change any of the inputs to the hash, you should change `CACHE_VERSION`.
-    let mut m = Digest::new();
-    m.update(compiler_digest.as_bytes());
+    let mut digest = Digest::new();
+    digest.update(compiler_digest.as_bytes());
     // clang and clang++ have different behavior despite being byte-for-byte identical binaries, so
     // we have to incorporate that into the hash as well.
-    m.update(&[plusplus as u8]);
-    m.update(CACHE_VERSION);
-    m.update(language.as_str().as_bytes());
+    digest.update(&[plusplus as u8]);
+    digest.update(CACHE_VERSION);
+    digest.update(language.as_str().as_bytes());
 
     for arg in arguments {
-        arg.hash(&mut HashToDigest { digest: &mut m });
+        arg.hash(&mut HashToDigest {
+            digest: &mut digest,
+        });
     }
 
     for hash in extra_hashes {
-        m.update(hash.as_bytes());
+        digest.update(hash.as_bytes());
     }
 
     for (var, val) in env_vars.iter() {
         if CACHED_ENV_VARS.contains(var.as_os_str()) {
-            var.hash(&mut HashToDigest { digest: &mut m });
-            m.update(&b"="[..]);
-            val.hash(&mut HashToDigest { digest: &mut m });
+            var.hash(&mut HashToDigest {
+                digest: &mut digest,
+            });
+            digest.update(&b"="[..]);
+            val.hash(&mut HashToDigest {
+                digest: &mut digest,
+            });
         }
     }
 
-    while let Some(bytes) = preprocessor_output.try_next().await? {
-        let reader = futures::io::AllowStdIo::new(bytes.reader());
-        let reader = std::pin::pin!(reader);
-        m.update_from_reader(reader).await?;
-    }
+    digest = preprocessor_output
+        .try_fold(digest, |digest, bytes| {
+            digest.with_reader(futures::io::AllowStdIo::new(bytes.reader()))
+        })
+        .await?;
 
-    Ok(m.finish())
+    Ok(digest.finish())
 }
 
 #[cfg(test)]
@@ -1742,9 +1738,7 @@ mod test {
     use super::*;
 
     fn into_process_output_stream(buf: &[u8]) -> Pin<Box<ProcessOutputStream>> {
-        Box::pin(futures::stream::iter([Ok(bytes::Bytes::copy_from_slice(
-            buf,
-        ))]))
+        Box::pin(futures::stream::iter([Ok(Bytes::copy_from_slice(buf))]))
     }
 
     #[test]
@@ -2180,7 +2174,7 @@ mod test {
                 put_preprocessor_cache_entry(
                     storage.as_ref(),
                     "test1",
-                    PreprocessorCacheEntry::default(),
+                    &PreprocessorCacheEntry::default(),
                 )
                 .await
                 .unwrap();
@@ -2196,7 +2190,7 @@ mod test {
                     put_preprocessor_cache_entry(
                         storage.as_ref(),
                         "test1",
-                        PreprocessorCacheEntry::default()
+                        &PreprocessorCacheEntry::default()
                     )
                     .await
                     .unwrap_err()

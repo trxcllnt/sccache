@@ -300,31 +300,24 @@ mod toolchain_imp {
     #[async_trait]
     impl PackagedToolchain for ToolchainPackaged {
         async fn compute_hash(&self) -> Result<String> {
-            use crate::util::Digest;
-            let dir_set = self.dir_set.clone();
-            let file_set = self.file_set.clone();
-            let symlinks = self.symlinks.clone();
-            tokio::task::spawn_blocking(move || {
-                let mut digest = Digest::new();
+            let mut digest = crate::util::Digest::new();
 
-                for (_, dir_path) in dir_set.iter() {
-                    digest.update(dir_path.to_string_lossy().as_bytes());
+            for (_, dir_path) in self.dir_set.iter() {
+                digest.update(dir_path.to_string_lossy().as_bytes());
+            }
+            for (_, file_path) in self.file_set.iter() {
+                digest = digest.with_file(file_path).await?;
+                digest.update(file_path.to_string_lossy().as_bytes());
+            }
+            for (from_path, to_path) in self.symlinks.iter() {
+                if to_path.is_file() {
+                    digest = digest.with_file(to_path).await?;
                 }
-                for (_, file_path) in file_set.iter() {
-                    digest.update_from_reader_sync(fs::File::open(file_path)?)?;
-                    digest.update(file_path.to_string_lossy().as_bytes());
-                }
-                for (from_path, to_path) in symlinks.iter() {
-                    if to_path.is_file() {
-                        digest.update_from_reader_sync(fs::File::open(to_path)?)?;
-                    }
-                    digest.update(to_path.to_string_lossy().as_bytes());
-                    digest.update(from_path.to_string_lossy().as_bytes());
-                }
+                digest.update(to_path.to_string_lossy().as_bytes());
+                digest.update(from_path.to_string_lossy().as_bytes());
+            }
 
-                Ok(digest.finish())
-            })
-            .await?
+            Ok(digest.finish())
         }
 
         async fn write_tar_gz(&self, toolchain: &Toolchain, writer: fs::File) -> Result<()> {

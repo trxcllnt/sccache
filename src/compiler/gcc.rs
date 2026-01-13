@@ -540,7 +540,7 @@ where
             Some(Language(lang)) => {
                 language = match lang
                     .to_str()
-                    .and_then(|lang| Language::from_compiler_str(kind.clone().into(), lang))
+                    .and_then(|lang| Language::from_compiler_str(kind.into(), lang))
                 {
                     Some(language) => Some(language),
                     None => cannot_cache!("-x", lang.to_string_lossy().to_string()),
@@ -1215,7 +1215,7 @@ pub fn generate_compile_commands(
 
     // Pass the language explicitly as we might have gotten it from the
     // command line.
-    let language = parsed_args.language.as_compiler_str(kind.clone().into());
+    let language = parsed_args.language.as_compiler_str(kind.into());
     if let Some(lang) = &language {
         arguments.extend(vec!["-x".into(), lang.into()]);
     }

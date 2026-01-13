@@ -12,16 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{
-    mock_command::{CommandChild, ProcessOutput, RunCommand},
-    util,
-};
+use crate::mock_command::{CommandChild, ProcessOutput, RunCommand};
 use async_trait::async_trait;
 use blake3::Hasher as blake3_Hasher;
 use byteorder::{BigEndian, ByteOrder};
+use bytes::{Buf, Bytes};
 use fs::File;
 use fs_err as fs;
-use futures::{AsyncRead, AsyncReadExt, FutureExt, StreamExt, lock::Mutex};
+use futures::{AsyncRead, AsyncReadExt, FutureExt, StreamExt, io::AllowStdIo, lock::Mutex};
+use memmap2::Mmap;
 use object::read::{
     archive::ArchiveFile,
     macho::{FatArch, MachOFatFile32, MachOFatFile64},
@@ -36,7 +35,6 @@ use std::{
     hash::{Hash, Hasher},
     io::prelude::*,
     path::{Path, PathBuf},
-    pin::Pin,
     process::{self, Stdio},
     str,
     sync::{Arc, LazyLock},
@@ -65,83 +63,147 @@ impl Digest {
         }
     }
 
-    /// Calculate the BLAKE3 digest of the contents of `path`.
-    pub async fn file<T>(path: T) -> Result<String>
+    fn open_file<T>(path: T) -> Result<AllowStdIo<bytes::buf::Reader<Bytes>>>
     where
         T: AsRef<Path>,
     {
-        use tokio_util::compat::TokioAsyncReadCompatExt;
-        Digest::reader(
-            tokio::fs::File::open(path.as_ref())
-                .await
-                .with_context(|| format!("Failed to open file for hashing: {:?}", path.as_ref()))?
-                .compat(),
-        )
-        .await
+        let path = path.as_ref();
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("Failed to open file for hashing: {path:?}"))?;
+        let mmap = Bytes::from_owner(unsafe { Mmap::map(&file) }?);
+        Ok(AllowStdIo::new(mmap.reader()))
     }
 
     /// Calculate the BLAKE3 digest of the contents of `path`.
-    pub async fn reader<R: AsyncRead + Send + 'static>(reader: R) -> Result<String> {
-        util::spawn(async move {
-            let mut digest = Digest::new();
-            let reader = std::pin::pin!(reader);
-            digest.update_from_reader(reader).await?;
-            Ok(digest.finish())
-        })
-        .await?
+    pub async fn from_file<T>(path: T) -> Result<Self>
+    where
+        T: AsRef<Path>,
+    {
+        Self::new().with_file(path).await
     }
 
-    /// Calculate the BLAKE3 digest of the contents read from `reader`.
-    pub fn reader_sync<R: Read>(reader: R) -> Result<String> {
-        Self::reader_sync_with(reader, |_| {}).map(|d| d.finish())
+    /// Calculate the BLAKE3 digest of the contents of `path`, while
+    /// also checking for the presence of time macros.
+    /// See [`TimeMacroFinder`] for more details.
+    pub async fn from_file_with_time_macros<T>(
+        path: T,
+        env_vars: &[(OsString, OsString)],
+    ) -> Result<(Self, TimeMacroFinder)>
+    where
+        T: AsRef<Path>,
+    {
+        Self::new().with_file_and_time_macros(path, env_vars).await
     }
 
     /// Calculate the BLAKE3 digest of the contents read from `reader`, calling
     /// `each` before each time the digest is updated.
-    pub fn reader_sync_with<R: Read, F: FnMut(&[u8])>(mut reader: R, mut each: F) -> Result<Self> {
-        let mut m = Digest::new();
-        // A buffer of 128KB should give us the best performance.
-        // See https://eklitzke.org/efficient-file-copying-on-linux.
-        let mut buffer = [0; HASH_BUFFER_SIZE];
-        loop {
-            let count = reader.read(&mut buffer[..])?;
-            if count == 0 {
-                break;
-            }
-            each(&buffer[..count]);
-            m.update(&buffer[..count]);
-        }
-        Ok(m)
+    pub async fn from_reader_with_each<R: AsyncRead + Send, F: FnMut(&[u8])>(
+        reader: R,
+        each: F,
+    ) -> Result<Self> {
+        Digest::new()
+            .with_reader_each(std::pin::pin!(reader), each)
+            .await
     }
 
     /// Calculate the BLAKE3 digest of the contents read from `reader`, while
     /// also checking for the presence of time macros.
     /// See [`TimeMacroFinder`] for more details.
-    pub fn reader_sync_time_macros<R: Read>(reader: R) -> Result<(String, TimeMacroFinder)> {
+    pub async fn from_reader_with_time_macros<R: AsyncRead + Send>(
+        reader: R,
+    ) -> Result<(Self, TimeMacroFinder)> {
+        let mut finder = TimeMacroFinder::new();
+        let digest =
+            Self::from_reader_with_each(reader, |visit| finder.find_time_macros(visit)).await?;
+
+        Ok((digest, finder))
+    }
+
+    /// Merge the BLAKE3 digest of the contents of `path` into this digest.
+    pub async fn with_file<T>(self, path: T) -> Result<Self>
+    where
+        T: AsRef<Path>,
+    {
+        self.with_reader(Self::open_file(path)?).await
+    }
+
+    /// Merge the BLAKE3 digest of the contents of `path` into this digest, while
+    /// also checking for the presence of time macros.
+    /// See [`TimeMacroFinder`] for more details.
+    pub async fn with_file_and_time_macros<T>(
+        self,
+        path: T,
+        env_vars: &[(OsString, OsString)],
+    ) -> Result<(Self, TimeMacroFinder)>
+    where
+        T: AsRef<Path>,
+    {
+        use chrono::Datelike;
+
+        let path = path.as_ref();
         let mut finder = TimeMacroFinder::new();
 
-        Ok((
-            Self::reader_sync_with(reader, |visit| finder.find_time_macros(visit))?.finish(),
-            finder,
-        ))
+        let mut digest = self
+            .with_reader_each(Self::open_file(path)?, |visit| {
+                finder.find_time_macros(visit)
+            })
+            .await?;
+
+        // If __DATE__ or __TIMESTAMP__ found, make sure that the digest changes
+        // if the (potential) expansion of those macros changes by computing a new
+        // digest comprising the file digest and time information that represents the
+        // macro expansions.
+
+        if finder.found_date() {
+            debug!("found __DATE__ in {path:?}");
+            digest.delimiter(b"date");
+            // If the compiler has support for it, the expansion of __DATE__ will change
+            // according to the value of SOURCE_DATE_EPOCH. If the compiler doesn't support
+            // it (i.e. MSVC), this envvar shouldn't be defined.
+            let date = env_vars
+                .iter()
+                .find(|(k, _)| k == "SOURCE_DATE_EPOCH")
+                .and_then(|(_, v)| v.as_os_str().to_str())
+                .and_then(|v| v.parse().ok())
+                .and_then(chrono::DateTime::from_timestamp_secs)
+                .unwrap_or_else(|| chrono::Local::now().to_utc())
+                .date_naive();
+            digest.update(&date.year().to_le_bytes());
+            digest.update(&date.month().to_le_bytes());
+            digest.update(&date.day().to_le_bytes());
+        }
+
+        if finder.found_timestamp() {
+            debug!("found __TIMESTAMP__ in {path:?}");
+            let mtime: chrono::DateTime<chrono::Local> = tokio::fs::symlink_metadata(path)
+                .await
+                .with_context(|| format!("Failed to read file mtime for hashing: {path:?}"))?
+                .modified()
+                .with_context(|| format!("Failed to read file mtime for hashing: {path:?}"))?
+                .into();
+
+            digest.delimiter(b"timestamp");
+            digest.update(&mtime.naive_local().and_utc().timestamp().to_le_bytes());
+        }
+
+        Ok((digest, finder))
     }
 
-    pub fn update(&mut self, bytes: &[u8]) {
-        self.inner.update(bytes);
+    /// Merge the BLAKE3 digest of the contents read from `reader` into this digest.
+    pub async fn with_reader<R: AsyncRead + Send + Unpin>(self, reader: R) -> Result<Self> {
+        self.with_reader_each(reader, |_| {}).await
     }
 
-    pub async fn update_from_reader<R: AsyncRead>(&mut self, reader: Pin<&mut R>) -> Result<()> {
-        self.update_from_reader_with(reader, |_| {}).await
-    }
-
-    pub async fn update_from_reader_with<R: AsyncRead, F: FnMut(&[u8])>(
-        &mut self,
-        mut reader: Pin<&mut R>,
+    /// Merge the BLAKE3 digest of the contents read from `reader` into this digest, calling
+    /// `each` before each time the digest is updated.
+    pub async fn with_reader_each<R: AsyncRead + Send + Unpin, F: FnMut(&[u8])>(
+        mut self,
+        mut reader: R,
         mut each: F,
-    ) -> Result<()> {
+    ) -> Result<Self> {
         // A buffer of 128KB should give us the best performance.
         // See https://eklitzke.org/efficient-file-copying-on-linux.
-        let mut buffer = [0; HASH_BUFFER_SIZE];
+        let mut buffer = vec![0u8; HASH_BUFFER_SIZE];
         loop {
             let count = reader.read(&mut buffer[..]).await?;
             if count == 0 {
@@ -150,30 +212,11 @@ impl Digest {
             each(&buffer[..count]);
             self.inner.update(&buffer[..count]);
         }
-        Ok(())
+        Ok(self)
     }
 
-    pub fn update_from_reader_sync<R: Read>(&mut self, reader: R) -> Result<()> {
-        self.update_from_reader_sync_with(reader, |_| {})
-    }
-
-    pub fn update_from_reader_sync_with<R: Read, F: FnMut(&[u8])>(
-        &mut self,
-        mut reader: R,
-        mut each: F,
-    ) -> Result<()> {
-        // A buffer of 128KB should give us the best performance.
-        // See https://eklitzke.org/efficient-file-copying-on-linux.
-        let mut buffer = [0; HASH_BUFFER_SIZE];
-        loop {
-            let count = reader.read(&mut buffer[..])?;
-            if count == 0 {
-                break;
-            }
-            each(&buffer[..count]);
-            self.inner.update(&buffer[..count]);
-        }
-        Ok(())
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.inner.update(bytes);
     }
 
     pub fn delimiter(&mut self, name: &[u8]) {
@@ -394,7 +437,11 @@ where
     T: AsRef<Path>,
 {
     let start = time::Instant::now();
-    let hashes = futures::future::try_join_all(files.iter().map(Digest::file)).await?;
+    let hashes =
+        futures::future::try_join_all(files.iter().map(|path| async move {
+            Digest::from_file(path).await.map(|digest| digest.finish())
+        }))
+        .await?;
     if !hashes.is_empty() {
         trace!(
             "Hashed {} files in {}",
@@ -665,7 +712,7 @@ where
 pub async fn run_input_stream_output<C>(
     command: C,
     input: Option<Vec<u8>>,
-) -> Result<impl futures::Stream<Item = Result<bytes::Bytes>>>
+) -> Result<impl futures::Stream<Item = Result<Bytes>>>
 where
     C: RunCommand + 'static,
 {
@@ -771,8 +818,11 @@ where
 pub trait OsStrExt {
     fn find(&self, s: &str) -> Option<usize>;
     fn contains(&self, s: &str) -> bool;
+    fn encode_to_bytes(&self) -> Result<Vec<u8>>;
     fn ends_with(&self, s: &str) -> bool;
     fn starts_with(&self, s: &str) -> bool;
+    fn split(&self, s: &str) -> impl Iterator<Item = &'_ OsStr>;
+    fn split_once(&self, s: &str) -> Option<(&'_ OsStr, &'_ OsStr)>;
     fn split_prefix(&self, s: &str) -> Option<OsString>;
     fn trim(&self) -> &OsStr;
 }
@@ -780,6 +830,10 @@ pub trait OsStrExt {
 impl OsStrExt for OsStr {
     fn contains(&self, s: &str) -> bool {
         self.find(s).is_some()
+    }
+
+    fn encode_to_bytes(&self) -> Result<Vec<u8>> {
+        Ok(encode_osstr_to_bytes(self)?)
     }
 
     fn find(&self, s: &str) -> Option<usize> {
@@ -808,6 +862,40 @@ impl OsStrExt for OsStr {
         let s = self.as_encoded_bytes();
         let (m, n) = (s.len(), p.len());
         if m < n { false } else { p == &s[0..n] }
+    }
+
+    fn split(&self, s: &str) -> impl Iterator<Item = &'_ OsStr> {
+        struct Split<'a> {
+            rest: &'a OsStr,
+            delim: String,
+        }
+        impl<'a> Iterator for Split<'a> {
+            type Item = &'a OsStr;
+            fn next(&mut self) -> Option<&'a OsStr> {
+                if let Some((lhs, rhs)) = self.rest.split_once(&self.delim) {
+                    self.rest = rhs;
+                    Some(lhs)
+                } else {
+                    None
+                }
+            }
+        }
+        Split::<'_> {
+            rest: self,
+            delim: s.to_owned(),
+        }
+    }
+
+    fn split_once(&self, s: &str) -> Option<(&'_ OsStr, &'_ OsStr)> {
+        self.find(s).map(|idx| {
+            let p = OsStr::new(s).as_encoded_bytes();
+            let s = self.as_encoded_bytes();
+            let a = &s[..idx];
+            let b = &s[idx + p.len()..];
+            let a = (!a.is_empty()).then(|| unsafe { OsStr::from_encoded_bytes_unchecked(a) });
+            let b = (!b.is_empty()).then(|| unsafe { OsStr::from_encoded_bytes_unchecked(b) });
+            (a.unwrap_or_default(), b.unwrap_or_default())
+        })
     }
 
     fn split_prefix(&self, s: &str) -> Option<OsString> {
@@ -856,11 +944,23 @@ impl OsStrExt for OsStr {
 use std::os::windows::ffi::OsStringExt;
 
 #[cfg(unix)]
+fn encode_osstr_to_bytes(os_str: &OsStr) -> std::io::Result<Vec<u8>> {
+    use std::os::unix::prelude::*;
+    Ok(os_str.as_bytes().to_vec())
+}
+
+#[cfg(unix)]
 pub fn encode_path(dst: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     use std::os::unix::prelude::*;
 
     let bytes = path.as_os_str().as_bytes();
     dst.write_all(bytes)
+}
+
+#[cfg(windows)]
+fn encode_osstr_to_bytes(os_str: &OsStr) -> std::io::Result<Vec<u8>> {
+    use std::os::windows::prelude::*;
+    wide_char_to_multi_byte(&os_str.encode_wide().collect::<Vec<_>>()) // use_default_char_flag
 }
 
 #[cfg(windows)]
@@ -973,8 +1073,8 @@ pub fn multi_byte_to_wide_char(
                 wstr.as_mut_ptr(),
                 len,
             );
-            wstr.set_len(len as usize);
             if len > 0 {
+                wstr.set_len(len as usize);
                 return Ok(wstr);
             }
         }

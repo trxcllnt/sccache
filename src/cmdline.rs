@@ -295,23 +295,43 @@ pub fn try_parse() -> Result<Command> {
             } else if matches.contains_id("CMD") {
                 let mut env_vars = env::vars_os().collect::<Vec<_>>();
 
-                // If we're running under rr, avoid the `LD_PRELOAD` bits, as it will
-                // almost surely do the wrong thing, as the compiler gets executed
-                // in a different process tree.
-                env_vars.retain(|(k, _v)| {
-                    k != "LD_PRELOAD"
-                        && k != "RUNNING_UNDER_RR"
-                        && k != "HOSTNAME"
-                        && k != "PWD"
-                        && k != "HOST"
-                        && k != "RPM_BUILD_ROOT"
-                        && k != "SOURCE_DATE_EPOCH"
-                        && k != "RPM_PACKAGE_RELEASE"
-                        && k != "MINICOM"
-                        && k != "DESTDIR"
-                        && k != "RPM_PACKAGE_VERSION"
-                        && k != "CARGO_MAKEFLAGS"
-                });
+                //
+                // Strip some envvars that are incompatible with caching and/or distributed compilation:
+                // * `LD_PRELOAD` because the compiler gets executed in a different process tree.
+                // * `CARGO_MAKEFLAGS` has non-cacheable jobserver info.
+                //
+                if !env_vars.iter().any(|(k, _)| k == "RUNNING_UNDER_RR") {
+                    env_vars.retain(|(k, _)| {
+                        !matches!(
+                            k.as_os_str().to_str().unwrap_or_default(),
+                            "LD_PRELOAD" | "CARGO_MAKEFLAGS"
+                        )
+                    });
+                } else {
+                    // https://github.com/mozilla/sccache/pull/1613 added logic to strip the following envvars
+                    // when using rpmbuild. I'm not sure why they were added since sccache doesn't include them
+                    // in either the preprocessor or object cache keys. Does rpmbuild automatically add them as
+                    // preprocessor definitions or something?
+                    env_vars.retain(|(k, _v)| {
+                        !matches!(
+                            k.as_os_str().to_str().unwrap_or_default(),
+                            "LD_PRELOAD"
+                                | "RUNNING_UNDER_RR"
+                                | "HOSTNAME"
+                                | "PWD"
+                                | "HOST"
+                                | "RPM_BUILD_ROOT"
+                                // Don't filter this out since it's used by the preprocessor cache
+                                // for __DATE__ macro expansion
+                                // | "SOURCE_DATE_EPOCH"
+                                | "RPM_PACKAGE_RELEASE"
+                                | "MINICOM"
+                                | "DESTDIR"
+                                | "RPM_PACKAGE_VERSION"
+                                | "CARGO_MAKEFLAGS"
+                        )
+                    });
+                }
 
                 let cmd = matches
                     .get_many("CMD")

@@ -21,8 +21,8 @@ mod client {
     use crate::lru_disk_cache::LruDiskCache;
     use crate::util::Digest;
 
-    async fn path_key(path: &Path) -> Result<String> {
-        Digest::file(path.to_owned()).await
+    async fn path_key<T: AsRef<Path>>(path: T) -> Result<String> {
+        Digest::from_file(path).await.map(|digest| digest.finish())
     }
 
     #[derive(Clone, Debug)]

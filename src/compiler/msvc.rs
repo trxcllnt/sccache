@@ -1026,8 +1026,6 @@ pub async fn preprocess<T>(
 where
     T: CommandCreatorSync,
 {
-    let start_time = std::time::SystemTime::now();
-
     let cmd = preprocess_cmd(
         creator.clone().new_command_sync(executable),
         parsed_args,
@@ -1091,7 +1089,7 @@ where
     }
 
     if generate_dependencies {
-        match parse_dependencies(start_time, parsed_args, cwd, output).await? {
+        match parse_dependencies(parsed_args, cwd, output).await? {
             (output, Err(err)) => {
                 debug!(
                     "[{}]: Failed to parse dependencies from preprocessor result: {err:?}",
@@ -1166,7 +1164,6 @@ where
 }
 
 pub async fn parse_dependencies(
-    start: std::time::SystemTime,
     parsed_args: &ParsedArguments,
     cwd: &Path,
     mut output: ProcessOutput,
@@ -1179,7 +1176,6 @@ pub async fn parse_dependencies(
             cwd.as_path(),
             &mut output.stdout,
             Default::default(),
-            start,
             StandardFsAbstraction,
         ) {
             Err(err) => (output, Err(err)),
