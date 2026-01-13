@@ -7,18 +7,20 @@ extern crate serde_json;
 
 mod harness;
 
+use harness::{
+    Compiler, check_output,
+    client::SccacheClient,
+    dist::{DistSystem, cargo_command},
+    init_cargo, write_source,
+};
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+use harness::{find_compilers, find_cuda_compilers};
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 use paste::paste;
 use sccache::{config::HTTPUrl, errors::*};
 use std::path::Path;
 use std::process::Output;
 use test_case::test_case;
-
-use harness::{
-    Compiler, check_output,
-    client::SccacheClient,
-    dist::{DistSystem, cargo_command},
-    find_compilers, find_cuda_compilers, init_cargo, write_source,
-};
 
 // In case of panics, this command will destroy any dangling containers:
 //   docker rm -f $(docker ps -aq --filter "name=sccache_dist_*")
@@ -696,7 +698,7 @@ async fn test_dist_stdpar_compiles(compiler: &Compiler, message_broker: &str) ->
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 macro_rules! test_dist_if_compiler_available {
     ($name:ident, $compiler:ident, $compiler_name:expr) => {
         paste! {
@@ -725,7 +727,7 @@ test_dist_if_compiler_available!(stdpar, nvcxx, "nvc++");
 #[cfg(target_os = "linux")]
 test_dist_if_compiler_available!(stdpar, mpicxx, "mpic++");
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 macro_rules! test_dist_if_cuda_compiler_available {
     ($cuda_compiler:ident, $host_compiler:ident, $cuda_compiler_name:expr, $host_compiler_name:expr) => {
         paste! {

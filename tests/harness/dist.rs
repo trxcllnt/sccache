@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 use bytes::Buf;
 use fs_err as fs;
 use futures::{StreamExt, TryStreamExt};

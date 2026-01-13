@@ -15,7 +15,6 @@
 // limitations under the License.
 
 #![deny(rust_2018_idioms)]
-#![allow(dead_code, unused_imports)]
 
 #[macro_use]
 extern crate log;
@@ -25,33 +24,32 @@ mod harness;
 use assert_cmd::prelude::*;
 use fs::File;
 use fs_err as fs;
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+use harness::find_cuda_compilers;
 use harness::{
     Compiler,
     client::{SccacheClient, sccache_client_cfg},
-    find_compilers, find_cuda_compilers, write_json_cfg, write_source,
+    find_compilers, write_json_cfg, write_source,
 };
-use log::Level::Trace;
 use paste::paste;
 use predicates::prelude::*;
 use regex::Regex;
 use sccache::{
     compiler::{CCompilerKind, CompilerKind, Language},
-    server::{ServerInfo, ServerStats},
+    server::ServerStats,
 };
+#[cfg(unix)]
 use serial_test::serial;
-use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::fmt::{self, format};
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::Command;
 use std::str;
 use std::time::{Duration, SystemTime};
 use test_case::test_case;
-use which::{which, which_in};
 
 fn adv_key_kind(lang: &str, compiler: &str) -> String {
     let language = lang.to_owned();
@@ -116,6 +114,7 @@ fn compile_cmdline<T: AsRef<OsStr>>(
 
 // TODO: This will fail if gcc/clang is actually a ccache wrapper, as it is the
 // default case on Fedora, e.g.
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 fn compile_cuda_cmdline<T: AsRef<OsStr>>(
     compiler: &str,
     exe: T,
@@ -200,14 +199,18 @@ const INPUT_WITH_WHITESPACE_ALT: &str = "test_whitespace_alt.c";
 const INPUT_ERR: &str = "test_err.c";
 const INPUT_MACRO_EXPANSION: &str = "test_macro_expansion.c";
 const INPUT_WITH_DEFINE: &str = "test_with_define.c";
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 const INPUT_FOR_CUDA_A: &str = "test_a.cu";
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 const INPUT_FOR_CUDA_A_COPY: &str = "test_a_copy.cu";
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 const INPUT_FOR_CUDA_A_INTERNAL_LINKAGE: &str = "test_a_internal_linkage.cu";
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 const INPUT_FOR_CUDA_B: &str = "test_b.cu";
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 const INPUT_FOR_CUDA_C: &str = "test_c.cu";
 const INPUT_FOR_HIP_A: &str = "test_a.hip";
 const INPUT_FOR_HIP_B: &str = "test_b.hip";
-const INPUT_FOR_HIP_C: &str = "test_c.hip";
 const OUTPUT: &str = "test.o";
 
 // Copy the source files into the tempdir so we can compile with relative paths, since the commandline winds up in the hash key.
@@ -731,12 +734,16 @@ fn run_sccache_command_tests(
         };
         test_clang_cache_whitespace_normalization(
             client,
-            compiler,
+            compiler.clone(),
             tempdir,
             !is_appleclang && major >= 14,
         );
     } else {
-        test_clang_cache_whitespace_normalization(client, compiler, tempdir, false);
+        test_clang_cache_whitespace_normalization(client, compiler.clone(), tempdir, false);
+    }
+
+    if compiler.name != "cl" {
+        test_noncacheable_stats(client, compiler.clone(), tempdir);
     }
 }
 
@@ -754,6 +761,7 @@ struct AdditionalStats {
     preprocessor_cache_misses: Option<Vec<(CCompilerKind, Language, u64)>>,
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 fn test_nvcc_cuda_compiles(
     client: &SccacheClient,
     compiler: &Compiler,
@@ -1871,6 +1879,7 @@ int main(int argc, char** argv) {
     }
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 fn test_nvcc_proper_lang_stat_tracking(
     client: &SccacheClient,
     compiler: &Compiler,
@@ -2083,6 +2092,7 @@ fn test_nvcc_proper_lang_stat_tracking(
     );
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 fn run_sccache_nvcc_cuda_command_tests(
     client: &SccacheClient,
     compiler: &Compiler,
@@ -2112,6 +2122,7 @@ fn run_sccache_nvcc_cuda_command_tests(
     );
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 fn test_clang_cuda_compiles(
     client: &SccacheClient,
     compiler: &Compiler,
@@ -2309,6 +2320,7 @@ fn test_clang_cuda_compiles(
     );
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 fn test_clang_proper_lang_stat_tracking(
     client: &SccacheClient,
     compiler: &Compiler,
@@ -2499,6 +2511,7 @@ fn test_clang_proper_lang_stat_tracking(
     );
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 fn run_sccache_clang_cuda_command_tests(
     client: &SccacheClient,
     compiler: &Compiler,
@@ -2924,7 +2937,7 @@ fn test_stats_no_server() {
     );
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 macro_rules! test_cuda_sccache_command {
     ($cuda_compiler:ident, $host_compiler:ident, $cuda_compiler_name:expr, $host_compiler_name:expr) => {
         paste! {
@@ -2977,6 +2990,8 @@ test_cuda_sccache_command!(clang, clang, "clang++", "clang++");
 // Windows
 #[cfg(target_os = "windows")]
 test_cuda_sccache_command!(nvcc, cl, "nvcc", "cl");
+#[cfg(target_env = "msvc")]
+test_cuda_sccache_command!(clang, clang, "clang++", "clang++");
 
 #[test_case(true ; "with preprocessor cache")]
 #[test_case(false ; "without preprocessor cache")]

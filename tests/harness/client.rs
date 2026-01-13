@@ -61,6 +61,7 @@ static CLIENT_PORT: AtomicU16 = AtomicU16::new(4227);
 
 pub struct SccacheClient {
     envvars: Vec<(OsString, OsString)>,
+    #[allow(dead_code)]
     pub path: PathBuf,
 }
 

@@ -10,7 +10,7 @@ use std::{
 };
 
 use serde::Serialize;
-use which::{which, which_in};
+use which::which_in;
 
 use sccache::{errors::*, mock_command::ProcessOutput};
 
@@ -21,6 +21,7 @@ pub mod dist;
 
 pub const TC_CACHE_SIZE: u64 = 2 * 1024 * 1024 * 1024; // 2GiB
 
+#[allow(dead_code)]
 pub fn check_output<O: Into<ProcessOutput>>(output: O) -> Result<()> {
     let output = output.into();
     if !output.success() {
@@ -43,6 +44,7 @@ pub fn check_output<O: Into<ProcessOutput>>(output: O) -> Result<()> {
     }
 }
 
+#[allow(dead_code)]
 pub fn init_cargo(path: &Path, cargo_name: &str) -> PathBuf {
     let cargo_path = path.join(cargo_name);
     let source_path = "src";
@@ -122,7 +124,7 @@ pub const COMPILERS: &[&str] = &["gcc", "clang", "clang++", "nvc", "nvc++"];
 #[cfg(target_os = "macos")]
 pub const COMPILERS: &[&str] = &["clang", "clang++"];
 
-#[cfg(all(unix, not(target_os = "windows")))]
+#[cfg(target_os = "linux")]
 pub const CUDA_COMPILERS: &[&str] = &["nvcc", "clang++"];
 
 #[cfg(target_os = "windows")]
@@ -160,7 +162,10 @@ pub fn find_compilers() -> Vec<Compiler> {
     }]
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 pub fn find_cuda_compilers() -> Vec<Compiler> {
+    use which::which;
+
     let cwd = env::current_dir().unwrap();
 
     let candidates = match env::var_os("NOTEST_CUDA_COMPILERS") {
