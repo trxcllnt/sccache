@@ -32,7 +32,6 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Instant;
 use tempfile::TempPath;
 
@@ -235,13 +234,9 @@ where
     if is_clang {
         cmd.arg("--driver-mode=cl");
     }
-    cmd.args(&["-nologo", "-showIncludes", "-c", "-Fonul", "-I."])
+    cmd.args(&["-nologo", "-showIncludes", "-c", "-Fonul", "-I.", "-E"])
         .arg(&input)
-        .current_dir(tempdir.path())
-        // The MSDN docs say the -showIncludes output goes to stderr,
-        // but that's not true unless running with -E.
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .current_dir(tempdir.path());
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -250,12 +245,12 @@ where
     let output = run_input_output(cmd, None).await?;
 
     if !output.success() {
-        bail!("Failed to detect showIncludes prefix")
+        bail!("Failed to detect showIncludes prefix ({:?})", output.status)
     }
 
-    let stdout = from_local_codepage(output.stdout)
-        .context("Failed to convert compiler stdout while detecting showIncludes prefix")?;
-    for line in stdout.lines() {
+    let stderr = from_local_codepage(output.stderr)
+        .context("Failed to convert compiler stderr while detecting showIncludes prefix")?;
+    for line in stderr.lines() {
         if !line.ends_with("test.h") {
             continue;
         }
@@ -276,7 +271,7 @@ where
 
     debug!(
         "failed to detect showIncludes prefix with output: {}",
-        stdout
+        stderr
     );
 
     bail!("Failed to detect showIncludes prefix")
@@ -1562,8 +1557,8 @@ mod test {
         if s.starts_with("\\\\?\\") {
             s = &s[4..];
         }
-        let stdout = format!("blah: {s}\r\n");
-        let stderr = String::from("some\r\nstderr\r\n");
+        let stderr = format!("blah: {s}\r\n");
+        let stdout = String::from("some\r\nstderr\r\n");
         next_command(&creator, Ok(MockChild::new(exit_status(0), stdout, stderr)));
         assert_eq!(
             "blah: ",
