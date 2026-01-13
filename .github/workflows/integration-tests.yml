@@ -629,7 +629,7 @@ jobs:
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
-      - name: Test
+      - name: Test C/C++
         env:
           SCCACHE_RECACHE: 1
         run: |
@@ -655,6 +655,16 @@ jobs:
         uses: ./.github/actions/artifact_failure
         with:
           name: clang
+
+      - name: Test ASM
+        run: |
+          export ASM="${SCCACHE_PATH} clang"
+          $ASM -c `pwd`/tests/test_intel_asm.s
+
+      - name: Test ASM with preprocessor
+        run: |
+          export ASM="${SCCACHE_PATH} clang"
+          $ASM -c `pwd`/tests/test_intel_asm_to_preproc.S
 
   hip:
     # Probably wouldn't matter anyway since we run in a container, but staying
@@ -791,7 +801,7 @@ jobs:
       - name: Chmod for binary
         run: chmod +x ${SCCACHE_PATH}
 
-      - name: Test
+      - name: Test C/C++
         env:
           SCCACHE_RECACHE: 1
         run: |
@@ -817,6 +827,16 @@ jobs:
         uses: ./.github/actions/artifact_failure
         with:
           name: gcc
+
+      - name: Test ASM
+        run: |
+          export ASM="${SCCACHE_PATH} gcc"
+          $ASM -c `pwd`/tests/test_intel_asm.s
+
+      - name: Test ASM with preprocessor
+        run: |
+          export ASM="${SCCACHE_PATH} gcc"
+          $ASM -c `pwd`/tests/test_intel_asm_to_preproc.S
 
   autotools:
     runs-on: ubuntu-24.04

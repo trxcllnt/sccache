@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::compiler::{
-    Cacheable, CompileCommandImpl, CompilerArguments,
+    Cacheable, CompileCommandImpl, CompilerArguments, Language,
     args::*,
     c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput},
     gcc::{self, ArgData::*},
@@ -128,8 +128,12 @@ impl CCompilerImpl for Clang {
             vec!["-P".to_string()]
         };
 
-        // Clang 14 and later support -fminimize-whitespace, which normalizes away non-semantic whitespace which in turn increases cache hit rate.
-        if self.supports_fminimize_whitespace {
+        // Clang 14 and later support -fminimize-whitespace, which normalizes
+        // away non-semantic whitespace which in turn increases cache hit rate.
+        // '-fminimize-whitespace' invalid for input of type assembler-with-cpp
+        if self.supports_fminimize_whitespace
+            && parsed_args.language != Language::AssemblerToPreprocess
+        {
             extra_preprocessor_flags.push("-fminimize-whitespace".to_string());
         }
 

@@ -255,6 +255,8 @@ pub enum CompilerKind {
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum Language {
+    AssemblerToPreprocess,
+    Assembler,
     #[default]
     C,
     Cxx,
@@ -280,6 +282,8 @@ impl Language {
     pub fn from_file_name(file: &Path) -> Option<Self> {
         match file.extension().and_then(|e| e.to_str()) {
             // gcc: https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html
+            Some("s") => Some(Language::Assembler),
+            Some("S") | Some("sx") => Some(Language::AssemblerToPreprocess),
             Some("c") => Some(Language::C),
             // Could be C or C++
             Some("h") => Some(Language::GenericHeader),
@@ -308,6 +312,8 @@ impl Language {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Language::AssemblerToPreprocess => "assemblerToPreprocess",
+            Language::Assembler => "assembler",
             Language::C => "c",
             Language::CHeader => "cHeader",
             Language::CPreprocessed => "cPreprocessed",
@@ -345,6 +351,8 @@ impl Language {
                 }
             }
             _ => match lang {
+                "assembler" => Some(Language::Assembler),
+                "assembler-with-cpp" => Some(Language::AssemblerToPreprocess),
                 "c" => Some(Language::C),
                 "c++" => Some(Language::Cxx),
                 "c-header" => Some(Language::CHeader),
@@ -378,6 +386,8 @@ impl Language {
                 //     Specify the language for any following input files, instead of
                 //     letting the compiler choose based on suffix. Turn off with -x none
                 match self {
+                    Language::AssemblerToPreprocess => Some("assembler-with-cpp"),
+                    Language::Assembler => Some("assembler"),
                     Language::C => Some("c"),
                     Language::CPreprocessed => Some("cpp-output"),
                     Language::Cxx => Some("c++"),
@@ -386,6 +396,8 @@ impl Language {
                 }
             }
             _ => match self {
+                Language::AssemblerToPreprocess => Some("assembler-with-cpp"),
+                Language::Assembler => Some("assembler"),
                 Language::C => Some("c"),
                 Language::Cxx => Some("c++"),
                 Language::CHeader => Some("c-header"),
@@ -415,7 +427,8 @@ impl Language {
     pub fn needs_c_preprocessing(self) -> bool {
         !matches!(
             self,
-            Language::CPreprocessed
+            Language::Assembler
+                | Language::CPreprocessed
                 | Language::CxxPreprocessed
                 | Language::ObjectiveCPreprocessed
                 | Language::ObjectiveCxxPreprocessed
@@ -427,6 +440,7 @@ impl Language {
 impl CompilerKind {
     pub fn lang_kind(&self, lang: &Language) -> String {
         match lang {
+            Language::AssemblerToPreprocess | Language::Assembler => "Assembler",
             Language::C
             | Language::CHeader
             | Language::CPreprocessed
