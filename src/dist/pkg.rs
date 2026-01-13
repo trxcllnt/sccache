@@ -302,19 +302,19 @@ mod toolchain_imp {
         async fn compute_hash(&self) -> Result<String> {
             let mut digest = crate::util::Digest::new();
 
-            for (_, dir_path) in self.dir_set.iter() {
-                digest.update(dir_path.to_string_lossy().as_bytes());
-            }
-            for (_, file_path) in self.file_set.iter() {
-                digest = digest.with_file(file_path).await?;
-                digest.update(file_path.to_string_lossy().as_bytes());
-            }
             for (from_path, to_path) in self.symlinks.iter() {
                 if to_path.is_file() {
                     digest = digest.with_file(to_path).await?;
                 }
                 digest.update(to_path.to_string_lossy().as_bytes());
                 digest.update(from_path.to_string_lossy().as_bytes());
+            }
+            for (_, dir_path) in self.dir_set.iter() {
+                digest.update(dir_path.to_string_lossy().as_bytes());
+            }
+            for (_, file_path) in self.file_set.iter() {
+                digest = digest.with_file(file_path).await?;
+                digest.update(file_path.to_string_lossy().as_bytes());
             }
 
             Ok(digest.finish())
@@ -346,12 +346,8 @@ mod toolchain_imp {
 
                 let mut builder = tar::Builder::new(compressor);
 
-                for (tar_path, dir_path) in dir_set.iter() {
-                    builder.append_dir(tar_path, dir_path)?;
-                }
-                for (tar_path, file_path) in file_set.iter() {
-                    builder.append_path_with_name(file_path, tar_path)?;
-                }
+                // Add symlinks first to ensure the symlinks exist before
+                // files are unpacked to paths that may traverse them
                 for (from_path, to_path) in symlinks.iter() {
                     let mut header = tar::Header::new_gnu();
                     header.set_size(0);
@@ -360,6 +356,12 @@ mod toolchain_imp {
                     // Leave `to_path` as absolute, assuming the tar will
                     // be used in a chroot-like environment.
                     builder.append_link(&mut header, tar_safe_path(from_path), to_path)?;
+                }
+                for (tar_path, dir_path) in dir_set.iter() {
+                    builder.append_dir(tar_path, dir_path)?;
+                }
+                for (tar_path, file_path) in file_set.iter() {
+                    builder.append_path_with_name(file_path, tar_path)?;
                 }
 
                 builder.finish().map_err(anyhow::Error::new)

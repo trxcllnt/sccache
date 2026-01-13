@@ -1182,45 +1182,72 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
         let mut path_transformer = path_transformer.clone();
         let mut symlinks = BTreeMap::<PathBuf, PathBuf>::new();
 
-        let dependencies = {
-            let input_path = cwd.join(&parsed_args.input);
-            let input_path = pkg::tarify_path(&mut symlinks, &input_path)?;
-
+        let (preprocessor_output, dependencies) = {
             match preprocessor_output {
-                PreprocessorOutput::File(file) => {
-                    builder.append_path_with_name(
-                        file.path(),
-                        path_transformer
-                            .as_dist(&input_path)
-                            .map(pkg::tar_safe_path)
-                            .with_context(|| {
-                                format!("unable to transform input path {}", input_path.display())
-                            })?,
-                    )?;
-                    vec![]
-                }
+                PreprocessorOutput::File(file) => (PreprocessorOutput::File(file), vec![]),
                 PreprocessorOutput::OutputWithDepedencies(output, dependencies) => {
-                    let dist_input_path = path_transformer
-                        .as_dist_input_path(&input_path)
-                        .with_context(|| {
-                            format!("unable to transform input path {}", input_path.display())
-                        })?;
-                    let (mut file_header, dist_input_path) =
-                        pkg::make_tar_header(&input_path, &dist_input_path)?;
-                    let stdout = output
-                        .try_collect::<Vec<Bytes>>()
-                        .await?
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<_>>();
-                    file_header.set_size(stdout.len() as u64); // The metadata is from non-preprocessed
-                    file_header.set_cksum();
-                    builder.append_data(&mut file_header, dist_input_path, stdout.as_slice())?;
-                    dependencies.await?
+                    (PreprocessorOutput::Output(output), dependencies.await?)
                 }
                 _ => unreachable!(),
             }
         };
+
+        let input_path = cwd.join(&parsed_args.input);
+        let input_path = pkg::tarify_path(&mut symlinks, &input_path)?;
+
+        // Find and add symlinks to the tar archive before adding files
+        // to ensure the symlinks exist before creating files at paths
+        // that traverse them when unpacking
+        dependencies
+            .iter()
+            .chain(parsed_args.extra_dist_files.iter())
+            .chain(parsed_args.extra_hash_files.iter())
+            .for_each(|path| {
+                let _ = pkg::tarify_path(&mut symlinks, path);
+            });
+
+        for (from_path, to_path) in symlinks.iter() {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(0);
+            header.set_mtime(0);
+            header.set_entry_type(tar::EntryType::Symlink);
+            // Leave `to_path` as absolute, assuming the tar will
+            // be used in a chroot-like environment.
+            builder.append_link(&mut header, pkg::tar_safe_path(from_path), to_path)?;
+        }
+
+        match preprocessor_output {
+            PreprocessorOutput::File(file) => {
+                builder.append_path_with_name(
+                    file.path(),
+                    path_transformer
+                        .as_dist(&input_path)
+                        .map(pkg::tar_safe_path)
+                        .with_context(|| {
+                            format!("unable to transform input path {}", input_path.display())
+                        })?,
+                )?;
+            }
+            PreprocessorOutput::Output(output) => {
+                let dist_input_path = path_transformer
+                    .as_dist_input_path(&input_path)
+                    .with_context(|| {
+                        format!("unable to transform input path {}", input_path.display())
+                    })?;
+                let (mut file_header, dist_input_path) =
+                    pkg::make_tar_header(&input_path, &dist_input_path)?;
+                let stdout = output
+                    .try_collect::<Vec<Bytes>>()
+                    .await?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                file_header.set_size(stdout.len() as u64); // The metadata is from non-preprocessed
+                file_header.set_cksum();
+                builder.append_data(&mut file_header, dist_input_path, stdout.as_slice())?;
+            }
+            _ => unreachable!(),
+        }
 
         tokio::task::spawn_blocking(move || -> Result<_> {
             let extra_dist_files = parsed_args.extra_dist_files;
@@ -1253,16 +1280,6 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                             format!("unable to transform input path {}", extra_path.display())
                         })?,
                 )?;
-            }
-
-            for (from_path, to_path) in symlinks.iter() {
-                let mut header = tar::Header::new_gnu();
-                header.set_size(0);
-                header.set_mtime(0);
-                header.set_entry_type(tar::EntryType::Symlink);
-                // Leave `to_path` as absolute, assuming the tar will
-                // be used in a chroot-like environment.
-                builder.append_link(&mut header, pkg::tar_safe_path(from_path), to_path)?;
             }
 
             // Finish archive
