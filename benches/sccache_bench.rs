@@ -514,10 +514,14 @@ fn cache_entry_batch_roundtrip(bencher: Bencher) {
 fn hash_header_file(bencher: Bencher) {
     // Simulate a typical header file (~50KB)
     let header_content = generate_preprocessor_output(1000); // ~50KB
+    let rt = single_threaded_runtime();
 
     bencher.bench(|| {
-        let cursor = Cursor::new(black_box(&header_content));
-        black_box(Digest::reader_sync(cursor).unwrap())
+        rt.block_on(async {
+            let cursor = Cursor::new(black_box(&header_content));
+            let cursor = futures::io::AllowStdIo::new(cursor);
+            black_box(Digest::new().with_reader(cursor).await.unwrap())
+        });
     });
 }
 
@@ -532,12 +536,16 @@ fn hash_multiple_files(bencher: Bencher) {
             data
         })
         .collect();
+    let rt = single_threaded_runtime();
 
     bencher.bench(|| {
-        for file_data in &files {
-            let cursor = Cursor::new(black_box(file_data));
-            black_box(Digest::reader_sync(cursor).unwrap());
-        }
+        rt.block_on(async {
+            for file_data in &files {
+                let cursor = Cursor::new(black_box(file_data));
+                let cursor = futures::io::AllowStdIo::new(cursor);
+                black_box(Digest::new().with_reader(cursor).await.unwrap());
+            }
+        });
     });
 }
 
