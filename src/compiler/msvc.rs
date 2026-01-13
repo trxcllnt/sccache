@@ -64,9 +64,41 @@ impl CCompilerImpl for Msvc {
         &self,
         arguments: &[OsString],
         cwd: &Path,
-        _env_vars: &[(OsString, OsString)],
+        env_vars: &[(OsString, OsString)],
     ) -> CompilerArguments<ParsedArguments> {
-        parse_arguments(arguments, cwd, self.is_clang)
+        // Include MSVC's prepend/append flags envvars
+        // https://learn.microsoft.com/en-us/cpp/build/reference/cl-environment-variables?view=msvc-170
+        let mut arguments = arguments.to_vec();
+
+        if let Some(prepend_flags) = env_vars
+            .iter()
+            .find(|(k, _)| k == "CL")
+            .and_then(|(_, v)| v.encode_to_bytes().ok())
+            .and_then(|b| from_local_codepage(b).ok())
+        {
+            // Parse the `CL` environment variable value as MSVC flags.
+            arguments = [
+                SplitMsvcResponseFileArgs::from(&prepend_flags)
+                    .map(|s| s.into_arg_os_string())
+                    .collect::<Vec<_>>(),
+                arguments,
+            ]
+            .concat();
+        }
+
+        if let Some(append_flags) = env_vars
+            .iter()
+            .find(|(k, _)| k == "_CL_")
+            .and_then(|(_, v)| v.encode_to_bytes().ok())
+            .and_then(|b| from_local_codepage(b).ok())
+        {
+            // Parse the `_CL_` environment variable value as MSVC flags.
+            arguments.extend(
+                SplitMsvcResponseFileArgs::from(&append_flags).map(|s| s.into_arg_os_string()),
+            );
+        }
+
+        parse_arguments(&arguments, cwd, self.is_clang)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -152,52 +184,20 @@ impl CCompilerImpl for Msvc {
 }
 
 #[cfg(not(windows))]
-fn from_local_codepage(multi_byte_str: &[u8]) -> io::Result<String> {
-    String::from_utf8(multi_byte_str.to_vec())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+fn from_local_codepage(multi_byte_str: Vec<u8>) -> io::Result<String> {
+    String::from_utf8(multi_byte_str).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
 }
 
 #[cfg(windows)]
-pub fn from_local_codepage(multi_byte_str: &[u8]) -> io::Result<String> {
-    use windows_sys::Win32::Globalization::{CP_OEMCP, MB_ERR_INVALID_CHARS, MultiByteToWideChar};
+pub fn from_local_codepage(multi_byte_str: Vec<u8>) -> io::Result<String> {
+    use crate::util::multi_byte_to_wide_char;
+    use windows_sys::Win32::Globalization::{CP_OEMCP, MB_ERR_INVALID_CHARS};
 
-    let codepage = CP_OEMCP;
-    let flags = MB_ERR_INVALID_CHARS;
-
-    // Empty string
-    if multi_byte_str.is_empty() {
-        return Ok(String::new());
-    }
-    unsafe {
-        // Get length of UTF-16 string
-        let len = MultiByteToWideChar(
-            codepage,
-            flags,
-            multi_byte_str.as_ptr() as _,
-            multi_byte_str.len() as i32,
-            std::ptr::null_mut(),
-            0,
-        );
-        if len > 0 {
-            // Convert to UTF-16
-            let mut wstr: Vec<u16> = Vec::with_capacity(len as usize);
-            let len = MultiByteToWideChar(
-                codepage,
-                flags,
-                multi_byte_str.as_ptr() as _,
-                multi_byte_str.len() as i32,
-                wstr.as_mut_ptr() as _,
-                len,
-            );
-            if len > 0 {
-                // wstr's contents have now been initialized
-                wstr.set_len(len as usize);
-                return String::from_utf16(&wstr[0..(len as usize)])
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e));
-            }
-        }
-        Err(io::Error::last_os_error())
-    }
+    multi_byte_to_wide_char(CP_OEMCP, MB_ERR_INVALID_CHARS, &multi_byte_str)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+        .and_then(|buf| {
+            String::from_utf16(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+        })
 }
 
 /// Detect the prefix included in the output of MSVC's -showIncludes output.
@@ -253,11 +253,7 @@ where
         bail!("Failed to detect showIncludes prefix")
     }
 
-    let ProcessOutput {
-        stdout: stdout_bytes,
-        ..
-    } = output;
-    let stdout = from_local_codepage(&stdout_bytes)
+    let stdout = from_local_codepage(output.stdout)
         .context("Failed to convert compiler stdout while detecting showIncludes prefix")?;
     for line in stdout.lines() {
         if !line.ends_with("test.h") {
@@ -973,7 +969,12 @@ where
 {
     cmd.current_dir(cwd)
         .env_clear()
-        .envs(env_vars.to_vec())
+        .envs(
+            env_vars
+                .iter()
+                .filter(|(k, _)| k != "CL" && k != "_CL_")
+                .map(|(k, v)| (k.as_os_str(), v.as_os_str())),
+        )
         // If we should generate dependencies, include line numbers so we can parse out the include paths
         .arg(if include_line_numbers || generate_dependencies {
             "-E"
@@ -1053,7 +1054,7 @@ where
             encode_path(&mut f, &parsed_args.input)
                 .with_context(|| format!("Couldn't encode input filename: '{objfile:?}'"))?;
             write!(f, " ")?;
-            let stderr = from_local_codepage(&output.stderr)
+            let stderr = from_local_codepage(output.stderr)
                 .context("Failed to convert preprocessor stderr")?;
             let mut deps = HashSet::new();
             let mut stderr_bytes = vec![];
@@ -1197,6 +1198,12 @@ fn generate_compile_commands(
     Option<dist::CompileCommand>,
     Cacheable,
 )> {
+    let env_vars = env_vars
+        .iter()
+        .filter(|(k, _)| k != "CL" && k != "_CL_")
+        .cloned()
+        .collect::<Vec<_>>();
+
     #[cfg(not(feature = "dist-client"))]
     let _ = path_transformer;
 
@@ -1235,7 +1242,7 @@ fn generate_compile_commands(
     let command = SingleCompileCommand {
         arguments,
         cwd: cwd.to_owned(),
-        env_vars: env_vars.to_owned(),
+        env_vars: env_vars.clone(),
         executable: executable.to_owned(),
         out_pretty: out_pretty.to_string(),
     };
@@ -1248,7 +1255,7 @@ fn generate_compile_commands(
     let dist_command = (|| {
         let command = dist::CompileCommand {
             cwd: path_transformer.as_dist(cwd)?,
-            env_vars: dist::osstring_tuples_to_strings(env_vars)?,
+            env_vars: dist::osstring_tuples_to_strings(&env_vars)?,
             executable: path_transformer.as_dist(executable)?,
             arguments: {
                 // http://releases.llvm.org/6.0.0/tools/clang/docs/UsersManual.html#clang-cl
@@ -2854,7 +2861,10 @@ mod test {
             ];
 
             // Test the conversion from the OEM codepage to UTF-8
-            assert_eq!(from_local_codepage(&INPUT_BYTES).unwrap(), INPUT_STRING);
+            assert_eq!(
+                from_local_codepage(INPUT_BYTES.to_vec()).unwrap(),
+                INPUT_STRING
+            );
 
             // The characters in INPUT_STRING encoded in UTF-16
             const INPUT_WORDS: [u16; 16] = [

@@ -47,7 +47,6 @@ use std::{
     sync::{Arc, LazyLock},
 };
 use tempfile::TempPath;
-use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::errors::*;
 
@@ -1297,6 +1296,7 @@ struct CToolchainPackager {
 impl pkg::ToolchainPackager for CToolchainPackager {
     async fn package(&self) -> Result<Arc<dyn pkg::PackagedToolchain>> {
         use std::os::unix::ffi::OsStringExt;
+        use tokio_util::compat::TokioAsyncReadCompatExt;
 
         debug!(
             "Packaging toolchain for executable {:?}",
