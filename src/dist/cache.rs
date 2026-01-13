@@ -516,15 +516,16 @@ mod client {
 
 #[cfg(feature = "dist-server")]
 mod server {
-    use async_compression::futures::bufread::GzipDecoder;
     use async_trait::async_trait;
+    use flate2::bufread::MultiGzDecoder as GzipDecoder;
+    use fs_err as fs;
 
-    use futures::io::BufReader;
-    use tokio_util::compat::TokioAsyncReadCompatExt;
-
-    use std::ffi::OsStr;
-    use std::path::{Path, PathBuf};
-    use std::sync::Arc;
+    use std::{
+        ffi::OsStr,
+        io::BufReader,
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
     use crate::cache::disk::DiskCache;
     use crate::cache::{Cache, Storage, cache};
@@ -696,17 +697,16 @@ mod server {
                     let deflated_path = deflated_path.to_owned();
                     let inflated_path = inflated_path.to_owned();
                     async move {
-                        // Ensure the inflated dir exists first
-                        tokio::fs::create_dir_all(&inflated_path).await?;
-                        let deflated_file = tokio::fs::File::open(&deflated_path).await?;
-                        let targz_archive = async_tar::Archive::new(GzipDecoder::new(
-                            BufReader::new(deflated_file.compat()),
-                        ));
-                        // Unpack the tgz into the inflated dir
-                        targz_archive
-                            .unpack(&inflated_path)
-                            .await
-                            .map(|_| deflated_size)
+                        tokio::task::spawn_blocking(move || {
+                            // Ensure the inflated dir exists first
+                            fs::create_dir_all(&inflated_path)?;
+                            let deflated_file = fs::File::open(&deflated_path)?;
+                            // Unpack the tgz into the inflated dir
+                            tar::Archive::new(GzipDecoder::new(BufReader::new(deflated_file)))
+                                .unpack(&inflated_path)
+                                .map(|_| deflated_size)
+                        })
+                        .await?
                     }
                 })
                 .await
