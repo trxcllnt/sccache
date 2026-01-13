@@ -1391,6 +1391,10 @@ impl pkg::ToolchainPackager for CToolchainPackager {
             if Path::new("/etc/ld.so.conf").is_file() {
                 package_builder.add_file(&self.env_vars, "/etc/ld.so.conf".into())?;
             }
+            let ld_conf_dir = Path::new("/etc/ld.so.conf.d");
+            if ld_conf_dir.is_dir() {
+                package_builder.add_dir_contents(&self.env_vars, ld_conf_dir)?;
+            }
             Ok(())
         };
 
