@@ -1475,19 +1475,16 @@ where
             }
             CompilerArguments::CannotCache(why, extra_info) => {
                 if let Some(extra_info) = extra_info {
-                    debug!(
-                        "parse_arguments: CannotCache({}, {}): {:?}",
-                        why, extra_info, cmd
-                    );
+                    debug!("parse_arguments: CannotCache({why}, {extra_info}): {cmd:?}");
                 } else {
-                    debug!("parse_arguments: CannotCache({}): {:?}", why, cmd);
+                    debug!("parse_arguments: CannotCache({why}): {cmd:?}");
                 }
                 let mut stats = self.stats.lock().await;
                 stats.requests_not_cacheable += 1;
                 *stats.not_cached.entry(why.to_string()).or_insert(0) += 1;
             }
             CompilerArguments::NotCompilation => {
-                debug!("parse_arguments: NotCompilation: {:?}", cmd);
+                debug!("parse_arguments: NotCompilation: {cmd:?}");
                 self.stats.lock().await.requests_not_compile += 1;
             }
         }
