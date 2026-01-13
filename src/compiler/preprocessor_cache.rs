@@ -48,7 +48,7 @@ use super::Language;
 /// The current format is 1 header byte for the version + bincode encoding
 /// of the [`PreprocessorCacheEntry`] struct.
 const FORMAT_VERSION: u8 = 1;
-const MAX_PREPROCESSOR_CACHE_ENTRIES: u64 = 10_000;
+const MAX_PREPROCESSOR_CACHE_ENTRIES: u64 = 100_000;
 
 struct CompiledEntrySize;
 
