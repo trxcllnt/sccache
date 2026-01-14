@@ -23,7 +23,7 @@ use divan::{Bencher, black_box};
 use sccache::cache::{CacheRead, CacheWrite};
 use sccache::lru_disk_cache::LruCache;
 use sccache::util::{Digest, TimeMacroFinder};
-use std::io::{Cursor, Write};
+use std::io::Cursor;
 
 // =============================================================================
 // Helper Functions
@@ -104,6 +104,16 @@ fn hash_large_data(bencher: Bencher) {
     });
 }
 
+#[divan::bench]
+fn hash_large_data_sync(bencher: Bencher) {
+    let data = generate_test_data(4 * 1024 * 1024); // 4MB
+
+    bencher.bench_local(|| {
+        let cursor = Cursor::new(black_box(&data));
+        black_box(Digest::new().with_reader_sync(cursor).unwrap())
+    });
+}
+
 // =============================================================================
 // Time Macro Finder Benchmarks
 // =============================================================================
@@ -111,18 +121,16 @@ fn hash_large_data(bencher: Bencher) {
 /// Benchmark time macro detection on data without macros (~1MB)
 #[divan::bench]
 fn time_macro_finder_no_macros(bencher: Bencher) {
-    let file = {
-        let data = generate_test_data(1024 * 1024); // 1MB
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(&data[..]).unwrap();
-        file
-    };
+    let data = generate_test_data(1024 * 1024); // 1MB
     let rt = single_threaded_runtime();
 
     bencher.bench_local(|| {
         rt.block_on(async {
+            let cursor = Cursor::new(black_box(&data));
+            let cursor = futures::io::AllowStdIo::new(cursor);
             black_box(
-                Digest::from_file_with_time_macros(file.path(), &[])
+                Digest::new()
+                    .with_reader_and_time_macros(cursor)
                     .await
                     .unwrap(),
             )
@@ -130,25 +138,49 @@ fn time_macro_finder_no_macros(bencher: Bencher) {
     });
 }
 
+#[divan::bench]
+fn time_macro_finder_sync_no_macros(bencher: Bencher) {
+    let data = generate_test_data(1024 * 1024); // 1MB
+
+    bencher.bench_local(|| {
+        black_box(
+            Digest::new()
+                .with_reader_and_time_macros_sync(&data[..])
+                .unwrap(),
+        );
+    });
+}
+
 /// Benchmark time macro detection on data with __TIME__ and __DATE__
 #[divan::bench]
 fn time_macro_finder_with_macros(bencher: Bencher) {
-    let file = {
-        let data = generate_data_with_time_macros(1024 * 1024); // 1MB
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(&data[..]).unwrap();
-        file
-    };
+    let data = generate_data_with_time_macros(1024 * 1024); // 1MB
     let rt = single_threaded_runtime();
 
     bencher.bench_local(|| {
         rt.block_on(async {
+            let cursor = Cursor::new(black_box(&data));
+            let cursor = futures::io::AllowStdIo::new(cursor);
             black_box(
-                Digest::from_file_with_time_macros(file.path(), &[])
+                Digest::new()
+                    .with_reader_and_time_macros(cursor)
                     .await
                     .unwrap(),
-            )
+            );
         });
+    });
+}
+
+#[divan::bench]
+fn time_macro_finder_sync_with_macros(bencher: Bencher) {
+    let data = generate_data_with_time_macros(1024 * 1024); // 1MB
+
+    bencher.bench_local(|| {
+        black_box(
+            Digest::new()
+                .with_reader_and_time_macros_sync(&data[..])
+                .unwrap(),
+        );
     });
 }
 
@@ -525,6 +557,17 @@ fn hash_header_file(bencher: Bencher) {
     });
 }
 
+#[divan::bench]
+fn hash_header_file_sync(bencher: Bencher) {
+    // Simulate a typical header file (~50KB)
+    let header_content = generate_preprocessor_output(1000); // ~50KB
+
+    bencher.bench(|| {
+        let cursor = Cursor::new(black_box(&header_content));
+        black_box(Digest::new().with_reader_sync(cursor).unwrap())
+    });
+}
+
 /// Benchmark hashing multiple input files (parallel compilation simulation)
 #[divan::bench]
 fn hash_multiple_files(bencher: Bencher) {
@@ -546,6 +589,25 @@ fn hash_multiple_files(bencher: Bencher) {
                 black_box(Digest::new().with_reader(cursor).await.unwrap());
             }
         });
+    });
+}
+
+#[divan::bench]
+fn hash_multiple_files_sync(bencher: Bencher) {
+    // Simulate hashing 10 different source files
+    let files: Vec<Vec<u8>> = (0..10)
+        .map(|i| {
+            let mut data = generate_preprocessor_output(200); // ~10KB each
+            data.extend_from_slice(format!("// File {}\n", i).as_bytes());
+            data
+        })
+        .collect();
+
+    bencher.bench(|| {
+        for file_data in &files {
+            let cursor = Cursor::new(black_box(file_data));
+            black_box(Digest::new().with_reader_sync(cursor).unwrap());
+        }
     });
 }
 

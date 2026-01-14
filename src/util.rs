@@ -17,7 +17,6 @@ use async_trait::async_trait;
 use blake3::Hasher as blake3_Hasher;
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, Bytes};
-use fs::File;
 use fs_err as fs;
 use futures::{AsyncRead, AsyncReadExt, FutureExt, StreamExt, io::AllowStdIo, lock::Mutex};
 use memmap2::Mmap;
@@ -68,7 +67,7 @@ impl Digest {
         T: AsRef<Path>,
     {
         let path = path.as_ref();
-        let file = std::fs::File::open(path)
+        let file = fs::File::open(path)
             .with_context(|| format!("Failed to open file for hashing: {path:?}"))?;
         let mmap = Bytes::from_owner(unsafe { Mmap::map(&file) }?);
         Ok(AllowStdIo::new(mmap.reader()))
@@ -119,7 +118,7 @@ impl Digest {
         Ok((digest, finder))
     }
 
-    /// Merge the BLAKE3 digest of the contents of `path` into this digest.
+    /// Update the BLAKE3 digest of the contents of `path` into this digest.
     pub async fn with_file<T>(self, path: T) -> Result<Self>
     where
         T: AsRef<Path>,
@@ -127,7 +126,7 @@ impl Digest {
         self.with_reader(Self::open_file(path)?).await
     }
 
-    /// Merge the BLAKE3 digest of the contents of `path` into this digest, while
+    /// Update the BLAKE3 digest of the contents of `path` into this digest, while
     /// also checking for the presence of time macros.
     /// See [`TimeMacroFinder`] for more details.
     pub async fn with_file_and_time_macros<T>(
@@ -141,12 +140,9 @@ impl Digest {
         use chrono::Datelike;
 
         let path = path.as_ref();
-        let mut finder = TimeMacroFinder::new();
 
-        let mut digest = self
-            .with_reader_each(Self::open_file(path)?, |visit| {
-                finder.find_time_macros(visit)
-            })
+        let (mut digest, finder) = self
+            .with_reader_and_time_macros(Self::open_file(path)?)
             .await?;
 
         // If __DATE__ or __TIMESTAMP__ found, make sure that the digest changes
@@ -189,12 +185,43 @@ impl Digest {
         Ok((digest, finder))
     }
 
-    /// Merge the BLAKE3 digest of the contents read from `reader` into this digest.
+    /// Update the BLAKE3 digest of the contents read from `reader` into this digest.
     pub async fn with_reader<R: AsyncRead + Send + Unpin>(self, reader: R) -> Result<Self> {
         self.with_reader_each(reader, |_| {}).await
     }
 
-    /// Merge the BLAKE3 digest of the contents read from `reader` into this digest, calling
+    /// Update the BLAKE3 digest of the contents of `reader` into this digest, while
+    /// also checking for the presence of time macros.
+    /// See [`TimeMacroFinder`] for more details.
+    pub async fn with_reader_and_time_macros<R: AsyncRead + Send + Unpin>(
+        self,
+        reader: R,
+    ) -> Result<(Self, TimeMacroFinder)> {
+        let mut finder = TimeMacroFinder::new();
+        let digest = self
+            .with_reader_each(reader, |visit| finder.find_time_macros(visit))
+            .await?;
+        Ok((digest, finder))
+    }
+
+    /// Update the BLAKE3 digest of the contents read from `reader` into this digest.
+    pub fn with_reader_sync<R: Read + Send>(self, reader: R) -> Result<Self> {
+        self.with_reader_each_sync(reader, |_| {})
+    }
+
+    /// Update the BLAKE3 digest of the contents of `reader` into this digest, while
+    /// also checking for the presence of time macros.
+    /// See [`TimeMacroFinder`] for more details.
+    pub fn with_reader_and_time_macros_sync<R: Read + Send>(
+        self,
+        reader: R,
+    ) -> Result<(Self, TimeMacroFinder)> {
+        let mut finder = TimeMacroFinder::new();
+        let digest = self.with_reader_each_sync(reader, |visit| finder.find_time_macros(visit))?;
+        Ok((digest, finder))
+    }
+
+    /// Update the BLAKE3 digest of the contents read from `reader` into this digest, calling
     /// `each` before each time the digest is updated.
     pub async fn with_reader_each<R: AsyncRead + Send + Unpin, F: FnMut(&[u8])>(
         mut self,
@@ -206,6 +233,27 @@ impl Digest {
         let mut buffer = vec![0u8; HASH_BUFFER_SIZE];
         loop {
             let count = reader.read(&mut buffer[..]).await?;
+            if count == 0 {
+                break;
+            }
+            each(&buffer[..count]);
+            self.inner.update(&buffer[..count]);
+        }
+        Ok(self)
+    }
+
+    /// Update the BLAKE3 digest of the contents read from `reader` into this digest, calling
+    /// `each` before each time the digest is updated.
+    pub fn with_reader_each_sync<R: Read + Send, F: FnMut(&[u8])>(
+        mut self,
+        mut reader: R,
+        mut each: F,
+    ) -> Result<Self> {
+        // A buffer of 128KB should give us the best performance.
+        // See https://eklitzke.org/efficient-file-copying-on-linux.
+        let mut buffer = [0u8; HASH_BUFFER_SIZE];
+        loop {
+            let count = reader.read(&mut buffer[..])?;
             if count == 0 {
                 break;
             }
@@ -469,7 +517,7 @@ pub async fn hash_all_archives(
         let path = path.clone();
         pool.spawn_blocking(move || -> Result<String> {
             let mut m = Digest::new();
-            let archive_file = File::open(&path)
+            let archive_file = fs::File::open(&path)
                 .with_context(|| format!("Failed to open file for hashing: {path:?}"))?;
             let archive_mmap =
                 unsafe { memmap2::MmapOptions::new().map_copy_read_only(&archive_file)? };
