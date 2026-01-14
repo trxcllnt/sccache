@@ -897,7 +897,7 @@ mod client {
     {
         async fn call(
             &self,
-            (tc, packaged): &(Toolchain, Option<Arc<dyn PackagedToolchain>>),
+            (tc, package): &(Toolchain, Option<Arc<dyn PackagedToolchain>>),
         ) -> Result<SubmitToolchainResult> {
             let id = &tc.archive_id;
 
@@ -908,14 +908,14 @@ mod client {
                 client_toolchains,
             } = self;
 
-            if let Some(packaged) = packaged {
-                client_toolchains
-                    .put_toolchain(tc, packaged.as_ref())
-                    .await?;
-            }
+            let toolchain = if let Some(package) = package {
+                client_toolchains.put_toolchain(tc, package.as_ref()).await
+            } else {
+                client_toolchains.get_toolchain(tc).await
+            };
 
-            let res = match client_toolchains.get_toolchain(tc).await {
-                Err(e) => Err(e),
+            let res = match toolchain {
+                Err(err) => Err(err),
                 Ok(None) => Err(anyhow!("Couldn't find toolchain locally")),
                 Ok(Some(file)) => {
                     debug!("Uploading toolchain {id:?}");

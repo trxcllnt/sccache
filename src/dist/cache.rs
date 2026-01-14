@@ -12,7 +12,7 @@ mod client {
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Weak};
+    use std::sync::Arc;
 
     use crate::config;
     use crate::dist::Toolchain;
@@ -42,7 +42,8 @@ mod client {
         custom_toolchain_paths: Mutex<HashMap<PathBuf, (CustomToolchain, Option<Toolchain>)>>,
         // Toolchains configured to not be distributed
         disabled_toolchains: HashSet<PathBuf>,
-        packaged_toolchains: Mutex<HashMap<String, Weak<dyn PackagedToolchain>>>,
+        // Toolchains that have been hashed but not yet cached to disk
+        pending_toolchains: Mutex<HashMap<String, Arc<dyn PackagedToolchain>>>,
         // Local machine mapping from 'weak' hashes to strong toolchain hashes
         // - Weak hashes are what sccache uses to determine if a compiler has changed
         //   on the local machine - they're fast and 'good enough' (assuming we trust
@@ -64,18 +65,6 @@ mod client {
             fs::create_dir_all(&cache_dir).context(format!(
                 "failed to create top level toolchain cache dir: {}",
                 cache_dir.display()
-            ))?;
-
-            let toolchain_creation_dir = cache_dir.join("toolchain_tmp");
-            if toolchain_creation_dir.exists() {
-                fs::remove_dir_all(&toolchain_creation_dir).context(format!(
-                    "failed to clean up temporary toolchain creation directory: {}",
-                    toolchain_creation_dir.display()
-                ))?;
-            }
-            fs::create_dir(&toolchain_creation_dir).context(format!(
-                "failed to create temporary toolchain creation directory: {}",
-                toolchain_creation_dir.display()
             ))?;
 
             let weak_map_path = cache_dir.join("weak_map.json");
@@ -158,7 +147,7 @@ mod client {
                 custom_toolchain_archives: Mutex::new(HashMap::new()),
                 custom_toolchain_paths,
                 disabled_toolchains,
-                packaged_toolchains: Default::default(),
+                pending_toolchains: Default::default(),
                 // TODO: shouldn't clear on restart, but also should have some
                 // form of pruning
                 weak_map: Mutex::new(weak_map),
@@ -192,7 +181,7 @@ mod client {
         pub async fn hash_toolchain(
             &self,
             compiler_path: &Path,
-            weak_key: &str,
+            weak_toolchain_key: &str,
             toolchain_packager: &dyn ToolchainPackager,
         ) -> Result<(
             Toolchain,
@@ -214,77 +203,91 @@ mod client {
             // Only hash one toolchain at a time.
             // Not an issue if there are multiple attempts to
             // create the same toolchain, just a waste of time
-            let cache = self.cache.lock().await;
+            let mut cache = self.cache.lock().await;
             let mut weak_map = self.weak_map.lock().await;
-            let mut packaged_toolchains = self.packaged_toolchains.lock().await;
+            let mut pending_toolchains = self.pending_toolchains.lock().await;
 
-            if let Some(archive_id) = weak_map.get(weak_key) {
-                let packaged = packaged_toolchains.get(archive_id).and_then(Weak::upgrade);
-                if packaged.is_some() || cache.contains_key(archive_id) {
-                    trace!("Using cached toolchain {:?} -> {:?}", weak_key, archive_id);
+            if let Some(archive_id) = weak_map.get(weak_toolchain_key) {
+                let archive = cache.get_file(archive_id).ok();
+                let package = pending_toolchains.get(archive_id).cloned();
+                if archive.is_some() || package.is_some() {
+                    if let Some(file) = archive {
+                        trace!(
+                            "Using cached toolchain {weak_toolchain_key:?} -> {archive_id:?} ({:?})",
+                            file.path()
+                        );
+                    } else {
+                        trace!("Using pending toolchain {weak_toolchain_key:?} -> {archive_id:?}");
+                    }
                     return Ok((
                         Toolchain {
                             archive_id: archive_id.to_owned(),
                         },
                         None,
-                        packaged,
+                        package,
                     ));
                 }
             }
 
-            debug!("Weak key appears to be new: {weak_key:?}");
+            debug!("Weak key appears to be new: {weak_toolchain_key:?}");
 
-            let packaged = toolchain_packager
+            let package = toolchain_packager
                 .package()
                 .await
                 .context("Could not package toolchain")?;
 
-            let archive_id = packaged
+            let archive_id = package
                 .compute_hash()
                 .await
                 .context("Could not hash toolchain")?;
 
-            weak_map.insert(weak_key.to_owned(), archive_id.clone());
-            packaged_toolchains.insert(archive_id.clone(), Arc::downgrade(&packaged));
+            pending_toolchains.insert(archive_id.clone(), package.clone());
+            weak_map.insert(weak_toolchain_key.to_owned(), archive_id.clone());
 
-            let weak_map_path = self.cache_dir.join("weak_map.json");
-            fs::File::create(weak_map_path)
+            fs::File::create(self.cache_dir.join("weak_map.json"))
                 .map_err(Error::from)
                 .and_then(|f| serde_json::to_writer(f, &*weak_map).map_err(Error::from))
                 .context("failed to enter toolchain in weak map")?;
 
-            Ok((Toolchain { archive_id }, None, Some(packaged)))
+            Ok((Toolchain { archive_id }, None, Some(package)))
         }
 
         // If the toolchain doesn't already exist, compress it and insert into the local cache
         pub async fn put_toolchain(
             &self,
             toolchain: &Toolchain,
-            packaged: &dyn PackagedToolchain,
-        ) -> Result<()> {
+            package: &dyn PackagedToolchain,
+        ) -> Result<Option<fs::File>> {
+            let archive_id = &toolchain.archive_id;
             // Only compress one toolchain at a time, because the default is to compress with all the cores.
             let mut cache = self.cache.lock().await;
+            let mut pending_toolchains = self.pending_toolchains.lock().await;
 
-            if let Ok(file) = cache.get_file(&toolchain.archive_id) {
-                trace!(
-                    "Using cached toolchain {:?} -> {:?}",
-                    toolchain.archive_id,
-                    file.path().display()
-                );
-                return Ok(());
+            if let Ok(file) = cache.get_file(archive_id) {
+                trace!("Using cached toolchain {archive_id:?} ({:?})", file.path());
+                pending_toolchains.remove(archive_id);
+                return Ok(Some(file));
             }
 
-            let (tmpfile, tmppath) =
-                crate::util::tempfile_in(self.cache_dir.join("toolchain_tmp"))?.into_parts();
+            let mut f = cache
+                .prepare_add(archive_id, 0)
+                .await
+                .context("Failed to prepare toolchain cache dir")?;
 
-            packaged
-                .write_tar_gz(toolchain, fs_err::File::from_parts(tmpfile, &tmppath))
+            package
+                .write_tar_gz(toolchain, f.as_file_mut())
                 .await
                 .context("Could not compress toolchain")?;
 
-            cache.insert_file(&toolchain.archive_id, &tmppath)?;
+            cache.commit(f).await.context("Failed to cache toolchain")?;
 
-            Ok(())
+            pending_toolchains.remove(archive_id);
+
+            match cache.get_file(archive_id) {
+                Ok(file) => Ok(Some(file)),
+                Err(LruError::FileNotInCache) => Ok(None),
+                Err(e) => Err(e).context("error while retrieving toolchain from cache"),
+            }
         }
 
         pub async fn get_custom_toolchain(

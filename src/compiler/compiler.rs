@@ -4337,9 +4337,12 @@ mod test_dist {
     };
     use crate::mock_command::ProcessOutput;
     use async_trait::async_trait;
-    use std::path::{Path, PathBuf};
-    use std::sync::{Arc, atomic::AtomicBool};
-    use std::time::Duration;
+    use std::{
+        io::Write,
+        path::{Path, PathBuf},
+        sync::{Arc, atomic::AtomicBool},
+        time::Duration,
+    };
 
     use crate::errors::*;
 
@@ -4350,7 +4353,7 @@ mod test_dist {
         async fn compute_hash(&self) -> Result<String> {
             panic!("PackagedToolchain::compute_hash should not have called packager")
         }
-        async fn write_tar_gz(&self, _: &Toolchain, _: fs_err::File) -> Result<()> {
+        async fn write_tar_gz(&self, _: &Toolchain, _: &mut (dyn Write + Send)) -> Result<()> {
             panic!("PackagedToolchain::write_compressed_tar should not have called packager")
         }
     }

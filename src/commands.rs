@@ -819,7 +819,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             let creator = ProcessCommandCreator::new(&jobserver);
             let args: Vec<_> = env::args_os().collect();
             let env: Vec<_> = env::vars_os().collect();
-            let out_file = File::create(out)?;
+            let mut out_file = File::create(out)?;
             let cwd = env::current_dir().expect("A current working dir should exist");
 
             let pool = runtime.handle().clone();
@@ -844,7 +844,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                         &Toolchain {
                             archive_id: packaged.compute_hash().await?,
                         },
-                        out_file,
+                        &mut out_file,
                     )
                     .await
             })?;

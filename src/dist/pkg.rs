@@ -36,7 +36,11 @@ pub trait ToolchainPackager: Send + Sync {
 #[async_trait]
 pub trait PackagedToolchain: Send + Sync {
     async fn compute_hash(&self) -> Result<String>;
-    async fn write_tar_gz(&self, toolchain: &dist::Toolchain, f: fs::File) -> Result<()>;
+    async fn write_tar_gz(
+        &self,
+        toolchain: &dist::Toolchain,
+        writer: &mut (dyn Write + Send),
+    ) -> Result<()>;
 }
 
 pub trait InputsWriter: Write + Send {
@@ -116,7 +120,7 @@ mod toolchain_imp {
     use is_executable::IsExecutable;
     use std::collections::BTreeMap;
     use std::ffi::OsString;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::path::{Component, Path, PathBuf};
     use std::process;
     use std::str;
@@ -320,7 +324,11 @@ mod toolchain_imp {
             Ok(digest.finish())
         }
 
-        async fn write_tar_gz(&self, toolchain: &Toolchain, writer: fs::File) -> Result<()> {
+        async fn write_tar_gz(
+            &self,
+            toolchain: &Toolchain,
+            writer: &mut (dyn Write + Send),
+        ) -> Result<()> {
             use crate::util::num_cpus;
 
             use gzp::{
@@ -338,35 +346,36 @@ mod toolchain_imp {
                 toolchain.archive_id,
             );
 
-            tokio::task::spawn_blocking(move || {
-                let compressor = ParCompressBuilder::<Gzip>::new()
-                    .compression_level(Compression::default())
-                    .num_threads(num_cpus())?
-                    .from_writer(writer);
+            tokio::task::block_in_place(move || {
+                std::thread::scope(|scope| {
+                    let compressor = ParCompressBuilder::<Gzip>::new()
+                        .compression_level(Compression::default())
+                        .num_threads(num_cpus())?
+                        .from_borrowed_writer(writer, scope);
 
-                let mut builder = tar::Builder::new(compressor);
+                    let mut builder = tar::Builder::new(compressor);
 
-                // Add symlinks first to ensure the symlinks exist before
-                // files are unpacked to paths that may traverse them
-                for (from_path, to_path) in symlinks.iter() {
-                    let mut header = tar::Header::new_gnu();
-                    header.set_size(0);
-                    header.set_mtime(0);
-                    header.set_entry_type(tar::EntryType::Symlink);
-                    // Leave `to_path` as absolute, assuming the tar will
-                    // be used in a chroot-like environment.
-                    builder.append_link(&mut header, tar_safe_path(from_path), to_path)?;
-                }
-                for (tar_path, dir_path) in dir_set.iter() {
-                    builder.append_dir(tar_path, dir_path)?;
-                }
-                for (tar_path, file_path) in file_set.iter() {
-                    builder.append_path_with_name(file_path, tar_path)?;
-                }
+                    // Add symlinks first to ensure the symlinks exist before
+                    // files are unpacked to paths that may traverse them
+                    for (from_path, to_path) in symlinks.iter() {
+                        let mut header = tar::Header::new_gnu();
+                        header.set_size(0);
+                        header.set_mtime(0);
+                        header.set_entry_type(tar::EntryType::Symlink);
+                        // Leave `to_path` as absolute, assuming the tar will
+                        // be used in a chroot-like environment.
+                        builder.append_link(&mut header, tar_safe_path(from_path), to_path)?;
+                    }
+                    for (tar_path, dir_path) in dir_set.iter() {
+                        builder.append_dir(tar_path, dir_path)?;
+                    }
+                    for (tar_path, file_path) in file_set.iter() {
+                        builder.append_path_with_name(file_path, tar_path)?;
+                    }
 
-                builder.finish().map_err(anyhow::Error::new)
+                    builder.finish().map_err(anyhow::Error::new)
+                })
             })
-            .await?
         }
     }
 
