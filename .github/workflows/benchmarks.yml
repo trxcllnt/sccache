@@ -46,6 +46,7 @@ jobs:
         with:
           mode: simulation
           run: cargo codspeed run > /dev/null
+          cache-instruments: false
 
   memory-benchmarks:
     name: Run memory benchmarks (CodSpeed)
@@ -75,3 +76,4 @@ jobs:
         with:
           mode: memory
           run: cargo codspeed run > /dev/null
+          cache-instruments: false
