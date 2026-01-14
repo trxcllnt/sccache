@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read # to fetch code (actions/checkout)
+  id-token: write # to authenticate with CodSpeed
 
 # End the current execution if there is a new changeset in the PR.
 concurrency:
@@ -44,8 +45,7 @@ jobs:
           CODSPEED_LOG: debug
         with:
           mode: simulation
-          run: cargo codspeed run
-          token: ${{ secrets.CODSPEED_TOKEN }}
+          run: cargo codspeed run > /dev/null
 
   memory-benchmarks:
     name: Run memory benchmarks (CodSpeed)
@@ -74,5 +74,4 @@ jobs:
           CODSPEED_LOG: debug
         with:
           mode: memory
-          run: cargo codspeed run
-          token: ${{ secrets.CODSPEED_TOKEN }}
+          run: cargo codspeed run > /dev/null
