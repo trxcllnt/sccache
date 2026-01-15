@@ -63,6 +63,7 @@ async fn nvcc_compile(
     tmpdir: &Path,
 ) -> Result<()> {
     let source_file = "x.cu";
+    let dep_file = "x.cu.o.d";
     let obj_file = "x.cu.o";
     write_source(
         tmpdir,
@@ -77,6 +78,11 @@ async fn nvcc_compile(
         .arg(tmpdir.join(source_file))
         .arg("-o")
         .arg(tmpdir.join(obj_file))
+        .arg("-MD")
+        .arg("-MT")
+        .arg(tmpdir.join(obj_file))
+        .arg("-MF")
+        .arg(tmpdir.join(dep_file))
         .env("RUST_BACKTRACE", "1")
         .env("SCCACHE_MAX_THREADS", "2")
         .kill_on_drop(true)
@@ -569,13 +575,14 @@ async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Resu
         .build()
         .await?;
 
-    let mut config =
-        dist_test_sccache_client_cfg(system.data_dir(), system.scheduler(0)?.url(), true);
-    config.cache.disk.as_mut().unwrap().size = 10_000_000; // enough for one tiny object file
+    let client = system.new_client(&{
+        let mut config =
+            dist_test_sccache_client_cfg(system.data_dir(), system.scheduler(0)?.url(), true);
+        config.cache.disk.as_mut().unwrap().size = 10_000_000; // enough for one tiny object file
+        config
+    });
 
-    let client = system.new_client(&config);
-
-    client.clear_disk_cache()?;
+    let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
 
     cc_compile(&client, system.test_dir()).await?;
 
@@ -591,20 +598,15 @@ async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Resu
     let obj_file = "x.o";
     let obj_path = system.test_dir().join(obj_file);
     let data_a = std::fs::read(&obj_path)?;
-    let cache_path = config.cache.disk.unwrap().dir;
 
     // Don't touch the preprocessor cache - and check that it exists
     assert!(
-        cache_path.join("preprocessor").is_dir(),
+        preprocessor_cache_path.is_dir(),
         "The preprocessor cache should exist"
     );
 
-    // Delete the main cache to ensure a cache miss - potential dirs are "0".."f".
-    let main_cache_dirs = "0123456789abcdef";
-    let delete_count = main_cache_dirs.chars().fold(0, |res, dir| {
-        res + (std::fs::remove_dir_all(cache_path.join(String::from(dir))).is_ok() as u32)
-    });
-    assert_eq!(delete_count, 1, "Did the disk cache format change?");
+    // Delete the object cache to ensure a cache miss
+    client.clear_object_cache()?;
 
     cc_compile(&client, system.test_dir()).await?;
 
@@ -622,7 +624,7 @@ async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Resu
     // from cc_compile(), but that seems pretty involved and this happens to work...
     let data_b = std::fs::read(&obj_path)?;
 
-    assert_eq!(data_a, data_b);
+    assert!(data_a == data_b, "object files don't match");
 
     Ok(())
 }
@@ -646,11 +648,14 @@ async fn test_dist_cuda_compiles(
         .build()
         .await?;
 
-    let client = system.new_client(&dist_test_sccache_client_cfg(
-        system.data_dir(),
-        system.scheduler(0)?.url(),
-        false,
-    ));
+    let client = system.new_client(&{
+        let mut config =
+            dist_test_sccache_client_cfg(system.data_dir(), system.scheduler(0)?.url(), true);
+        config.cache.disk.as_mut().unwrap().size = 10_000_000; // enough for one tiny object file
+        config
+    });
+
+    let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
 
     nvcc_compile(&client, cuda_compiler, host_compiler, system.test_dir()).await?;
 
@@ -661,6 +666,51 @@ async fn test_dist_cuda_compiles(
     assert_eq!(5, stats.requests_executed);
     assert_eq!(5, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
+    assert_eq!(0, stats.preprocessor_cache_hits.all());
+
+    // Test we don't regress bug 2173 for CUDA compilations
+
+    let obj_path = system.test_dir().join("x.cu.o");
+    let dep_path = system.test_dir().join("x.cu.o.d");
+    let dep_a = std::fs::read(&dep_path)?;
+    let obj_a = std::fs::read(&obj_path)?;
+
+    // Don't touch the preprocessor cache - and check that it exists
+    assert!(
+        preprocessor_cache_path.is_dir(),
+        "The preprocessor cache should exist"
+    );
+
+    // Delete the object cache to ensure a cache miss
+    client.clear_object_cache()?;
+    client.zero_stats();
+
+    nvcc_compile(&client, cuda_compiler, host_compiler, system.test_dir()).await?;
+
+    let stats = client.stats()?;
+    assert_eq!(4, stats.dist_compiles.values().sum::<usize>());
+    assert_eq!(0, stats.dist_errors);
+    assert_eq!(1, stats.compile_requests);
+    assert_eq!(5, stats.requests_executed);
+    assert_eq!(5, stats.compilations);
+    assert_eq!(0, stats.cache_hits.all());
+    assert_eq!(1, stats.preprocessor_cache_hits.all());
+
+    let dep_b = std::fs::read(&dep_path)?;
+    let obj_b = std::fs::read(&obj_path)?;
+
+    if host_compiler.name == "nvc++" {
+        // nvc++ produces different binary contents for the same inputs.
+        // TODO: Figure out which optimizations to disable to fix this.
+        assert!(obj_a.len() == obj_b.len(), "object files don't match");
+    } else {
+        assert!(obj_a == obj_b, "object files don't match");
+    }
+    assert_eq!(
+        String::from_utf8_lossy(&dep_a),
+        String::from_utf8_lossy(&dep_b),
+        "dependency files don't match"
+    );
 
     Ok(())
 }

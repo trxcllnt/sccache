@@ -131,7 +131,8 @@ fn test_preprocessor_cache_mode_single_entry_multiple_hashes(
         Language::C
     };
 
-    let preprocessor_cache_path = client.clear_disk_cache()?.join("preprocessor");
+    client.zero_stats();
+    let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
 
     let preprocessor_cache_entry = || {
         assert!(
@@ -349,7 +350,8 @@ fn test_preprocessor_cache_mode_time_macros(
         Language::C
     };
 
-    let preprocessor_cache_path = client.clear_disk_cache()?.join("preprocessor");
+    client.zero_stats();
+    let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
 
     let preprocessor_cache_entries = || {
         walkdir::WalkDir::new(preprocessor_cache_path.as_path())
@@ -648,7 +650,8 @@ fn test_preprocessor_cache_mode_date_macros(
         Language::C
     };
 
-    let preprocessor_cache_path = client.clear_disk_cache()?.join("preprocessor");
+    client.zero_stats();
+    let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
 
     let preprocessor_cache_entries = || {
         walkdir::WalkDir::new(preprocessor_cache_path.as_path())
@@ -1164,7 +1167,8 @@ fn test_preprocessor_cache_mode_timestamp_macros(
         Language::C
     };
 
-    let preprocessor_cache_path = client.clear_disk_cache()?.join("preprocessor");
+    client.zero_stats();
+    let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
 
     let preprocessor_cache_entries = || {
         walkdir::WalkDir::new(preprocessor_cache_path.as_path())
