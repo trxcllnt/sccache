@@ -1902,6 +1902,8 @@ fn test_nvcc_proper_lang_stat_tracking(
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
             preprocessor_duration: stats.preprocessor_duration,
+            preprocessor_cache_hit_duration: stats.preprocessor_cache_hit_duration,
+            preprocessor_cache_miss_duration: stats.preprocessor_cache_miss_duration,
             ..client.stats().unwrap()
         }
     );
@@ -1943,6 +1945,8 @@ fn test_nvcc_proper_lang_stat_tracking(
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
             preprocessor_duration: stats.preprocessor_duration,
+            preprocessor_cache_hit_duration: stats.preprocessor_cache_hit_duration,
+            preprocessor_cache_miss_duration: stats.preprocessor_cache_miss_duration,
             ..client.stats().unwrap()
         }
     );
@@ -1984,6 +1988,8 @@ fn test_nvcc_proper_lang_stat_tracking(
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
             preprocessor_duration: stats.preprocessor_duration,
+            preprocessor_cache_hit_duration: stats.preprocessor_cache_hit_duration,
+            preprocessor_cache_miss_duration: stats.preprocessor_cache_miss_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2023,6 +2029,8 @@ fn test_nvcc_proper_lang_stat_tracking(
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
             preprocessor_duration: stats.preprocessor_duration,
+            preprocessor_cache_hit_duration: stats.preprocessor_cache_hit_duration,
+            preprocessor_cache_miss_duration: stats.preprocessor_cache_miss_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2133,6 +2141,8 @@ fn test_clang_cuda_compiles(
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
             preprocessor_duration: stats.preprocessor_duration,
+            preprocessor_cache_hit_duration: stats.preprocessor_cache_hit_duration,
+            preprocessor_cache_miss_duration: stats.preprocessor_cache_miss_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2173,6 +2183,8 @@ fn test_clang_cuda_compiles(
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
             preprocessor_duration: stats.preprocessor_duration,
+            preprocessor_cache_hit_duration: stats.preprocessor_cache_hit_duration,
+            preprocessor_cache_miss_duration: stats.preprocessor_cache_miss_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2216,6 +2228,8 @@ fn test_clang_cuda_compiles(
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
             preprocessor_duration: stats.preprocessor_duration,
+            preprocessor_cache_hit_duration: stats.preprocessor_cache_hit_duration,
+            preprocessor_cache_miss_duration: stats.preprocessor_cache_miss_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2256,6 +2270,8 @@ fn test_clang_cuda_compiles(
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
             preprocessor_duration: stats.preprocessor_duration,
+            preprocessor_cache_hit_duration: stats.preprocessor_cache_hit_duration,
+            preprocessor_cache_miss_duration: stats.preprocessor_cache_miss_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2336,6 +2352,8 @@ fn test_clang_proper_lang_stat_tracking(
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
             preprocessor_duration: stats.preprocessor_duration,
+            preprocessor_cache_hit_duration: stats.preprocessor_cache_hit_duration,
+            preprocessor_cache_miss_duration: stats.preprocessor_cache_miss_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2375,6 +2393,8 @@ fn test_clang_proper_lang_stat_tracking(
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
             preprocessor_duration: stats.preprocessor_duration,
+            preprocessor_cache_hit_duration: stats.preprocessor_cache_hit_duration,
+            preprocessor_cache_miss_duration: stats.preprocessor_cache_miss_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2414,6 +2434,8 @@ fn test_clang_proper_lang_stat_tracking(
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
             preprocessor_duration: stats.preprocessor_duration,
+            preprocessor_cache_hit_duration: stats.preprocessor_cache_hit_duration,
+            preprocessor_cache_miss_duration: stats.preprocessor_cache_miss_duration,
             ..client.stats().unwrap()
         }
     );
@@ -2452,6 +2474,8 @@ fn test_clang_proper_lang_stat_tracking(
             cache_read_hit_duration: stats.cache_read_hit_duration,
             compiler_write_duration: stats.compiler_write_duration,
             preprocessor_duration: stats.preprocessor_duration,
+            preprocessor_cache_hit_duration: stats.preprocessor_cache_hit_duration,
+            preprocessor_cache_miss_duration: stats.preprocessor_cache_miss_duration,
             ..client.stats().unwrap()
         }
     );

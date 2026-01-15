@@ -108,9 +108,10 @@ impl CCompilerImpl for TaskingVX {
 
         preprocess(creator, executable, parsed_args, cwd, env_vars)
             .and_then(|res| async move {
+                let dur = preprocessor_start.elapsed();
                 let mut stats = stats.lock().await;
                 stats.preprocessed += 1;
-                stats.preprocessor_duration += preprocessor_start.elapsed();
+                stats.preprocessor_duration += dur;
                 Ok(res)
             })
             .await

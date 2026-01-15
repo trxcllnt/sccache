@@ -308,5 +308,7 @@ impl std::ops::AddAssign<AdditionalStats> for ServerStats {
         self.cache_read_hit_duration = Default::default();
         self.compiler_write_duration = Default::default();
         self.preprocessor_duration = Default::default();
+        self.preprocessor_cache_hit_duration = Default::default();
+        self.preprocessor_cache_miss_duration = Default::default();
     }
 }

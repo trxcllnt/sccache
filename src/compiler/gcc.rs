@@ -974,9 +974,10 @@ where
     let output = run_input_stream_output(cmd, None)
         .await?
         .chain(async_stream::stream! {
+            let dur = preprocessor_start.elapsed();
             let mut stats = stats.lock().await;
             stats.preprocessed += 1;
-            stats.preprocessor_duration += preprocessor_start.elapsed();
+            stats.preprocessor_duration += dur;
             yield Ok(bytes::Bytes::new());
         })
         .boxed();

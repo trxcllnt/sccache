@@ -667,6 +667,7 @@ where
         let lang = <CCompilerHasher<I> as CompilerHasher<T>>::language(&*self);
 
         // Try to look for a cached preprocessing step for this compilation request.
+        let preprocessor_cache_lookup_start = std::time::Instant::now();
         let preprocessor_cache_lookup = self
             .preprocessor_cache_lookup(
                 &cwd,
@@ -679,12 +680,10 @@ where
 
         match preprocessor_cache_lookup {
             PreprocessorCacheLookup::Hit(key) => {
-                service
-                    .stats
-                    .lock()
-                    .await
-                    .preprocessor_cache_hits
-                    .increment(&kind, &lang);
+                let dur = preprocessor_cache_lookup_start.elapsed();
+                let mut stats = service.stats.lock().await;
+                stats.preprocessor_cache_hit_duration += dur;
+                stats.preprocessor_cache_hits.increment(&kind, &lang);
 
                 // Skip preprocessing if it's a preprocessor cache hit
                 return Ok(HashResult {
@@ -704,12 +703,10 @@ where
                 });
             }
             PreprocessorCacheLookup::Miss(_) => {
-                service
-                    .stats
-                    .lock()
-                    .await
-                    .preprocessor_cache_misses
-                    .increment(&kind, &lang);
+                let dur = preprocessor_cache_lookup_start.elapsed();
+                let mut stats = service.stats.lock().await;
+                stats.preprocessor_cache_miss_duration += dur;
+                stats.preprocessor_cache_misses.increment(&kind, &lang);
             }
             _ => {}
         };

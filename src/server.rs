@@ -1977,6 +1977,10 @@ pub struct ServerStats {
     pub preprocessed: u64,
     /// The number of successful compilations performed.
     pub compilations: u64,
+    /// The total time spent verifying preprocessor cache hits.
+    pub preprocessor_cache_hit_duration: Duration,
+    /// The total time spent verifying preprocessor cache misses.
+    pub preprocessor_cache_miss_duration: Duration,
     /// The total time spent preprocessing.
     pub preprocessor_duration: Duration,
     /// The total time spent compiling.
@@ -2045,6 +2049,8 @@ impl Default for ServerStats {
             cache_read_hit_duration: Duration::new(0, 0),
             preprocessed: u64::default(),
             compilations: u64::default(),
+            preprocessor_cache_hit_duration: Duration::new(0, 0),
+            preprocessor_cache_miss_duration: Duration::new(0, 0),
             preprocessor_duration: Duration::new(0, 0),
             compiler_write_duration: Duration::new(0, 0),
             compile_fails: u64::default(),
@@ -2211,6 +2217,22 @@ impl ServerStats {
             self.cache_writes,
             "Average cache write"
         );
+        if use_preprocessor_cache_mode && self.preprocessor_cache_hits.all() > 0 {
+            set_duration_stat!(
+                stats_vec,
+                self.preprocessor_cache_hit_duration,
+                self.preprocessor_cache_hits.all(),
+                "Average preprocessor cache hit"
+            );
+        }
+        if use_preprocessor_cache_mode && self.preprocessor_cache_misses.all() > 0 {
+            set_duration_stat!(
+                stats_vec,
+                self.preprocessor_cache_miss_duration,
+                self.preprocessor_cache_misses.all(),
+                "Average preprocessor cache miss"
+            );
+        }
         if self.preprocessed > 0 {
             set_duration_stat!(
                 stats_vec,
