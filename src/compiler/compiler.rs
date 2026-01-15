@@ -432,6 +432,9 @@ impl Language {
                 | Language::CxxPreprocessed
                 | Language::ObjectiveCPreprocessed
                 | Language::ObjectiveCxxPreprocessed
+                | Language::CudaFE
+                | Language::Ptx
+                | Language::Cubin
                 | Language::Rust
         )
     }

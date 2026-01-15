@@ -1289,13 +1289,6 @@ where
     let mut device_compile_groups =
         HashMap::<PathBuf, Vec<(ParsedArguments, NvccGeneratedSubcommand)>>::new();
 
-    let env_vars_no_preprocessor_cache_mode = env_vars
-        .iter()
-        .filter(|(key, _)| key != "SCCACHE_DIRECT")
-        .chain([("SCCACHE_DIRECT".into(), "false".into())].iter())
-        .cloned()
-        .collect::<Vec<_>>();
-
     for (dir, exe, args) in all_commands.iter_mut() {
         if let Some((cacheable, group, parsed_args, env_vars)) =
             match exe.file_stem().and_then(|s| s.to_str()) {
@@ -1304,14 +1297,14 @@ where
                     Cacheable::Yes,
                     &mut cuda_front_end_group,
                     parse_args_simple(args, dir),
-                    env_vars_no_preprocessor_cache_mode.clone(),
+                    env_vars.clone(),
                 )),
                 // fatbinary and nvlink are not cacheable
                 Some("fatbinary") | Some("nvlink") => Some((
                     Cacheable::No,
                     &mut final_assembly_group,
                     parse_args_simple(args, dir),
-                    env_vars_no_preprocessor_cache_mode.clone(),
+                    env_vars.clone(),
                 )),
                 // cicc and ptxas are cacheable
                 Some("cicc") => Some(parse_args_simple(args, dir))
@@ -1330,7 +1323,7 @@ where
                                 .entry(parsed_args.input.clone())
                                 .or_default(),
                             parsed_args,
-                            env_vars_no_preprocessor_cache_mode.clone(),
+                            env_vars.clone(),
                         )
                     }),
                 Some("ptxas") => {
@@ -1359,12 +1352,7 @@ where
                                 })
                         })
                         .map(|(parsed_args, group)| {
-                            (
-                                Cacheable::Yes,
-                                group,
-                                parsed_args,
-                                env_vars_no_preprocessor_cache_mode.clone(),
-                            )
+                            (Cacheable::Yes, group, parsed_args, env_vars.clone())
                         })
                 }
                 _ => {
