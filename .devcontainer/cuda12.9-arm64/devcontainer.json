@@ -8,8 +8,7 @@
     },
     "options": [
       "--platform",
-      "linux/arm64",
-      "--pull"
+      "linux/arm64"
     ]
   },
   "capAdd": ["SYS_ADMIN", "SYS_PTRACE"],
