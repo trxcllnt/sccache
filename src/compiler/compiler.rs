@@ -1161,7 +1161,9 @@ where
                 let executable = compile_cmd.get_executable();
                 let fallback_to_local = dist.dist_client.fallback_to_local_compile();
                 // Do the distributed compilation
-                let dist_compile_res = dist.into_result(&executable, &outputs, service).await;
+                let dist_compile_res = dist
+                    .into_result(command_creator, &executable, &outputs, service)
+                    .await;
 
                 match dist_compile_res {
                     Ok((dt, o)) => Ok((hash_key, outputs, cacheable, dt, o)),
@@ -1219,6 +1221,7 @@ where
 {
     async fn into_result(
         self,
+        creator: &T,
         executable: &Path,
         outputs: &[FileObjectSource],
         service: &server::SccacheService<T>,
@@ -1249,6 +1252,9 @@ where
         }
 
         let pending = service.increment_pending_compilations();
+
+        // Ensure the dependency file exists
+        compilation.generate_dependencies(creator).await?;
 
         let (inputs_packager, toolchain_packager, outputs_rewriter) =
             compilation.into_dist_packagers()?;
@@ -1713,6 +1719,12 @@ where
         Option<dist::CompileCommand>,
         Cacheable,
     )>;
+
+    /// Run the C preprocessor to generate the dependencies if dist-compiling.
+    #[allow(dead_code)]
+    async fn generate_dependencies(&self, _creator: &T) -> Result<()> {
+        Ok(())
+    }
 
     /// Create a function that will create the inputs used to perform a distributed compilation
     #[cfg(feature = "dist-client")]

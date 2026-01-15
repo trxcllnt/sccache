@@ -1028,7 +1028,10 @@ where
         creator: &T,
         active: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput> {
-        self.cmd.execute(service, creator, active).await
+        let out = self.cmd.execute(service, creator, active).await?;
+        // Ensure the dependency file exists
+        self.compilation.generate_dependencies(creator).await?;
+        Ok(out)
     }
 
     fn box_clone(&self) -> Box<dyn CompileCommand<T>> {
@@ -1074,6 +1077,39 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
                     cacheable,
                 )
             })
+    }
+
+    #[allow(dead_code)]
+    async fn generate_dependencies(&self, creator: &T) -> Result<()> {
+        let CCompilation {
+            parsed_args,
+            executable,
+            compiler,
+            cwd,
+            env_vars,
+            ..
+        } = self;
+
+        // Ensure the depfile exists if it is required and doesn't already.
+        //
+        // When not configured for dist-compile, the depfile is either created
+        // by the preprocessor, generated during compile, or restored from
+        // cache.
+        //
+        // If we're using preprocessor cache mode with sccache-dist, it's possible
+        // to get a preprocessor cache hit, an object cache miss (i.e. changed from
+        // remote to local caching), and then dist-compile. However, dist-compile
+        // doesn't generate dependency files because it compiles the preprocessed
+        // source. Preprocessor-cache mode means we skip calling the preprocessor,
+        // so we have to generate the dependency file after the fact.
+        if let Some(depfile) = parsed_args.depfile.as_ref() {
+            if !depfile.exists() {
+                compiler
+                    .generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     #[cfg(feature = "dist-client")]
