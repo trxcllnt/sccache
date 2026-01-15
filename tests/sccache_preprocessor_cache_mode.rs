@@ -1491,37 +1491,38 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
         assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
 
         // Reset the mtime and compile again to validate preprocessor cache hits
-        {
-            let f = std::fs::File::open(tempdir.join(dep_b))?;
-            f.set_modified(prev_mtime)?;
-            f.sync_all()?;
+        // Don't error if this fails due to permissions issues (i.e. in Windows CI)
+        let mtime_reset = std::fs::File::open(tempdir.join(dep_b))
+            .and_then(|f| f.set_modified(prev_mtime).map(|_| f))
+            .and_then(|f| f.sync_all());
+
+        if mtime_reset.is_ok() {
+            // Compile again to ensure preprocessor cache hit
+            compile_and_verify(AdditionalStats {
+                compile_requests: Some(1),
+                requests_executed: Some(1),
+                cache_hits: Some(vec![(kind, lang, 1)]),
+                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+                ..Default::default()
+            })?;
+
+            entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+            // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 4] results)
+            assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 4]);
+            // Verify the new preprocessor cache entry result is at the back of the LRU
+            assert_preprocessor_cache_entries_result_orders_changed(
+                &entries_b
+                    .iter()
+                    .filter(|(_, e)| e.iter().count() > 1)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                &entries_a
+                    .iter()
+                    .filter(|(_, e)| e.iter().count() > 1)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
         }
-
-        // Compile again to ensure preprocessor cache hit
-        compile_and_verify(AdditionalStats {
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 4] results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 4]);
-        // Verify the new preprocessor cache entry result is at the back of the LRU
-        assert_preprocessor_cache_entries_result_orders_changed(
-            &entries_b
-                .iter()
-                .filter(|(_, e)| e.iter().count() > 1)
-                .cloned()
-                .collect::<Vec<_>>(),
-            &entries_a
-                .iter()
-                .filter(|(_, e)| e.iter().count() > 1)
-                .cloned()
-                .collect::<Vec<_>>(),
-        );
     }
 
     // Test removing __TIMESTAMP__ from dependency B

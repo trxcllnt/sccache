@@ -24,20 +24,14 @@ mod harness;
 use assert_cmd::prelude::*;
 use fs::File;
 use fs_err as fs;
-#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
-use harness::find_cuda_compilers;
 use harness::{
-    AdditionalStats, Compiler,
+    Compiler,
     client::{SccacheClient, make_sccache_client},
     compile_cmdline, find_compilers, write_source,
 };
 use paste::paste;
 use predicates::prelude::*;
 use regex::Regex;
-use sccache::{
-    compiler::{CCompilerKind, CompilerKind, Language},
-    server::ServerStats,
-};
 #[cfg(unix)]
 use serial_test::serial;
 use std::env;
@@ -45,7 +39,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::str;
 use std::time::{Duration, SystemTime};
@@ -720,6 +714,9 @@ fn test_nvcc_cuda_compiles(
     with_debug_flags: bool,
     with_rdc: bool,
 ) {
+    use harness::AdditionalStats;
+    use sccache::compiler::{CCompilerKind, Language};
+
     let mut extra_args = vec![format!("-ccbin={}", host_compiler.exe.to_string_lossy()).into()];
 
     if with_debug_flags {
@@ -750,8 +747,8 @@ fn test_nvcc_cuda_compiles(
         tempdir,
     );
 
-    let build_dir = PathBuf::from("build");
-    fs::create_dir_all(tempdir.join(&build_dir)).unwrap();
+    let build_dir = Path::new("build");
+    fs::create_dir_all(tempdir.join(build_dir)).unwrap();
 
     let mut expected_stats = client.stats().unwrap();
 
@@ -813,7 +810,7 @@ fn test_nvcc_cuda_compiles(
     run_cuda_test(
         "-cubin",
         Path::new(INPUT_FOR_CUDA_A), // relative path for input
-        &tempdir.join(&build_dir).join("test.cubin"), // absolute path for output
+        &tempdir.join(build_dir).join("test.cubin"), // absolute path for output
         &extra_args,
         AdditionalStats {
             preprocessed: Some(1),
@@ -867,7 +864,7 @@ fn test_nvcc_cuda_compiles(
     run_cuda_test(
         "-c",
         &tempdir.join(INPUT_FOR_CUDA_A), // absolute path for input
-        &tempdir.join(&build_dir).join(OUTPUT), // absolute path for output
+        &tempdir.join(build_dir).join(OUTPUT), // absolute path for output
         &extra_args,
         AdditionalStats {
             preprocessed: Some(2 * !preprocessor_cache_mode as u64),
@@ -920,7 +917,7 @@ fn test_nvcc_cuda_compiles(
     run_cuda_test(
         "-c",
         &tempdir.join(INPUT_FOR_CUDA_A_COPY), // absolute path for input
-        &tempdir.join(&build_dir).join(OUTPUT), // absolute path for output
+        &tempdir.join(build_dir).join(OUTPUT), // absolute path for output
         &extra_args,
         AdditionalStats {
             preprocessed: Some(2 * !preprocessor_cache_mode as u64),
@@ -961,7 +958,7 @@ fn test_nvcc_cuda_compiles(
     run_cuda_test(
         "-c",
         &tempdir.join(INPUT_FOR_CUDA_A_INTERNAL_LINKAGE), // absolute path for input
-        &tempdir.join(&build_dir).join(OUTPUT),           // absolute path for output
+        &tempdir.join(build_dir).join(OUTPUT),            // absolute path for output
         &extra_args,
         AdditionalStats {
             preprocessed: Some(2 * !preprocessor_cache_mode as u64),
@@ -1004,7 +1001,7 @@ fn test_nvcc_cuda_compiles(
     run_cuda_test(
         "-c",
         &tempdir.join(INPUT_FOR_CUDA_B), // absolute path for input
-        &tempdir.join(&build_dir).join(OUTPUT), // absolute path for output
+        &tempdir.join(build_dir).join(OUTPUT), // absolute path for output
         &extra_args,
         AdditionalStats {
             preprocessed: Some(2 * !preprocessor_cache_mode as u64),
@@ -1094,7 +1091,7 @@ int main(int argc, char** argv) {
     run_cuda_test(
         "-c",
         &tempdir.join(test_2299_src_name), // absolute path for input
-        &tempdir.join(&build_dir).join(test_2299_out_name), // absolute path for output
+        &tempdir.join(build_dir).join(test_2299_out_name), // absolute path for output
         &extra_args,
         AdditionalStats {
             preprocessed: Some(2 * !preprocessor_cache_mode as u64),
@@ -1434,7 +1431,7 @@ int main(int argc, char** argv) {
     run_cuda_test(
         "-cubin",
         &tempdir.join(INPUT_FOR_CUDA_A), // absolute path for input
-        &tempdir.join(&build_dir).join("test.cubin"), // absolute path for output
+        &tempdir.join(build_dir).join("test.cubin"), // absolute path for output
         &[
             extra_args.as_slice(),
             &["-gencode=arch=compute_80,code=[sm_80]".into()],
@@ -1470,7 +1467,7 @@ int main(int argc, char** argv) {
     run_cuda_test(
         "-cubin",
         &tempdir.join(INPUT_FOR_CUDA_B), // absolute path for input
-        &tempdir.join(&build_dir).join("test.cubin"), // absolute path for output
+        &tempdir.join(build_dir).join("test.cubin"), // absolute path for output
         &[
             extra_args.as_slice(),
             &["-gencode=arch=compute_80,code=[sm_80]".into()],
@@ -1721,7 +1718,7 @@ int main(int argc, char** argv) {
         run_cuda_test(
             "-ltoir",
             &tempdir.join(INPUT_FOR_CUDA_A), // absolute path for input
-            &tempdir.join(&build_dir).join("test.ltoir"), // absolute path for output
+            &tempdir.join(build_dir).join("test.ltoir"), // absolute path for output
             &[
                 extra_args.as_slice(),
                 &[
@@ -1823,6 +1820,11 @@ fn test_nvcc_proper_lang_stat_tracking(
     with_debug_flags: bool,
     with_rdc: bool,
 ) {
+    use sccache::{
+        compiler::{CCompilerKind, CompilerKind, Language},
+        server::ServerStats,
+    };
+
     let mut stats = client.stats().unwrap();
 
     let mut extra_args = vec![format!("-ccbin={}", host_compiler.exe.to_string_lossy()).into()];
@@ -2065,6 +2067,11 @@ fn test_clang_cuda_compiles(
     with_debug_flags: bool,
     with_rdc: bool,
 ) {
+    use sccache::{
+        compiler::{CCompilerKind, CompilerKind, Language},
+        server::ServerStats,
+    };
+
     let mut stats = client.stats().unwrap();
 
     let mut extra_args = vec![];
@@ -2263,6 +2270,11 @@ fn test_clang_proper_lang_stat_tracking(
     with_debug_flags: bool,
     with_rdc: bool,
 ) {
+    use sccache::{
+        compiler::{CCompilerKind, CompilerKind, Language},
+        server::ServerStats,
+    };
+
     let mut stats = client.stats().unwrap();
 
     let mut extra_args = vec![];
@@ -2877,7 +2889,7 @@ macro_rules! test_cuda_sccache_command {
                 with_rdc: bool,
             ) {
                 let _ = env_logger::try_init();
-                let cuda_compilers = find_cuda_compilers();
+                let cuda_compilers = harness::find_cuda_compilers();
                 if let Some(cuda_compiler) = cuda_compilers.iter().find(|c| c.name == $cuda_compiler_name) {
                     let host_compilers = find_compilers();
                     if let Some(host_compiler) = host_compilers.iter().find(|c| c.name == $host_compiler_name) {
