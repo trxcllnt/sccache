@@ -874,7 +874,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                     _ => (),
                 });
 
-            let jobserver = Client::new();
+            let jobserver = Client::new_num(1);
             let conn = connect_or_start_server(&get_addr(), config.server_startup_timeout)?;
             let mut runtime = Runtime::new()?;
             let res = do_compile(
