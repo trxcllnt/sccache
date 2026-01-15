@@ -62,6 +62,7 @@ pub trait Meter<K, V> {
 }
 
 /// Size limit based on a simple count of cache items.
+#[derive(Clone)]
 pub struct Count;
 
 impl<K, V> Meter<K, V> for Count {

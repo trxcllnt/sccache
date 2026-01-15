@@ -1124,7 +1124,6 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                 .unwrap_or_default(),
                 key_prefix: key_prefix_from_env_var(&envvar("S3_PREPROCESSOR_CACHE_KEY_PREFIX"))
                     .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
-                ..Default::default()
             }),
             order: number_from_env_var(&envvar("S3_CACHE_ORDER"))
                 .unwrap_or(Ok(S3CacheConfig::default_order()))
@@ -1193,7 +1192,6 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                         "REDIS_PREPROCESSOR_CACHE_KEY_PREFIX",
                     ))
                     .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
-                    ..Default::default()
                 }),
                 order: number_from_env_var(&envvar("REDIS_CACHE_ORDER"))
                     .unwrap_or(Ok(RedisCacheConfig::default_order()))
@@ -1247,7 +1245,6 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                     "MEMCACHED_PREPROCESSOR_CACHE_KEY_PREFIX",
                 ))
                 .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
-                ..Default::default()
             }),
             order: number_from_env_var(&envvar("MEMCACHED_CACHE_ORDER"))
                 .unwrap_or(Ok(MemcachedCacheConfig::default_order()))
@@ -1324,7 +1321,6 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                 .unwrap_or_default(),
                 key_prefix: key_prefix_from_env_var(&envvar("GCS_PREPROCESSOR_CACHE_KEY_PREFIX")) //
                     .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
-                ..Default::default()
             }),
             order: number_from_env_var(&envvar("GCS_CACHE_ORDER"))
                 .unwrap_or(Ok(GCSCacheConfig::default_order()))
@@ -1348,7 +1344,6 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                 .unwrap_or_default(),
                 key_prefix: key_prefix_from_env_var(&envvar("GHA_PREPROCESSOR_CACHE_KEY_PREFIX"))
                     .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
-                ..Default::default()
             }),
             order: number_from_env_var(&envvar("GHA_CACHE_ORDER"))
                 .unwrap_or(Ok(GHACacheConfig::default_order()))
@@ -1369,7 +1364,6 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                 .unwrap_or_default(),
                 key_prefix: key_prefix_from_env_var(&envvar("GHA_PREPROCESSOR_CACHE_KEY_PREFIX"))
                     .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
-                ..Default::default()
             }),
             order: number_from_env_var(&envvar("GHA_CACHE_ORDER"))
                 .unwrap_or(Ok(GHACacheConfig::default_order()))
@@ -1396,7 +1390,6 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                 .unwrap_or_default(),
                 key_prefix: key_prefix_from_env_var(&envvar("AZURE_PREPROCESSOR_CACHE_KEY_PREFIX"))
                     .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
-                ..Default::default()
             }),
             order: number_from_env_var(&envvar("AZURE_CACHE_ORDER"))
                 .unwrap_or(Ok(AzureCacheConfig::default_order()))
@@ -1428,7 +1421,6 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                     "WEBDAV_PREPROCESSOR_CACHE_KEY_PREFIX",
                 ))
                 .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
-                ..Default::default()
             }),
             order: number_from_env_var(&envvar("WEBDAV_CACHE_ORDER"))
                 .unwrap_or(Ok(WebdavCacheConfig::default_order()))
@@ -1457,7 +1449,6 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
                 .unwrap_or_default(),
                 key_prefix: key_prefix_from_env_var(&envvar("OSS_PREPROCESSOR_CACHE_KEY_PREFIX"))
                     .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
-                ..Default::default()
             }),
             order: number_from_env_var(&envvar("OSS_CACHE_ORDER"))
                 .unwrap_or(Ok(OSSCacheConfig::default_order()))

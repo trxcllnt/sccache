@@ -17,7 +17,9 @@ use crate::{
     compiler::{
         Cacheable, ColorMode, Compilation, CompileCommand, CompileCommandImpl, Compiler,
         CompilerArguments, CompilerHasher, CompilerKind, HashResult, Language,
-        preprocessor_cache::{include_is_too_new, preprocessor_cache_entry_hash_key},
+        preprocessor_cache::{
+            include_is_too_new, normalize_path, preprocessor_cache_entry_hash_key,
+        },
     },
     dist,
     mock_command::{CommandCreatorSync, ProcessOutput},
@@ -541,7 +543,6 @@ where
             cwd,
             &parsed_args.input,
             compiler.plusplus(),
-            &preprocessor_cache_mode_config,
         )
         .await?
         .filter(|_| !matches!(cache_control, CacheControl::ForceNoCache));
@@ -552,13 +553,15 @@ where
                 return Ok(PreprocessorCacheLookup::Miss(preprocessor_key));
             }
 
-            if let Cache::Hit(mut preprocessor_cache_entry) =
-                get_preprocessor_cache_entry(storage, &preprocessor_key).await?
-            {
-                let mut updated = false;
+            let preprocessor_cache_entry = get_preprocessor_cache_entry(storage, &preprocessor_key)
+                .await
+                .inspect_err(|err| {
+                    debug!("[{out_pretty}]: Error loading preprocessor cache entry for {preprocessor_key:?}: {err:#}");
+                });
 
-                let hit = preprocessor_cache_entry
-                    .lookup_result_digest(&preprocessor_cache_mode_config, env_vars, &mut updated)
+            if let Ok(Cache::Hit(mut preprocessor_cache_entry)) = preprocessor_cache_entry {
+                let (updated, hit) = preprocessor_cache_entry
+                    .lookup_result_digest(env_vars)
                     .await;
 
                 let mut update_failed = false;
@@ -660,6 +663,9 @@ where
             hash_all(&parsed_args.extra_hash_files).await?
         };
 
+        let kind = compiler.kind().into();
+        let lang = <CCompilerHasher<I> as CompilerHasher<T>>::language(&*self);
+
         // Try to look for a cached preprocessing step for this compilation request.
         let preprocessor_cache_lookup = self
             .preprocessor_cache_lookup(
@@ -678,10 +684,7 @@ where
                     .lock()
                     .await
                     .preprocessor_cache_hits
-                    .increment(
-                        &CompilerKind::C(compiler.kind()),
-                        &<CCompilerHasher<I> as CompilerHasher<T>>::language(&*self),
-                    );
+                    .increment(&kind, &lang);
 
                 // Skip preprocessing if it's a preprocessor cache hit
                 return Ok(HashResult {
@@ -706,10 +709,7 @@ where
                     .lock()
                     .await
                     .preprocessor_cache_misses
-                    .increment(
-                        &CompilerKind::C(compiler.kind()),
-                        &<CCompilerHasher<I> as CompilerHasher<T>>::language(&*self),
-                    );
+                    .increment(&kind, &lang);
             }
             _ => {}
         };
@@ -819,63 +819,64 @@ where
 
         drop(common_and_arch_args);
 
-        let deps_and_preprocessor = dependencies.and_then(|deps| {
+        let dependencies_and_preprocessor_key = dependencies.and_then(|dependencies| {
             if let PreprocessorCacheLookup::Miss(preprocessor_key) = preprocessor_cache_lookup {
-                Some((deps, preprocessor_key))
+                Some((dependencies, preprocessor_key))
             } else {
                 None
             }
         });
 
-        if let Some((dependencies, preprocessor_key)) = deps_and_preprocessor {
-            let dependencies = try_or_cleanup!(dependencies.await);
-
-            // Dedupe first to ensure we only hash each file once
-            let dependencies = dependencies
-                .into_iter()
-                .sorted_unstable_by(|a, b| a.cmp(b))
-                .dedup();
-
-            futures::stream::iter(dependencies)
-                .map(|path| {
-                    Digest::from_file_with_time_macros(path.clone(), &env_vars)
-                        .and_then(|(digest, finder)| async move {
-                            if finder.found_time() {
-                                // Write an entry for this dependency, even though it has __TIME__ macros.
-                                // If it's still present next time, preprocessor cache mode will be disabled.
-                                // If it's not present next time, the new object key will be added to this cache entry.
-                                debug!("Found __TIME__ in {path:?}");
-                            }
-                            let meta = tokio::fs::symlink_metadata(&path).await?;
-                            if include_is_too_new(&path, &(&meta).into(), start_of_compilation) {
-                                bail!("Dependency {path:?} changed after preprocessor invoked");
-                            }
-                            Ok((digest.finish(), path, meta))
+        if let Some((dependencies, preprocessor_key)) = dependencies_and_preprocessor_key {
+            dependencies
+                .map(|dependencies| {
+                    dependencies
+                        .map(|dependencies| {
+                            // Dedupe first to ensure we only hash each file once
+                            dependencies
+                                .into_iter()
+                                .map(|path| cwd.join(normalize_path(&path)))
+                                .sorted_unstable_by(|a, b| a.cmp(b))
+                                .dedup()
                         })
-                        .into_stream()
-                        .boxed()
+                        .into_iter()
+                        .flatten()
                 })
-                .flatten_unordered(None)
+                .map(futures::stream::iter)
+                .flatten_stream()
+                .flat_map_unordered(None, |path| {
+                    futures::stream::once(Box::pin(async {
+                        let (digest, finder) =
+                            Digest::from_file_with_time_macros(&path, &env_vars).await?;
+                        if finder.found_time() {
+                            // Write an entry for this dependency, even though it has __TIME__ macros.
+                            // If it's still present next time, preprocessor cache mode will be disabled.
+                            // If it's not present next time, the new object key will be added to this cache entry.
+                            debug!("Found __TIME__ in {path:?}");
+                        }
+                        let meta = tokio::fs::symlink_metadata(&path).await?.into();
+                        if include_is_too_new(&path, &meta, start_of_compilation) {
+                            bail!("Dependency changed after preprocessor invoked: {path:?}");
+                        }
+                        Ok((digest.finish(), path))
+                    }))
+                })
                 .try_collect::<Vec<_>>()
                 .and_then(|dependencies| async {
                     // Load the latest cache entry for this preprocessor key
                     // This helps minimize races if other clients write more
                     // entries while this client is preprocessing.
-                    let mut preprocessor_cache_entry = if let Cache::Hit(preprocessor_cache_entry) =
-                        get_preprocessor_cache_entry(storage.as_ref(), &preprocessor_key).await?
-                    {
-                        preprocessor_cache_entry
-                    } else {
-                        Default::default()
-                    };
+                    let mut preprocessor_cache_entry =
+                        if let Ok(Cache::Hit(preprocessor_cache_entry)) =
+                            get_preprocessor_cache_entry(storage.as_ref(), &preprocessor_key).await
+                        {
+                            preprocessor_cache_entry
+                        } else {
+                            Default::default()
+                        };
 
                     // Add the object key to the preprocessor cache entry
-                    preprocessor_cache_entry.add_result(
-                        start_of_compilation,
-                        &preprocessor_key,
-                        &key,
-                        dependencies,
-                    );
+                    preprocessor_cache_entry.add_result(&preprocessor_key, &key, dependencies);
 
                     // Write the cache entry back to the preprocessor cache
                     put_preprocessor_cache_entry(
@@ -886,6 +887,7 @@ where
                     .await
                 })
                 .await
+                // Don't fail if updating the preprocessor cache entry fails, just log it
                 .inspect_err(|err| {
                     debug!("[{out_pretty}]: Failed to update preprocessor cache entry: {err}")
                 })

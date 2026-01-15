@@ -1171,8 +1171,8 @@ pub async fn parse_dependencies(
             input.as_path(),
             cwd.as_path(),
             &mut output.stdout,
-            Default::default(),
             StandardFsAbstraction,
+            false,
         ) {
             Err(err) => (output, Err(err)),
             Ok(None) => (output, Ok(vec![])),

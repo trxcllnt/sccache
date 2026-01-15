@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_imports)]
-
 use bytes::Buf;
 use fs_err as fs;
 use futures::{StreamExt, TryStreamExt};
@@ -201,7 +199,6 @@ impl DistSystemGlobals {
         })
     }
 
-    #[allow(unused)]
     pub fn rabbitmq(&self) -> Option<DistMessageBroker> {
         self.message_broker("rabbitmq")
     }
@@ -393,7 +390,6 @@ pub struct MessageBrokerHandle {
     handle: ResourceHandle,
 }
 
-#[allow(unused)]
 impl MessageBrokerHandle {
     pub fn is_amqp(&self) -> bool {
         self.broker.is_amqp()
@@ -536,16 +532,8 @@ impl Drop for ServerHandle {
 
 #[derive(Clone)]
 pub enum ResourceHandle {
-    Container {
-        id: String,
-        cid: String,
-    },
-    #[allow(unused)]
-    Process {
-        id: String,
-        #[allow(dead_code)]
-        pid: Pid,
-    },
+    Container { id: String, cid: String },
+    Process { id: String, pid: Pid },
 }
 
 impl ResourceHandle {
@@ -800,7 +788,6 @@ impl Drop for DistSystemBuilder {
 pub struct DistSystem {
     name: String,
     handles: Vec<DistHandle>,
-    #[allow(dead_code)]
     root_dir: PathBuf,
     data_dir: PathBuf,
     dist_dir: (PathBuf, Option<tempfile::TempDir>),

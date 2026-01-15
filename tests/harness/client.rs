@@ -16,7 +16,37 @@ use sccache::{
     server::{ServerInfo, ServerStats},
 };
 
+use crate::harness::write_json_cfg;
+
 use super::{TC_CACHE_SIZE, prune_command};
+
+pub fn make_sccache_client(
+    preprocessor_cache_mode: bool,
+) -> (Option<tempfile::TempDir>, PathBuf, SccacheClient) {
+    let tempdir = tempfile::Builder::new()
+        .prefix("sccache_system_test")
+        .tempdir()
+        .unwrap();
+
+    // Persist the tempdir if SCCACHE_DEBUG is defined
+    let (tempdir_path, maybe_tempdir) = if env::var("SCCACHE_DEBUG").is_ok() {
+        (tempdir.keep(), None)
+    } else {
+        (tempdir.path().to_path_buf(), Some(tempdir))
+    };
+
+    // Create the configurations
+    let sccache_cfg = sccache_client_cfg(&tempdir_path, preprocessor_cache_mode);
+    write_json_cfg(&tempdir_path, "sccache-cfg.json", &sccache_cfg);
+    let sccache_cached_cfg_path = tempdir_path.join("sccache-cached-cfg");
+    // Start the server daemon on a unique port
+    let client = SccacheClient::new(
+        &tempdir_path.join("sccache-cfg.json"),
+        &sccache_cached_cfg_path,
+    );
+
+    (maybe_tempdir, tempdir_path, client)
+}
 
 pub fn sccache_client_cfg(data_dir: &Path, preprocessor_cache_mode: bool) -> FileConfig {
     let disk_cache_dir = data_dir.join("cache");
@@ -61,11 +91,9 @@ static CLIENT_PORT: AtomicU16 = AtomicU16::new(4227);
 
 pub struct SccacheClient {
     envvars: Vec<(OsString, OsString)>,
-    #[allow(dead_code)]
     pub path: PathBuf,
 }
 
-#[allow(unused)]
 impl SccacheClient {
     pub fn new_no_cfg() -> Self {
         let path = env!("CARGO_BIN_EXE_sccache").into();
@@ -138,7 +166,7 @@ impl SccacheClient {
     }
 
     pub fn cmd(&self) -> Command {
-        let mut cmd = prune_command(Command::new(env!("CARGO_BIN_EXE_sccache")));
+        let mut cmd = prune_command(Command::new(self.path.as_os_str()));
         cmd.envs(
             self.envvars
                 .iter()

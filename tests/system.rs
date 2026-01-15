@@ -27,16 +27,15 @@ use fs_err as fs;
 #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 use harness::find_cuda_compilers;
 use harness::{
-    Compiler,
-    client::{SccacheClient, sccache_client_cfg},
-    find_compilers, write_json_cfg, write_source,
+    AdditionalStats, Compiler,
+    client::{SccacheClient, make_sccache_client},
+    compile_cmdline, find_compilers, write_source,
 };
-use itertools::Itertools;
 use paste::paste;
 use predicates::prelude::*;
 use regex::Regex;
 use sccache::{
-    compiler::{CCompilerKind, CompilerKind, Language, PreprocessorCacheEntry},
+    compiler::{CCompilerKind, CompilerKind, Language},
     server::ServerStats,
 };
 #[cfg(unix)]
@@ -78,37 +77,6 @@ macro_rules! vec_from {
     ( $t:ty, $( $x:expr ),* ) => {
         vec!($( Into::<$t>::into(&$x), )*)
     };
-}
-
-// TODO: This will fail if gcc/clang is actually a ccache wrapper, as it is the
-// default case on Fedora, e.g.
-fn compile_cmdline<T: AsRef<OsStr>>(
-    compiler: &str,
-    exe: T,
-    input: &str,
-    output: &str,
-    extra_args: impl IntoIterator<Item = OsString>,
-) -> Vec<OsString> {
-    let mut arg = match compiler {
-        "gcc" | "clang" | "clang++" | "nvc" | "nvc++" => {
-            vec_from!(OsString, exe.as_ref(), "-c", input, "-o", output)
-        }
-        "nvcc" => {
-            vec_from!(
-                OsString,
-                exe.as_ref(),
-                "-allow-unsupported-compiler",
-                "-c",
-                input,
-                "-o",
-                output
-            )
-        }
-        "cl" => vec_from!(OsString, exe, "-c", input, format!("-Fo{}", output)),
-        _ => panic!("Unsupported compiler: {compiler}"),
-    };
-    arg.extend(extra_args);
-    arg
 }
 
 // TODO: This will fail if gcc/clang is actually a ccache wrapper, as it is the
@@ -174,7 +142,7 @@ fn compile_hip_cmdline<T: AsRef<OsStr>>(
     input: &str,
     output: &str,
     archs: &Vec<String>,
-    mut extra_args: Vec<OsString>,
+    extra_args: impl IntoIterator<Item = OsString>,
 ) -> Vec<OsString> {
     let mut arg = match compiler {
         "clang" => {
@@ -185,9 +153,7 @@ fn compile_hip_cmdline<T: AsRef<OsStr>>(
     for arch in archs {
         arg.push(format!("--offload-arch={arch}").into());
     }
-    if !extra_args.is_empty() {
-        arg.append(&mut extra_args)
-    }
+    arg.extend(extra_args);
     arg
 }
 
@@ -249,7 +215,7 @@ fn test_basic_compile(
     trace!("compile");
     client
         .cmd()
-        .args(compile_cmdline(name, exe, INPUT, OUTPUT, Vec::new()))
+        .args(compile_cmdline(name, exe, INPUT, OUTPUT, []))
         .current_dir(tempdir)
         .envs(env_vars.clone())
         .assert()
@@ -271,7 +237,7 @@ fn test_basic_compile(
     fs::remove_file(&out_file).unwrap();
     client
         .cmd()
-        .args(compile_cmdline(name, exe, INPUT, OUTPUT, Vec::new()))
+        .args(compile_cmdline(name, exe, INPUT, OUTPUT, []))
         .current_dir(tempdir)
         .envs(env_vars.clone())
         .assert()
@@ -334,7 +300,7 @@ fn test_msvc_deps(client: &SccacheClient, compiler: &Compiler, tempdir: &Path) {
     } = compiler;
     // Check that -deps works.
     trace!("compile with /sourceDependencies");
-    let mut args = compile_cmdline(name, exe, INPUT, OUTPUT, Vec::new());
+    let mut args = compile_cmdline(name, exe, INPUT, OUTPUT, []);
     args.push("/sourceDependenciestest.o.json".into());
     client
         .cmd()
@@ -395,7 +361,7 @@ fn test_gcc_mp_werror(client: &SccacheClient, compiler: &Compiler, tempdir: &Pat
         ..
     } = compiler;
     trace!("test -MP with -Werror");
-    let mut args = compile_cmdline(name, exe, INPUT_ERR, OUTPUT, Vec::new());
+    let mut args = compile_cmdline(name, exe, INPUT_ERR, OUTPUT, []);
     args.extend(vec_from!(
         OsString, "-MD", "-MP", "-MF", "foo.pp", "-Werror"
     ));
@@ -441,7 +407,7 @@ int main(int argc, char** argv) {
 }
 ",
     );
-    let mut args = compile_cmdline(name, exe, SRC, OUTPUT, Vec::new());
+    let mut args = compile_cmdline(name, exe, SRC, OUTPUT, []);
     args.extend(vec_from!(OsString, "-fprofile-generate"));
     trace!("compile source.c (1)");
     client
@@ -524,7 +490,7 @@ fn test_split_dwarf_object_generate_output_dir_changes(
     client.zero_stats();
     const SRC: &str = "source.c";
     write_source(tempdir, SRC, "int test(){}");
-    let mut args = compile_cmdline(name, exe.clone(), SRC, "test1.o", Vec::new());
+    let mut args = compile_cmdline(name, exe.clone(), SRC, "test1.o", []);
     args.extend(vec_from!(OsString, "-g"));
     args.extend(vec_from!(OsString, "-gsplit-dwarf"));
     trace!("compile source.c (1)");
@@ -555,7 +521,7 @@ fn test_split_dwarf_object_generate_output_dir_changes(
     assert_eq!(&1, stats.cache_misses.get("C/C++").unwrap());
     // Compile the same source again with different output
     // to ensure we can force generate new object file.
-    let mut args2 = compile_cmdline(name, exe, SRC, "test2.o", Vec::new());
+    let mut args2 = compile_cmdline(name, exe, SRC, "test2.o", []);
     args2.extend(vec_from!(OsString, "-g"));
     args2.extend(vec_from!(OsString, "-gsplit-dwarf"));
     trace!("compile source.c (2)");
@@ -593,7 +559,7 @@ fn test_gcc_clang_no_warnings_from_macro_expansion(
         .cmd()
         .args(
             [
-                &compile_cmdline(name, exe, INPUT_MACRO_EXPANSION, OUTPUT, Vec::new())[..],
+                &compile_cmdline(name, exe, INPUT_MACRO_EXPANSION, OUTPUT, [])[..],
                 &vec_from!(OsString, "-Wunreachable-code")[..],
             ]
             .concat(),
@@ -621,7 +587,7 @@ fn test_compile_with_define(client: &SccacheClient, compiler: &Compiler, tempdir
         .cmd()
         .args(
             [
-                &compile_cmdline(name, exe, INPUT_WITH_DEFINE, OUTPUT, Vec::new())[..],
+                &compile_cmdline(name, exe, INPUT_WITH_DEFINE, OUTPUT, [])[..],
                 &vec_from!(OsString, "-DSCCACHE_TEST_DEFINE")[..],
             ]
             .concat(),
@@ -647,13 +613,7 @@ fn test_gcc_clang_depfile(client: &SccacheClient, compiler: &Compiler, tempdir: 
     trace!("compile");
     client
         .cmd()
-        .args(compile_cmdline(
-            name,
-            exe.clone(),
-            INPUT,
-            OUTPUT,
-            Vec::new(),
-        ))
+        .args(compile_cmdline(name, exe.clone(), INPUT, OUTPUT, []))
         .args(vec_from!(OsString, "-MD", "-MF", "first.d"))
         .current_dir(tempdir)
         .envs(env_vars.clone())
@@ -666,7 +626,7 @@ fn test_gcc_clang_depfile(client: &SccacheClient, compiler: &Compiler, tempdir: 
             exe,
             "same-content.c",
             "same-content.o",
-            Vec::new(),
+            [],
         ))
         .args(vec_from!(OsString, "-MD", "-MF", "second.d"))
         .current_dir(tempdir)
@@ -684,1694 +644,6 @@ fn test_gcc_clang_depfile(client: &SccacheClient, compiler: &Compiler, tempdir: 
         .read_to_string(&mut second)
         .unwrap();
     assert_ne!(first, second);
-}
-
-fn test_preprocessor_cache_mode_single_entry_multiple_hashes(
-    client: &SccacheClient,
-    compiler: &Compiler,
-    tempdir: &Path,
-    clang_plusplus: bool,
-) -> sccache::errors::Result<()> {
-    let Compiler {
-        name,
-        exe,
-        env_vars,
-        ..
-    } = compiler;
-
-    println!("test_preprocessor_cache_mode_single_entry_multiple_hashes: {name}");
-
-    let src = "pp_test.c";
-    let obj = "pp_test.c.o";
-    let dep_a = "pp_test_a.h";
-    let dep_b = "pp_test_b.h";
-
-    let kind = (*name).into();
-    let lang = if clang_plusplus {
-        Language::Cxx
-    } else {
-        Language::C
-    };
-
-    let preprocessor_cache_path = client.clear_disk_cache()?.join("preprocessor");
-
-    let preprocessor_cache_entry = || {
-        assert!(
-            preprocessor_cache_path.is_dir(),
-            "The preprocessor cache should exist"
-        );
-
-        let mut preprocessor_cache_entries =
-            walkdir::WalkDir::new(preprocessor_cache_path.as_path())
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter_map(|e| e.file_type().is_file().then_some(e))
-                .collect::<Vec<_>>();
-
-        assert_eq!(
-            preprocessor_cache_entries.len(),
-            1,
-            "The preprocessor cache should have one entry"
-        );
-
-        let preprocessor_cache_entry = preprocessor_cache_entries
-            .pop()
-            .expect("The preprocessor cache should have one entry");
-
-        PreprocessorCacheEntry::read(&fs::read(preprocessor_cache_entry.path())?)
-    };
-
-    let mut expected_stats = client.stats().unwrap();
-
-    let mut compile_and_verify =
-        |additional_stats: AdditionalStats| -> sccache::errors::Result<()> {
-            let mut cmd = client.cmd();
-            cmd.current_dir(tempdir)
-                .envs(env_vars.clone())
-                .args(compile_cmdline(name, exe, src, obj, []))
-                .assert()
-                .success();
-            // Zero-out duration stats
-            let actual_stats = client.stats().unwrap() + AdditionalStats::default();
-            expected_stats += additional_stats;
-            assert_eq!(expected_stats, actual_stats);
-            // Assert the number of results in the preprocessor cache entry
-            // matches the number of expected preprocessor cache misses
-            assert_eq!(
-                expected_stats.preprocessor_cache_misses.all(),
-                preprocessor_cache_entry()?.iter().count() as u64,
-            );
-            Ok(())
-        };
-
-    {
-        // Write source file
-        write_source(
-            tempdir,
-            src,
-            &format!(
-                r#"
-#include "{dep_a}"
-int main(int argc, char** argv) {{
-    return a();
-}}
-"#
-            ),
-        );
-
-        // Write dependency A
-        write_source(tempdir, dep_a, r#"int a() { return 0; }"#);
-
-        // Compile and populate preprocessor and object disk caches
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Compile again to ensure preprocessor cache hit
-        compile_and_verify(AdditionalStats {
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-    }
-
-    // Change dep_a and recompile
-    {
-        write_source(
-            tempdir,
-            dep_a,
-            &format!(
-                r#"
-#include "{dep_b}"
-int a() {{ return b(); }}
-"#
-            ),
-        );
-
-        // Write dependency B
-        write_source(tempdir, dep_b, r#"int b() { return 1; }"#);
-
-        // Should be two object hashes now
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Compile again to ensure preprocessor cache hit
-        // Should still be two object hashes
-        compile_and_verify(AdditionalStats {
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-    }
-
-    // Change dep_b and recompile
-    {
-        write_source(tempdir, dep_b, r#"int b() { return 2; }"#);
-
-        // Should be three object hashes now
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Compile again to ensure preprocessor cache hit
-        // Should still be three object hashes
-        compile_and_verify(AdditionalStats {
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-    }
-
-    // Revert dep_b to ensure preprocessor cache hit
-    {
-        // Write dependency B
-        write_source(tempdir, dep_b, r#"int b() { return 1; }"#);
-
-        // Should still be three object hashes
-        compile_and_verify(AdditionalStats {
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-    }
-
-    // Revert dep_a to ensure preprocessor cache hit
-    {
-        // Write dependency A
-        write_source(tempdir, dep_a, r#"int a() { return 0; }"#);
-
-        // Should still be three object hashes
-        compile_and_verify(AdditionalStats {
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-    }
-
-    Ok(())
-}
-
-fn test_preprocessor_cache_mode_time_macros(
-    client: &SccacheClient,
-    compiler: &Compiler,
-    tempdir: &Path,
-    clang_plusplus: bool,
-) -> sccache::errors::Result<()> {
-    use sccache::errors::Result;
-    let Compiler {
-        name,
-        exe,
-        env_vars,
-        ..
-    } = compiler;
-
-    println!("test_preprocessor_cache_mode_time_macros: {name}");
-
-    let src = "time_macros_test.c";
-    let obj = "time_macros_test.c.o";
-    let dep_a = "time_macros_test_a.h";
-    let dep_b = "time_macros_test_b.h";
-
-    let kind = (*name).into();
-    let lang = if clang_plusplus {
-        Language::Cxx
-    } else {
-        Language::C
-    };
-
-    let preprocessor_cache_path = client.clear_disk_cache()?.join("preprocessor");
-
-    let preprocessor_cache_entries = || {
-        walkdir::WalkDir::new(preprocessor_cache_path.as_path())
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_type().is_file().then_some(e))
-            .map(|preprocessor_cache_entry| {
-                PreprocessorCacheEntry::read(&fs::read(preprocessor_cache_entry.path())?)
-            })
-    };
-
-    let mut expected_stats = client.stats().unwrap();
-
-    let mut compile_and_verify =
-        |additional_stats: AdditionalStats| -> sccache::errors::Result<()> {
-            let mut cmd = client.cmd();
-            cmd.current_dir(tempdir)
-                .envs(env_vars.clone())
-                .args(compile_cmdline(name, exe, src, obj, []))
-                .assert()
-                .success();
-            // Zero-out duration stats
-            let actual_stats = client.stats().unwrap() + AdditionalStats::default();
-            expected_stats += additional_stats;
-            assert_eq!(expected_stats, actual_stats);
-            Ok(())
-        };
-
-    // Test __TIME__ macro used in main source file
-    {
-        // Write source file with __TIME__ macro
-        write_source(
-            tempdir,
-            src,
-            r#"
-#include <stdio.h>
-int main(int argc, char** argv) {{
-    printf("time: %s", __TIME__);
-    return 0;
-}}
-    "#,
-        );
-
-        // Compile and populate preprocessor and object disk caches
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 0
-        let entries = preprocessor_cache_entries()
-            .collect::<Result<Vec<_>>>()
-            .unwrap_or_default();
-        assert_eq!(0, entries.len() as u64);
-
-        // Wait 2s and compile again to ensure preprocessor cache miss
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 0
-        let entries = preprocessor_cache_entries()
-            .collect::<Result<Vec<_>>>()
-            .unwrap_or_default();
-        assert_eq!(0, entries.len() as u64);
-    }
-
-    // Test time macro used in dependency
-    {
-        write_source(
-            tempdir,
-            src,
-            &format!(
-                r#"
-#include "{dep_a}"
-int main(int argc, char** argv) {{
-    a();
-    return 0;
-}}
-"#
-            ),
-        );
-
-        // Write dependency A with __TIME__ macro
-        write_source(
-            tempdir,
-            dep_a,
-            r#"
-#include <stdio.h>
-void a() { printf("time: %s", __TIME__); }
-"#,
-        );
-
-        // Compile and populate preprocessor and object disk caches
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is now 1
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(1, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 1 result
-        assert_eq!(
-            vec![1],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Wait 2s and compile again to ensure preprocessor cache miss
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 1
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(1, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 2 results
-        assert_eq!(
-            vec![2],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-    }
-
-    // Test time macro used in dependency of a dependency
-    {
-        write_source(
-            tempdir,
-            dep_a,
-            &format!(
-                r#"
-#include "{dep_b}"
-void a() {{ b(); }}
-"#
-            ),
-        );
-
-        // Write dependency B with __TIME__ macro
-        write_source(
-            tempdir,
-            dep_b,
-            r#"
-#include <stdio.h>
-void b() { printf("time: %s", __TIME__); }
-"#,
-        );
-
-        // Compile and populate preprocessor and object disk caches
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 1
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(1, entries.len() as u64);
-
-        // Assert the preprocessor cache entry has 3 results
-        assert_eq!(
-            vec![3],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Wait 2s and compile again to ensure preprocessor cache miss
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 1
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(1, entries.len() as u64);
-
-        // Assert the preprocessor cache entry now has 4 results
-        assert_eq!(
-            vec![4],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-    }
-
-    // Test removing __TIME__ macro from dependency B
-    {
-        // Remove __TIME__ macro from dependency B
-        write_source(tempdir, dep_b, r#"void b() {}"#);
-
-        // Compile and populate preprocessor and object disk caches
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 1
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(1, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 5 results
-        assert_eq!(
-            vec![5],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Wait 2s and compile again to ensure preprocessor cache hit
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        compile_and_verify(AdditionalStats {
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 1
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(1, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry still has 5 results
-        assert_eq!(
-            vec![5],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-    }
-
-    Ok(())
-}
-
-fn test_preprocessor_cache_mode_date_macros(
-    client: &SccacheClient,
-    compiler: &Compiler,
-    tempdir: &Path,
-    clang_plusplus: bool,
-) -> sccache::errors::Result<()> {
-    use sccache::errors::Result;
-
-    if (compiler.name == "clang" || compiler.name == "clang++")
-        && !compiler
-            .version()
-            .and_then(|clang_v| {
-                version_compare::compare_to(clang_v, "16.0.0", version_compare::Cmp::Ge)
-                    .map_err(|_| sccache::errors::anyhow!("clang too old"))
-            })
-            .unwrap_or_default()
-    {
-        return Ok(());
-    }
-
-    let Compiler {
-        name,
-        exe,
-        env_vars,
-        ..
-    } = compiler;
-
-    println!("test_preprocessor_cache_mode_date_macros: {name}");
-
-    let src = "date_macros_test.c";
-    let obj = "date_macros_test.c.o";
-    let dep_a = "date_macros_test_a.h";
-    let dep_b = "date_macros_test_b.h";
-
-    let kind = (*name).into();
-    let lang = if clang_plusplus {
-        Language::Cxx
-    } else {
-        Language::C
-    };
-
-    let preprocessor_cache_path = client.clear_disk_cache()?.join("preprocessor");
-
-    let preprocessor_cache_entries = || {
-        walkdir::WalkDir::new(preprocessor_cache_path.as_path())
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_type().is_file().then_some(e))
-            .map(|preprocessor_cache_entry| {
-                PreprocessorCacheEntry::read(&fs::read(preprocessor_cache_entry.path())?)
-            })
-    };
-
-    let mut expected_stats = client.stats().unwrap();
-
-    let mut compile_and_verify =
-        |envs: &[(OsString, OsString)], additional_stats| -> sccache::errors::Result<()> {
-            let mut cmd = client.cmd();
-            cmd.current_dir(tempdir)
-                .envs(envs.to_vec())
-                .args(compile_cmdline(name, exe, src, obj, []))
-                .assert()
-                .success();
-            // Zero-out duration stats
-            let actual_stats = client.stats().unwrap() + AdditionalStats::default();
-            expected_stats += additional_stats;
-            assert_eq!(expected_stats, actual_stats);
-            Ok(())
-        };
-
-    let s_epoch_today = chrono::Local::now().to_utc();
-    let s_epoch_tomorrow = s_epoch_today
-        .checked_add_days(chrono::Days::new(1))
-        .unwrap();
-    let s_epoch_today = s_epoch_today.timestamp().to_string();
-    let s_epoch_tomorrow = s_epoch_tomorrow.timestamp().to_string();
-
-    // Test __DATE__ macro used in main source file
-    {
-        // Write source file with __DATE__ macro
-        write_source(
-            tempdir,
-            src,
-            r#"
-#include <stdio.h>
-int main(int argc, char** argv) {{
-    printf("date: %s", __DATE__);
-    return 0;
-}}
-    "#,
-        );
-
-        // Compile and populate preprocessor and object disk caches
-        compile_and_verify(
-            &[
-                &env_vars[..],
-                &[("SOURCE_DATE_EPOCH".into(), s_epoch_today.as_str().into())],
-            ]
-            .concat(),
-            AdditionalStats {
-                preprocessed: Some(1),
-                compilations: Some(1),
-                cache_writes: Some(1),
-                compile_requests: Some(1),
-                requests_executed: Some(1),
-                cache_misses: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-                ..Default::default()
-            },
-        )?;
-
-        // Assert the number of preprocessor cache entries is now 1
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(1, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 1 result
-        assert_eq!(
-            vec![1],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile again to ensure preprocessor cache hit
-        compile_and_verify(
-            &[
-                &env_vars[..],
-                &[("SOURCE_DATE_EPOCH".into(), s_epoch_today.as_str().into())],
-            ]
-            .concat(),
-            AdditionalStats {
-                compile_requests: Some(1),
-                requests_executed: Some(1),
-                cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-                ..Default::default()
-            },
-        )?;
-
-        // Assert the number of preprocessor cache entries is still 1
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(1, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry still has 1 result
-        assert_eq!(
-            vec![1],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile "tomorrow" to ensure cache miss
-        compile_and_verify(
-            &[
-                &env_vars[..],
-                &[("SOURCE_DATE_EPOCH".into(), s_epoch_tomorrow.as_str().into())],
-            ]
-            .concat(),
-            AdditionalStats {
-                preprocessed: Some(1),
-                compilations: Some(1),
-                cache_writes: Some(1),
-                compile_requests: Some(1),
-                requests_executed: Some(1),
-                cache_misses: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-                ..Default::default()
-            },
-        )?;
-
-        // Assert the number of preprocessor cache entries is now 2
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(2, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 1 result
-        assert_eq!(
-            vec![1, 1],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile "tomorrow" again to ensure preprocessor cache hit
-        compile_and_verify(
-            &[
-                &env_vars[..],
-                &[("SOURCE_DATE_EPOCH".into(), s_epoch_tomorrow.as_str().into())],
-            ]
-            .concat(),
-            AdditionalStats {
-                compile_requests: Some(1),
-                requests_executed: Some(1),
-                cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-                ..Default::default()
-            },
-        )?;
-
-        // Assert the number of preprocessor cache entries is still 2
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(2, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry still has 1 result
-        assert_eq!(
-            vec![1, 1],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-    }
-
-    // Test date macro used in dependency
-    {
-        write_source(
-            tempdir,
-            src,
-            &format!(
-                r#"
-#include "{dep_a}"
-int main(int argc, char** argv) {{
-    a();
-    return 0;
-}}
-"#
-            ),
-        );
-
-        // Write dependency A with __DATE__ macro
-        write_source(
-            tempdir,
-            dep_a,
-            r#"
-#include <stdio.h>
-void a() { printf("date: %s", __DATE__); }
-"#,
-        );
-
-        // Compile and populate preprocessor and object disk caches
-        compile_and_verify(
-            &[
-                &env_vars[..],
-                &[("SOURCE_DATE_EPOCH".into(), s_epoch_today.as_str().into())],
-            ]
-            .concat(),
-            AdditionalStats {
-                preprocessed: Some(1),
-                compilations: Some(1),
-                cache_writes: Some(1),
-                compile_requests: Some(1),
-                requests_executed: Some(1),
-                cache_misses: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-                ..Default::default()
-            },
-        )?;
-
-        // Assert the number of preprocessor cache entries is now 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 1 result
-        assert_eq!(
-            vec![1, 1, 1],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile again to ensure preprocessor cache hit
-        compile_and_verify(
-            &[
-                &env_vars[..],
-                &[("SOURCE_DATE_EPOCH".into(), s_epoch_today.as_str().into())],
-            ]
-            .concat(),
-            AdditionalStats {
-                compile_requests: Some(1),
-                requests_executed: Some(1),
-                cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-                ..Default::default()
-            },
-        )?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry still has 1 result
-        assert_eq!(
-            vec![1, 1, 1],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile "tomorrow" to ensure cache miss
-        compile_and_verify(
-            &[
-                &env_vars[..],
-                &[("SOURCE_DATE_EPOCH".into(), s_epoch_tomorrow.as_str().into())],
-            ]
-            .concat(),
-            AdditionalStats {
-                preprocessed: Some(1),
-                compilations: Some(1),
-                cache_writes: Some(1),
-                compile_requests: Some(1),
-                requests_executed: Some(1),
-                cache_misses: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-                ..Default::default()
-            },
-        )?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 2 results
-        assert_eq!(
-            vec![1, 1, 2],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile "tomorrow" again to ensure preprocessor cache hit
-        compile_and_verify(
-            &[
-                &env_vars[..],
-                &[("SOURCE_DATE_EPOCH".into(), s_epoch_tomorrow.as_str().into())],
-            ]
-            .concat(),
-            AdditionalStats {
-                compile_requests: Some(1),
-                requests_executed: Some(1),
-                cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-                ..Default::default()
-            },
-        )?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry still has 2 results
-        assert_eq!(
-            vec![1, 1, 2],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-    }
-
-    // Test date macro used in dependency of a dependency
-    {
-        write_source(
-            tempdir,
-            dep_a,
-            &format!(
-                r#"
-#include "{dep_b}"
-void a() {{ b(); }}
-"#
-            ),
-        );
-
-        // Write dependency B with __DATE__ macro
-        write_source(
-            tempdir,
-            dep_b,
-            r#"
-#include <stdio.h>
-void b() { printf("date: %s", __DATE__); }
-"#,
-        );
-
-        // Compile and populate preprocessor and object disk caches
-        compile_and_verify(
-            &[
-                &env_vars[..],
-                &[("SOURCE_DATE_EPOCH".into(), s_epoch_today.as_str().into())],
-            ]
-            .concat(),
-            AdditionalStats {
-                preprocessed: Some(1),
-                compilations: Some(1),
-                cache_writes: Some(1),
-                compile_requests: Some(1),
-                requests_executed: Some(1),
-                cache_misses: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-                ..Default::default()
-            },
-        )?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 3 results
-        assert_eq!(
-            vec![1, 1, 3],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile again to ensure preprocessor cache hit
-        compile_and_verify(
-            &[
-                &env_vars[..],
-                &[("SOURCE_DATE_EPOCH".into(), s_epoch_today.as_str().into())],
-            ]
-            .concat(),
-            AdditionalStats {
-                compile_requests: Some(1),
-                requests_executed: Some(1),
-                cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-                ..Default::default()
-            },
-        )?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry still has 3 results
-        assert_eq!(
-            vec![1, 1, 3],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile "tomorrow" to ensure cache miss
-        compile_and_verify(
-            &[
-                &env_vars[..],
-                &[("SOURCE_DATE_EPOCH".into(), s_epoch_tomorrow.as_str().into())],
-            ]
-            .concat(),
-            AdditionalStats {
-                preprocessed: Some(1),
-                compilations: Some(1),
-                cache_writes: Some(1),
-                compile_requests: Some(1),
-                requests_executed: Some(1),
-                cache_misses: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-                ..Default::default()
-            },
-        )?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 4 results
-        assert_eq!(
-            vec![1, 1, 4],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile "tomorrow" again to ensure preprocessor cache hit
-        compile_and_verify(
-            &[
-                &env_vars[..],
-                &[("SOURCE_DATE_EPOCH".into(), s_epoch_tomorrow.as_str().into())],
-            ]
-            .concat(),
-            AdditionalStats {
-                compile_requests: Some(1),
-                requests_executed: Some(1),
-                cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-                ..Default::default()
-            },
-        )?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry still has 4 results
-        assert_eq!(
-            vec![1, 1, 4],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-    }
-
-    // Test removing __DATE__ from dependency B
-    {
-        // Write dependency B without __DATE__ macro
-        write_source(tempdir, dep_b, r#"void b() {}"#);
-
-        // Compile and populate preprocessor and object disk caches
-        compile_and_verify(
-            &[
-                &env_vars[..],
-                &[("SOURCE_DATE_EPOCH".into(), s_epoch_today.as_str().into())],
-            ]
-            .concat(),
-            AdditionalStats {
-                preprocessed: Some(1),
-                compilations: Some(1),
-                cache_writes: Some(1),
-                compile_requests: Some(1),
-                requests_executed: Some(1),
-                cache_misses: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-                ..Default::default()
-            },
-        )?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 5 results
-        assert_eq!(
-            vec![1, 1, 5],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile "today" again to ensure preprocessor cache hit
-        compile_and_verify(
-            &[
-                &env_vars[..],
-                &[("SOURCE_DATE_EPOCH".into(), s_epoch_today.as_str().into())],
-            ]
-            .concat(),
-            AdditionalStats {
-                compile_requests: Some(1),
-                requests_executed: Some(1),
-                cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-                ..Default::default()
-            },
-        )?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 5 results
-        assert_eq!(
-            vec![1, 1, 5],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile "tomorrow" again to ensure preprocessor cache hit
-        compile_and_verify(
-            &[
-                &env_vars[..],
-                &[("SOURCE_DATE_EPOCH".into(), s_epoch_tomorrow.as_str().into())],
-            ]
-            .concat(),
-            AdditionalStats {
-                compile_requests: Some(1),
-                requests_executed: Some(1),
-                cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-                ..Default::default()
-            },
-        )?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 5 results
-        assert_eq!(
-            vec![1, 1, 5],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-    }
-
-    Ok(())
-}
-
-fn test_preprocessor_cache_mode_timestamp_macros(
-    client: &SccacheClient,
-    compiler: &Compiler,
-    tempdir: &Path,
-    clang_plusplus: bool,
-) -> sccache::errors::Result<()> {
-    use sccache::errors::Result;
-
-    let Compiler {
-        name,
-        exe,
-        env_vars,
-        ..
-    } = compiler;
-
-    println!("test_preprocessor_cache_mode_timestamp_macros: {name}");
-
-    let src = "timestamp_macro_test.c";
-    let obj = "timestamp_macro_test.c.o";
-    let dep_a = "timestamp_macro_test_a.h";
-    let dep_b = "timestamp_macro_test_b.h";
-
-    let kind = (*name).into();
-    let lang = if clang_plusplus {
-        Language::Cxx
-    } else {
-        Language::C
-    };
-
-    let preprocessor_cache_path = client.clear_disk_cache()?.join("preprocessor");
-
-    let preprocessor_cache_entries = || {
-        walkdir::WalkDir::new(preprocessor_cache_path.as_path())
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_type().is_file().then_some(e))
-            .map(|preprocessor_cache_entry| {
-                PreprocessorCacheEntry::read(&fs::read(preprocessor_cache_entry.path())?)
-            })
-    };
-
-    let mut expected_stats = client.stats().unwrap();
-
-    let mut compile_and_verify = |additional_stats: AdditionalStats| -> Result<()> {
-        let mut cmd = client.cmd();
-        cmd.current_dir(tempdir)
-            .envs(env_vars.clone())
-            .args(compile_cmdline(name, exe, src, obj, []))
-            .assert()
-            .success();
-        // Zero-out duration stats
-        let actual_stats = client.stats().unwrap() + AdditionalStats::default();
-        expected_stats += additional_stats;
-        assert_eq!(expected_stats, actual_stats);
-        Ok(())
-    };
-
-    // Test __TIMESTAMP__ macro used in main source file
-    {
-        // Write source file with __TIMESTAMP__ macro
-        write_source(
-            tempdir,
-            src,
-            r#"
-#include <stdio.h>
-int main(int argc, char** argv) {{
-    printf("timestamp 1: %s", __TIMESTAMP__);
-    return 0;
-}}
-    "#,
-        );
-
-        // Compile and populate preprocessor and object disk caches
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is now 1
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(1, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 1 result
-        assert_eq!(
-            vec![1],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile again to ensure preprocessor cache hit
-        compile_and_verify(AdditionalStats {
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 1
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(1, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry still has 1 result
-        assert_eq!(
-            vec![1],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Wait 2s, update source file with __TIMESTAMP__ macro,
-        // then compile again to ensure preprocessor cache miss
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        write_source(
-            tempdir,
-            src,
-            r#"
-#include <stdio.h>
-int main(int argc, char** argv) {{
-    printf("timestamp 2: %s", __TIMESTAMP__);
-    return 0;
-}}
-    "#,
-        );
-
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is now 2
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(2, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 1 result
-        assert_eq!(
-            vec![1, 1],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile again to ensure preprocessor cache hit
-        compile_and_verify(AdditionalStats {
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 2
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(2, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry still has 1 result
-        assert_eq!(
-            vec![1, 1],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-    }
-
-    // Test timestamp macro used in dependency
-    {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        write_source(
-            tempdir,
-            src,
-            &format!(
-                r#"
-#include "{dep_a}"
-int main(int argc, char** argv) {{
-    a();
-    return 0;
-}}
-"#
-            ),
-        );
-
-        // Write dependency A with __TIMESTAMP__ macro
-        write_source(
-            tempdir,
-            dep_a,
-            r#"
-#include <stdio.h>
-void a() { printf("timestamp: %s", __TIMESTAMP__); }
-"#,
-        );
-
-        // Compile and populate preprocessor and object disk caches
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is now 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 1 result
-        assert_eq!(
-            vec![1, 1, 1],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        compile_and_verify(AdditionalStats {
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry still has 1 result
-        assert_eq!(
-            vec![1, 1, 1],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Wait 2s, update dependency A with __TIMESTAMP__ macro,
-        // then compile again to ensure preprocessor cache miss
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        write_source(
-            tempdir,
-            dep_a,
-            r#"
-#include <stdio.h>
-void a() { printf("timestamp: %s", __TIMESTAMP__); }
-"#,
-        );
-
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 2 results
-        assert_eq!(
-            vec![1, 1, 2],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile again to ensure preprocessor cache hit
-        compile_and_verify(AdditionalStats {
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry still has 2 results
-        assert_eq!(
-            vec![1, 1, 2],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-    }
-
-    // Test timestamp macro used in dependency of a dependency
-    {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        write_source(
-            tempdir,
-            dep_a,
-            &format!(
-                r#"
-#include "{dep_b}"
-void a() {{ b(); }}
-"#
-            ),
-        );
-
-        // Write dependency B with __TIMESTAMP__ macro
-        write_source(
-            tempdir,
-            dep_b,
-            r#"
-#include <stdio.h>
-void b() { printf("timestamp: %s", __TIMESTAMP__); }
-"#,
-        );
-
-        // Compile and populate preprocessor and object disk caches
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 3 results
-        assert_eq!(
-            vec![1, 1, 3],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        compile_and_verify(AdditionalStats {
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 3 results
-        assert_eq!(
-            vec![1, 1, 3],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Wait 2s, update dependency B with __TIMESTAMP__ macro,
-        // then compile again to ensure preprocessor cache miss
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        write_source(
-            tempdir,
-            dep_b,
-            r#"
-#include <stdio.h>
-void b() { printf("timestamp: %s", __TIMESTAMP__); }
-"#,
-        );
-
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 4 results
-        assert_eq!(
-            vec![1, 1, 4],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile again to ensure preprocessor cache hit
-        compile_and_verify(AdditionalStats {
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry still has 4 results
-        assert_eq!(
-            vec![1, 1, 4],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-    }
-
-    // Test removing __TIMESTAMP__ from dependency B
-    {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        // Write dependency B without __TIMESTAMP__ macro
-        write_source(tempdir, dep_b, r#"void b() {}"#);
-
-        // Compile and populate preprocessor and object disk caches
-        compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry has 5 results
-        assert_eq!(
-            vec![1, 1, 5],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-
-        // Compile again to ensure preprocessor cache hit
-        compile_and_verify(AdditionalStats {
-            compile_requests: Some(1),
-            requests_executed: Some(1),
-            cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
-            ..Default::default()
-        })?;
-
-        // Assert the number of preprocessor cache entries is still 3
-        let entries = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        assert_eq!(3, entries.len() as u64);
-
-        // Assert the newest preprocessor cache entry still has 5 results
-        assert_eq!(
-            vec![1, 1, 5],
-            entries
-                .iter()
-                .map(|x| x.iter().count() as u64)
-                .sorted()
-                .collect::<Vec<_>>()
-        );
-    }
-
-    Ok(())
 }
 
 fn run_sccache_command_tests(
@@ -2435,72 +707,6 @@ fn run_sccache_command_tests(
 
     if compiler.name != "cl" {
         test_noncacheable_stats(client, compiler, tempdir);
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-struct AdditionalStats {
-    cache_writes: Option<u64>,
-    preprocessed: Option<u64>,
-    compilations: Option<u64>,
-    compile_requests: Option<u64>,
-    non_cacheable_compilations: Option<u64>,
-    requests_executed: Option<u64>,
-    cache_hits: Option<Vec<(CCompilerKind, Language, u64)>>,
-    preprocessor_cache_hits: Option<Vec<(CCompilerKind, Language, u64)>>,
-    cache_misses: Option<Vec<(CCompilerKind, Language, u64)>>,
-    preprocessor_cache_misses: Option<Vec<(CCompilerKind, Language, u64)>>,
-}
-
-impl std::ops::Add<AdditionalStats> for ServerStats {
-    type Output = ServerStats;
-    fn add(mut self, rhs: AdditionalStats) -> Self::Output {
-        self += rhs;
-        self
-    }
-}
-
-impl std::ops::AddAssign<AdditionalStats> for ServerStats {
-    fn add_assign(&mut self, rhs: AdditionalStats) {
-        self.cache_writes += rhs.cache_writes.unwrap_or(0);
-        self.preprocessed += rhs.preprocessed.unwrap_or(0);
-        self.compilations += rhs.compilations.unwrap_or(0);
-        self.compile_requests += rhs.compile_requests.unwrap_or(0);
-        self.requests_executed += rhs.requests_executed.unwrap_or(0);
-        self.non_cacheable_compilations += rhs.non_cacheable_compilations.unwrap_or(0);
-
-        for (kind, lang, count) in rhs.cache_hits.unwrap_or_default() {
-            let kind = CompilerKind::C(kind);
-            for _ in 0..count {
-                self.cache_hits.increment(&kind, &lang);
-            }
-        }
-
-        for (kind, lang, count) in rhs.preprocessor_cache_hits.unwrap_or_default() {
-            let kind = CompilerKind::C(kind);
-            for _ in 0..count {
-                self.preprocessor_cache_hits.increment(&kind, &lang);
-            }
-        }
-
-        for (kind, lang, count) in rhs.cache_misses.unwrap_or_default() {
-            let kind = CompilerKind::C(kind);
-            for _ in 0..count {
-                self.cache_misses.increment(&kind, &lang);
-            }
-        }
-
-        for (kind, lang, count) in rhs.preprocessor_cache_misses.unwrap_or_default() {
-            let kind = CompilerKind::C(kind);
-            for _ in 0..count {
-                self.preprocessor_cache_misses.increment(&kind, &lang);
-            }
-        }
-
-        self.cache_write_duration = Default::default();
-        self.cache_read_hit_duration = Default::default();
-        self.compiler_write_duration = Default::default();
-        self.preprocessor_duration = Default::default();
     }
 }
 
@@ -4290,7 +2496,7 @@ fn test_hip_compiles(client: &SccacheClient, compiler: &Compiler, tempdir: &Path
             INPUT_FOR_HIP_A,
             OUTPUT,
             &target_arch,
-            Vec::new(),
+            [],
         ))
         .current_dir(tempdir)
         .envs(env_vars.clone())
@@ -4316,7 +2522,7 @@ fn test_hip_compiles(client: &SccacheClient, compiler: &Compiler, tempdir: &Path
             INPUT_FOR_HIP_A,
             OUTPUT,
             &target_arch,
-            Vec::new(),
+            [],
         ))
         .current_dir(tempdir)
         .envs(env_vars.clone())
@@ -4345,7 +2551,7 @@ fn test_hip_compiles(client: &SccacheClient, compiler: &Compiler, tempdir: &Path
             INPUT_FOR_HIP_B,
             OUTPUT,
             &target_arch,
-            Vec::new(),
+            [],
         ))
         .current_dir(tempdir)
         .envs(env_vars.clone())
@@ -4388,7 +2594,7 @@ fn test_hip_compiles_multi_targets(client: &SccacheClient, compiler: &Compiler, 
             INPUT_FOR_HIP_A,
             OUTPUT,
             &target_arches,
-            Vec::new(),
+            [],
         ))
         .current_dir(tempdir)
         .envs(env_vars.clone())
@@ -4415,7 +2621,7 @@ fn test_hip_compiles_multi_targets(client: &SccacheClient, compiler: &Compiler, 
             INPUT_FOR_HIP_A,
             OUTPUT,
             &target_arches,
-            Vec::new(),
+            [],
         ))
         .current_dir(tempdir)
         .envs(env_vars.clone())
@@ -4445,7 +2651,7 @@ fn test_hip_compiles_multi_targets(client: &SccacheClient, compiler: &Compiler, 
             INPUT_FOR_HIP_B,
             OUTPUT,
             &target_arches,
-            Vec::new(),
+            [],
         ))
         .current_dir(tempdir)
         .envs(env_vars.clone())
@@ -4492,7 +2698,7 @@ fn test_clang_multicall(client: &SccacheClient, compiler: &Compiler, tempdir: &P
             exe,
             INPUT_CLANG_MULTICALL,
             OUTPUT,
-            Vec::new(),
+            [],
         ))
         .current_dir(tempdir)
         .envs(env_vars.clone())
@@ -4526,7 +2732,7 @@ fn test_clang_cache_whitespace_normalization(
             exe,
             INPUT_WITH_WHITESPACE,
             OUTPUT,
-            Vec::new(),
+            [],
         ))
         .current_dir(tempdir)
         .envs(env_vars.clone())
@@ -4547,7 +2753,7 @@ fn test_clang_cache_whitespace_normalization(
             exe,
             INPUT_WITH_WHITESPACE_ALT,
             OUTPUT,
-            Vec::new(),
+            [],
         ))
         .current_dir(tempdir)
         .envs(env_vars.clone())
@@ -4613,34 +2819,6 @@ fn test_stats_no_server() {
     );
 }
 
-fn make_sccache_client(
-    preprocessor_cache_mode: bool,
-) -> (Option<tempfile::TempDir>, PathBuf, SccacheClient) {
-    let tempdir = tempfile::Builder::new()
-        .prefix("sccache_system_test")
-        .tempdir()
-        .unwrap();
-
-    // Persist the tempdir if SCCACHE_DEBUG is defined
-    let (tempdir_path, maybe_tempdir) = if env::var("SCCACHE_DEBUG").is_ok() {
-        (tempdir.keep(), None)
-    } else {
-        (tempdir.path().to_path_buf(), Some(tempdir))
-    };
-
-    // Create the configurations
-    let sccache_cfg = sccache_client_cfg(&tempdir_path, preprocessor_cache_mode);
-    write_json_cfg(&tempdir_path, "sccache-cfg.json", &sccache_cfg);
-    let sccache_cached_cfg_path = tempdir_path.join("sccache-cached-cfg");
-    // Start the server daemon on a unique port
-    let client = SccacheClient::new(
-        &tempdir_path.join("sccache-cfg.json"),
-        &sccache_cached_cfg_path,
-    );
-
-    (maybe_tempdir, tempdir_path, client)
-}
-
 macro_rules! test_sccache_command {
     ($compiler:ident, $compiler_name:expr) => {
         paste! {
@@ -4661,89 +2839,6 @@ macro_rules! test_sccache_command {
                         &tempdir_path,
                         preprocessor_cache_mode,
                     )
-                }
-            }
-        }
-
-        paste! {
-            #[test]
-            #[cfg(any(unix, target_env = "msvc"))]
-            fn [<test_sccache_command_preprocessor_cache_mode_single_entry_multiple_hashes_ $compiler>] () {
-                let _ = env_logger::try_init();
-                let compilers = find_compilers();
-                if let Some(compiler) = compilers.iter().find(|c| c.name == $compiler_name) {
-                    // Create and start the sccache client
-                    let (_tempdir, tempdir_path, client) = make_sccache_client(true);
-                    test_preprocessor_cache_mode_single_entry_multiple_hashes(
-                        &client.start(),
-                        &compiler,
-                        &tempdir_path,
-                        $compiler_name == "clang++"
-                    )
-                    .unwrap();
-                }
-            }
-        }
-
-        paste! {
-            #[test]
-            #[cfg(any(unix, target_env = "msvc"))]
-            fn [<test_sccache_command_preprocessor_cache_mode_time_macros_ $compiler>] () {
-                let _ = env_logger::try_init();
-                let compilers = find_compilers();
-                if let Some(compiler) = compilers.iter().find(|c| c.name == $compiler_name) {
-                    // Create and start the sccache client
-                    let (_tempdir, tempdir_path, client) = make_sccache_client(true);
-                    test_preprocessor_cache_mode_time_macros(
-                        &client.start(),
-                        &compiler,
-                        &tempdir_path,
-                        $compiler_name == "clang++"
-                    )
-                    .unwrap();
-                }
-            }
-        }
-
-        paste! {
-            #[test]
-            #[cfg(any(unix, target_env = "msvc"))]
-            fn [<test_sccache_command_preprocessor_cache_mode_date_macros_ $compiler>] () {
-                // MSVC and NVHPC don't respect SOURCE_DATE_EPOCH
-                if !matches!($compiler_name, "cl" | "nvc" | "nvc++") {
-                    let _ = env_logger::try_init();
-                    let compilers = find_compilers();
-                    if let Some(compiler) = compilers.iter().find(|c| c.name == $compiler_name) {
-                        // Create and start the sccache client
-                        let (_tempdir, tempdir_path, client) = make_sccache_client(true);
-                        test_preprocessor_cache_mode_date_macros(
-                            &client.start(),
-                            &compiler,
-                            &tempdir_path,
-                            $compiler_name == "clang++"
-                        )
-                        .unwrap();
-                    }
-                }
-            }
-        }
-
-        paste! {
-            #[test]
-            #[cfg(any(unix, target_env = "msvc"))]
-            fn [<test_sccache_command_preprocessor_cache_mode_timestamp_macros_ $compiler>] () {
-                let _ = env_logger::try_init();
-                let compilers = find_compilers();
-                if let Some(compiler) = compilers.iter().find(|c| c.name == $compiler_name) {
-                    // Create and start the sccache client
-                    let (_tempdir, tempdir_path, client) = make_sccache_client(true);
-                    test_preprocessor_cache_mode_timestamp_macros(
-                        &client.start(),
-                        &compiler,
-                        &tempdir_path,
-                        $compiler_name == "clang++"
-                    )
-                    .unwrap();
                 }
             }
         }

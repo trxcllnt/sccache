@@ -19,14 +19,13 @@
 //! different.
 
 use std::{
-    collections::{HashMap, HashSet, hash_map::RandomState},
+    collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
     hash::Hash,
     io::{self, Read, Write},
     ops::ControlFlow,
     path::{Path, PathBuf},
     sync::LazyLock,
-    time::SystemTime,
 };
 
 use anyhow::Context;
@@ -34,13 +33,9 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    cache::PreprocessorCacheModeConfig,
     errors::*,
-    lru_disk_cache::{LruCache, Meter},
-    util::{
-        Digest, HashToDigest, MetadataCtimeExt, OsStrExt, TimeMacroFinder, Timestamp, decode_path,
-        encode_path,
-    },
+    lru_disk_cache::{LruCache, lru_cache},
+    util::{Digest, HashToDigest, MetadataCtimeExt, OsStrExt, Timestamp, decode_path, encode_path},
 };
 
 use super::Language;
@@ -48,25 +43,14 @@ use super::Language;
 /// The current format is 1 header byte for the version + bincode encoding
 /// of the [`PreprocessorCacheEntry`] struct.
 const FORMAT_VERSION: u8 = 1;
-const MAX_PREPROCESSOR_CACHE_ENTRIES: u64 = 100_000;
+const MAX_PREPROCESSOR_CACHE_ENTRIES: u64 = 1_000;
 
-struct CompiledEntrySize;
-
-impl<K> Meter<K, Vec<IncludeEntry>> for CompiledEntrySize {
-    type Measure = usize;
-    fn measure<Q: ?Sized>(&self, _: &Q, entries: &Vec<IncludeEntry>) -> Self::Measure
-    where
-        K: std::borrow::Borrow<Q>,
-    {
-        entries.len()
-    }
-}
-
+#[derive(Clone)]
 pub struct PreprocessorCacheEntry {
     /// The digest of a result is computed by hashing the output of the
     /// C preprocessor. Entries correspond to the included files during the
     /// preprocessing step.
-    results: LruCache<String, Vec<IncludeEntry>, RandomState, CompiledEntrySize>,
+    results: LruCache<String, Vec<IncludeEntry>>,
 }
 
 impl std::fmt::Debug for PreprocessorCacheEntry {
@@ -85,7 +69,7 @@ impl Default for PreprocessorCacheEntry {
 impl PreprocessorCacheEntry {
     pub fn new() -> Self {
         Self {
-            results: LruCache::with_meter(MAX_PREPROCESSOR_CACHE_ENTRIES, CompiledEntrySize),
+            results: LruCache::new(MAX_PREPROCESSOR_CACHE_ENTRIES),
         }
     }
 
@@ -151,8 +135,12 @@ impl PreprocessorCacheEntry {
         Ok(writer.into_inner().freeze())
     }
 
-    pub fn iter(&self) -> crate::lru_disk_cache::lru_cache::Iter<'_, String, Vec<IncludeEntry>> {
+    pub fn iter(&self) -> lru_cache::Iter<'_, String, Vec<IncludeEntry>> {
         self.results.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> lru_cache::IterMut<'_, String, Vec<IncludeEntry>> {
+        self.results.iter_mut()
     }
 
     /// Insert the full compilation key and included files for a given source file.
@@ -161,33 +149,19 @@ impl PreprocessorCacheEntry {
     /// or more of the include files has changed but not the source file.
     pub fn add_result(
         &mut self,
-        compilation_time_start: SystemTime,
         preprocessor_key: &str,
         result_key: &str,
-        included_files: impl IntoIterator<Item = (String, PathBuf, std::fs::Metadata)>,
+        included_files: impl IntoIterator<Item = (String, PathBuf)>,
     ) -> &mut Self {
         self.results.insert(
             result_key.to_string(),
             included_files
                 .into_iter()
                 .sorted_unstable_by(|a, b| a.1.cmp(&b.1))
-                .map(|(digest, path, meta)| {
-                    let mtime = meta.modified().ok().map(|t| -> Timestamp { t.into() });
-                    let ctime = meta.ctime_or_creation().ok();
-
-                    let should_cache_time = match (mtime, ctime) {
-                        (Some(mtime), Some(ctime)) => {
-                            Timestamp::from(compilation_time_start) > mtime.max(ctime)
-                        }
-                        _ => false,
-                    };
-                    IncludeEntry {
-                        path: path.into_os_string(),
-                        digest,
-                        file_size: meta.len(),
-                        mtime: if should_cache_time { mtime } else { None },
-                        ctime: if should_cache_time { ctime } else { None },
-                    }
+                .map(|(digest, path)| IncludeEntry {
+                    path: path.into_os_string(),
+                    digest,
+                    ..Default::default()
                 })
                 .collect::<Vec<_>>(),
         );
@@ -206,133 +180,110 @@ impl PreprocessorCacheEntry {
     /// are already on disk and have not changed.
     pub async fn lookup_result_digest(
         &mut self,
-        config: &PreprocessorCacheModeConfig,
         env_vars: &[(OsString, OsString)],
-        updated: &mut bool,
-    ) -> Option<String> {
-        use futures::{StreamExt, stream};
+    ) -> (bool, Option<String>) {
+        let mut maybe_result = None;
+        let mut needs_update = false;
+        let mut memo = HashMap::new();
 
-        *updated = false;
-
-        // Find the first result key whose include files
-        // on disk match this preprocessor cache entry
-        let maybe_result = stream::iter(
-            self.results
-                .iter()
-                // Check newest result first since it's more likely to match.
-                .rev(),
-        )
-        .filter_map(|(result_key, includes)| {
-            Box::pin({
-                async {
-                    Self::result_matches(includes, config, env_vars)
-                        .await
-                        .map(|updated_includes| (result_key.clone(), updated_includes))
-                }
-            })
-        })
-        .next()
-        .await;
-
-        maybe_result.and_then(|(result_key, updated_includes)| {
-            // Insert updated include entries
-            if !updated_includes.is_empty() {
-                let mut includes = self.results.remove(&result_key)?;
-                for (idx, include) in updated_includes {
-                    includes[idx] = include;
-                }
-                self.results.insert(result_key.clone(), includes);
-                // Signal if the preprocessor cache entry has been updated and needs to be
-                // written to disk.
-                *updated = true;
+        // Find the first result key whose include files on disk match this
+        // preprocessor cache entry. Check newest results first since they're
+        // more likely to match.
+        for (idx, (result_key, includes)) in self.iter_mut().rev().enumerate() {
+            if let Some(updated) = Self::result_matches(&mut memo, includes, env_vars).await {
+                needs_update = needs_update || updated;
+                // Need to write back to storage if the LRU order changes
+                needs_update = needs_update || idx != 0;
+                maybe_result = Some(result_key.clone());
+                break;
             }
+        }
 
+        if let Some(result_key) = maybe_result.as_ref() {
+            // Move the entry to the back of the LRU
+            self.results.get(result_key);
+        }
+
+        (
+            // Signal this preprocessor cache entry was modified and should
+            // be written back to storage.
+            // Note: This can happen regardless whether a result was found.
+            needs_update,
             // Return the object hash
-            Some(result_key)
-        })
+            maybe_result,
+        )
     }
 
     /// A result matches if all of its include files exist on disk and have not changed.
     async fn result_matches(
-        includes: &[IncludeEntry],
-        config: &PreprocessorCacheModeConfig,
+        memo: &mut HashMap<PathBuf, Result<(IncludeEntry, bool, bool)>>,
+        includes: &mut [IncludeEntry],
         env_vars: &[(OsString, OsString)],
-    ) -> Option<Vec<(usize, IncludeEntry)>> {
-        let mut updates = vec![];
-        for (idx, include) in includes.iter().enumerate() {
-            let path = Path::new(include.path.as_os_str());
-            let meta = tokio::fs::symlink_metadata(path)
-                .await
-                .with_context(|| format!("while reading {path:?}"))
-                .inspect_err(|e| debug!("Preprocessor cache failure: {e:#?}"))
-                .ok()?;
+    ) -> Option<bool> {
+        let mut updated = false;
 
-            if meta.len() != include.file_size {
+        for prev in includes.iter_mut() {
+            let path = Path::new(prev.path.as_os_str());
+
+            let (curr, found_time, found_date_or_timestamp) = if let Some(seen) = memo.get(path) {
+                if seen.is_err() {
+                    return None;
+                }
+                seen.as_ref().unwrap()
+            } else {
+                let digest = Digest::from_file_with_time_macros(path, env_vars)
+                    .await
+                    .with_context(|| format!("while reading {}", path.display()))
+                    .inspect_err(|err| trace!("[result_matches]: {err:#}"))
+                    .map(|(digest, finder)| (digest.finish(), finder));
+
+                let (digest, finder) = match digest {
+                    Ok(res) => res,
+                    Err(err) => {
+                        memo.insert(path.to_path_buf(), Err(err));
+                        return None;
+                    }
+                };
+
+                memo.insert(
+                    path.to_path_buf(),
+                    Ok((
+                        IncludeEntry {
+                            path: path.into(),
+                            digest,
+                            ..Default::default()
+                        },
+                        finder.found_time(),
+                        finder.found_date() || finder.found_timestamp(),
+                    )),
+                );
+
+                memo.get(path).unwrap().as_ref().unwrap()
+            };
+
+            // If the digests are different, disable preprocessor cache mode
+            if prev.digest != curr.digest {
                 return None;
             }
 
-            if config.file_stat_matches {
-                match (include.mtime, include.ctime) {
-                    (Some(mtime), Some(ctime)) if config.use_ctime_for_stat => {
-                        let mtime_matches = meta.modified().map(Into::into).ok() == Some(mtime);
-                        let ctime_matches = meta.ctime_or_creation().ok() == Some(ctime);
-                        if mtime_matches && ctime_matches {
-                            trace!("mtime+ctime hit for {path:?}");
-                            continue;
-                        } else {
-                            trace!("mtime+ctime miss for {path:?}");
-                        }
-                    }
-                    (Some(mtime), _) => {
-                        let mtime_matches = meta.modified().map(Into::into).ok() == Some(mtime);
-                        if mtime_matches {
-                            trace!("mtime hit for {path:?}");
-                            continue;
-                        } else {
-                            trace!("mtime miss for {path:?}");
-                        }
-                    }
-                    _ => { /* Nothing was recorded, fall back to contents comparison */ }
-                }
+            if *found_time {
+                // We don't know for sure that the program actually uses the __TIME__ macro,
+                // but we have to assume it anyway and hash the time stamp. However, that's
+                // not very useful since the chance that we get a cache hit later the same
+                // second should be quite slim... So, just signal back to the caller that
+                // __TIME__ has been found so that the preprocessor cache mode can be disabled.
+                debug!("Found __TIME__ in {path:?}");
+                return None;
             }
 
-            if config.ignore_time_macros {
-                Digest::from_file(path)
-                    .await
-                    .with_context(|| format!("while reading {path:?}"))
-                    .inspect_err(|e| debug!("Preprocessor cache failure: {e:#?}"))
-                    .ok()
-                    .map(|digest| digest.finish())
-                    // If there's any difference, bail and disable preprocessor cache mode
-                    .filter(|digest| include.digest.eq(digest))?;
-            } else {
-                let (digest, finder) = Digest::from_file_with_time_macros(path, env_vars)
-                    .await
-                    .inspect_err(|e| debug!("Preprocessor cache failure: {e:#?}"))
-                    .ok()
-                    .map(|(digest, finder)| (digest.finish(), finder))
-                    // If there's any difference, bail and disable preprocessor cache mode
-                    .filter(|(digest, _)| include.digest.eq(digest))?;
-
-                if finder.found_time() {
-                    // We don't know for sure that the program actually uses the __TIME__ macro,
-                    // but we have to assume it anyway and hash the time stamp. However, that's
-                    // not very useful since the chance that we get a cache hit later the same
-                    // second should be quite slim... So, just signal back to the caller that
-                    // __TIME__ has been found so that the preprocessor cache mode can be disabled.
-                    debug!("Found __TIME__ in {path:?}");
-                    return None;
-                }
-
-                if finder.found_date() || finder.found_timestamp() {
-                    let mut include = include.clone();
-                    include.digest = digest;
-                    updates.push((idx, include));
-                }
+            // If __DATE__ or __TIMESTAMP__ found, update the includes for this result.
+            if *found_date_or_timestamp {
+                *prev = curr.clone();
+                updated = true;
             }
         }
 
-        Some(updates)
+        Some(updated)
     }
 }
 
@@ -366,7 +317,6 @@ pub async fn preprocessor_cache_entry_hash_key(
     cwd: &Path,
     input: &Path,
     plusplus: bool,
-    config: &PreprocessorCacheModeConfig,
 ) -> Result<Option<String>> {
     // If you change any of the inputs to the hash, you should change `FORMAT_VERSION`.
 
@@ -455,9 +405,7 @@ pub async fn preprocessor_cache_entry_hash_key(
         digest.update(&buf);
     }
 
-    digest = if config.ignore_time_macros {
-        digest.with_file(&input_path).await?
-    } else {
+    digest = {
         let (digest, finder) = digest
             .with_file_and_time_macros(&input_path, env_vars)
             .await?;
@@ -479,13 +427,12 @@ const INCBIN_DIRECTIVE: &[u8] = b".incbin";
 
 /// Remember the include files in the preprocessor output if it can be cached.
 /// Returns `Ok(None)` if preprocessor cache mode should be disabled.
-#[allow(dead_code)]
 pub fn process_preprocessed_file(
     input_file: &Path,
     cwd: &Path,
     bytes: &mut [u8],
-    config: PreprocessorCacheModeConfig,
     fs_impl: impl PreprocessorFSAbstraction,
+    skip_system_headers: bool,
 ) -> Result<Option<Vec<PathBuf>>> {
     let mut start = 0;
     let mut hash_start = 0;
@@ -529,13 +476,13 @@ pub fn process_preprocessed_file(
                 input_file,
                 cwd,
                 &mut included_files,
-                &config,
                 bytes,
                 start,
                 hash_start,
                 total_len,
                 &mut normalized_include_paths,
                 &fs_impl,
+                skip_system_headers,
             )? {
                 ControlFlow::Continue((s, h)) => {
                     start = s;
@@ -599,13 +546,13 @@ fn process_preprocessor_line(
     input_file: &Path,
     cwd: &Path,
     included_files: &mut HashMap<PathBuf, bool>,
-    config: &PreprocessorCacheModeConfig,
     bytes: &mut [u8],
     mut start: usize,
     mut hash_start: usize,
     total_len: usize,
     normalized_include_paths: &mut HashMap<Vec<u8>, Option<Vec<u8>>>,
     fs_impl: &impl PreprocessorFSAbstraction,
+    skip_system_headers: bool,
 ) -> Result<PreprocessedLineAction> {
     let mut slice = &bytes[start..];
     // Workarounds for preprocessor linemarker bugs in GCC version 6.
@@ -700,9 +647,9 @@ fn process_preprocessor_line(
         input_file,
         cwd,
         included_files,
-        system,
-        config,
         fs_impl,
+        system,
+        skip_system_headers,
     )? {
         return Ok(ControlFlow::Break((start, hash_start, false)));
     };
@@ -715,8 +662,7 @@ fn process_preprocessor_line(
 ///
 /// Normalize a path, removing things like `.` and `..`.
 ///
-/// CAUTION: This does not resolve symlinks (unlike
-/// [`std::fs::canonicalize`]).
+/// CAUTION: This does not resolve symlinks (unlike [`std::fs::canonicalize`]).
 pub fn normalize_path(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut components = path.components().peekable();
@@ -781,10 +727,6 @@ pub trait PreprocessorFSAbstraction {
     fn metadata(&self, path: impl AsRef<Path>) -> io::Result<PreprocessorFileMetadata> {
         std::fs::metadata(path).map(Into::into)
     }
-
-    fn open(&self, path: impl AsRef<Path>) -> io::Result<Box<dyn std::io::Read>> {
-        Ok(Box::new(std::fs::File::open(path)?))
-    }
 }
 
 /// Provides filesystem access with the expected standard library functions.
@@ -801,9 +743,9 @@ fn remember_include_file(
     input_file: &Path,
     cwd: &Path,
     included_files: &mut HashMap<PathBuf, bool>,
-    system: bool,
-    config: &PreprocessorCacheModeConfig,
     fs_impl: &impl PreprocessorFSAbstraction,
+    #[allow(unused_variables)] system: bool,
+    #[allow(unused_variables)] skip_system_headers: bool,
 ) -> Result<bool> {
     // TODO if precompiled header.
     if path.len() >= 2 && path[0] == b'<' && path[path.len() - 1] == b'>' {
@@ -811,11 +753,9 @@ fn remember_include_file(
         return Ok(true);
     }
 
-    if system && config.skip_system_headers
-        // Don't remember system includes when testing.
-        // Always remember them in prod.
-        && cfg!(test)
-    {
+    #[cfg(test)]
+    // Allow skipping system includes in tests
+    if system && skip_system_headers {
         // Don't remember this system header.
         return Ok(true);
     }
@@ -865,31 +805,7 @@ fn remember_include_file(
         return Ok(false);
     }
 
-    // Let's hash the include file content.
-    let mut file = match fs_impl.open(&path) {
-        Ok(file) => file,
-        Err(e) => {
-            debug!("Failed to open header file {path:?}: {e}");
-            return Ok(false);
-        }
-    };
-
-    if !config.ignore_time_macros {
-        let mut finder = TimeMacroFinder::new();
-        let mut buffer = [0u8; crate::util::HASH_BUFFER_SIZE];
-        loop {
-            let count = file.read(&mut buffer[..])?;
-            if count == 0 {
-                break;
-            }
-            finder.find_time_macros(&buffer[..count]);
-            if finder.found_time() {
-                debug!("Found __TIME__ in header file {path:?}");
-                break;
-            }
-        }
-    };
-
+    // Remember this include file
     included_files.insert(path, true);
 
     Ok(true)
@@ -931,17 +847,20 @@ pub fn include_is_too_new(
 }
 
 /// Corresponds to a cached include file used in the pre-processor stage
-#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct IncludeEntry {
     /// Its absolute path
     path: OsString,
     /// The hash of its contents
     digest: String,
-    /// Its file size, in bytes
+    /// Its file size, in bytes.
+    /// (Unused in format 1, will always be 0)
     file_size: u64,
     /// Its modification time, `None` if not recorded.
+    /// (Unused in format 1, will always be None)
     mtime: Option<Timestamp>,
     /// Its status change time, `None` if not recorded.
+    /// (Unused in format 1, will always be None)
     ctime: Option<Timestamp>,
 }
 
@@ -989,7 +908,7 @@ mod test {
     #[test]
     fn test_serialize_deserialize() {
         let mut entry_a = PreprocessorCacheEntry::new();
-        entry_a.add_result(SystemTime::now(), "abc", "def", []);
+        entry_a.add_result("abc", "def", []);
 
         assert_eq!(entry_a.iter().count(), 1);
 
@@ -1187,12 +1106,8 @@ mod test {
             input_file,
             Path::new(""),
             &mut bytes,
-            PreprocessorCacheModeConfig {
-                use_preprocessor_cache_mode: true,
-                skip_system_headers: true,
-                ..Default::default()
-            },
             StandardFsAbstraction,
+            true,
         )
         .unwrap_or(None);
 
@@ -1204,73 +1119,6 @@ mod test {
         assert_eq!(include_files.len(), 0);
     }
 
-    // struct YesFs {
-    //     yes: &'static str,
-    // }
-
-    // impl PreprocessorFSAbstraction for YesFs {
-    //     fn metadata(&self, _path: impl AsRef<Path>) -> io::Result<PreprocessorFileMetadata> {
-    //         Ok(PreprocessorFileMetadata {
-    //             is_dir: false,
-    //             is_file: true,
-    //             modified: Some(Timestamp::new(0, 0)),
-    //             ctime_or_creation: None,
-    //         })
-    //     }
-
-    //     fn open(&self, _path: impl AsRef<Path>) -> io::Result<Box<dyn std::io::Read>> {
-    //         use bytes::Buf;
-    //         Ok(Box::new(self.yes.as_bytes().reader()))
-    //     }
-    // }
-
-    // #[test]
-    // fn test_process_preprocessed_file_msvc() {
-    //     env_logger::builder()
-    //         .is_test(true)
-    //         .filter_level(log::LevelFilter::Trace)
-    //         .try_init()
-    //         .ok();
-    //     let input_file = Path::new("tests/test.c");
-    //     let path = Path::new(file!())
-    //         .parent()
-    //         .unwrap()
-    //         .parent()
-    //         .unwrap()
-    //         .parent()
-    //         .unwrap();
-    //     // This should be portable since the only headers present in this
-    //     // output are system headers, which aren't interacted with
-    //     // on the filesystem if configured.
-    //     let path = path.join("tests/msvc.ii");
-    //     let mut bytes = std::fs::read(path).unwrap();
-    //     let original_bytes = bytes.clone();
-
-    //     let result = process_preprocessed_file(
-    //         input_file,
-    //         Path::new(""),
-    //         &mut bytes,
-    //         PreprocessorCacheModeConfig {
-    //             use_preprocessor_cache_mode: true,
-    //             skip_system_headers: true,
-    //             ..Default::default()
-    //         },
-    //         std::time::SystemTime::now(),
-    //         YesFs { yes: "yes" },
-    //     )
-    //     .unwrap_or(None);
-
-    //     assert_eq!(&bytes, &original_bytes);
-
-    //     assert!(result.is_some());
-
-    //     let include_files = result.unwrap();
-
-    //     debug!("include_files: {include_files:?}");
-
-    //     assert_ne!(include_files.len(), 0);
-    // }
-
     /// A filesystem interface that only panics to test that we don't access it.
     struct PanicFs;
 
@@ -1278,16 +1126,11 @@ mod test {
         fn metadata(&self, path: impl AsRef<Path>) -> io::Result<PreprocessorFileMetadata> {
             panic!("called metadata at {}", path.as_ref().display());
         }
-
-        fn open(&self, path: impl AsRef<Path>) -> io::Result<Box<dyn std::io::Read>> {
-            panic!("called open at {}", path.as_ref().display());
-        }
     }
 
     /// A filesystem interface that gives back expected values.
     struct TestFs {
         metadata_results: Mutex<VecDeque<(PathBuf, PreprocessorFileMetadata)>>,
-        open_results: Mutex<VecDeque<(PathBuf, Box<dyn std::io::Read>)>>,
     }
 
     impl PreprocessorFSAbstraction for TestFs {
@@ -1301,17 +1144,6 @@ mod test {
             assert_eq!(expected_path, path.as_ref(), "{}", path.as_ref().display());
             Ok(meta)
         }
-
-        fn open(&self, path: impl AsRef<Path>) -> io::Result<Box<dyn std::io::Read>> {
-            let (expected_path, impls_read) = self
-                .open_results
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("not enough 'open' results");
-            assert_eq!(expected_path, path.as_ref(), "{}", path.as_ref().display());
-            Ok(impls_read)
-        }
     }
 
     // Short-circuit the parameters we don't need to change during tests
@@ -1323,25 +1155,19 @@ mod test {
     ) -> PreprocessedLineAction {
         let input_file = Path::new("tests/test.c");
 
-        let config = PreprocessorCacheModeConfig {
-            use_preprocessor_cache_mode: true,
-            skip_system_headers,
-            ..Default::default()
-        };
-
         let mut bytes = line.to_vec();
         let total_len = bytes.len();
         process_preprocessor_line(
             input_file,
             Path::new(""),
             include_files,
-            &config,
             &mut bytes,
             0,
             0,
             total_len,
             &mut HashMap::new(),
             fs_impl,
+            skip_system_headers,
         )
         .unwrap()
     }
@@ -1455,7 +1281,6 @@ mod test {
             let mut include_files = HashMap::new();
             let fs_impl = TestFs {
                 metadata_results: Mutex::new(VecDeque::new()),
-                open_results: Mutex::new(VecDeque::new()),
             };
             assert_eq!(
                 do_single_preprocessor_line_call(
@@ -1482,36 +1307,6 @@ mod test {
             .try_init()
             .ok();
 
-        // Check moved into c.rs
-        // // Test "too new" include file
-        // let mut include_files = HashMap::new();
-        // let fs_impl = TestFs {
-        //     metadata_results: Mutex::new(
-        //         [(
-        //             PathBuf::from("/usr/include/x86_64-linux-gnu/bits/libc-header-start.h"),
-        //             PreprocessorFileMetadata {
-        //                 is_dir: false,
-        //                 is_file: true,
-        //                 modified: Some(Timestamp::new(i64::MAX - 1, 0)),
-        //                 ctime_or_creation: None,
-        //             },
-        //         )]
-        //         .into_iter()
-        //         .collect(),
-        //     ),
-        //     open_results: Mutex::new(VecDeque::new()),
-        // };
-        // assert_eq!(
-        //     do_single_preprocessor_line_call(
-        //         br#"// # 33 "/usr/include/x86_64-linux-gnu/bits/libc-header-start.h" 3 4"#,
-        //         &mut include_files,
-        //         &fs_impl,
-        //         false,
-        //     ),
-        //     // preprocessor cache mode is disabled
-        //     ControlFlow::Break((63, 9, false)),
-        // );
-
         // Test invalid include file is actually a dir
         let mut include_files = HashMap::new();
         let fs_impl = TestFs {
@@ -1528,7 +1323,6 @@ mod test {
                 .into_iter()
                 .collect(),
             ),
-            open_results: Mutex::new(VecDeque::new()),
         };
         assert_eq!(
             do_single_preprocessor_line_call(
@@ -1558,14 +1352,6 @@ mod test {
                 .into_iter()
                 .collect(),
             ),
-            open_results: Mutex::new(
-                [(
-                    PathBuf::from("/usr/include/x86_64-linux-gnu/bits/libc-header-start.h"),
-                    Box::new(&b"contents"[..]) as Box<dyn std::io::Read>,
-                )]
-                .into_iter()
-                .collect(),
-            ),
         };
         assert_eq!(
             do_single_preprocessor_line_call(
@@ -1577,14 +1363,5 @@ mod test {
             ControlFlow::Continue((63, 63)),
         );
         assert_eq!(include_files.len(), 1);
-        // assert_eq!(
-        //     include_files
-        //         .get(Path::new(
-        //             "/usr/include/x86_64-linux-gnu/bits/libc-header-start.h",
-        //         ))
-        //         .unwrap(),
-        //     // hash of `b"contents"`
-        //     "a93900c371d997927c5bc568ea538bed59ae5c960021dcfe7b0b369da5267528",
-        // );
     }
 }
