@@ -153,24 +153,24 @@ impl PreprocessorCacheEntry {
         result_key: &str,
         included_files: impl IntoIterator<Item = (String, PathBuf)>,
     ) -> &mut Self {
-        self.results.insert(
-            result_key.to_string(),
-            included_files
-                .into_iter()
-                .sorted_unstable_by(|a, b| a.1.cmp(&b.1))
-                .map(|(digest, path)| IncludeEntry {
-                    path: path.into_os_string(),
-                    digest,
-                    ..Default::default()
-                })
-                .collect::<Vec<_>>(),
-        );
+        let included_files = included_files
+            .into_iter()
+            .sorted_unstable_by(|a, b| a.1.cmp(&b.1))
+            .map(|(digest, path)| IncludeEntry {
+                path: path.into_os_string(),
+                digest,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
 
-        debug!("Added result key {result_key:?} to preprocessor cache entry {preprocessor_key:?}");
+        let num_includes = included_files.len();
+
+        self.results.insert(result_key.to_string(), included_files);
+
+        let num_results = self.results.len();
+
         debug!(
-            "Preprocessor cache entry {preprocessor_key:?} now has {} result key(s) and tracks {} dependencies(s)",
-            self.results.len(),
-            self.results.size()
+            "Added result to preprocessor cache entry (preprocessor_key={preprocessor_key:?}, result_key={result_key:?}, num_includes={num_includes}, num_results={num_results})"
         );
 
         self

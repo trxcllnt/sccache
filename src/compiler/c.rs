@@ -937,7 +937,7 @@ fn use_preprocessor_cache_mode(
 
     if !parsed_args.language.needs_c_preprocessing() {
         debug!(
-            "parse_arguments: Disabling preprocessor cache because {} language doesn't need C preprocessing",
+            "[{out_pretty}]: Disabling preprocessor cache because {} language doesn't need C preprocessing",
             parsed_args.language.as_str()
         );
         return false;
