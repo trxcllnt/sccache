@@ -98,8 +98,8 @@ fn assert_preprocessor_cache_entries_result_orders_changed(
         let new_back = new_back.unwrap();
         // Assert all but the last preprocessor cache entry results are the same
         assert_eq!(
-            old.iter().filter(|x| x != &new_back).collect::<Vec<_>>(),
-            new.iter().filter(|x| x != &new_back).collect::<Vec<_>>()
+            old.iter().filter(|x| x.0 != new_back.0).collect::<Vec<_>>(),
+            new.iter().filter(|x| x.0 != new_back.0).collect::<Vec<_>>()
         );
     }
 }

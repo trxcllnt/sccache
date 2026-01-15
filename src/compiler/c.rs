@@ -18,24 +18,21 @@ use crate::{
         Cacheable, ColorMode, Compilation, CompileCommand, CompileCommandImpl, Compiler,
         CompilerArguments, CompilerHasher, CompilerKind, HashResult, Language,
         preprocessor_cache::{
-            include_is_too_new, normalize_path, preprocessor_cache_entry_hash_key,
+            CachedIncludeEntry, include_is_too_new, normalize_path,
+            preprocessor_cache_entry_hash_key,
         },
     },
     dist,
+    errors::*,
+    lru_disk_cache::LruCache,
     mock_command::{CommandCreatorSync, ProcessOutput},
     server::SccacheService,
     util::{Digest, HashToDigest, hash_all},
 };
-
-#[cfg(feature = "dist-client")]
-use crate::{
-    compiler::{DistPackagers, NoopOutputsRewriter},
-    dist::pkg::{self, InputsWriter},
-};
-
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use fs_err as fs;
+use futures::lock::Mutex;
 use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt};
 use itertools::Itertools;
 use std::{
@@ -50,7 +47,11 @@ use std::{
 };
 use tempfile::TempPath;
 
-use crate::errors::*;
+#[cfg(feature = "dist-client")]
+use crate::{
+    compiler::{DistPackagers, NoopOutputsRewriter},
+    dist::pkg::{self, InputsWriter},
+};
 
 use super::CacheControl;
 use super::preprocessor_cache::PreprocessorCacheEntry;
@@ -67,6 +68,8 @@ where
     #[cfg(not(test))]
     executable_digest: String,
     compiler: I,
+    // cache for hashed preprocessor dependencies
+    preprocessor_dependencies_cache: Arc<Mutex<LruCache<PathBuf, Arc<Result<CachedIncludeEntry>>>>>,
 }
 
 /// A generic implementation of the `CompilerHasher` trait for C/C++ compilers.
@@ -79,6 +82,8 @@ where
     executable: PathBuf,
     executable_digest: String,
     compiler: I,
+    // cache for hashed preprocessor dependencies
+    preprocessor_dependencies_cache: Arc<Mutex<LruCache<PathBuf, Arc<Result<CachedIncludeEntry>>>>>,
 }
 
 /// Artifact produced by a C/C++ compiler.
@@ -334,6 +339,10 @@ where
             compiler,
             executable,
             executable_digest,
+            preprocessor_dependencies_cache: Arc::new(Mutex::new(LruCache::new(
+                // TODO: capacity chosen arbitrarily, should measure instead
+                10_000,
+            ))),
         })
     }
 
@@ -446,6 +455,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
                     executable: self.executable.clone(),
                     executable_digest: self.executable_digest.clone(),
                     compiler: self.compiler.clone(),
+                    preprocessor_dependencies_cache: self.preprocessor_dependencies_cache.clone(),
                 }))
             }
             CompilerArguments::CannotCache(why, extra_info) => {
@@ -516,6 +526,7 @@ where
             parsed_args,
             executable_digest,
             compiler,
+            preprocessor_dependencies_cache,
             ..
         } = self;
 
@@ -561,7 +572,7 @@ where
 
             if let Ok(Cache::Hit(mut preprocessor_cache_entry)) = preprocessor_cache_entry {
                 let (updated, hit) = preprocessor_cache_entry
-                    .lookup_result_digest(env_vars)
+                    .lookup_result_digest(preprocessor_dependencies_cache.as_ref(), env_vars)
                     .await;
 
                 let mut update_failed = false;
@@ -667,23 +678,26 @@ where
         let lang = <CCompilerHasher<I> as CompilerHasher<T>>::language(&*self);
 
         // Try to look for a cached preprocessing step for this compilation request.
-        let preprocessor_cache_lookup_start = std::time::Instant::now();
-        let preprocessor_cache_lookup = self
-            .preprocessor_cache_lookup(
-                &cwd,
-                &env_vars,
-                &extra_hashes,
-                &cache_control,
-                storage.as_ref(),
-            )
-            .await?;
+        let (preprocessor_cache_lookup, preprocessor_cache_lookup_duration) = {
+            let start = std::time::Instant::now();
+            let _pending = service.increment_pending_cache_lookups();
+            let res = self
+                .preprocessor_cache_lookup(
+                    &cwd,
+                    &env_vars,
+                    &extra_hashes,
+                    &cache_control,
+                    storage.as_ref(),
+                )
+                .await?;
+            (res, start.elapsed())
+        };
 
         match preprocessor_cache_lookup {
             PreprocessorCacheLookup::Hit(key) => {
-                let dur = preprocessor_cache_lookup_start.elapsed();
                 let mut stats = service.stats.lock().await;
-                stats.preprocessor_cache_hit_duration += dur;
                 stats.preprocessor_cache_hits.increment(&kind, &lang);
+                stats.preprocessor_cache_hit_duration += preprocessor_cache_lookup_duration;
 
                 // Skip preprocessing if it's a preprocessor cache hit
                 return Ok(HashResult {
@@ -703,10 +717,9 @@ where
                 });
             }
             PreprocessorCacheLookup::Miss(_) => {
-                let dur = preprocessor_cache_lookup_start.elapsed();
                 let mut stats = service.stats.lock().await;
-                stats.preprocessor_cache_miss_duration += dur;
                 stats.preprocessor_cache_misses.increment(&kind, &lang);
+                stats.preprocessor_cache_miss_duration += preprocessor_cache_lookup_duration;
             }
             _ => {}
         };
@@ -851,11 +864,11 @@ where
                             // If it's not present next time, the new object key will be added to this cache entry.
                             debug!("Found __TIME__ in {path:?}");
                         }
-                        let meta = tokio::fs::symlink_metadata(&path).await?.into();
-                        if include_is_too_new(&path, &meta, start_of_compilation) {
+                        let meta = tokio::fs::symlink_metadata(&path).await?;
+                        if include_is_too_new(&path, &(&meta).into(), start_of_compilation) {
                             bail!("Dependency changed after preprocessor invoked: {path:?}");
                         }
-                        Ok((digest.finish(), path))
+                        Ok((digest.finish(), path, meta))
                     }))
                 })
                 .try_collect::<Vec<_>>()

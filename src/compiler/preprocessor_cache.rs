@@ -25,10 +25,11 @@ use std::{
     io::{self, Read, Write},
     ops::ControlFlow,
     path::{Path, PathBuf},
-    sync::LazyLock,
+    sync::{Arc, LazyLock},
 };
 
 use anyhow::Context;
+use futures::lock::Mutex;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
@@ -151,15 +152,17 @@ impl PreprocessorCacheEntry {
         &mut self,
         preprocessor_key: &str,
         result_key: &str,
-        included_files: impl IntoIterator<Item = (String, PathBuf)>,
+        included_files: impl IntoIterator<Item = (String, PathBuf, std::fs::Metadata)>,
     ) -> &mut Self {
         let included_files = included_files
             .into_iter()
             .sorted_unstable_by(|a, b| a.1.cmp(&b.1))
-            .map(|(digest, path)| IncludeEntry {
-                path: path.into_os_string(),
+            .map(|(digest, path, meta)| IncludeEntry {
+                ctime: meta.ctime_or_creation().ok(),
                 digest,
-                ..Default::default()
+                file_size: meta.len(),
+                mtime: meta.modified().map(Into::into).ok(),
+                path: path.into_os_string(),
             })
             .collect::<Vec<_>>();
 
@@ -180,17 +183,30 @@ impl PreprocessorCacheEntry {
     /// are already on disk and have not changed.
     pub async fn lookup_result_digest(
         &mut self,
+        preprocessor_dependencies_cache: &Mutex<LruCache<PathBuf, Arc<Result<CachedIncludeEntry>>>>,
         env_vars: &[(OsString, OsString)],
     ) -> (bool, Option<String>) {
         let mut maybe_result = None;
         let mut needs_update = false;
-        let mut memo = HashMap::new();
+        let compile_timestamp = env_vars
+            .iter()
+            .find(|(k, _)| k == "SOURCE_DATE_EPOCH")
+            .and_then(|(_, v)| v.as_os_str().to_str())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| chrono::Local::now().to_utc().timestamp());
 
         // Find the first result key whose include files on disk match this
         // preprocessor cache entry. Check newest results first since they're
         // more likely to match.
         for (idx, (result_key, includes)) in self.iter_mut().rev().enumerate() {
-            if let Some(updated) = Self::result_matches(&mut memo, includes, env_vars).await {
+            if let Some(updated) = Self::result_matches(
+                preprocessor_dependencies_cache,
+                compile_timestamp,
+                includes,
+                env_vars,
+            )
+            .await
+            {
                 needs_update = needs_update || updated;
                 // Need to write back to storage if the LRU order changes
                 needs_update = needs_update || idx != 0;
@@ -216,20 +232,49 @@ impl PreprocessorCacheEntry {
 
     /// A result matches if all of its include files exist on disk and have not changed.
     async fn result_matches(
-        memo: &mut HashMap<PathBuf, Result<(IncludeEntry, bool, bool)>>,
+        preprocessor_dependencies_cache: &Mutex<LruCache<PathBuf, Arc<Result<CachedIncludeEntry>>>>,
+        compile_timestamp: i64,
         includes: &mut [IncludeEntry],
         env_vars: &[(OsString, OsString)],
     ) -> Option<bool> {
+        use std::ops::Deref;
+
         let mut updated = false;
 
         for prev in includes.iter_mut() {
             let path = Path::new(prev.path.as_os_str());
+            let meta = tokio::fs::symlink_metadata(path).await.ok()?;
+            let mtime = meta.modified().map(Into::into).ok();
+            let ctime = meta.ctime_or_creation().ok();
+            let file_size = meta.len();
 
-            let (curr, found_time, found_date_or_timestamp) = if let Some(seen) = memo.get(path) {
-                if seen.is_err() {
-                    return None;
-                }
-                seen.as_ref().unwrap()
+            let seen = match preprocessor_dependencies_cache.lock().await.get(path) {
+                Some(seen) => seen
+                    .deref()
+                    .as_ref()
+                    .ok()
+                    .filter(|cached| {
+                        // If the file hasn't changed, reuse the cached entry
+                        if cached.entry.file_size != file_size
+                            || cached.entry.ctime != ctime
+                            || cached.entry.mtime != mtime
+                        {
+                            false
+                        }
+                        // If __DATE__ or __TIMESTAMP__ were found, compare
+                        // compilation timestamp to now (or SOURCE_DATE_EPOCH)
+                        else if cached.found_date || cached.found_timestamp {
+                            cached.compiled_at == compile_timestamp
+                        } else {
+                            true
+                        }
+                    })
+                    .map(|_| seen.clone()),
+                _ => None,
+            };
+
+            let cached = if let Some(seen) = seen {
+                seen.clone()
             } else {
                 let digest = Digest::from_file_with_time_macros(path, env_vars)
                     .await
@@ -240,26 +285,43 @@ impl PreprocessorCacheEntry {
                 let (digest, finder) = match digest {
                     Ok(res) => res,
                     Err(err) => {
-                        memo.insert(path.to_path_buf(), Err(err));
+                        preprocessor_dependencies_cache
+                            .lock()
+                            .await
+                            .insert(path.to_path_buf(), Arc::new(Err(err)));
                         return None;
                     }
                 };
 
-                memo.insert(
-                    path.to_path_buf(),
-                    Ok((
-                        IncludeEntry {
-                            path: path.into(),
-                            digest,
-                            ..Default::default()
-                        },
-                        finder.found_time(),
-                        finder.found_date() || finder.found_timestamp(),
-                    )),
-                );
+                let cached = Arc::new(Ok(CachedIncludeEntry {
+                    entry: IncludeEntry {
+                        ctime,
+                        digest,
+                        file_size,
+                        mtime,
+                        path: path.into(),
+                    },
+                    found_time: finder.found_time(),
+                    found_date: finder.found_date(),
+                    found_timestamp: finder.found_timestamp(),
+                    compiled_at: compile_timestamp,
+                }));
 
-                memo.get(path).unwrap().as_ref().unwrap()
+                preprocessor_dependencies_cache
+                    .lock()
+                    .await
+                    .insert(path.to_path_buf(), cached.clone());
+
+                cached
             };
+
+            let CachedIncludeEntry {
+                entry: curr,
+                found_time,
+                found_date,
+                found_timestamp,
+                ..
+            } = cached.deref().as_ref().unwrap();
 
             // If the digests are different, disable preprocessor cache mode
             if prev.digest != curr.digest {
@@ -277,7 +339,7 @@ impl PreprocessorCacheEntry {
             }
 
             // If __DATE__ or __TIMESTAMP__ found, update the includes for this result.
-            if *found_date_or_timestamp {
+            if *found_date || *found_timestamp {
                 *prev = curr.clone();
                 updated = true;
             }
@@ -854,14 +916,19 @@ pub struct IncludeEntry {
     /// The hash of its contents
     digest: String,
     /// Its file size, in bytes.
-    /// (Unused in format 1, will always be 0)
     file_size: u64,
     /// Its modification time, `None` if not recorded.
-    /// (Unused in format 1, will always be None)
     mtime: Option<Timestamp>,
     /// Its status change time, `None` if not recorded.
-    /// (Unused in format 1, will always be None)
     ctime: Option<Timestamp>,
+}
+
+pub struct CachedIncludeEntry {
+    entry: IncludeEntry,
+    found_time: bool,
+    found_date: bool,
+    found_timestamp: bool,
+    compiled_at: i64,
 }
 
 #[derive(Debug)]
