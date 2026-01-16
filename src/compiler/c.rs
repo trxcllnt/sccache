@@ -1210,6 +1210,8 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
             match preprocessor_output {
                 PreprocessorOutput::File(file) => (PreprocessorOutput::File(file), vec![]),
                 PreprocessorOutput::OutputWithDepedencies(output, dependencies) => {
+                    let output = output.collect::<Vec<Result<Bytes>>>().await;
+                    let output = futures::stream::iter(output).boxed();
                     (PreprocessorOutput::Output(output), dependencies.await?)
                 }
                 _ => unreachable!(),

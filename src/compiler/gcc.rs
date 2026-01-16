@@ -14,7 +14,7 @@
 
 use crate::compiler::CompileCommandImpl;
 use crate::mock_command::{CommandCreatorSync, RunCommand};
-use crate::util::{OsStrExt, decode_path, run_input_output, run_input_stream_output};
+use crate::util::{OsStrExt, run_input_output, run_input_stream_output};
 use crate::{
     compiler::{
         Cacheable, ColorMode, CompilerArguments, Language, SingleCompileCommand,
@@ -1165,12 +1165,11 @@ pub async fn parse_dependencies(
         .map_ok(|lines| futures::stream::iter(lines.into_iter().map(Ok)))
         .try_flatten()
         .try_filter_map(|path| async move {
+            let path = path.trim();
             if path.is_empty() {
                 Ok(None::<PathBuf>)
             } else {
-                decode_path(path.trim().as_bytes())
-                    .map_err(anyhow::Error::new)
-                    .map(Some::<PathBuf>)
+                Ok(Some(PathBuf::from(path)))
             }
         })
         .try_fold(Vec::<PathBuf>::new(), |mut paths, path| async {
