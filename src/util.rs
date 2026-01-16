@@ -16,10 +16,13 @@ use crate::mock_command::{CommandChild, ProcessOutput, RunCommand};
 use async_trait::async_trait;
 use blake3::Hasher as blake3_Hasher;
 use byteorder::{BigEndian, ByteOrder};
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use fs_err as fs;
-use futures::{AsyncRead, AsyncReadExt, FutureExt, StreamExt, io::AllowStdIo, lock::Mutex};
-use memmap2::Mmap;
+use futures::{
+    AsyncRead, AsyncReadExt, FutureExt, StreamExt,
+    io::{AllowStdIo, BufReader},
+    lock::Mutex,
+};
 use object::read::{
     archive::ArchiveFile,
     macho::{FatArch, MachOFatFile32, MachOFatFile64},
@@ -62,15 +65,14 @@ impl Digest {
         }
     }
 
-    fn open_file<T>(path: T) -> Result<AllowStdIo<bytes::buf::Reader<Bytes>>>
+    fn open_file<T>(path: T) -> Result<BufReader<AllowStdIo<fs::File>>>
     where
         T: AsRef<Path>,
     {
         let path = path.as_ref();
         let file = fs::File::open(path)
             .with_context(|| format!("Failed to open file for hashing: {path:?}"))?;
-        let mmap = Bytes::from_owner(unsafe { Mmap::map(&file) }?);
-        Ok(AllowStdIo::new(mmap.reader()))
+        Ok(BufReader::new(AllowStdIo::new(file)))
     }
 
     /// Calculate the BLAKE3 digest of the contents of `path`.
