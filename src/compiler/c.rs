@@ -44,6 +44,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, LazyLock},
+    time::{Duration, Instant},
 };
 use tempfile::TempPath;
 
@@ -679,7 +680,7 @@ where
 
         // Try to look for a cached preprocessing step for this compilation request.
         let (preprocessor_cache_lookup, preprocessor_cache_lookup_duration) = {
-            let start = std::time::Instant::now();
+            let start = Instant::now();
             let _pending = service.increment_pending_cache_lookups();
             let res = self
                 .preprocessor_cache_lookup(
@@ -772,7 +773,10 @@ where
             }};
         }
 
-        let preprocessor_output = if !parsed_args.language.needs_c_preprocessing() {
+        let preprocessor_start = Instant::now();
+        let needs_c_preprocessing = parsed_args.language.needs_c_preprocessing();
+
+        let preprocessor_output = if !needs_c_preprocessing {
             PreprocessorOutput::File(fs::File::open(cwd.join(&parsed_args.input))?)
         } else {
             try_or_cleanup!(
@@ -814,7 +818,7 @@ where
             }
         };
 
-        let key = try_or_cleanup!(
+        let (key, hash_time) = try_or_cleanup!(
             hash_key_async(
                 executable_digest,
                 parsed_args.language,
@@ -828,6 +832,14 @@ where
         );
 
         drop(common_and_arch_args);
+
+        if needs_c_preprocessing {
+            // Track how long the preprocessor took
+            let preprocessor_time = preprocessor_start.elapsed() - hash_time;
+            let mut stats = service.stats.lock().await;
+            stats.preprocessed += 1;
+            stats.preprocessor_duration += preprocessor_time;
+        }
 
         let dependencies_and_preprocessor_key = dependencies.and_then(|dependencies| {
             if let PreprocessorCacheLookup::Miss(preprocessor_key) = preprocessor_cache_lookup {
@@ -1172,6 +1184,9 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
         path_transformer: &mut dist::PathTransformer,
         compressor: Box<dyn InputsWriter>,
     ) -> Result<()> {
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+
         let CCompilation {
             service,
             creator,
@@ -1184,54 +1199,74 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
             ..
         } = *self;
 
-        // Preprocess again but this time with line numbers
-        let preprocessor_output = compiler
-            .preprocess(
-                &service,
-                &creator,
-                &executable,
-                &parsed_args,
-                &cwd,
-                &env_vars,
-                rewrite_includes_only,
-                true, // generate_dependencies
-                true, // include_line_numbers
-            )
-            .await?;
+        let preprocessor_start = Instant::now();
+        let input_path = cwd.join(&parsed_args.input);
+        let needs_c_preprocessing = parsed_args.language.needs_c_preprocessing();
 
-        use std::collections::BTreeMap;
-        use std::path::PathBuf;
-
-        let mut builder = tar::Builder::new(compressor);
-        let mut path_transformer = path_transformer.clone();
-        let mut symlinks = BTreeMap::<PathBuf, PathBuf>::new();
+        let preprocessor_output = if !needs_c_preprocessing {
+            PreprocessorOutput::File(fs::File::open(&input_path)?)
+        } else {
+            // Preprocess again but this time with line numbers
+            compiler
+                .preprocess(
+                    &service,
+                    &creator,
+                    &executable,
+                    &parsed_args,
+                    &cwd,
+                    &env_vars,
+                    rewrite_includes_only,
+                    true, // generate_dependencies
+                    true, // include_line_numbers
+                )
+                .await?
+        };
 
         let (preprocessor_output, dependencies) = {
             match preprocessor_output {
                 PreprocessorOutput::File(file) => (PreprocessorOutput::File(file), vec![]),
                 PreprocessorOutput::OutputWithDepedencies(output, dependencies) => {
+                    // Collect the preprocessor output before reading the dependencies file
                     let output = output.collect::<Vec<Result<Bytes>>>().await;
+
+                    // Track how long the preprocessor took
+                    {
+                        let preprocessor_time = preprocessor_start.elapsed();
+                        let mut stats = service.stats.lock().await;
+                        stats.preprocessed += 1;
+                        stats.preprocessor_duration += preprocessor_time;
+                    }
+
+                    let dependencies = dependencies.await?;
                     let output = futures::stream::iter(output).boxed();
-                    (PreprocessorOutput::Output(output), dependencies.await?)
+
+                    (PreprocessorOutput::Output(output), dependencies)
                 }
                 _ => unreachable!(),
             }
         };
 
-        let input_path = cwd.join(&parsed_args.input);
-        let input_path = pkg::tarify_path(&mut symlinks, &input_path)?;
+        let mut builder = tar::Builder::new(compressor);
+        let mut path_transformer = path_transformer.clone();
+        let mut symlinks = BTreeMap::<PathBuf, PathBuf>::new();
 
         // Find and add symlinks to the tar archive before adding files
         // to ensure the symlinks exist before creating files at paths
         // that traverse them when unpacking
-        dependencies
-            .iter()
-            .chain(parsed_args.extra_dist_files.iter())
-            .chain(parsed_args.extra_hash_files.iter())
-            .for_each(|path| {
-                let _ = pkg::tarify_path(&mut symlinks, path);
-            });
+        let tarified_extra_paths = [
+            &dependencies[..],
+            &parsed_args.extra_dist_files[..],
+            &parsed_args.extra_hash_files[..],
+        ]
+        .into_iter()
+        .flatten()
+        .map(|path| pkg::tarify_path(&mut symlinks, path))
+        .try_collect::<_, Vec<_>, _>()?;
 
+        // The input path may traverse a symlink too
+        let input_path = pkg::tarify_path(&mut symlinks, &input_path)?;
+
+        // Add all the symlinks to the archive first
         for (from_path, to_path) in symlinks.iter() {
             let mut header = tar::Header::new_gnu();
             header.set_size(0);
@@ -1250,60 +1285,44 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                         .as_dist(&input_path)
                         .map(pkg::tar_safe_path)
                         .with_context(|| {
-                            format!("unable to transform input path {}", input_path.display())
+                            format!("unable to transform input path {input_path:?}")
                         })?,
                 )?;
             }
             PreprocessorOutput::Output(output) => {
                 let dist_input_path = path_transformer
                     .as_dist_input_path(&input_path)
-                    .with_context(|| {
-                        format!("unable to transform input path {}", input_path.display())
-                    })?;
-                let (mut file_header, dist_input_path) =
+                    .with_context(|| format!("unable to transform input path {input_path:?}"))?;
+                let (mut header, dist_input_path) =
                     pkg::make_tar_header(&input_path, &dist_input_path)?;
-                let stdout = output
-                    .try_collect::<Vec<Bytes>>()
-                    .await?
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>();
-                file_header.set_size(stdout.len() as u64); // The metadata is from non-preprocessed
-                file_header.set_cksum();
-                builder.append_data(&mut file_header, dist_input_path, stdout.as_slice())?;
+                let stdout = output.try_collect::<Vec<Bytes>>().await?.concat();
+                header.set_size(stdout.len() as u64); // The metadata is from non-preprocessed
+                header.set_cksum();
+                builder.append_data(&mut header, dist_input_path, &stdout[..])?;
             }
             _ => unreachable!(),
         }
 
         tokio::task::spawn_blocking(move || -> Result<_> {
-            let extra_dist_files = parsed_args.extra_dist_files;
-            let extra_hash_files = parsed_args.extra_hash_files;
-
-            for extra_path in dependencies
-                .iter()
-                .chain(extra_hash_files.iter())
-                .chain(extra_dist_files.iter())
-            {
-                let extra_path = pkg::tarify_path(&mut symlinks, extra_path)?;
-
+            for path in tarified_extra_paths {
                 if !super::CAN_DIST_DYLIBS
-                    && extra_path
+                    && path
                         .extension()
                         .is_some_and(|ext| ext == std::env::consts::DLL_EXTENSION)
                 {
                     bail!(
                         "Cannot distribute dylib input {} on this platform",
-                        extra_path.display()
+                        path.display()
                     )
                 }
 
                 builder.append_path_with_name(
-                    &extra_path,
+                    &path,
                     path_transformer
-                        .as_dist(&extra_path)
+                        .as_dist(&path)
                         .map(pkg::tar_safe_path)
                         .with_context(|| {
-                            format!("unable to transform input path {}", extra_path.display())
+                            format!("unable to transform input path {}", path.display())
                         })?,
                 )?;
             }
@@ -1733,7 +1752,7 @@ pub async fn hash_key_async(
     env_vars: &[(OsString, OsString)],
     preprocessor_output: Pin<Box<ProcessOutputStream>>,
     plusplus: bool,
-) -> Result<String> {
+) -> Result<(String, Duration)> {
     // If you change any of the inputs to the hash, you should change `CACHE_VERSION`.
     let mut digest = Digest::new();
     digest.update(compiler_digest.as_bytes());
@@ -1765,13 +1784,18 @@ pub async fn hash_key_async(
         }
     }
 
-    digest = preprocessor_output
-        .try_fold(digest, |digest, bytes| {
-            digest.with_reader(futures::io::AllowStdIo::new(bytes.reader()))
-        })
+    let (digest, hash_time) = preprocessor_output
+        .try_fold(
+            (digest, Duration::default()),
+            |(digest, hash_time), bytes| async move {
+                let start = Instant::now();
+                let res = digest.with_reader_sync(bytes.reader());
+                res.map(|digest| (digest, hash_time + start.elapsed()))
+            },
+        )
         .await?;
 
-    Ok(digest.finish())
+    Ok((digest.finish(), hash_time))
 }
 
 #[cfg(test)]
@@ -1803,7 +1827,8 @@ mod test {
                 false
             )
             .wait()
-            .unwrap(),
+            .unwrap()
+            .0,
             hash_key_async(
                 "abcd",
                 Language::C,
@@ -1815,6 +1840,7 @@ mod test {
             )
             .wait()
             .unwrap()
+            .0
         );
     }
 
@@ -1833,7 +1859,8 @@ mod test {
                 false
             )
             .wait()
-            .unwrap(),
+            .unwrap()
+            .0,
             hash_key_async(
                 "abcd",
                 Language::C,
@@ -1845,6 +1872,7 @@ mod test {
             )
             .wait()
             .unwrap()
+            .0
         );
     }
 
@@ -1863,7 +1891,8 @@ mod test {
                 false
             )
             .wait()
-            .unwrap(),
+            .unwrap()
+            .0,
             hash_key_async(
                 "abcd",
                 Language::CHeader,
@@ -1875,6 +1904,7 @@ mod test {
             )
             .wait()
             .unwrap()
+            .0
         );
     }
 
@@ -1893,7 +1923,8 @@ mod test {
                 true
             )
             .wait()
-            .unwrap(),
+            .unwrap()
+            .0,
             hash_key_async(
                 "abcd",
                 Language::CxxHeader,
@@ -1905,6 +1936,7 @@ mod test {
             )
             .wait()
             .unwrap()
+            .0
         );
     }
 
@@ -1923,7 +1955,8 @@ mod test {
                 false
             )
             .wait()
-            .unwrap(),
+            .unwrap()
+            .0,
             hash_key_async(
                 "wxyz",
                 Language::C,
@@ -1935,6 +1968,7 @@ mod test {
             )
             .wait()
             .unwrap()
+            .0
         );
     }
 
@@ -1957,7 +1991,8 @@ mod test {
                 false
             )
             .wait()
-            .unwrap(),
+            .unwrap()
+            .0,
             hash_key_async(
                 digest,
                 Language::C,
@@ -1969,6 +2004,7 @@ mod test {
             )
             .wait()
             .unwrap()
+            .0
         );
 
         assert_neq!(
@@ -1982,7 +2018,8 @@ mod test {
                 false
             )
             .wait()
-            .unwrap(),
+            .unwrap()
+            .0,
             hash_key_async(
                 digest,
                 Language::C,
@@ -1994,6 +2031,7 @@ mod test {
             )
             .wait()
             .unwrap()
+            .0
         );
 
         assert_neq!(
@@ -2007,7 +2045,8 @@ mod test {
                 false
             )
             .wait()
-            .unwrap(),
+            .unwrap()
+            .0,
             hash_key_async(
                 digest,
                 Language::C,
@@ -2019,6 +2058,7 @@ mod test {
             )
             .wait()
             .unwrap()
+            .0
         );
     }
 
@@ -2036,7 +2076,8 @@ mod test {
                 false
             )
             .wait()
-            .unwrap(),
+            .unwrap()
+            .0,
             hash_key_async(
                 "abcd",
                 Language::C,
@@ -2048,6 +2089,7 @@ mod test {
             )
             .wait()
             .unwrap()
+            .0
         );
     }
 
@@ -2067,7 +2109,8 @@ mod test {
                 false,
             )
             .wait()
-            .unwrap();
+            .unwrap()
+            .0;
             let vars = vec![(OsString::from(var), OsString::from("something"))];
             let h2 = hash_key_async(
                 digest,
@@ -2079,7 +2122,8 @@ mod test {
                 false,
             )
             .wait()
-            .unwrap();
+            .unwrap()
+            .0;
             let vars = vec![(OsString::from(var), OsString::from("something else"))];
             let h3 = hash_key_async(
                 digest,
@@ -2091,7 +2135,8 @@ mod test {
                 false,
             )
             .wait()
-            .unwrap();
+            .unwrap()
+            .0;
             assert_neq!(h1, h2);
             assert_neq!(h2, h3);
         }
@@ -2115,7 +2160,8 @@ mod test {
                 false
             )
             .wait()
-            .unwrap(),
+            .unwrap()
+            .0,
             hash_key_async(
                 digest,
                 Language::C,
@@ -2127,6 +2173,7 @@ mod test {
             )
             .wait()
             .unwrap()
+            .0
         );
     }
 

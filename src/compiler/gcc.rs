@@ -36,7 +36,6 @@ use std::env;
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 use tempfile::TempPath;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
@@ -925,7 +924,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 pub async fn preprocess<T>(
-    service: &SccacheService<T>,
+    _service: &SccacheService<T>,
     creator: &T,
     executable: &Path,
     parsed_args: &ParsedArguments,
@@ -939,8 +938,6 @@ pub async fn preprocess<T>(
 where
     T: CommandCreatorSync,
 {
-    let preprocessor_start = Instant::now();
-
     let cmd = preprocess_cmd(
         creator.clone().new_command_sync(executable),
         parsed_args,
@@ -970,17 +967,7 @@ where
     debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
     debug_if_trace!("[{}]: depfile: {depfile:?}", parsed_args.output_pretty());
 
-    let stats = service.stats.clone();
-    let output = run_input_stream_output(cmd, None)
-        .await?
-        .chain(async_stream::stream! {
-            let dur = preprocessor_start.elapsed();
-            let mut stats = stats.lock().await;
-            stats.preprocessed += 1;
-            stats.preprocessor_duration += dur;
-            yield Ok(bytes::Bytes::new());
-        })
-        .boxed();
+    let output = run_input_stream_output(cmd, None).await?.boxed();
 
     if let Some(depfile) = depfile {
         Ok(PreprocessorOutput::OutputWithDepedencies(

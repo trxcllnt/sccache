@@ -834,7 +834,7 @@ fn test_nvcc_cuda_compiles(
         &build_dir.join(OUTPUT),     // relative path for output
         &extra_args,
         AdditionalStats {
-            preprocessed: Some(2),
+            preprocessed: Some(1),
             cache_writes: Some(3 + with_debug_flags as u64),
             compilations: Some(4 + with_debug_flags as u64),
             compile_requests: Some(1),
@@ -867,7 +867,7 @@ fn test_nvcc_cuda_compiles(
         &tempdir.join(build_dir).join(OUTPUT), // absolute path for output
         &extra_args,
         AdditionalStats {
-            preprocessed: Some(2 * !preprocessor_cache_mode as u64),
+            preprocessed: Some(!preprocessor_cache_mode as u64),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
@@ -887,7 +887,7 @@ fn test_nvcc_cuda_compiles(
         // Since `test_a_copy.cu` is a copy of `test_a.cu`, its PTX will be identical when *not* using -G.
         // But -G causes cudafe++ and cicc to embed the source path their output, and we get cache misses.
         AdditionalStats {
-            preprocessed: Some(2),
+            preprocessed: Some(1),
             cache_writes: Some(3 + with_debug_flags as u64),
             compilations: Some(4 + with_debug_flags as u64),
             compile_requests: Some(1),
@@ -920,7 +920,7 @@ fn test_nvcc_cuda_compiles(
         &tempdir.join(build_dir).join(OUTPUT), // absolute path for output
         &extra_args,
         AdditionalStats {
-            preprocessed: Some(2 * !preprocessor_cache_mode as u64),
+            preprocessed: Some(!preprocessor_cache_mode as u64),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
@@ -937,7 +937,7 @@ fn test_nvcc_cuda_compiles(
         &build_dir.join(OUTPUT),                      // relative path for output
         &extra_args,
         AdditionalStats {
-            preprocessed: Some(2),
+            preprocessed: Some(1),
             cache_writes: Some(4),
             compilations: Some(5),
             compile_requests: Some(1),
@@ -961,7 +961,7 @@ fn test_nvcc_cuda_compiles(
         &tempdir.join(build_dir).join(OUTPUT),            // absolute path for output
         &extra_args,
         AdditionalStats {
-            preprocessed: Some(2 * !preprocessor_cache_mode as u64),
+            preprocessed: Some(!preprocessor_cache_mode as u64),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
@@ -980,7 +980,7 @@ fn test_nvcc_cuda_compiles(
         &build_dir.join(OUTPUT),     // relative path for output
         &extra_args,
         AdditionalStats {
-            preprocessed: Some(2),
+            preprocessed: Some(1),
             cache_writes: Some(4),
             compilations: Some(5),
             compile_requests: Some(1),
@@ -1004,7 +1004,7 @@ fn test_nvcc_cuda_compiles(
         &tempdir.join(build_dir).join(OUTPUT), // absolute path for output
         &extra_args,
         AdditionalStats {
-            preprocessed: Some(2 * !preprocessor_cache_mode as u64),
+            preprocessed: Some(!preprocessor_cache_mode as u64),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
@@ -1041,7 +1041,7 @@ int main(int argc, char** argv) {
         &build_dir.join(test_2299_out_name), // relative path for output
         &extra_args,
         AdditionalStats {
-            preprocessed: Some(2),
+            preprocessed: Some(1),
             cache_writes: Some(4),
             compilations: Some(5),
             compile_requests: Some(1),
@@ -1066,7 +1066,7 @@ int main(int argc, char** argv) {
         &build_dir.join(test_2299_out_name), // relative path for output
         &extra_args,
         AdditionalStats {
-            preprocessed: Some(2),
+            preprocessed: Some(1),
             cache_writes: Some(2),
             compilations: Some(3),
             compile_requests: Some(1),
@@ -1094,7 +1094,7 @@ int main(int argc, char** argv) {
         &tempdir.join(build_dir).join(test_2299_out_name), // absolute path for output
         &extra_args,
         AdditionalStats {
-            preprocessed: Some(2 * !preprocessor_cache_mode as u64),
+            preprocessed: Some(!preprocessor_cache_mode as u64),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
@@ -1212,7 +1212,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
-            preprocessed: Some(3),
+            preprocessed: Some(1),
             cache_writes: Some(5 + with_debug_flags as u64),
             compilations: Some(6 + with_debug_flags as u64),
             compile_requests: Some(1),
@@ -1254,7 +1254,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
-            preprocessed: Some(3),
+            preprocessed: Some(1),
             cache_writes: Some(4 + 2 * with_debug_flags as u64),
             compilations: Some(5 + 2 * with_debug_flags as u64),
             compile_requests: Some(1),
@@ -1295,7 +1295,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
-            preprocessed: Some(3),
+            preprocessed: Some(1),
             cache_writes: Some(5 + with_debug_flags as u64),
             compilations: Some(6 + with_debug_flags as u64),
             compile_requests: Some(1),
@@ -1335,7 +1335,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
-            preprocessed: Some(3),
+            preprocessed: Some(1),
             cache_writes: Some(5 + with_debug_flags as u64),
             compilations: Some(6 + with_debug_flags as u64),
             compile_requests: Some(1),
@@ -1375,7 +1375,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
-            preprocessed: Some(2),
+            preprocessed: Some(1),
             cache_writes: Some(2),
             compilations: Some(3),
             compile_requests: Some(1),
@@ -1405,7 +1405,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
-            preprocessed: Some(2),
+            preprocessed: Some(1),
             cache_writes: Some(2),
             compilations: Some(3),
             compile_requests: Some(1),
@@ -1512,7 +1512,7 @@ int main(int argc, char** argv) {
         ]
         .concat(),
         AdditionalStats {
-            preprocessed: Some(2),
+            preprocessed: Some(1),
             cache_writes: Some(2),
             compilations: Some(3),
             compile_requests: Some(1),
@@ -1547,7 +1547,7 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
-                preprocessed: Some(5),
+                preprocessed: Some(3),
                 cache_writes: Some(2),
                 compilations: Some(2),
                 compile_requests: Some(1),
@@ -1583,7 +1583,7 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
-                preprocessed: Some(5),
+                preprocessed: Some(3),
                 cache_writes: Some(2),
                 compilations: Some(2),
                 compile_requests: Some(1),
@@ -1619,7 +1619,7 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
-                preprocessed: Some(5),
+                preprocessed: Some(3),
                 cache_writes: Some(2),
                 compilations: Some(2),
                 compile_requests: Some(1),
@@ -1655,7 +1655,7 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
-                preprocessed: Some(5),
+                preprocessed: Some(3),
                 cache_writes: Some(2),
                 compilations: Some(2),
                 compile_requests: Some(1),
@@ -1758,7 +1758,7 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
-                preprocessed: Some(3),
+                preprocessed: Some(1),
                 cache_writes: Some(3),
                 compilations: Some(4),
                 compile_requests: Some(1),
@@ -1789,7 +1789,7 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
-                preprocessed: Some(3),
+                preprocessed: Some(1),
                 cache_writes: Some(2),
                 compilations: Some(3),
                 compile_requests: Some(1),
@@ -1874,7 +1874,7 @@ fn test_nvcc_proper_lang_stat_tracking(
     fs::remove_file(&out_file).unwrap();
 
     stats.cache_writes += 4;
-    stats.preprocessed += 2;
+    stats.preprocessed += 1;
     stats.compilations += 5;
     stats.compile_requests += 1;
     stats.requests_executed += 5;
@@ -1936,7 +1936,7 @@ fn test_nvcc_proper_lang_stat_tracking(
             .preprocessor_cache_hits
             .increment(&CompilerKind::C(CCompilerKind::Nvcc), &Language::Cuda);
     } else {
-        stats.preprocessed += 2;
+        stats.preprocessed += 1;
     }
     assert_eq!(
         stats,
@@ -1970,6 +1970,7 @@ fn test_nvcc_proper_lang_stat_tracking(
     fs::remove_file(&out_file).unwrap();
 
     stats.cache_writes += 1;
+    stats.preprocessed += 1;
     stats.compilations += 2;
     stats.compile_requests += 1;
     stats.requests_executed += 2;
@@ -2021,6 +2022,8 @@ fn test_nvcc_proper_lang_stat_tracking(
         stats
             .preprocessor_cache_hits
             .increment(&CompilerKind::C(CCompilerKind::Nvcc), &Language::C);
+    } else {
+        stats.preprocessed += 1;
     }
     assert_eq!(
         stats,

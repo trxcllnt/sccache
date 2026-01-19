@@ -1243,17 +1243,6 @@ where
             ..
         } = self;
 
-        macro_rules! try_or_cleanup {
-            ($res:expr) => {{
-                match $res {
-                    Ok(res) => res,
-                    Err(err) => {
-                        return Err(err.into());
-                    }
-                }
-            }};
-        }
-
         let pending = service.increment_pending_compilations();
 
         // Ensure the dependency file exists
@@ -1273,7 +1262,7 @@ where
                 .write_inputs(
                     &mut path_transformer,
                     crate::dist::pkg::InputsCompressor::new(flate2::write::ZlibEncoder::new(
-                        try_or_cleanup!(job_inputs.reopen()),
+                        job_inputs.reopen()?,
                         // Optimize for size since bandwidth costs more than client CPU cycles
                         flate2::Compression::best(),
                     )),

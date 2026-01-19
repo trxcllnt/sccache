@@ -32,12 +32,11 @@ use crate::{
     util::{normal_temp_path, run_input_output},
 };
 use async_trait::async_trait;
-use futures::{FutureExt, TryFutureExt};
+use futures::FutureExt;
 use std::{
     collections::HashMap,
     ffi::OsString,
     path::{Path, PathBuf},
-    time::Instant,
 };
 use tempfile::TempPath;
 
@@ -69,7 +68,7 @@ impl CCompilerImpl for TaskingVX {
 
     async fn preprocess<T>(
         &self,
-        service: &SccacheService<T>,
+        _service: &SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
@@ -82,9 +81,6 @@ impl CCompilerImpl for TaskingVX {
     where
         T: CommandCreatorSync,
     {
-        let preprocessor_start = Instant::now();
-        let stats = service.stats.clone();
-
         // Tasking can produce a dep file while preprocessing, BUT if this is
         // enabled the preprocessor output is discarded. Run depfile generation
         // first and preprocessing for hash generation afterwards.
@@ -107,13 +103,6 @@ impl CCompilerImpl for TaskingVX {
         };
 
         preprocess(creator, executable, parsed_args, cwd, env_vars)
-            .and_then(|res| async move {
-                let dur = preprocessor_start.elapsed();
-                let mut stats = stats.lock().await;
-                stats.preprocessed += 1;
-                stats.preprocessor_duration += dur;
-                Ok(res)
-            })
             .await
             .map(|output| {
                 if let Some(dependencies) = dependencies {
