@@ -646,7 +646,6 @@ impl CacheConfigs {
         if webdav.is_some() {
             self.webdav = webdav;
         }
-
         if oss.is_some() {
             self.oss = oss;
         }
@@ -881,7 +880,7 @@ pub struct DistNetworking {
 }
 
 impl DistNetworking {
-    pub fn with_env_or_config(&self) -> Self {
+    pub fn with_env_or_config(self) -> Self {
         Self {
             connect_timeout: number_from_env_var("SCCACHE_DIST_CONNECT_TIMEOUT")
                 .map(|val| val.unwrap_or(self.connect_timeout))
@@ -928,7 +927,7 @@ pub struct DistNetworkingKeepalive {
 }
 
 impl DistNetworkingKeepalive {
-    pub fn with_env_or_config(&self) -> Self {
+    pub fn with_env_or_config(self) -> Self {
         Self {
             enabled: bool_from_env_var("SCCACHE_DIST_KEEPALIVE_ENABLED")
                 .map(|val| val.unwrap_or(self.enabled))
@@ -974,7 +973,7 @@ pub struct DistConfig {
 }
 
 impl DistConfig {
-    pub fn with_env_or_config(&self) -> Self {
+    pub fn with_env_or_config(self) -> Self {
         Self {
             auth: self.auth.with_env_or_config(),
             net: self.net.with_env_or_config(),
@@ -984,7 +983,7 @@ impl DistConfig {
                 .and_then(parse_http_url)
                 .map(HTTPUrl::from_url)
                 .ok()
-                .or(self.scheduler_url.clone()),
+                .or(self.scheduler_url),
             fallback_to_local_compile: bool_from_env_var("SCCACHE_DIST_FALLBACK_TO_LOCAL_COMPILE")
                 .map(|val| val.unwrap_or(self.fallback_to_local_compile))
                 .unwrap_or(self.fallback_to_local_compile),
@@ -994,7 +993,7 @@ impl DistConfig {
             rewrite_includes_only: bool_from_env_var("SCCACHE_DIST_REWRITE_INCLUDES_ONLY")
                 .map(|val| val.unwrap_or(self.rewrite_includes_only))
                 .unwrap_or(self.rewrite_includes_only),
-            ..self.clone()
+            ..self
         }
     }
 }
@@ -1735,7 +1734,18 @@ pub enum DogStatsDAggregationMode {
 }
 
 #[cfg(feature = "dist-server")]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+impl DogStatsDAggregationMode {
+    pub fn with_env_or_config(self) -> Self {
+        match env::var("SCCACHE_DIST_DOGSTATSD_AGGREGATION_MODE").as_deref() {
+            Ok("aggressive") => Self::Aggressive,
+            Ok("conservative") => Self::Conservative,
+            _ => self,
+        }
+    }
+}
+
+#[cfg(feature = "dist-server")]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DogStatsDMetricsConfig {
     pub remote_addr: String,
     // Write timeout (in milliseconds) for forwarding metrics to dogstatsd
@@ -1754,6 +1764,55 @@ pub struct DogStatsDMetricsConfig {
     pub histogram_reservoir_size: Option<usize>,
     // Whether or not to send histograms as distributions
     pub histograms_as_distributions: Option<bool>,
+}
+
+#[cfg(feature = "dist-server")]
+impl DogStatsDMetricsConfig {
+    fn from_env() -> Option<Self> {
+        env::var("SCCACHE_DIST_DOGSTATSD_ADDR")
+            .ok()
+            .map(|remote_addr| {
+                Self {
+                    remote_addr,
+                    ..Default::default()
+                }
+                .with_env_or_config()
+            })
+    }
+
+    pub fn with_env_or_config(self) -> Self {
+        Self {
+            remote_addr: env::var("SCCACHE_DIST_DOGSTATSD_ADDR")
+                .ok()
+                .unwrap_or(self.remote_addr),
+            write_timeout: number_from_env_var("SCCACHE_DIST_DOGSTATSD_WRITE_TIMEOUT")
+                .and_then(|val| val.ok().or(self.write_timeout)),
+            maximum_payload_length: number_from_env_var(
+                "SCCACHE_DIST_DOGSTATSD_MAXIMUM_PAYLOAD_LENGTH",
+            )
+            .and_then(|val| val.ok().or(self.maximum_payload_length)),
+            aggregation_mode: self
+                .aggregation_mode
+                .map(|aggregation_mode| aggregation_mode.with_env_or_config()),
+            flush_interval: number_from_env_var("SCCACHE_DIST_DOGSTATSD_FLUSH_INTERVAL")
+                .and_then(|val| val.ok().or(self.flush_interval)),
+            telemetry: bool_from_env_var("SCCACHE_DIST_DOGSTATSD_TELEMETRY")
+                .transpose()
+                .and_then(|val| val.ok().or(self.telemetry)),
+            histogram_sampling: bool_from_env_var("SCCACHE_DIST_DOGSTATSD_HISTOGRAM_SAMPLING")
+                .transpose()
+                .and_then(|val| val.ok().or(self.histogram_sampling)),
+            histogram_reservoir_size: number_from_env_var(
+                "SCCACHE_DIST_DOGSTATSD_HISTOGRAM_RESERVOIR_SIZE",
+            )
+            .and_then(|val| val.ok().or(self.histogram_reservoir_size)),
+            histograms_as_distributions: bool_from_env_var(
+                "SCCACHE_DIST_DOGSTATSD_HISTOGRAMS_AS_DISTRIBUTIONS",
+            )
+            .transpose()
+            .and_then(|val| val.ok().or(self.histograms_as_distributions)),
+        }
+    }
 }
 
 #[cfg(feature = "dist-server")]
@@ -1777,10 +1836,105 @@ pub enum PrometheusMetricsConfig {
 }
 
 #[cfg(feature = "dist-server")]
+impl PrometheusMetricsConfig {
+    fn from_env() -> Option<Self> {
+        match env::var("SCCACHE_DIST_PROMETHEUS_TYPE").as_deref() {
+            Ok("bind") => Some(Self::ListenAddr {
+                addr: env::var("SCCACHE_DIST_PROMETHEUS_LISTEN_ADDR")
+                    .ok()
+                    .and_then(|addr| std::net::SocketAddr::from_str(&addr).ok()),
+            }),
+            Ok("path") => Some(Self::ListenPath {
+                path: env::var("SCCACHE_DIST_PROMETHEUS_LISTEN_PATH").ok(),
+            }),
+            Ok("push") => env::var("SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT")
+                .ok()
+                .map(|endpoint| Self::PushGateway {
+                    endpoint,
+                    interval: number_from_env_var("SCCACHE_DIST_PROMETHEUS_PUSH_INTERVAL")
+                        .transpose()
+                        .unwrap_or(Some(10_000)),
+                    username: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_USERNAME").ok(),
+                    password: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_PASSWORD").ok(),
+                    http_method: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_HTTP_METHOD").ok(),
+                }),
+            _ => None,
+        }
+    }
+
+    pub fn with_env_or_config(self) -> Self {
+        match self {
+            Self::ListenAddr { addr } => Self::ListenAddr {
+                addr: env::var("SCCACHE_DIST_PROMETHEUS_LISTEN_ADDR")
+                    .ok()
+                    .and_then(|addr| std::net::SocketAddr::from_str(&addr).ok())
+                    .or(addr),
+            },
+            Self::ListenPath { path } => Self::ListenPath {
+                path: env::var("SCCACHE_DIST_PROMETHEUS_LISTEN_PATH")
+                    .ok()
+                    .or(path),
+            },
+            Self::PushGateway {
+                endpoint,
+                interval,
+                username,
+                password,
+                http_method,
+            } => Self::PushGateway {
+                endpoint: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT")
+                    .ok()
+                    .unwrap_or(endpoint),
+                // Interval (in milliseconds) to push metrics to prometheus
+                interval: number_from_env_var("SCCACHE_DIST_PROMETHEUS_PUSH_INTERVAL")
+                    .transpose()
+                    .unwrap_or(interval),
+                username: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_USERNAME")
+                    .ok()
+                    .or(username),
+                password: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_PASSWORD")
+                    .ok()
+                    .or(password),
+                http_method: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_HTTP_METHOD")
+                    .ok()
+                    .or(http_method),
+            },
+        }
+    }
+}
+
+#[cfg(feature = "dist-server")]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetricsConfigs {
     pub dogstatsd: Option<DogStatsDMetricsConfig>,
     pub prometheus: Option<PrometheusMetricsConfig>,
+}
+
+#[cfg(feature = "dist-server")]
+impl MetricsConfigs {
+    pub fn with_env_or_config(self) -> Self {
+        let mut metrics = match env::var("SCCACHE_DIST_METRICS_TYPE").as_deref() {
+            Ok("dogstatsd") => Self {
+                dogstatsd: self.dogstatsd.or_else(DogStatsDMetricsConfig::from_env),
+                prometheus: None,
+            },
+            Ok("prometheus") => Self {
+                dogstatsd: None,
+                prometheus: self.prometheus.or_else(PrometheusMetricsConfig::from_env),
+            },
+            _ => self,
+        };
+
+        metrics.dogstatsd = metrics
+            .dogstatsd
+            .map(|dogstatsd| dogstatsd.with_env_or_config());
+
+        metrics.prometheus = metrics
+            .prometheus
+            .map(|prometheus| prometheus.with_env_or_config());
+
+        metrics
+    }
 }
 
 #[cfg(feature = "dist-server")]
@@ -1795,9 +1949,8 @@ pub mod scheduler {
     use serde::{Deserialize, Serialize};
 
     use super::{
-        CacheConfigs, CacheModeConfig, CacheType, DiskCacheConfig, MessageBroker, MetricsConfigs,
-        config_from_env, default_disk_cache_dir, default_disk_cache_size, number_from_env_var,
-        try_read_config_file,
+        CacheConfigs, CacheType, MessageBroker, MetricsConfigs, config_from_env,
+        number_from_env_var, try_read_config_file,
     };
 
     #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1826,6 +1979,113 @@ pub mod scheduler {
         },
     }
 
+    impl ClientAuth {
+        pub fn with_env_or_config(self) -> Result<Self> {
+            let mut env_or_cfg_token = env::var("SCCACHE_DIST_AUTH_TOKEN");
+            let mut env_or_cfg_audience = env::var("SCCACHE_DIST_AUTH_AUDIENCE");
+            let mut env_or_cfg_issuer = env::var("SCCACHE_DIST_AUTH_ISSUER");
+            let mut env_or_cfg_jwks_url = env::var("SCCACHE_DIST_AUTH_JWKS_URL");
+            let mut env_or_cfg_claims = env::var("SCCACHE_DIST_AUTH_CLAIMS")
+                .map(|claims| claims.split(" ").map(|s| s.to_string()).collect::<Vec<_>>())
+                .ok();
+            let mut env_or_cfg_url = env::var("SCCACHE_DIST_AUTH_URL");
+            let mut env_or_cfg_cache_secs =
+                number_from_env_var("SCCACHE_DIST_AUTH_CACHE_SECS").and_then(|s| s.ok());
+            let mut env_or_cfg_decode = Some(ProxyTokenDecodeConfig::None);
+            let mut env_or_cfg_rate_limit_on_error_count =
+                number_from_env_var("SCCACHE_DIST_AUTH_RATE_LIMIT_ON_ERROR_COUNT")
+                    .and_then(|s| s.ok());
+            let mut env_or_cfg_rate_limit_on_error_window_size_secs =
+                number_from_env_var("SCCACHE_DIST_AUTH_RATE_LIMIT_ON_ERROR_WINDOW_SIZE_SECS")
+                    .and_then(|s| s.ok());
+
+            match self.clone() {
+                Self::Token { token } => {
+                    env_or_cfg_token = env_or_cfg_token.or(Ok(token));
+                }
+                Self::JwtValidate {
+                    audience,
+                    issuer,
+                    jwks_url,
+                    claims,
+                } => {
+                    env_or_cfg_audience = env_or_cfg_audience.or(Ok(audience));
+                    env_or_cfg_issuer = env_or_cfg_issuer.or(Ok(issuer));
+                    env_or_cfg_jwks_url = env_or_cfg_jwks_url.or(Ok(jwks_url));
+                    env_or_cfg_claims = env_or_cfg_claims.or(claims);
+                }
+                Self::ProxyToken {
+                    url,
+                    cache_secs,
+                    decode,
+                    rate_limit_on_error_count,
+                    rate_limit_on_error_window_size_secs,
+                } => {
+                    env_or_cfg_url = env_or_cfg_url.or(Ok(url));
+                    env_or_cfg_cache_secs = env_or_cfg_cache_secs.or(cache_secs);
+                    env_or_cfg_decode = env::var("SCCACHE_DIST_AUTH_PROXY_TOKEN_DECODE")
+                        .ok()
+                        .map(|_| ProxyTokenDecodeConfig::from_env())
+                        .or(decode)
+                        .map(|decode| decode.with_env_or_config());
+
+                    env_or_cfg_rate_limit_on_error_count =
+                        env_or_cfg_rate_limit_on_error_count.or(rate_limit_on_error_count);
+                    env_or_cfg_rate_limit_on_error_window_size_secs =
+                        env_or_cfg_rate_limit_on_error_window_size_secs
+                            .or(rate_limit_on_error_window_size_secs);
+                }
+                _ => {}
+            };
+
+            let into_token = || {
+                Ok(Self::Token {
+                    token: env_or_cfg_token.context(
+                        "SCCACHE_DIST_AUTH_TOKEN must be set when SCCACHE_DIST_AUTH_TYPE=token",
+                    )?,
+                })
+            };
+
+            let into_jwt_validate = || {
+                Ok(Self::JwtValidate {
+                    audience: env_or_cfg_audience.context("SCCACHE_DIST_AUTH_AUDIENCE must be set when SCCACHE_DIST_AUTH_TYPE=jwt_validate")?,
+                    issuer: env_or_cfg_issuer.context("SCCACHE_DIST_AUTH_ISSUER must be set when SCCACHE_DIST_AUTH_TYPE=jwt_validate")?,
+                    jwks_url: env_or_cfg_jwks_url.context("SCCACHE_DIST_AUTH_JWKS_URL must be set when SCCACHE_DIST_AUTH_TYPE=jwt_validate")?,
+                    claims: env_or_cfg_claims,
+                })
+            };
+
+            let into_proxy_token = || {
+                Ok(Self::ProxyToken {
+                    url: env_or_cfg_url.context(
+                        "SCCACHE_DIST_AUTH_URL must be set when SCCACHE_DIST_AUTH_TYPE=proxy_token",
+                    )?,
+                    cache_secs: env_or_cfg_cache_secs,
+                    decode: env_or_cfg_decode,
+                    rate_limit_on_error_count: env_or_cfg_rate_limit_on_error_count,
+                    rate_limit_on_error_window_size_secs:
+                        env_or_cfg_rate_limit_on_error_window_size_secs,
+                })
+            };
+
+            if let Ok(auth_type) = env::var("SCCACHE_DIST_AUTH_TYPE").as_deref() {
+                match auth_type {
+                    "token" => into_token(),
+                    "jwt_validate" => into_jwt_validate(),
+                    "proxy_token" => into_proxy_token(),
+                    _ => Ok(Self::Insecure),
+                }
+            } else {
+                match self {
+                    Self::Token { .. } => into_token(),
+                    Self::JwtValidate { .. } => into_jwt_validate(),
+                    Self::ProxyToken { .. } => into_proxy_token(),
+                    _ => Ok(Self::Insecure),
+                }
+            }
+        }
+    }
+
     #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
     #[serde(tag = "type")]
     #[serde(deny_unknown_fields)]
@@ -1841,6 +2101,63 @@ pub mod scheduler {
         },
     }
 
+    impl ProxyTokenDecodeConfig {
+        pub fn from_env() -> Self {
+            match env::var("SCCACHE_DIST_AUTH_PROXY_TOKEN_DECODE").as_deref() {
+                Ok("jwt") => Self::JwtDecoder {
+                    audience: env::var("SCCACHE_DIST_AUTH_AUDIENCE")
+                        .ok()
+                        .unwrap_or_default(),
+                    issuer: env::var("SCCACHE_DIST_AUTH_ISSUER")
+                        .ok()
+                        .unwrap_or_default(),
+                    jwks_url: env::var("SCCACHE_DIST_AUTH_JWKS_URL")
+                        .ok()
+                        .unwrap_or_default(),
+                    claims: env::var("SCCACHE_DIST_AUTH_CLAIMS")
+                        .map(|claims| claims.split(" ").map(|s| s.to_string()).collect::<Vec<_>>())
+                        .ok(),
+                },
+                _ => Self::None,
+            }
+        }
+        pub fn with_env_or_config(self) -> Self {
+            match self {
+                Self::JwtDecoder {
+                    audience,
+                    issuer,
+                    jwks_url,
+                    claims,
+                } => {
+                    let audience = env::var("SCCACHE_DIST_AUTH_AUDIENCE")
+                        .ok()
+                        .or((!audience.is_empty()).then_some(audience));
+
+                    let issuer = env::var("SCCACHE_DIST_AUTH_ISSUER")
+                        .ok()
+                        .or((!issuer.is_empty()).then_some(issuer));
+
+                    let jwks_url = env::var("SCCACHE_DIST_AUTH_JWKS_URL")
+                        .ok()
+                        .or((!jwks_url.is_empty()).then_some(jwks_url));
+
+                    let claims = env::var("SCCACHE_DIST_AUTH_CLAIMS")
+                        .map(|claims| claims.split(" ").map(|s| s.to_string()).collect::<Vec<_>>())
+                        .ok()
+                        .or(claims);
+
+                    Self::JwtDecoder {
+                        audience: audience.expect("SCCACHE_DIST_AUTH_AUDIENCE must be set when SCCACHE_DIST_AUTH_PROXY_TOKEN_DECODE=jwt"),
+                        issuer: issuer.expect("SCCACHE_DIST_AUTH_ISSUER must be set when SCCACHE_DIST_AUTH_PROXY_TOKEN_DECODE=jwt"),
+                        jwks_url: jwks_url.expect("SCCACHE_DIST_AUTH_JWKS_URL must be set when SCCACHE_DIST_AUTH_PROXY_TOKEN_DECODE=jwt"),
+                        claims,
+                    }
+                }
+                _ => Self::None,
+            }
+        }
+    }
+
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
     #[serde(default)]
     #[serde(deny_unknown_fields)]
@@ -1850,7 +2167,7 @@ pub mod scheduler {
         pub heartbeat_interval_ms: u64,
         #[serde(default = "Config::default_job_time_limit")]
         pub job_time_limit: u32,
-        #[serde(default = "Config::default_jobs_storage")]
+        #[serde(default = "CacheConfigs::default")]
         pub jobs: CacheConfigs,
         pub keepalive: DistNetworkingKeepalive,
         #[serde(default = "Config::default_max_body_size")]
@@ -1864,7 +2181,7 @@ pub mod scheduler {
         pub scheduler_id: String,
         #[serde(default = "Config::default_shutdown_timeout")]
         pub shutdown_timeout: u64,
-        #[serde(default = "Config::default_toolchains_storage")]
+        #[serde(default = "CacheConfigs::default")]
         pub toolchains: CacheConfigs,
     }
 
@@ -1874,7 +2191,7 @@ pub mod scheduler {
                 client_auth: ClientAuth::Insecure,
                 heartbeat_interval_ms: Config::default_heartbeat_interval_ms(),
                 job_time_limit: Config::default_job_time_limit(),
-                jobs: Config::default_jobs_storage(),
+                jobs: CacheConfigs::default(),
                 keepalive: Default::default(),
                 max_body_size: Config::default_max_body_size(),
                 max_concurrent_streams: None,
@@ -1883,7 +2200,7 @@ pub mod scheduler {
                 public_addr: SocketAddr::from_str("0.0.0.0:10500").unwrap(),
                 scheduler_id: Config::default_scheduler_id(),
                 shutdown_timeout: Config::default_shutdown_timeout(),
-                toolchains: Config::default_toolchains_storage(),
+                toolchains: CacheConfigs::default(),
             }
         }
     }
@@ -1912,28 +2229,6 @@ pub mod scheduler {
     }
 
     impl Config {
-        pub fn default_jobs_storage() -> CacheConfigs {
-            CacheConfigs {
-                disk: Some(DiskCacheConfig {
-                    dir: default_disk_cache_dir().join("jobs"),
-                    rw_mode: CacheModeConfig::ReadWrite,
-                    size: default_disk_cache_size(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }
-        }
-        pub fn default_toolchains_storage() -> CacheConfigs {
-            CacheConfigs {
-                disk: Some(DiskCacheConfig {
-                    dir: default_disk_cache_dir().join("toolchains"),
-                    rw_mode: CacheModeConfig::ReadWrite,
-                    size: default_disk_cache_size(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }
-        }
         // Default to 15s
         fn default_heartbeat_interval_ms() -> u64 {
             15000
@@ -1983,6 +2278,8 @@ pub mod scheduler {
                 })
                 .unwrap_or_default();
 
+            let client_auth = client_auth.with_env_or_config()?;
+
             let jobs = CacheConfigs::default()
                 .merge(jobs)
                 .merge(config_from_env("SCCACHE_DIST_JOBS_")?.cache);
@@ -2009,6 +2306,13 @@ pub mod scheduler {
                 .unwrap_or(max_concurrent_streams);
 
             let message_broker = MessageBroker::from_env().or(message_broker);
+
+            let metrics = metrics.with_env_or_config();
+
+            let public_addr = env::var("SCCACHE_DIST_PUBLIC_ADDR")
+                .ok()
+                .and_then(|addr| SocketAddr::from_str(&addr).ok())
+                .unwrap_or(public_addr);
 
             let scheduler_id = env::var("SCCACHE_DIST_SCHEDULER_ID")
                 .ok()
@@ -2084,9 +2388,8 @@ pub mod scheduler {
 #[cfg(feature = "dist-server")]
 pub mod server {
     use super::{
-        CacheConfigs, CacheModeConfig, CacheType, DiskCacheConfig, MessageBroker, MetricsConfigs,
-        PrometheusMetricsConfig, config_from_env, default_disk_cache_dir, default_disk_cache_size,
-        number_from_env_var, try_read_config_file,
+        CacheConfigs, CacheType, MessageBroker, MetricsConfigs, PrometheusMetricsConfig,
+        config_from_env, default_disk_cache_dir, number_from_env_var, try_read_config_file,
     };
     use serde::{Deserialize, Serialize};
     use std::env;
@@ -2148,15 +2451,88 @@ pub mod server {
         },
     }
 
+    impl BuilderType {
+        pub fn with_env_or_config(self) -> Self {
+            let mut overlay_build_dir = None;
+            let mut overlay_bwrap_path = None;
+            let mut pot_clone_from = None;
+            let mut pot_clone_args = None;
+            let mut pot_cmd = None;
+            let mut pot_fs_root = None;
+
+            match self {
+                BuilderType::Overlay {
+                    build_dir,
+                    bwrap_path,
+                } => {
+                    overlay_build_dir = Some(build_dir);
+                    overlay_bwrap_path = Some(bwrap_path);
+                }
+                BuilderType::Pot {
+                    pot_fs_root: fs_root,
+                    clone_from,
+                    pot_cmd: cmd,
+                    pot_clone_args: clone_args,
+                } => {
+                    pot_fs_root = Some(fs_root);
+                    pot_clone_from = Some(clone_from);
+                    pot_cmd = Some(cmd);
+                    pot_clone_args = Some(clone_args);
+                }
+                _ => {}
+            };
+
+            match env::var("SCCACHE_DIST_BUILDER_TYPE")
+                .ok()
+                .as_deref()
+                .or(overlay_build_dir.as_ref().map(|_| "overlay"))
+                .or(pot_clone_from.as_ref().map(|_| "pot"))
+            {
+                Some("overlay") => BuilderType::Overlay {
+                    build_dir: env::var_os("SCCACHE_DIST_BUILD_DIR")
+                        .map(Into::into)
+                        .or(overlay_build_dir)
+                        .unwrap(),
+                    bwrap_path: env::var_os("SCCACHE_DIST_BWRAP_PATH")
+                        .map(Into::into)
+                        .or(overlay_bwrap_path)
+                        .unwrap(),
+                },
+                Some("pot") => BuilderType::Pot {
+                    pot_fs_root: env::var_os("SCCACHE_DIST_BUILD_DIR")
+                        .map(Into::into)
+                        .or(pot_fs_root)
+                        .unwrap_or_else(default_pot_fs_root),
+                    clone_from: env::var("SCCACHE_DIST_POT_CLONE_FROM")
+                        .ok()
+                        .or(pot_clone_from)
+                        .unwrap_or_else(default_pot_clone_from),
+                    pot_cmd: env::var_os("SCCACHE_DIST_POT_CMD")
+                        .map(Into::into)
+                        .or(pot_cmd)
+                        .unwrap_or_else(default_pot_cmd),
+                    pot_clone_args: env::var("SCCACHE_DIST_POT_CLONE_ARGS")
+                        .ok()
+                        .as_deref()
+                        .and_then(shlex::split)
+                        .or(pot_clone_args)
+                        .unwrap_or_else(default_pot_clone_args),
+                },
+                _ => BuilderType::Docker,
+            }
+        }
+    }
+
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
     #[serde(default)]
     #[serde(deny_unknown_fields)]
     pub struct FileConfig {
         pub builder: BuilderType,
+        #[serde(default = "Config::default_cache_dir")]
         pub cache_dir: PathBuf,
         #[serde(default = "Config::default_heartbeat_interval_ms")]
         pub heartbeat_interval_ms: u64,
-        #[serde(default = "Config::default_jobs_storage")]
+        #[serde(default = "CacheConfigs::default")]
         pub jobs: CacheConfigs,
         #[serde(default = "Config::default_max_per_core_load")]
         pub max_per_core_load: f64,
@@ -2170,7 +2546,7 @@ pub mod server {
         pub shutdown_timeout: u64,
         #[serde(default = "Config::default_toolchain_cache_size")]
         pub toolchain_cache_size: u64,
-        #[serde(default = "Config::default_toolchains_storage")]
+        #[serde(default = "CacheConfigs::default")]
         pub toolchains: CacheConfigs,
     }
 
@@ -2178,9 +2554,9 @@ pub mod server {
         fn default() -> Self {
             Self {
                 builder: BuilderType::Docker,
-                cache_dir: Default::default(),
+                cache_dir: Config::default_cache_dir(),
                 heartbeat_interval_ms: Config::default_heartbeat_interval_ms(),
-                jobs: Config::default_jobs_storage(),
+                jobs: CacheConfigs::default(),
                 max_per_core_load: Config::default_max_per_core_load(),
                 max_per_core_prefetch: Config::default_max_per_core_prefetch(),
                 message_broker: None,
@@ -2188,7 +2564,7 @@ pub mod server {
                 server_id: Config::default_server_id(),
                 shutdown_timeout: Config::default_shutdown_timeout(),
                 toolchain_cache_size: Config::default_toolchain_cache_size(),
-                toolchains: Config::default_toolchains_storage(),
+                toolchains: CacheConfigs::default(),
             }
         }
     }
@@ -2216,27 +2592,8 @@ pub mod server {
     }
 
     impl Config {
-        pub fn default_jobs_storage() -> CacheConfigs {
-            CacheConfigs {
-                disk: Some(DiskCacheConfig {
-                    dir: default_disk_cache_dir().join("jobs"),
-                    rw_mode: CacheModeConfig::ReadWrite,
-                    size: default_disk_cache_size(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }
-        }
-        pub fn default_toolchains_storage() -> CacheConfigs {
-            CacheConfigs {
-                disk: Some(DiskCacheConfig {
-                    dir: default_disk_cache_dir().join("toolchains"),
-                    rw_mode: CacheModeConfig::ReadWrite,
-                    size: default_disk_cache_size(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }
+        pub fn default_cache_dir() -> PathBuf {
+            default_disk_cache_dir()
         }
         // Default to 15s
         fn default_heartbeat_interval_ms() -> u64 {
@@ -2287,64 +2644,19 @@ pub mod server {
                 })
                 .unwrap_or_default();
 
+            let metrics = metrics.with_env_or_config();
+
             if let Some(PrometheusMetricsConfig::ListenPath { .. }) = metrics.prometheus {
                 return Err(anyhow!(
                     "Invalid config `metrics.prometheus.type=\"path\"`. Choose `type = \"addr\"` or `type = \"push\"`"
                 ));
             }
 
-            let builder = if let Ok(builder_type) = env::var("SCCACHE_DIST_BUILDER_TYPE") {
-                match builder_type.as_ref() {
-                    "docker" => BuilderType::Docker,
-                    "overlay" => BuilderType::Overlay {
-                        build_dir: env::var("SCCACHE_DIST_BUILD_DIR").map(|p| p.into())?,
-                        bwrap_path: env::var("SCCACHE_DIST_BWRAP_PATH").map(|p| p.into())?,
-                    },
-                    "pot" => BuilderType::Pot {
-                        clone_from: default_pot_clone_from(),
-                        pot_clone_args: default_pot_clone_args(),
-                        pot_cmd: env::var("SCCACHE_DIST_POT_CMD")
-                            .map(|p| p.into())
-                            .unwrap_or_else(|_| default_pot_cmd()),
-                        pot_fs_root: env::var("SCCACHE_DIST_BUILD_DIR")
-                            .map(|p| p.into())
-                            .unwrap_or_else(|_| default_pot_fs_root()),
-                    },
-                    _ => builder,
-                }
-            } else {
-                builder
-            };
+            let builder = builder.with_env_or_config();
 
-            let builder = match builder {
-                BuilderType::Overlay {
-                    build_dir,
-                    bwrap_path,
-                } => BuilderType::Overlay {
-                    build_dir: env::var("SCCACHE_DIST_BUILD_DIR")
-                        .map(|p| p.into())
-                        .unwrap_or(build_dir),
-                    bwrap_path: env::var("SCCACHE_DIST_BWRAP_PATH")
-                        .map(|p| p.into())
-                        .unwrap_or(bwrap_path),
-                },
-                BuilderType::Pot {
-                    clone_from,
-                    pot_cmd,
-                    pot_fs_root,
-                    pot_clone_args,
-                } => BuilderType::Pot {
-                    clone_from,
-                    pot_clone_args,
-                    pot_cmd: env::var("SCCACHE_DIST_POT_CMD")
-                        .map(|p| p.into())
-                        .unwrap_or(pot_cmd),
-                    pot_fs_root: env::var("SCCACHE_DIST_BUILD_DIR")
-                        .map(|p| p.into())
-                        .unwrap_or(pot_fs_root),
-                },
-                builder => builder,
-            };
+            let cache_dir = env::var("SCCACHE_DIST_SERVER_CACHE_DIR")
+                .map(PathBuf::from)
+                .unwrap_or(cache_dir);
 
             let jobs = CacheConfigs::default()
                 .merge(jobs)
