@@ -86,7 +86,7 @@ fn get_clap_command() -> ClapCommand {
                 )
                 .args(&[
                     config_with_help_message("Use the scheduler config file at PATH")
-                        .required(true),
+                        .required(false),
                     syslog.clone(),
                 ]),
         )
@@ -94,7 +94,7 @@ fn get_clap_command() -> ClapCommand {
             ClapCommand::new("server")
                 .about("Launch as a server, to handle distributed builds assigned by the scheduler")
                 .args(&[
-                    config_with_help_message("Use the server config file at PATH").required(true),
+                    config_with_help_message("Use the server config file at PATH").required(false),
                     syslog,
                 ]),
         )
@@ -120,12 +120,10 @@ pub fn try_parse_from(
                 check_init_syslog("sccache-scheduler", *log_level);
             }
 
-            let config_path = matches
-                .get_one::<PathBuf>("config")
-                .expect("`config` is required");
+            let config_path = matches.get_one::<PathBuf>("config");
 
             Command::Scheduler(
-                config::scheduler::Config::load(Some(config_path.clone()))
+                config::scheduler::Config::load(config_path.cloned())
                     .with_context(|| "Could not load config")?,
             )
         }
@@ -137,12 +135,10 @@ pub fn try_parse_from(
                 check_init_syslog("sccache-buildserver", *log_level);
             }
 
-            let config_path = matches
-                .get_one::<PathBuf>("config")
-                .expect("`config` is required");
+            let config_path = matches.get_one::<PathBuf>("config");
 
             Command::Server(
-                config::server::Config::load(Some(config_path.clone()))
+                config::server::Config::load(config_path.cloned())
                     .with_context(|| "Could not load config")?,
             )
         }
