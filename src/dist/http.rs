@@ -952,10 +952,7 @@ mod client {
     impl ReqwestClients {
         fn new(net: &config::DistNetworking) -> Self {
             Self {
-                #[cfg(test)]
-                clients: vec![new_reqwest_client(net)],
-                #[cfg(not(test))]
-                clients: (0..(crate::util::num_cpus() / 2).clamp(1, 8))
+                clients: (0..net.max_connections.max(1))
                     .map(|_| new_reqwest_client(net))
                     .collect::<Vec<_>>(),
                 index: Default::default(),

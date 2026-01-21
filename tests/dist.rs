@@ -192,8 +192,6 @@ pub fn dist_test_sccache_client_cfg(
     let mut sccache_cfg = harness::client::sccache_client_cfg(tmpdir, preprocessor_cache_mode);
     sccache_cfg.cache.disk.as_mut().unwrap().size = 0;
     sccache_cfg.dist.scheduler_url = Some(scheduler_url);
-    sccache_cfg.dist.net.connect_timeout = 10;
-    sccache_cfg.dist.net.request_timeout = 300;
     sccache_cfg
 }
 

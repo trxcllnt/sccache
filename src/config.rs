@@ -876,6 +876,7 @@ pub struct DistNetworking {
     pub connect_timeout: u32,
     pub request_timeout: u32,
     pub connection_pool: bool,
+    pub max_connections: u32,
     pub keepalive: DistNetworkingKeepalive,
 }
 
@@ -891,6 +892,9 @@ impl DistNetworking {
             connection_pool: bool_from_env_var("SCCACHE_DIST_CONNECTION_POOL")
                 .map(|val| val.unwrap_or(self.connection_pool))
                 .unwrap_or(self.connection_pool),
+            max_connections: number_from_env_var("SCCACHE_DIST_MAX_CONNECTIONS")
+                .map(|val| val.unwrap_or(self.max_connections))
+                .unwrap_or(self.max_connections),
             keepalive: self.keepalive.with_env_or_config(),
         }
     }
@@ -907,6 +911,8 @@ impl Default for DistNetworking {
             request_timeout: 600,
             // Default to using reqwest's HTTP/2 connection pool
             connection_pool: true,
+            // Default to using 8 separate reqwest clients to maximize HTTP/2 throughput
+            max_connections: 8,
             keepalive: Default::default(),
         }
     }

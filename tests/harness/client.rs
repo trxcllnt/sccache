@@ -10,8 +10,8 @@ use std::{
 
 use sccache::{
     config::{
-        CacheConfigs, DiskCacheConfig, DistConfig, FileConfig, PreprocessorCacheModeConfig,
-        try_read_config_file,
+        CacheConfigs, DiskCacheConfig, DistConfig, DistNetworking, FileConfig,
+        PreprocessorCacheModeConfig, try_read_config_file,
     },
     server::{ServerInfo, ServerStats},
 };
@@ -81,6 +81,12 @@ pub fn sccache_client_cfg(data_dir: &Path, preprocessor_cache_mode: bool) -> Fil
             toolchains: vec![],
             toolchain_cache_size: TC_CACHE_SIZE,
             rewrite_includes_only: false, // TODO
+            net: DistNetworking {
+                max_connections: 1,
+                connect_timeout: 10,
+                request_timeout: 300,
+                ..Default::default()
+            },
             ..Default::default()
         },
         server_startup_timeout_ms: None,
