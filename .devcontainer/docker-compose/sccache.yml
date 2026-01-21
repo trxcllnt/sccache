@@ -1,0 +1,92 @@
+services:
+
+  sccache-scheduler:
+    image: ubuntu:latest
+    depends_on: [rabbitmq, redis, vector-ingest]
+    restart: on-failure
+    ports: ["10500:10500"]
+    environment: &sccache_scheduler_env
+      AMQP_ADDR: "amqp://rabbitmq:5672//"
+      DEBIAN_FRONTEND: "noninteractive"
+      RUST_BACKTRACE: "${RUST_BACKTRACE:-1}"
+      SCCACHE_NO_DAEMON: "1"
+      SCCACHE_DIST_SCHEDULER_ID: "scheduler"
+      SCCACHE_DIST_PUBLIC_ADDR: "0.0.0.0:10500"
+      SCCACHE_DIST_AUTH_TYPE: "token"
+      SCCACHE_DIST_AUTH_TOKEN: "client_token"
+      SCCACHE_DIST_JOB_TIME_LIMIT_SECS: "1200"
+      SCCACHE_DIST_JOBS_REDIS_ENDPOINT: "redis://redis:6379"
+      SCCACHE_DIST_JOBS_REDIS_EXPIRATION: "3600"
+      SCCACHE_DIST_JOBS_REDIS_KEY_PREFIX: "/sccache-dist-jobs"
+      SCCACHE_DIST_TOOLCHAINS_DIR: "/sccache/toolchains"
+      SCCACHE_DIST_TOOLCHAINS_CACHE_SIZE: "10737418240" # 10 GiBytes
+      # Push metrics to prometheus
+      SCCACHE_DIST_METRICS_TYPE: "prometheus"
+      SCCACHE_DIST_PROMETHEUS_TYPE: "push"
+      SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT: "http://vector-ingest:9091/metrics/job/scheduler"
+      SCCACHE_DIST_PROMETHEUS_PUSH_INTERVAL: "1000"
+      SCCACHE_DIST_PROMETHEUS_PUSH_USERNAME: "sccache"
+      SCCACHE_DIST_PROMETHEUS_PUSH_PASSWORD: "sccache"
+      SCCACHE_DIST_PROMETHEUS_PUSH_HTTP_METHOD: "POST" # Required when pushing to Vector, as it doesn't support PUT
+      SCCACHE_LOG: "celery=warn,tower_http=info,axum::rejection=trace,sccache=${SCCACHE_LOG:-info}"
+    volumes:
+      - /tmp/sccache:/sccache:z
+      - ../../target/x86_64-unknown-linux-musl/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
+    command: >
+      bash -c "
+      set -o errexit;
+      umask 000;
+      apt update && apt install -y --no-install-recommends ca-certificates;
+      rm -rf '$$SCCACHE_DIST_TOOLCHAINS_DIR';
+      mkdir -p '$$SCCACHE_DIST_TOOLCHAINS_DIR';
+      exec /sccache-dist scheduler;"
+
+  sccache-server-1:
+    image: ubuntu:latest
+    depends_on: [sccache-scheduler]
+    privileged: true
+    environment: &sccache_server_env
+      <<: *sccache_scheduler_env
+      SCCACHE_DIST_SERVER_ID: "server-1"
+      SCCACHE_DIST_BUILDER_TYPE: "overlay"
+      SCCACHE_DIST_BUILD_DIR: "/sccache/server-1"
+      SCCACHE_DIST_BWRAP_PATH: "/usr/bin/bwrap"
+      SCCACHE_DIST_MAX_PER_CORE_LOAD: "0.5"
+      SCCACHE_DIST_MAX_PER_CORE_PREFETCH: "0.5"
+      SCCACHE_DIST_SERVER_CACHE_DIR: "/sccache/server-1"
+      SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE: "10737418240" # 10 GiBytes
+      SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT: "http://vector-ingest:9091/metrics/job/server-1"
+      SCCACHE_LOG: "celery=warn,sccache=${SCCACHE_LOG:-debug}"
+    volumes:
+      - /tmp/sccache:/sccache:z
+      - ../../target/x86_64-unknown-linux-musl/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
+    command: >
+      bash -c "
+      set -o errexit;
+      umask 000;
+      apt update && apt install -y --no-install-recommends ca-certificates libcap2 bubblewrap;
+      rm -rf '$$SCCACHE_DIST_BUILD_DIR';
+      mkdir -p '$$SCCACHE_DIST_BUILD_DIR';
+      exec /sccache-dist server;"
+
+  sccache-server-2:
+    image: ubuntu:latest
+    depends_on: [sccache-scheduler]
+    privileged: true
+    environment:
+      <<: *sccache_server_env
+      SCCACHE_DIST_SERVER_ID: "server-2"
+      SCCACHE_DIST_BUILD_DIR: "/sccache/server-2"
+      SCCACHE_DIST_SERVER_CACHE_DIR: "/sccache/server-2"
+      SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT: "http://vector-ingest:9091/metrics/job/server-2"
+    volumes:
+      - /tmp/sccache:/sccache:z
+      - ../../target/x86_64-unknown-linux-musl/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
+    command: >
+      bash -c "
+      set -o errexit;
+      umask 000;
+      apt update && apt install -y --no-install-recommends ca-certificates libcap2 bubblewrap;
+      rm -rf '$$SCCACHE_DIST_BUILD_DIR';
+      mkdir -p '$$SCCACHE_DIST_BUILD_DIR';
+      exec /sccache-dist server;"

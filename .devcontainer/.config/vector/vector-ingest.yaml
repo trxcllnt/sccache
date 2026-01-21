@@ -1,7 +1,7 @@
 sources:
   sccache_metrics:
     type: prometheus_pushgateway
-    address: '0.0.0.0:9091'
+    address: "0.0.0.0:9091"
     aggregate_metrics: false
     auth:
       username: sccache
@@ -11,7 +11,7 @@ sinks:
   sccache_metrics_vector:
     type: vector
     inputs: [sccache_metrics]
-    address: 'http://vector-2:9089'
+    address: "http://vector-aggregate:9089"
     batch: {max_events: 1000, timeout_secs: 1}
     compression: true
     healthcheck: {enabled: false}

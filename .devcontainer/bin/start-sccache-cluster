@@ -1,0 +1,69 @@
+#! /usr/bin/env bash
+
+# Ensure we're in the repo root
+cd "$( cd "$( dirname "$(realpath -m "${BASH_SOURCE[0]}")" )" && pwd )/../.."
+cd "${SCCACHE_REPO:-$(pwd)}"
+
+# Start the services
+docker compose -f .devcontainer/docker-compose.yml down
+docker compose -f .devcontainer/docker-compose.yml up -d
+docker compose -f .devcontainer/docker-compose.yml logs -f \
+    | sed -u 's/\x1B\[[0-9;]*[JKmsu]//g' >services.log 2>&1 &
+
+trap 'docker compose -f .devcontainer/docker-compose.yml down' EXIT
+
+# sleep 5
+sudo pkill -9 sccache-dist || true
+sudo pkill -9 sccache || true
+
+source .devcontainer/sccache-test-env-vars.sh
+
+export BUILD_TYPE="${BUILD_TYPE:-release}"
+SCHEDULER_PID=
+
+# Start scheduler
+while true; do
+    if test -n "${SCHEDULER_PID:+x}"; then
+        sudo kill -9 "$SCHEDULER_PID" 2>/dev/null || true;
+    fi
+    sleep 1
+    NO_COLOR=1 \
+    SCCACHE_LOG=celery=warn,sccache=debug,tower_http=info,axum::rejection=trace \
+        .devcontainer/bin/start-sccache-scheduler >scheduler.log 2>&1 &
+    SCHEDULER_PID="$!"
+    sleep 1
+    if grep -Eq 'Scheduler `\w+` initialized' scheduler.log; then
+        break
+    else
+        echo "failed to start scheduler, retrying in 1s"
+    fi
+done
+
+echo "sccache-dist scheduler started"
+
+# Start server 1
+NO_COLOR=1 \
+SCCACHE_LOG=celery=warn,sccache=debug \
+    .devcontainer/bin/start-sccache-server-1 >server-1.log 2>&1 &
+
+echo "sccache-dist server 1 started"
+
+# Start server 2
+NO_COLOR=1 \
+SCCACHE_LOG=celery=warn,sccache=debug \
+    .devcontainer/bin/start-sccache-server-2 >server-2.log 2>&1 &
+
+echo "sccache-dist server 2 started"
+
+# Start the client
+AWS_PROFILE=none \
+NO_COLOR=1 \
+RUST_BACKTRACE=full \
+SCCACHE_LOG=sccache=trace \
+SCCACHE_LOG_MILLIS=1 \
+SCCACHE_ERROR_LOG="$(pwd)/sccache.log" \
+SCCACHE_NO_DAEMON=1 \
+SCCACHE_START_SERVER=1 \
+SCCACHE_IDLE_TIMEOUT=0 \
+SCCACHE_CONF="$(pwd)/.devcontainer/.config/sccache/client.conf" \
+    "./target/x86_64-unknown-linux-musl/${BUILD_TYPE}/sccache" | tee sccache.log 2>&1

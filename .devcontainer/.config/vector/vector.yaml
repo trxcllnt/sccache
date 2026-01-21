@@ -1,7 +1,7 @@
 sources:
   pushgateway:
     type: prometheus_pushgateway
-    address: 0.0.0.0:9091
+    address: "0.0.0.0:9091"
     aggregate_metrics: false
     auth:
       username: sccache

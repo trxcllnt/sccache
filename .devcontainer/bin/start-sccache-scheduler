@@ -26,6 +26,4 @@ env AWS_PROFILE=none \
     SCCACHE_LOG="${SCCACHE_LOG:-}" \
     RUST_BACKTRACE="${RUST_BACKTRACE:-}" \
     SCCACHE_NO_DAEMON=1 \
-    SCCACHE_DIST_OS=linux \
-    SCCACHE_DIST_ARCH="$(dpkg --print-architecture)" \
     "$(which sccache-dist)" scheduler --config .devcontainer/.config/sccache/scheduler.conf

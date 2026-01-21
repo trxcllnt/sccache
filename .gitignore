@@ -19,13 +19,12 @@ target
 # Don't ignore devcontainers and sample configurations
 /.devcontainer/*
 !/.devcontainer/Dockerfile
-!/.devcontainer/docker-compose.yml
+!/.devcontainer/docker-compose
 !/.devcontainer/cuda*-amd64
 !/.devcontainer/cuda*-arm64
 !/.devcontainer/nvhpc*-amd64
 !/.devcontainer/nvhpc*-arm64
 !/.devcontainer/bin
-!/.devcontainer/docker-compose.yml
 !/.devcontainer/.config
 /.devcontainer/.config/*
 !/.devcontainer/.config/grafana

@@ -1,0 +1,46 @@
+#! /usr/bin/env bash
+
+# Ensure we're in the repo root
+cd "$( cd "$( dirname "$(realpath -m "${BASH_SOURCE[0]}")" )" && pwd )/../.."
+cd "${SCCACHE_REPO:-$(pwd)}"
+
+case "$1" in
+    debug|release)
+        BUILD_TYPE="$1";
+        shift 1;
+        ;;
+    *)
+        echo "Unknown build type ${*@Q}" 2>&1;
+        exit 1;
+        ;;
+esac
+
+SCCACHE_ERROR_LOG="$(pwd)/sccache.log"
+SCCACHE_CONF="$(pwd)/.devcontainer/.config/sccache/client.conf"
+DEBUG_DIR="$(realpath -m "$(pwd)/target/$(uname -m)-unknown-linux-musl/debug")"
+RELEASE_DIR="$(realpath -m "$(pwd)/target/$(uname -m)-unknown-linux-musl/release")"
+BUILD_DIR="$(realpath -m "$(pwd)/target/$(uname -m)-unknown-linux-musl/$BUILD_TYPE")"
+
+for DIR in "$DEBUG_DIR" "$RELEASE_DIR"; do
+    if ! test -n "${PATH##*"$DIR"*}"; then
+        PATH="${PATH#"$DIR"}";
+    fi
+done
+
+if test -n "${PATH##*"$BUILD_DIR"*}"; then
+    PATH="$BUILD_DIR:$PATH";
+fi
+
+export PATH
+export BUILD_TYPE
+export SCCACHE_ERROR_LOG
+export SCCACHE_CONF
+export RUST_BACKTRACE="full"
+export AWS_PROFILE="none"
+export SCCACHE_SERVER_LOG="sccache=debug"
+export SCCACHE_LOG_MILLIS="1"
+export SCCACHE_IDLE_TIMEOUT="0"
+
+echo "Added ${BUILD_DIR@Q} to \$PATH" >&2
+echo "Using sccache from:      $(which sccache)" >&2
+echo "Using sccache-dist from: $(which sccache-dist)" >&2
