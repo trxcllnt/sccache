@@ -644,6 +644,7 @@ impl SimplifyPath<'_> {
                         let new_final_path = self.simplify(&parent.join(&link_target))?;
                         let old_final_path =
                             std::mem::replace(&mut final_path, new_final_path.clone());
+                        #[allow(clippy::unnecessary_unwrap)]
                         self.resolved_symlinks
                             .as_mut()
                             .unwrap()
