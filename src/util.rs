@@ -164,7 +164,7 @@ impl Digest {
                 .and_then(|(_, v)| v.as_os_str().to_str())
                 .and_then(|v| v.parse().ok())
                 .and_then(chrono::DateTime::from_timestamp_secs)
-                .unwrap_or_else(|| chrono::Local::now().to_utc())
+                .unwrap_or_else(chrono::Utc::now)
                 .date_naive();
             digest.update(&date.year().to_le_bytes());
             digest.update(&date.month().to_le_bytes());

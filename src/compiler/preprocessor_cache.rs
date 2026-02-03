@@ -193,7 +193,7 @@ impl PreprocessorCacheEntry {
             .find(|(k, _)| k == "SOURCE_DATE_EPOCH")
             .and_then(|(_, v)| v.as_os_str().to_str())
             .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| chrono::Local::now().to_utc().timestamp());
+            .unwrap_or_else(|| chrono::Utc::now().timestamp());
 
         // Find the first result key whose include files on disk match this
         // preprocessor cache entry. Check newest results first since they're
