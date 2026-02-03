@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+
+# Print and optionally format `sccache --dist-status`
+
+_sccache_dist_status() {
+
+    local -;
+    set -euo pipefail;
+
+    echo "sccache procs: $(pgrep sccache | wc -l)"
+
+    echo -n "preprocessed tempfiles: "
+    echo -n "$(ls -All /tmp/.sccache_temp/.tmp* 2>/dev/null | wc -l) "
+    echo " ($(du -ch /tmp/.sccache_temp/.tmp* 2>/dev/null | tail -n1 | cut -f1))"
+
+    echo -n "nvcc internal tempfiles: "
+    echo -n "$(ls -All /tmp/.sccache_temp/nvcc/*/* 2>/dev/null | wc -l)"
+    echo " ($(du -ch /tmp/.sccache_temp/nvcc/* 2>/dev/null | tail -n1 | cut -f1))"
+    echo
+
+    # Print stats
+    sccache --show-stats
+
+    echo
+
+    # Print dist status as a tsv
+    sccache 2>/dev/null --dist-status \
+  | {
+        cat - | jq -r -f <(cat <<EOF
+  def truncate_val: (
+    . as \$x
+    | \$x | length as \$l
+    | if (\$x | type == "string") and (\$l > 17)
+      then \$x[0:14] + "..."
+      else \$x
+      end
+  );
+  def info_to_row: {
+    time: now | strflocaltime("%X"),
+    type: (.type // "server"),
+    id: .id,
+    servers: (if .servers == null then "-" else (.servers | length) end),
+    cpus: .info.occupancy,
+    util: ((.info.cpu_usage // 0) * 100 | floor | . / 100 | tostring | . + "%"),
+    jobs: (.jobs.loading + .jobs.pending + .jobs.running),
+    loading: .jobs.loading,
+    pending: .jobs.pending,
+    running: .jobs.running,
+    oldest: ((.max_job_age // 0) | tostring | . + "s"),
+    accepted: .jobs.accepted,
+    finished: .jobs.finished,
+    seen: ((.u_time // 0) | tostring | . + "s"),
+  };
+
+  .SchedulerStatus as [\$x, \$y] | [
+    (\$y + { id: \$x, type: "scheduler", u_time: (\$y.servers // {} | map(.u_time) | min | . // "-" | tostring), max_job_age: (\$y.servers // {} | map(.max_job_age) | max | . // "-" | tostring) }),
+    (\$y.servers // [] | sort_by(.id)[])
+  ]
+  | map(info_to_row) as \$rows
+  | (\$rows[0] | keys_unsorted) as \$cols
+  | (\$rows | map(. as \$row | \$cols | map(\$row[.] | truncate_val))) as \$rows
+  | (\$cols | map(truncate_val)), \$rows[] | @csv
+EOF
+    )
+    } \
+  | {
+        # transform the csv into a tsv.
+        if [[ "$(grep DISTRIB_RELEASE= /etc/lsb-release | cut -d= -f2)" > "20.04" ]]; then
+            cat - | sed 's/\"//g' | column -t -s, -R $(seq -s, 1 14)
+        else
+            cat - | sed 's/\"//g' | column -t -s,
+        fi
+    }
+}
+
+_sccache_dist_status "$@" <&0;

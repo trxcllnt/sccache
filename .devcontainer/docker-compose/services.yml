@@ -1,10 +1,5 @@
 services:
 
-  # AMQP broker for scheduler and server communication
-  rabbitmq:
-    image: rabbitmq:management
-    ports: ["5672:5672", "15672:15672"]
-
   # Use Redis for job storage
   redis:
     image: redis

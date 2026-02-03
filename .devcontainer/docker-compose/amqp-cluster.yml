@@ -1,0 +1,22 @@
+services:
+  # AMQP broker cluster for scheduler and server communication
+  rabbitmq1: &rabbitmq_svc
+    hostname: rabbitmq1
+    image: rabbitmq:management
+    environment: {RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-setcookie 12345"}
+    volumes: ["./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro"]
+
+  rabbitmq2:
+    <<: *rabbitmq_svc
+    hostname: rabbitmq2
+
+  rabbitmq3:
+    <<: *rabbitmq_svc
+    hostname: rabbitmq3
+
+  rabbitmq:
+    hostname: rabbitmq
+    image: haproxy:1.7
+    ports: ["5672:5672", "15672:15672"]
+    depends_on: [rabbitmq1, rabbitmq2, rabbitmq3]
+    volumes: ["./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro"]

@@ -1,7 +1,7 @@
 services:
 
   sccache-scheduler:
-    image: ubuntu:latest
+    image: ubuntu:noble
     depends_on: [rabbitmq, redis, vector-ingest]
     restart: on-failure
     ports: ["10500:10500"]
@@ -34,6 +34,7 @@ services:
       - ../../target/x86_64-unknown-linux-musl/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
     command: >
       bash -c "
+      sleep 10;
       set -o errexit;
       umask 000;
       apt update && apt install -y --no-install-recommends ca-certificates;
@@ -42,8 +43,9 @@ services:
       exec /sccache-dist scheduler;"
 
   sccache-server-1:
-    image: ubuntu:latest
+    image: ubuntu:noble
     depends_on: [sccache-scheduler]
+    restart: on-failure
     privileged: true
     environment: &sccache_server_env
       <<: *sccache_scheduler_env
@@ -62,6 +64,7 @@ services:
       - ../../target/x86_64-unknown-linux-musl/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
     command: >
       bash -c "
+      sleep 10;
       set -o errexit;
       umask 000;
       apt update && apt install -y --no-install-recommends ca-certificates libcap2 bubblewrap;
@@ -70,8 +73,9 @@ services:
       exec /sccache-dist server;"
 
   sccache-server-2:
-    image: ubuntu:latest
+    image: ubuntu:noble
     depends_on: [sccache-scheduler]
+    restart: on-failure
     privileged: true
     environment:
       <<: *sccache_server_env
@@ -84,6 +88,7 @@ services:
       - ../../target/x86_64-unknown-linux-musl/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
     command: >
       bash -c "
+      sleep 10;
       set -o errexit;
       umask 000;
       apt update && apt install -y --no-install-recommends ca-certificates libcap2 bubblewrap;
