@@ -323,11 +323,6 @@ impl PreprocessorCacheEntry {
                 ..
             } = cached.deref().as_ref().unwrap();
 
-            // If the digests are different, disable preprocessor cache mode
-            if prev.digest != curr.digest {
-                return None;
-            }
-
             if *found_time {
                 // We don't know for sure that the program actually uses the __TIME__ macro,
                 // but we have to assume it anyway and hash the time stamp. However, that's
@@ -335,6 +330,11 @@ impl PreprocessorCacheEntry {
                 // second should be quite slim... So, just signal back to the caller that
                 // __TIME__ has been found so that the preprocessor cache mode can be disabled.
                 debug!("Found __TIME__ in {path:?}");
+                return None;
+            }
+
+            // If the digests are different, disable preprocessor cache mode
+            if prev.digest != curr.digest {
                 return None;
             }
 
