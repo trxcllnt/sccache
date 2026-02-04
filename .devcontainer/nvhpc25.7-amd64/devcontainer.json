@@ -61,29 +61,29 @@
   },
 
   "features": {
-    "ghcr.io/devcontainers/features/common-utils:2.4.7": {
+    "ghcr.io/devcontainers/features/common-utils:2.5.6": {
       "userUid": "1001",
       "userGid": "1001",
       "username": "${localEnv:USER:anon}",
       "installZsh": "false",
       "upgradePackages": "true"
     },
-    "ghcr.io/devcontainers/features/git:1": {
+    "ghcr.io/devcontainers/features/git:1.3.5": {
       "ppa": "true",
       "version": "latest"
     },
-    "ghcr.io/devcontainers/features/github-cli:1": {},
-    "ghcr.io/rapidsai/devcontainers/features/gcc:26.2": {
+    "ghcr.io/devcontainers/features/github-cli:1.1.0": {},
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1.6.5": {
+      "moby": "false"
+    },
+    "ghcr.io/rapidsai/devcontainers/features/gcc:latest": {
       "version": "11"
     },
-    "ghcr.io/rapidsai/devcontainers/features/llvm:26.2": {
+    "ghcr.io/rapidsai/devcontainers/features/llvm:latest": {
       "version": "19"
     },
-    "ghcr.io/rapidsai/devcontainers/features/nvhpc:26.2": {
+    "ghcr.io/rapidsai/devcontainers/features/nvhpc:latest": {
       "version": "25.7"
-    },
-    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
-      "moby": "false"
     }
   },
 
@@ -91,10 +91,10 @@
     "ghcr.io/devcontainers/features/common-utils",
     "ghcr.io/devcontainers/features/git",
     "ghcr.io/devcontainers/features/github-cli",
+    "ghcr.io/devcontainers/features/docker-outside-of-docker",
     "ghcr.io/rapidsai/devcontainers/features/gcc",
     "ghcr.io/rapidsai/devcontainers/features/nvhpc",
-    "ghcr.io/rapidsai/devcontainers/features/llvm",
-    "ghcr.io/devcontainers/features/docker-outside-of-docker"
+    "ghcr.io/rapidsai/devcontainers/features/llvm"
   ],
 
   "customizations": {

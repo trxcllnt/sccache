@@ -17,7 +17,7 @@
   "runArgs": [
     "--rm",
     "--name",
-    "${localEnv:USER:anon}-${localWorkspaceFolderBasename}-nvhpc25.11-amd64",
+    "${localEnv:USER:anon}-${localWorkspaceFolderBasename}-nvhpc26.1-amd64",
     "--network",
     "host",
     "--platform",
@@ -83,7 +83,7 @@
       "version": "22"
     },
     "ghcr.io/rapidsai/devcontainers/features/nvhpc:latest": {
-      "version": "25.11"
+      "version": "26.1"
     }
   },
 
