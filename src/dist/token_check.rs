@@ -10,6 +10,7 @@ use crate::{
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use futures::{TryFutureExt, lock::Mutex};
+use itertools::Itertools;
 use jwt::jwk::JwkSet;
 
 use std::{
@@ -48,10 +49,7 @@ enum ProxyTokenDecoder {
 impl ProxyTokenDecoder {
     async fn decode(&self, response: &str) -> Result<ClientClaims> {
         match self {
-            Self::Jwt(jwt) => jwt
-                .check_jwt_validity(response)
-                .await
-                .inspect_err(|e| tracing::warn!("JWT validation failed: {}", e)),
+            Self::Jwt(jwt) => jwt.check_jwt_validity(response).await,
             _ => Ok(HashMap::with_capacity(0)),
         }
     }
@@ -147,11 +145,12 @@ impl ProxyTokenCheck {
         let decoder = match decode {
             Some(ProxyTokenDecodeConfig::JwtDecoder {
                 audience,
+                claims,
                 issuer,
                 jwks_url,
-                claims,
+                leeway,
             }) => ProxyTokenDecoder::Jwt(
-                ValidJWTCheck::new(audience, issuer, &jwks_url, claims)
+                ValidJWTCheck::new(audience, issuer, jwks_url, claims, leeway)
                     .await
                     .context("Failed to create a checker for valid JWTs")?,
             ),
@@ -218,10 +217,11 @@ impl ProxyTokenCheck {
             _ => res.text().await?,
         };
 
-        let claims = self.decoder.decode(&auth).await.or_else(|err| {
-            tracing::warn!("Failed to decode token: {err}");
-            Result::Ok(HashMap::with_capacity(0))
-        })?;
+        let claims = self
+            .decoder
+            .decode(&auth)
+            .await
+            .or_else(|_| Result::Ok(HashMap::with_capacity(0)))?;
 
         // Cache the token
         if self.token_ttl.is_some() {
@@ -237,59 +237,77 @@ impl ProxyTokenCheck {
 
 // Check a JWT is valid
 pub struct ValidJWTCheck {
-    audience: String,
-    issuer: String,
+    audience: Vec<String>,
+    claims_to_check: Vec<(String, String)>,
+    claims_to_log: Vec<(String, String)>,
+    issuer: Vec<String>,
     keys: HashMap<String, jwt::DecodingKey>,
-    claims: Vec<String>,
+    leeway: Option<u64>,
 }
 
 #[async_trait]
 impl ClientAuthCheck for ValidJWTCheck {
     async fn check(&self, _: &SocketAddr, token: &str) -> Result<ClientClaims> {
-        match self.check_jwt_validity(token).await {
-            Ok(claims) => Ok(claims),
-            Err(e) => {
-                tracing::warn!("JWT validation failed: {}", e);
-                Err(e)
-            }
-        }
+        self.check_jwt_validity(token).await
     }
 }
 
 impl ValidJWTCheck {
     pub async fn new(
-        audience: String,
-        issuer: String,
-        jwks_url: &str,
-        claims: Option<Vec<String>>,
+        audience: Vec<String>,
+        issuer: Vec<String>,
+        jwks_url: Vec<String>,
+        claims: Option<HashMap<String, String>>,
+        leeway: Option<u64>,
     ) -> Result<Self> {
-        let res = reqwest::get(jwks_url)
-            .await
-            .context("Failed to make request to JWKs url")?;
-        if !res.status().is_success() {
-            bail!("Could not retrieve JWKs, HTTP error: {}", res.status())
+        let mut keys = HashMap::new();
+
+        for url in jwks_url {
+            let res = reqwest::get(url)
+                .await
+                .context("Failed to make request to JWKs url")?;
+
+            if !res.status().is_success() {
+                bail!("Could not retrieve JWKs, HTTP error: {}", res.status())
+            }
+
+            res.json::<JwkSet>()
+                .await
+                .context("Failed to parse JWKs json")?
+                .keys
+                .into_iter()
+                .filter_map(|jwk| {
+                    jwk.common.key_id.as_ref().and_then(|kid| {
+                        jwt::DecodingKey::from_jwk(&jwk)
+                            .ok()
+                            .map(|key| (kid.clone(), key))
+                    })
+                })
+                .for_each(|(kid, key)| {
+                    keys.insert(kid, key);
+                });
         }
 
-        let keys = res
-            .json::<JwkSet>()
-            .await
-            .context("Failed to parse JWKs json")?
-            .keys
-            .iter()
-            .filter_map(|jwk| {
-                jwk.common.key_id.as_ref().and_then(|kid| {
-                    jwt::DecodingKey::from_jwk(jwk)
-                        .ok()
-                        .map(|key| (kid.clone(), key))
-                })
-            })
-            .collect();
+        let (claims_to_log, claims_to_check): (Vec<_>, Vec<_>) = claims
+            .unwrap_or_default()
+            .into_iter()
+            .partition_map(|(key, val)| {
+                if matches!(val.as_str(), "*" | "") {
+                    itertools::Either::Left((key, val))
+                } else {
+                    itertools::Either::Right((key, val))
+                }
+            });
+
+        trace!("claims_to_log: {claims_to_log:?}, claims_to_check: {claims_to_check:?}");
 
         Ok(Self {
             audience,
+            claims_to_check,
+            claims_to_log,
             issuer,
             keys,
-            claims: claims.unwrap_or_default(),
+            leeway,
         })
     }
 
@@ -300,30 +318,47 @@ impl ValidJWTCheck {
 
         // Prepare validation
         let mut validation = jwt::Validation::new(header.alg);
-        validation.set_audience(&[&self.audience]);
-        validation.set_issuer(&[&self.issuer]);
+        validation.set_audience(self.audience.as_slice());
+        validation.set_issuer(self.issuer.as_slice());
+        validation.leeway = self.leeway.unwrap_or(60);
+
+        let value_to_string = |v: &serde_json::Value| {
+            if let Some(s) = v.as_str() {
+                s.to_owned()
+            } else {
+                v.to_string()
+            }
+        };
 
         let decode = |key: &jwt::DecodingKey| {
             let jwt::TokenData { claims, .. } =
                 jwt::decode::<serde_json::Value>(token, key, &validation)?;
-            Ok(claims
-                .as_object()
-                .map(|obj| {
-                    self.claims
-                        .iter()
-                        .filter_map(|key| {
-                            obj.get(key).map(|val| {
-                                (
-                                    key.clone(),
-                                    val.as_str()
-                                        .map(|val| val.to_string())
-                                        .unwrap_or_else(|| val.to_string()),
-                                )
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default())
+
+            let mut valid_claims = HashMap::new();
+
+            if let Some(claims) = claims.as_object() {
+                let mut passed = self.claims_to_check.is_empty();
+                for (key, req) in self.claims_to_check.iter() {
+                    let val = claims
+                        .get(key.as_str())
+                        .map(value_to_string)
+                        .unwrap_or_default();
+                    if &val == req {
+                        passed = true;
+                        valid_claims.insert(key.to_owned(), val);
+                    }
+                }
+                if !passed {
+                    bail!("Failed to validate required claims");
+                }
+                for (key, _) in self.claims_to_log.iter() {
+                    if let Some(val) = claims.get(key.as_str()).map(value_to_string) {
+                        valid_claims.insert(key.to_owned(), val);
+                    }
+                }
+            }
+
+            Ok(valid_claims)
         };
 
         // Decode the JWT and return the claims
@@ -342,7 +377,7 @@ impl ValidJWTCheck {
                 })
                 .map_break(Ok)
                 .break_value()
-                .unwrap_or_else(|| bail!("Unable to validate and decode jwt"))
+                .unwrap_or_else(|| bail!("Unable to decode or validate JWT"))
         }
     }
 }
@@ -356,11 +391,12 @@ pub async fn new_client_auth_check(client_auth: ClientAuth) -> Result<Box<dyn Cl
             issuer,
             jwks_url,
             claims,
+            leeway,
         } => Box::new(
-            ValidJWTCheck::new(audience, issuer, &jwks_url, claims)
+            ValidJWTCheck::new(audience, issuer, jwks_url, claims, leeway)
                 .await
                 .context("Failed to create a checker for valid JWTs")?,
-        ),
+        ) as Box<dyn ClientAuthCheck>,
         ClientAuth::ProxyToken {
             url,
             cache_secs,
@@ -376,6 +412,6 @@ pub async fn new_client_auth_check(client_auth: ClientAuth) -> Result<Box<dyn Cl
                 decode,
             )
             .await?,
-        ),
+        ) as Box<dyn ClientAuthCheck>,
     })
 }

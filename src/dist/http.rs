@@ -395,14 +395,22 @@ mod scheduler {
                     )
                 })?;
 
-            this.client_auth
-                .check(&remote_addr, bearer.token())
-                .await
-                .map(RequireAuth)
-                .map_err(|err| {
-                    tracing::warn!("[RequireAuth({remote_addr})]: Authentication failure: {err}");
-                    (StatusCode::UNAUTHORIZED, "Unauthorized".into())
-                })
+            let mut warnings = vec![];
+
+            for client_auth in this.client_auth.iter() {
+                match client_auth.check(&remote_addr, bearer.token()).await {
+                    Ok(res) => {
+                        return Ok(RequireAuth(res));
+                    }
+                    Err(err) => warnings.push(format!(
+                        "[RequireAuth({remote_addr})]: Authentication failure: {err}"
+                    )),
+                }
+            }
+
+            warnings.iter().for_each(|msg| tracing::warn!(msg));
+
+            Err((StatusCode::UNAUTHORIZED, "Unauthorized".into()))
         }
     }
 
@@ -465,7 +473,7 @@ mod scheduler {
     struct SchedulerState {
         service: Arc<dyn SchedulerService>,
         // Test whether clients are permitted to use the scheduler
-        client_auth: Box<dyn ClientAuthCheck>,
+        client_auth: Vec<Box<dyn ClientAuthCheck>>,
     }
 
     pub struct Scheduler {
@@ -475,7 +483,7 @@ mod scheduler {
     impl Scheduler {
         pub fn new(
             service: Arc<dyn SchedulerService>,
-            client_auth: Box<dyn ClientAuthCheck>,
+            client_auth: Vec<Box<dyn ClientAuthCheck>>,
         ) -> Self {
             Self {
                 state: Arc::new(SchedulerState {

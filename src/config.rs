@@ -1939,6 +1939,7 @@ impl MetricsConfigs {
 
 #[cfg(feature = "dist-server")]
 pub mod scheduler {
+    use std::collections::HashMap;
     use std::env;
     use std::path::PathBuf;
     use std::{net::SocketAddr, str::FromStr};
@@ -1946,6 +1947,7 @@ pub mod scheduler {
     use crate::config::DistNetworkingKeepalive;
     use crate::errors::*;
 
+    use itertools::Itertools;
     use serde::{Deserialize, Serialize};
 
     use super::{
@@ -1964,10 +1966,14 @@ pub mod scheduler {
         Token { token: String },
         #[serde(rename = "jwt_validate")]
         JwtValidate {
-            audience: String,
-            issuer: String,
-            jwks_url: String,
-            claims: Option<Vec<String>>,
+            #[serde(deserialize_with = "ClientAuth::string_or_list")]
+            audience: Vec<String>,
+            #[serde(deserialize_with = "ClientAuth::string_or_list")]
+            issuer: Vec<String>,
+            #[serde(deserialize_with = "ClientAuth::string_or_list")]
+            jwks_url: Vec<String>,
+            claims: Option<HashMap<String, String>>,
+            leeway: Option<u64>,
         },
         #[serde(rename = "proxy_token")]
         ProxyToken {
@@ -1980,23 +1986,67 @@ pub mod scheduler {
     }
 
     impl ClientAuth {
-        pub fn with_env_or_config(self) -> Result<Self> {
-            let mut env_or_cfg_token = env::var("SCCACHE_DIST_AUTH_TOKEN");
-            let mut env_or_cfg_audience = env::var("SCCACHE_DIST_AUTH_AUDIENCE");
-            let mut env_or_cfg_issuer = env::var("SCCACHE_DIST_AUTH_ISSUER");
-            let mut env_or_cfg_jwks_url = env::var("SCCACHE_DIST_AUTH_JWKS_URL");
-            let mut env_or_cfg_claims = env::var("SCCACHE_DIST_AUTH_CLAIMS")
-                .map(|claims| claims.split(" ").map(|s| s.to_string()).collect::<Vec<_>>())
+        pub fn with_env_or_config(self, idx: Option<usize>) -> Result<Self> {
+            let suf = idx.map(|idx| format!("_{idx}")).unwrap_or_default();
+            let sccache_dist_auth_token_env = format!("SCCACHE_DIST_AUTH_TOKEN{suf}");
+            let sccache_dist_auth_audience_env = format!("SCCACHE_DIST_AUTH_AUDIENCE{suf}");
+            let sccache_dist_auth_issuer_env = format!("SCCACHE_DIST_AUTH_ISSUER{suf}");
+            let sccache_dist_auth_jwks_url_env = format!("SCCACHE_DIST_AUTH_JWKS_URL{suf}");
+            let sccache_dist_auth_claims_env = format!("SCCACHE_DIST_AUTH_CLAIMS{suf}");
+            let sccache_dist_auth_leeway_env = format!("SCCACHE_DIST_AUTH_LEEWAY{suf}");
+            let sccache_dist_auth_url_env = format!("SCCACHE_DIST_AUTH_URL{suf}");
+            let sccache_dist_auth_type_env = format!("SCCACHE_DIST_AUTH_TYPE{suf}");
+            let sccache_dist_auth_cache_secs_env = format!("SCCACHE_DIST_AUTH_CACHE_SECS{suf}");
+            let sccache_dist_auth_rate_limit_on_error_count_env =
+                format!("SCCACHE_DIST_AUTH_RATE_LIMIT_ON_ERROR_COUNT{suf}");
+            let sccache_dist_auth_rate_limit_on_error_window_size_secs_env =
+                format!("SCCACHE_DIST_AUTH_RATE_LIMIT_ON_ERROR_WINDOW_SIZE_SECS{suf}");
+
+            let mut env_or_cfg_token = env::var(&sccache_dist_auth_token_env);
+            let mut env_or_cfg_audience =
+                env::var(&sccache_dist_auth_audience_env).map(|audiences| {
+                    audiences
+                        .split(" ")
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                });
+            let mut env_or_cfg_issuer = env::var(&sccache_dist_auth_issuer_env).map(|issuers| {
+                issuers
+                    .split(" ")
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            });
+            let mut env_or_cfg_jwks_url =
+                env::var(&sccache_dist_auth_jwks_url_env).map(|jwks_urls| {
+                    jwks_urls
+                        .split(" ")
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                });
+            let mut env_or_cfg_claims = env::var(&sccache_dist_auth_claims_env)
+                .map(|claims| {
+                    claims
+                        .split(" ")
+                        .map(|pair| {
+                            pair.split_once("=")
+                                .map(|(key, val)| (key.to_string(), val.to_string()))
+                                .unwrap_or_else(|| (pair.to_string(), "*".to_string()))
+                        })
+                        .collect::<_>()
+                })
                 .ok();
-            let mut env_or_cfg_url = env::var("SCCACHE_DIST_AUTH_URL");
+            let mut env_or_cfg_leeway =
+                number_from_env_var(&sccache_dist_auth_leeway_env).and_then(|s| s.ok());
+
+            let mut env_or_cfg_url = env::var(&sccache_dist_auth_url_env);
             let mut env_or_cfg_cache_secs =
-                number_from_env_var("SCCACHE_DIST_AUTH_CACHE_SECS").and_then(|s| s.ok());
-            let mut env_or_cfg_decode = Some(ProxyTokenDecodeConfig::None);
+                number_from_env_var(&sccache_dist_auth_cache_secs_env).and_then(|s| s.ok());
+            let mut env_or_cfg_decode = ProxyTokenDecodeConfig::from_env(idx);
             let mut env_or_cfg_rate_limit_on_error_count =
-                number_from_env_var("SCCACHE_DIST_AUTH_RATE_LIMIT_ON_ERROR_COUNT")
+                number_from_env_var(&sccache_dist_auth_rate_limit_on_error_count_env)
                     .and_then(|s| s.ok());
             let mut env_or_cfg_rate_limit_on_error_window_size_secs =
-                number_from_env_var("SCCACHE_DIST_AUTH_RATE_LIMIT_ON_ERROR_WINDOW_SIZE_SECS")
+                number_from_env_var(&sccache_dist_auth_rate_limit_on_error_window_size_secs_env)
                     .and_then(|s| s.ok());
 
             match self.clone() {
@@ -2008,11 +2058,13 @@ pub mod scheduler {
                     issuer,
                     jwks_url,
                     claims,
+                    leeway,
                 } => {
                     env_or_cfg_audience = env_or_cfg_audience.or(Ok(audience));
                     env_or_cfg_issuer = env_or_cfg_issuer.or(Ok(issuer));
                     env_or_cfg_jwks_url = env_or_cfg_jwks_url.or(Ok(jwks_url));
                     env_or_cfg_claims = env_or_cfg_claims.or(claims);
+                    env_or_cfg_leeway = env_or_cfg_leeway.or(leeway);
                 }
                 Self::ProxyToken {
                     url,
@@ -2023,12 +2075,8 @@ pub mod scheduler {
                 } => {
                     env_or_cfg_url = env_or_cfg_url.or(Ok(url));
                     env_or_cfg_cache_secs = env_or_cfg_cache_secs.or(cache_secs);
-                    env_or_cfg_decode = env::var("SCCACHE_DIST_AUTH_PROXY_TOKEN_DECODE")
-                        .ok()
-                        .map(|_| ProxyTokenDecodeConfig::from_env())
-                        .or(decode)
-                        .map(|decode| decode.with_env_or_config());
-
+                    env_or_cfg_decode =
+                        env_or_cfg_decode.or(decode.map(|decode| decode.with_env_or_config(idx)));
                     env_or_cfg_rate_limit_on_error_count =
                         env_or_cfg_rate_limit_on_error_count.or(rate_limit_on_error_count);
                     env_or_cfg_rate_limit_on_error_window_size_secs =
@@ -2040,26 +2088,27 @@ pub mod scheduler {
 
             let into_token = || {
                 Ok(Self::Token {
-                    token: env_or_cfg_token.context(
-                        "SCCACHE_DIST_AUTH_TOKEN must be set when SCCACHE_DIST_AUTH_TYPE=token",
-                    )?,
+                    token: env_or_cfg_token.with_context(|| format!(
+                        "{sccache_dist_auth_token_env} must be set when {sccache_dist_auth_type_env}=token",
+                    ))?,
                 })
             };
 
             let into_jwt_validate = || {
                 Ok(Self::JwtValidate {
-                    audience: env_or_cfg_audience.context("SCCACHE_DIST_AUTH_AUDIENCE must be set when SCCACHE_DIST_AUTH_TYPE=jwt_validate")?,
-                    issuer: env_or_cfg_issuer.context("SCCACHE_DIST_AUTH_ISSUER must be set when SCCACHE_DIST_AUTH_TYPE=jwt_validate")?,
-                    jwks_url: env_or_cfg_jwks_url.context("SCCACHE_DIST_AUTH_JWKS_URL must be set when SCCACHE_DIST_AUTH_TYPE=jwt_validate")?,
+                    audience: env_or_cfg_audience.with_context(|| format!("{sccache_dist_auth_audience_env} must be set when {sccache_dist_auth_type_env}=jwt_validate"))?,
+                    issuer: env_or_cfg_issuer.with_context(|| format!("{sccache_dist_auth_issuer_env} must be set when {sccache_dist_auth_type_env}=jwt_validate"))?,
+                    jwks_url: env_or_cfg_jwks_url.with_context(|| format!("{sccache_dist_auth_jwks_url_env} must be set when {sccache_dist_auth_type_env}=jwt_validate"))?,
                     claims: env_or_cfg_claims,
+                    leeway: env_or_cfg_leeway,
                 })
             };
 
             let into_proxy_token = || {
                 Ok(Self::ProxyToken {
-                    url: env_or_cfg_url.context(
-                        "SCCACHE_DIST_AUTH_URL must be set when SCCACHE_DIST_AUTH_TYPE=proxy_token",
-                    )?,
+                    url: env_or_cfg_url.with_context(|| format!(
+                        "{sccache_dist_auth_url_env} must be set when {sccache_dist_auth_type_env}=proxy_token",
+                    ))?,
                     cache_secs: env_or_cfg_cache_secs,
                     decode: env_or_cfg_decode,
                     rate_limit_on_error_count: env_or_cfg_rate_limit_on_error_count,
@@ -2068,7 +2117,7 @@ pub mod scheduler {
                 })
             };
 
-            if let Ok(auth_type) = env::var("SCCACHE_DIST_AUTH_TYPE").as_deref() {
+            if let Ok(auth_type) = env::var(&sccache_dist_auth_type_env).as_deref() {
                 match auth_type {
                     "token" => into_token(),
                     "jwt_validate" => into_jwt_validate(),
@@ -2084,6 +2133,41 @@ pub mod scheduler {
                 }
             }
         }
+
+        fn string_or_list<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            use serde::Deserialize;
+            use serde::de::{self, SeqAccess, Visitor};
+            use std::fmt;
+
+            struct StringOrList;
+
+            impl<'de> Visitor<'de> for StringOrList {
+                type Value = Vec<String>;
+
+                fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    formatter.write_str("string or list of strings")
+                }
+
+                fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+                where
+                    E: de::Error,
+                {
+                    Ok(vec![value.to_owned()])
+                }
+
+                fn visit_seq<A>(self, seq: A) -> std::result::Result<Self::Value, A::Error>
+                where
+                    A: SeqAccess<'de>,
+                {
+                    Deserialize::deserialize(de::value::SeqAccessDeserializer::new(seq))
+                }
+            }
+
+            deserializer.deserialize_any(StringOrList)
+        }
     }
 
     #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2094,63 +2178,145 @@ pub mod scheduler {
         None,
         #[serde(rename = "jwt")]
         JwtDecoder {
-            audience: String,
-            issuer: String,
-            jwks_url: String,
-            claims: Option<Vec<String>>,
+            #[serde(deserialize_with = "ClientAuth::string_or_list")]
+            audience: Vec<String>,
+            #[serde(deserialize_with = "ClientAuth::string_or_list")]
+            issuer: Vec<String>,
+            #[serde(deserialize_with = "ClientAuth::string_or_list")]
+            jwks_url: Vec<String>,
+            claims: Option<HashMap<String, String>>,
+            leeway: Option<u64>,
         },
     }
 
     impl ProxyTokenDecodeConfig {
-        pub fn from_env() -> Self {
-            match env::var("SCCACHE_DIST_AUTH_PROXY_TOKEN_DECODE").as_deref() {
-                Ok("jwt") => Self::JwtDecoder {
-                    audience: env::var("SCCACHE_DIST_AUTH_AUDIENCE")
+        pub fn from_env(idx: Option<usize>) -> Option<Self> {
+            let suf = idx.map(|idx| format!("_{idx}")).unwrap_or_default();
+            let sccache_dist_auth_proxy_token_decode_env =
+                format!("SCCACHE_DIST_AUTH_PROXY_TOKEN_DECODE{suf}");
+            let sccache_dist_auth_audience_env = format!("SCCACHE_DIST_AUTH_AUDIENCE{suf}");
+            let sccache_dist_auth_issuer_env = format!("SCCACHE_DIST_AUTH_ISSUER{suf}");
+            let sccache_dist_auth_jwks_url_env = format!("SCCACHE_DIST_AUTH_JWKS_URL{suf}");
+            let sccache_dist_auth_claims_env = format!("SCCACHE_DIST_AUTH_CLAIMS{suf}");
+            let sccache_dist_auth_leeway_env = format!("SCCACHE_DIST_AUTH_LEEWAY{suf}");
+
+            match env::var(&sccache_dist_auth_proxy_token_decode_env).as_deref() {
+                Ok("jwt") => Some(Self::JwtDecoder {
+                    audience: env::var(&sccache_dist_auth_audience_env)
+                        .map(|audiences| {
+                            audiences
+                                .split(" ")
+                                .map(|s| s.to_string())
+                                .collect::<Vec<_>>()
+                        })
                         .ok()
                         .unwrap_or_default(),
-                    issuer: env::var("SCCACHE_DIST_AUTH_ISSUER")
+                    issuer: env::var(&sccache_dist_auth_issuer_env)
+                        .map(|issuers| {
+                            issuers
+                                .split(" ")
+                                .map(|s| s.to_string())
+                                .collect::<Vec<_>>()
+                        })
                         .ok()
                         .unwrap_or_default(),
-                    jwks_url: env::var("SCCACHE_DIST_AUTH_JWKS_URL")
+                    jwks_url: env::var(&sccache_dist_auth_jwks_url_env)
+                        .map(|jwks_urls| {
+                            jwks_urls
+                                .split(" ")
+                                .map(|s| s.to_string())
+                                .collect::<Vec<_>>()
+                        })
                         .ok()
                         .unwrap_or_default(),
-                    claims: env::var("SCCACHE_DIST_AUTH_CLAIMS")
-                        .map(|claims| claims.split(" ").map(|s| s.to_string()).collect::<Vec<_>>())
+                    claims: env::var(&sccache_dist_auth_claims_env)
+                        .map(|claims| {
+                            claims
+                                .split(" ")
+                                .map(|pair| {
+                                    pair.split_once("=")
+                                        .map(|(key, val)| (key.to_string(), val.to_string()))
+                                        .unwrap_or_else(|| (pair.to_string(), "*".to_string()))
+                                })
+                                .collect::<_>()
+                        })
                         .ok(),
-                },
-                _ => Self::None,
+                    leeway: number_from_env_var(&sccache_dist_auth_leeway_env).and_then(|s| s.ok()),
+                }),
+                _ => None,
             }
         }
-        pub fn with_env_or_config(self) -> Self {
+        pub fn with_env_or_config(self, idx: Option<usize>) -> Self {
+            let suf = idx.map(|idx| format!("_{idx}")).unwrap_or_default();
+            let sccache_dist_auth_proxy_token_decode_env =
+                format!("SCCACHE_DIST_AUTH_PROXY_TOKEN_DECODE{suf}");
+            let sccache_dist_auth_audience_env = format!("SCCACHE_DIST_AUTH_AUDIENCE{suf}");
+            let sccache_dist_auth_issuer_env = format!("SCCACHE_DIST_AUTH_ISSUER{suf}");
+            let sccache_dist_auth_jwks_url_env = format!("SCCACHE_DIST_AUTH_JWKS_URL{suf}");
+            let sccache_dist_auth_claims_env = format!("SCCACHE_DIST_AUTH_CLAIMS{suf}");
+            let sccache_dist_auth_leeway_env = format!("SCCACHE_DIST_AUTH_LEEWAY{suf}");
             match self {
                 Self::JwtDecoder {
                     audience,
+                    claims,
                     issuer,
                     jwks_url,
-                    claims,
+                    leeway,
                 } => {
-                    let audience = env::var("SCCACHE_DIST_AUTH_AUDIENCE")
+                    let audience = env::var(&sccache_dist_auth_audience_env)
+                        .map(|audiences| {
+                            audiences
+                                .split(" ")
+                                .map(|s| s.to_string())
+                                .collect::<Vec<_>>()
+                        })
                         .ok()
                         .or((!audience.is_empty()).then_some(audience));
 
-                    let issuer = env::var("SCCACHE_DIST_AUTH_ISSUER")
+                    let issuer = env::var(&sccache_dist_auth_issuer_env)
+                        .map(|issuers| {
+                            issuers
+                                .split(" ")
+                                .map(|s| s.to_string())
+                                .collect::<Vec<_>>()
+                        })
                         .ok()
                         .or((!issuer.is_empty()).then_some(issuer));
 
-                    let jwks_url = env::var("SCCACHE_DIST_AUTH_JWKS_URL")
+                    let jwks_url = env::var(&sccache_dist_auth_jwks_url_env)
+                        .map(|jwks_urls| {
+                            jwks_urls
+                                .split(" ")
+                                .map(|s| s.to_string())
+                                .collect::<Vec<_>>()
+                        })
                         .ok()
                         .or((!jwks_url.is_empty()).then_some(jwks_url));
 
-                    let claims = env::var("SCCACHE_DIST_AUTH_CLAIMS")
-                        .map(|claims| claims.split(" ").map(|s| s.to_string()).collect::<Vec<_>>())
+                    let claims = env::var(&sccache_dist_auth_claims_env)
+                        .map(|claims| {
+                            claims
+                                .split(" ")
+                                .map(|pair| {
+                                    pair.split_once("=")
+                                        .map(|(key, val)| (key.to_string(), val.to_string()))
+                                        .unwrap_or_else(|| (pair.to_string(), "*".to_string()))
+                                })
+                                .collect::<_>()
+                        })
                         .ok()
                         .or(claims);
 
+                    let leeway = number_from_env_var(&sccache_dist_auth_leeway_env)
+                        .and_then(|s| s.ok())
+                        .or(leeway);
+
                     Self::JwtDecoder {
-                        audience: audience.expect("SCCACHE_DIST_AUTH_AUDIENCE must be set when SCCACHE_DIST_AUTH_PROXY_TOKEN_DECODE=jwt"),
-                        issuer: issuer.expect("SCCACHE_DIST_AUTH_ISSUER must be set when SCCACHE_DIST_AUTH_PROXY_TOKEN_DECODE=jwt"),
-                        jwks_url: jwks_url.expect("SCCACHE_DIST_AUTH_JWKS_URL must be set when SCCACHE_DIST_AUTH_PROXY_TOKEN_DECODE=jwt"),
+                        audience: audience.unwrap_or_else(|| panic!("{sccache_dist_auth_audience_env} must be set when {sccache_dist_auth_proxy_token_decode_env}=jwt")),
                         claims,
+                        issuer: issuer.unwrap_or_else(|| panic!("{sccache_dist_auth_issuer_env} must be set when {sccache_dist_auth_proxy_token_decode_env}=jwt")),
+                        jwks_url: jwks_url.unwrap_or_else(|| panic!("{sccache_dist_auth_jwks_url_env} must be set when {sccache_dist_auth_proxy_token_decode_env}=jwt")),
+                        leeway,
                     }
                 }
                 _ => Self::None,
@@ -2162,7 +2328,7 @@ pub mod scheduler {
     #[serde(default)]
     #[serde(deny_unknown_fields)]
     pub struct FileConfig {
-        pub client_auth: ClientAuth,
+        pub client_auth: Option<Vec<ClientAuth>>,
         #[serde(default = "Config::default_heartbeat_interval_ms")]
         pub heartbeat_interval_ms: u64,
         #[serde(default = "Config::default_job_time_limit")]
@@ -2188,7 +2354,7 @@ pub mod scheduler {
     impl Default for FileConfig {
         fn default() -> Self {
             Self {
-                client_auth: ClientAuth::Insecure,
+                client_auth: Some(vec![ClientAuth::Insecure]),
                 heartbeat_interval_ms: Config::default_heartbeat_interval_ms(),
                 job_time_limit: Config::default_job_time_limit(),
                 jobs: CacheConfigs::default(),
@@ -2207,7 +2373,7 @@ pub mod scheduler {
 
     #[derive(Debug)]
     pub struct Config {
-        pub client_auth: ClientAuth,
+        pub client_auth: Vec<ClientAuth>,
         pub heartbeat_interval_ms: u64,
         pub job_time_limit: u32,
         pub jobs: Vec<CacheType>,
@@ -2278,7 +2444,37 @@ pub mod scheduler {
                 })
                 .unwrap_or_default();
 
-            let client_auth = client_auth.with_env_or_config()?;
+            let client_auth = {
+                let client_auth = client_auth.unwrap_or_default();
+                let client_auth = if client_auth.is_empty() {
+                    vec![ClientAuth::Insecure]
+                } else {
+                    client_auth
+                };
+
+                let client_auth_from_env_count = env::vars()
+                    .filter(|(key, _)| key.starts_with("SCCACHE_DIST_AUTH_TYPE"))
+                    .count();
+
+                let client_auth = if client_auth_from_env_count > client_auth.len() {
+                    let num_from_env = client_auth_from_env_count - client_auth.len();
+                    [
+                        client_auth,
+                        (0..num_from_env)
+                            .map(|_| ClientAuth::Insecure)
+                            .collect::<Vec<_>>(),
+                    ]
+                    .concat()
+                } else {
+                    client_auth
+                };
+
+                client_auth
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, cfg)| cfg.with_env_or_config((idx > 0).then_some(idx)))
+                    .try_collect()?
+            };
 
             let jobs = CacheConfigs::default()
                 .merge(jobs)
@@ -2347,7 +2543,7 @@ pub mod scheduler {
     impl From<Config> for FileConfig {
         fn from(scheduler_config: Config) -> Self {
             Self {
-                client_auth: scheduler_config.client_auth,
+                client_auth: Some(scheduler_config.client_auth),
                 heartbeat_interval_ms: scheduler_config.heartbeat_interval_ms,
                 job_time_limit: scheduler_config.job_time_limit,
                 jobs: scheduler_config.jobs.into(),
@@ -2367,7 +2563,9 @@ pub mod scheduler {
     impl From<FileConfig> for Config {
         fn from(scheduler_config: FileConfig) -> Self {
             Self {
-                client_auth: scheduler_config.client_auth,
+                client_auth: scheduler_config
+                    .client_auth
+                    .unwrap_or_else(|| vec![ClientAuth::Insecure]),
                 heartbeat_interval_ms: scheduler_config.heartbeat_interval_ms,
                 job_time_limit: scheduler_config.job_time_limit,
                 jobs: scheduler_config.jobs.into(),

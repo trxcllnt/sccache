@@ -64,7 +64,7 @@ fn sccache_scheduler_cfg(message_broker: &MessageBroker) -> SchedulerConfig {
     let scheduler_port = SCHEDULER_PORT.fetch_add(1, Ordering::SeqCst);
 
     SchedulerConfig {
-        client_auth: ClientAuth::Insecure,
+        client_auth: vec![ClientAuth::Insecure],
         message_broker: Some(message_broker.clone()),
         public_addr: SocketAddr::from(([0, 0, 0, 0], scheduler_port)),
         jobs: vec![CacheType::Disk(DiskCacheConfig {

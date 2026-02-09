@@ -145,7 +145,10 @@ fn run(command: Command) -> Result<()> {
                     }
 
                     // Create ClientAuthCheck and bail on Err before registering with Celery
-                    let client_auth_check = new_client_auth_check(client_auth).await?;
+                    let client_auth_check = futures::future::try_join_all(
+                        client_auth.into_iter().map(new_client_auth_check),
+                    )
+                    .await?;
 
                     let tasks = tasks::Tasks::scheduler(
                         &scheduler_id,
@@ -294,7 +297,7 @@ async fn init_builder(
             build::DockerBuilder::new(job_queue.clone())
                 .await
                 .context("Docker builder failed to start")?,
-        )),
+        ) as Arc<dyn BuilderIncoming>),
         #[cfg(not(target_os = "freebsd"))]
         BuilderType::Overlay {
             bwrap_path,
@@ -303,7 +306,7 @@ async fn init_builder(
             build::OverlayBuilder::new(bwrap_path, build_dir, job_queue.clone())
                 .await
                 .context("Overlay builder failed to start")?,
-        )),
+        ) as Arc<dyn BuilderIncoming>),
         #[cfg(target_os = "freebsd")]
         BuilderType::Pot {
             pot_fs_root,
@@ -320,7 +323,7 @@ async fn init_builder(
             )
             .await
             .context("Pot builder failed to start")?,
-        )),
+        ) as Arc<dyn BuilderIncoming>),
         _ => bail!(
             "Builder type `{}` not supported on this platform",
             format!("{config:?}")
