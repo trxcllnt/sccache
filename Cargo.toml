@@ -51,7 +51,7 @@ dunce = "1.0.5"
 encoding_rs = "0.8"
 env_logger = "0.11"
 filetime = "0.2"
-flate2 = { version = "1.1", optional = true, default-features = false, features = [
+flate2 = { version = "1.1", default-features = false, features = [
   "rust_backend",
 ] }
 fs-err = "3"
@@ -238,7 +238,6 @@ vendored-openssl = [
 unstable = []
 # Enables distributed support in the sccache client
 dist-client = [
-  "flate2",
   "http-body-util",
   "hyper",
   "hyper-util",
@@ -254,7 +253,6 @@ dist-server = [
   "axum",
   "celery",
   "cloud-storage",
-  "flate2",
   "hyper-rustls",
   "hyper-util",
   "hyper",
