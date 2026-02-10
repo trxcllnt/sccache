@@ -1496,7 +1496,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                     // CCOMPDIR       Directory containing the C compiler =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/bin/tools
                     // CPPCOMPDIR     Directory containing the C compiler =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/bin/tools
                     // COMPINCDIRFULL                                     =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/include /opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/include-stdexec
-                    // CUDAROOT                                           =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/cuda/12.9
+                    // DCUDADIR                                           =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/cuda/12.9
                     // CUDADIR                                            =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/cuda/12.9/bin
                     // CUDALIBDIR                                         =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/cuda/12.9/lib64
                     // LLVMBINDIR     Directory containing LLVM tools     =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/share/llvm/bin
@@ -1512,7 +1512,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                 "CPPCOMPDIR    " | // .
                                 "CUDADIR       " | // .
                                 "CUDALIBDIR    " | // .
-                                "CUDAROOT      " | // .
+                                "DCUDADIR      " | // .
                                 "DEFCPPINC     " | // .
                                 "DEFSTDINC     " | // .
                                 "GCCINC        " | // .
@@ -1591,7 +1591,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                     // NVHPC uses internal LLVM header files, so add them.
                                     contents.extend_from_slice(dirs.as_slice());
                                 }
-                                "CUDAROOT      " => {
+                                "DCUDADIR      " => {
                                     files.extend(dirs.iter().map(|root| root.join("nvvm/bin/cicc")));
                                     files.extend(
                                         dirs.iter().flat_map(|root| {
