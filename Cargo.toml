@@ -29,6 +29,11 @@ strip = true
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 ar = "0.9"
+async-compression = { version = "0.4", features = [
+  "futures-io",
+  "gzip",
+  "zlib",
+] }
 async-stream = "0.3"
 async-trait = "0.1"
 backon = { version = "1", default-features = false, features = [
@@ -141,11 +146,6 @@ zip = { version = "0.6", default-features = false }
 zstd = "0.13"
 
 # dist-server only
-async-compression = { version = "0.4", features = [
-  "futures-io",
-  "gzip",
-  "zlib",
-], optional = true }
 axum = { version = "0.7", features = ["http2", "macros"], optional = true }
 axum-extra = { version = "0.9.6", features = ["typed-header"], optional = true }
 axum-server = { version = "0.7", default-features = false, optional = true }
@@ -249,7 +249,6 @@ dist-client = [
 ]
 # Enables the sccache-dist binary
 dist-server = [
-  "async-compression",
   "axum-extra",
   "axum-server",
   "axum",
