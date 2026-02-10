@@ -1195,6 +1195,10 @@ impl Timestamp {
             nanoseconds,
         }
     }
+
+    pub fn to_utc(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        Some(chrono::DateTime::from_timestamp(self.seconds, self.nanoseconds)?.to_utc())
+    }
 }
 
 /// Adds a fallback for trying Unix's `ctime` semantics on Windows systems.

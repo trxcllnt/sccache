@@ -29,8 +29,7 @@ use harness::{
 use itertools::Itertools;
 use paste::paste;
 use sccache::compiler::{Language, PreprocessorCacheEntry};
-use std::ffi::OsString;
-use std::path::Path;
+use std::{ffi::OsString, io::Read, path::Path};
 
 fn assert_num_preprocessor_cache_entries_and_results(
     entries: &[(OsString, PreprocessorCacheEntry)],
@@ -104,6 +103,12 @@ fn assert_preprocessor_cache_entries_result_orders_changed(
     }
 }
 
+fn deflate(data: Vec<u8>) -> std::io::Result<Vec<u8>> {
+    let mut buf = vec![];
+    flate2::read::ZlibDecoder::new(&data[..]).read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
 fn test_preprocessor_cache_mode_single_entry_multiple_hashes(
     client: &SccacheClient,
     compiler: &Compiler,
@@ -157,7 +162,7 @@ fn test_preprocessor_cache_mode_single_entry_multiple_hashes(
             .pop()
             .expect("The preprocessor cache should have one entry");
 
-        PreprocessorCacheEntry::read(&fs::read(preprocessor_cache_entry.path())?)
+        PreprocessorCacheEntry::read(&deflate(fs::read(preprocessor_cache_entry.path())?)?)
     };
 
     let mut expected_stats = client.stats().unwrap();
@@ -363,7 +368,7 @@ fn test_preprocessor_cache_mode_time_macros(
                 let preprocessor_key = path.components().next_back().unwrap();
                 Ok((
                     preprocessor_key.as_os_str().to_owned(),
-                    PreprocessorCacheEntry::read(&fs::read(path)?)?,
+                    PreprocessorCacheEntry::read(&deflate(fs::read(path)?)?)?,
                 ))
             })
     };
@@ -663,7 +668,7 @@ fn test_preprocessor_cache_mode_date_macros(
                 let preprocessor_key = path.components().next_back().unwrap();
                 Ok((
                     preprocessor_key.as_os_str().to_owned(),
-                    PreprocessorCacheEntry::read(&fs::read(path)?)?,
+                    PreprocessorCacheEntry::read(&deflate(fs::read(path)?)?)?,
                 ))
             })
     };
@@ -1180,7 +1185,7 @@ fn test_preprocessor_cache_mode_timestamp_macros(
                 let preprocessor_key = path.components().next_back().unwrap();
                 Ok((
                     preprocessor_key.as_os_str().to_owned(),
-                    PreprocessorCacheEntry::read(&fs::read(path)?)?,
+                    PreprocessorCacheEntry::read(&deflate(fs::read(path)?)?)?,
                 ))
             })
     };

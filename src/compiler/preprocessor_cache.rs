@@ -34,6 +34,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    cache::{Cache, Storage},
     errors::*,
     lru_disk_cache::{LruCache, lru_cache},
     util::{Digest, HashToDigest, MetadataCtimeExt, OsStrExt, Timestamp, decode_path, encode_path},
@@ -56,8 +57,43 @@ pub struct PreprocessorCacheEntry {
 
 impl std::fmt::Debug for PreprocessorCacheEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let results = self.iter().rev().collect::<Vec<_>>();
-        write!(f, "PreprocessorCacheEntry {{ results: {results:?} }}")
+        writeln!(f, "PreprocessorCacheEntry {{")?;
+        writeln!(f, "  \"version\": {FORMAT_VERSION},")?;
+        writeln!(f, "  \"results\": [")?;
+        for (key, entries) in self.iter().rev() {
+            writeln!(f, "    {{")?;
+            writeln!(f, "      \"object_key\": {key:?},")?;
+            writeln!(f, "      \"dependencies\": [")?;
+            for entry in entries {
+                writeln!(f, "        {{")?;
+                writeln!(f, "          \"path\": {:?},", entry.path)?;
+                writeln!(f, "          \"digest\": {:?},", entry.digest)?;
+                writeln!(f, "          \"file_size\": {:?},", entry.file_size)?;
+                writeln!(
+                    f,
+                    "          \"mtime\": {:?},",
+                    entry
+                        .mtime
+                        .and_then(|t| t.to_utc())
+                        .map(|t| t.to_string())
+                        .unwrap_or_default()
+                )?;
+                writeln!(
+                    f,
+                    "          \"ctime\": {:?},",
+                    entry
+                        .ctime
+                        .and_then(|t| t.to_utc())
+                        .map(|t| t.to_string())
+                        .unwrap_or_default()
+                )?;
+                writeln!(f, "        }},")?;
+            }
+            writeln!(f, "      ]")?;
+            writeln!(f, "    }},")?;
+        }
+        writeln!(f, "  ]")?;
+        write!(f, "}}")
     }
 }
 
@@ -72,6 +108,65 @@ impl PreprocessorCacheEntry {
         Self {
             results: LruCache::new(MAX_PREPROCESSOR_CACHE_ENTRIES),
         }
+    }
+
+    /// Return the preprocessor cache entry for a given preprocessor key if it exists in storage.
+    /// Only applicable when using preprocessor cache mode.
+    pub async fn get(storage: &dyn Storage, key: &str) -> Result<Cache<PreprocessorCacheEntry>> {
+        use async_compression::futures::bufread::ZlibDecoder as ZlibDecoderAsync;
+        use bytes::{Buf, Bytes};
+        use futures::{AsyncReadExt, TryFutureExt};
+
+        let res = storage
+            .get(&format!("{key}.zz"))
+            .and_then(|res| async {
+                match res {
+                    Cache::Miss => Err(anyhow!("compressed miss")),
+                    Cache::Hit(buf) => {
+                        let reader = futures::io::AllowStdIo::new(&buf[..]);
+                        let mut reader = ZlibDecoderAsync::new(reader);
+                        let mut out = vec![];
+                        reader
+                            .read_to_end(&mut out)
+                            .await
+                            .map_err(anyhow::Error::new)?;
+                        Ok(Cache::Hit(Bytes::from(out)))
+                    }
+                }
+            })
+            .or_else(|_| storage.get(key))
+            .await;
+
+        match res {
+            Err(err) => Err(err),
+            Ok(Cache::Miss) => Ok(Cache::Miss),
+            Ok(Cache::Hit(buf)) => Ok(Cache::Hit(
+                PreprocessorCacheEntry::deserialize_from(buf.reader()).await?,
+            )),
+        }
+    }
+
+    /// Write a preprocessor cache entry for the given preprocessor key to storage,
+    /// overwriting if it exists.
+    /// Only applicable when using preprocessor cache mode.
+    pub async fn put(self, storage: &dyn Storage, key: &str) -> Result<()> {
+        use bytes::{BufMut, BytesMut};
+        use flate2::write::ZlibEncoder as ZlibEncoderSync;
+
+        let buf = tokio::task::spawn_blocking(move || {
+            let mut writer =
+                ZlibEncoderSync::new(BytesMut::new().writer(), flate2::Compression::best());
+
+            self.serialize_to(&mut writer)?;
+
+            writer
+                .finish()
+                .map_err(anyhow::Error::new)
+                .map(|writer| writer.into_inner().freeze())
+        })
+        .await??;
+
+        storage.put(&format!("{key}.zz"), buf).await.map(|_| ())
     }
 
     fn deserialize<R: std::io::Read>(reader: R) -> Result<Self> {

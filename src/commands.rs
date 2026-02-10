@@ -16,7 +16,7 @@ use crate::cache::StorageKind;
 use crate::client::{ServerConnection, connect_to_server, connect_with_retry};
 use crate::cmdline::{Command, StatsFormat};
 use crate::compiler::ColorMode;
-use crate::config::{Config, default_disk_cache_dir};
+use crate::config::Config;
 use crate::jobserver::Client;
 use crate::mock_command::{CommandChild, CommandCreatorSync, ProcessCommandCreator, RunCommand};
 use crate::protocol::{Compile, CompileFinished, CompileResponse, Request, Response};
@@ -36,7 +36,6 @@ use std::time::Duration;
 use strip_ansi_escapes::Writer;
 use tokio::io::AsyncReadExt;
 use tokio::runtime::Runtime;
-use walkdir::WalkDir;
 use which::which_in;
 
 use crate::{debug_if_trace, errors::*};
@@ -671,23 +670,29 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 StatsFormat::Json => serde_json::to_writer(&mut io::stdout(), &stats)?,
             }
         }
-        Command::DebugPreprocessorCacheEntries => {
+        Command::DebugPreprocessorCacheEntries(key) => {
             trace!("Command::DebugPreprocessorCacheEntries");
-            let entries_dir = default_disk_cache_dir().join("preprocessor");
-            for entry in WalkDir::new(entries_dir).sort_by_file_name().into_iter() {
-                let preprocessor_cache_entry_file = entry?;
-                let path = preprocessor_cache_entry_file.path();
-                if !path.is_file() {
-                    continue;
+            let config = Config::load()?;
+            let runtime = Runtime::new()?;
+            runtime.block_on(async {
+                let storage = StorageKind::Preprocessor.create(&config.caches).await?;
+                match crate::compiler::PreprocessorCacheEntry::get(storage.as_ref(), &key).await {
+                    Err(err) => {
+                        eprintln!("Err retrieving preprocessor entry for key {key:?}: {err:#?}");
+                    }
+                    Ok(crate::cache::Cache::Miss) => {
+                        eprintln!("No preprocessor entry for key {key:?}");
+                    }
+                    Ok(crate::cache::Cache::Hit(entry)) => {
+                        println!("=========================");
+                        println!("Showing preprocessor entry for key {key:?}");
+                        println!("{entry:?}");
+                        println!("=========================");
+                    }
                 }
-                println!("=========================");
-                println!("Showing preprocessor entry file {}", &path.display());
-                let contents = std::fs::read(path)?;
-                let preprocessor_cache_entry =
-                    crate::compiler::PreprocessorCacheEntry::read(&contents)?;
-                println!("{preprocessor_cache_entry:#?}");
-                println!("=========================");
-            }
+
+                Ok::<(), anyhow::Error>(())
+            })?
         }
         Command::InternalStartServer => {
             trace!("Command::InternalStartServer");
