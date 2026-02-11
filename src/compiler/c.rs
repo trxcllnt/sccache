@@ -1496,14 +1496,19 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                     // CCOMPDIR       Directory containing the C compiler =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/bin/tools
                     // CPPCOMPDIR     Directory containing the C compiler =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/bin/tools
                     // COMPINCDIRFULL                                     =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/include /opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/include-stdexec
-                    // DCUDADIR                                           =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/cuda/12.9
+                    // CUDAROOT       (sometimes not set)                 =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/cuda/12.9
+                    // DCUDADIR                                           =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/cuda/
+                    // USECUDAROOT                                        =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/cuda/
                     // CUDADIR                                            =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/cuda/12.9/bin
                     // CUDALIBDIR                                         =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/cuda/12.9/lib64
                     // LLVMBINDIR     Directory containing LLVM tools     =/opt/nvidia/hpc_sdk/Linux_x86_64/25.7/compilers/share/llvm/bin
+                    // DEFCUDAVERSIONVAL                                  =12.9
+                    // DEFCUDAVERSION                                     =12.9
 
-                    info.lines()
+                    let lines = info
+                        .lines()
                         .try_filter(|line| future::ready(line.len() >= 14 && line.contains('=')))
-                        .try_filter_map(|mut line| {
+                        .try_filter_map(|line| {
                             future::ok(match &line[0..14] {
                                 "CCOMPDIR      " | // .
                                 "COMPBIN       " | // .
@@ -1512,6 +1517,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                 "CPPCOMPDIR    " | // .
                                 "CUDADIR       " | // .
                                 "CUDALIBDIR    " | // .
+                                "CUDAROOT      " | // .
                                 "DCUDADIR      " | // .
                                 "DEFCPPINC     " | // .
                                 "DEFSTDINC     " | // .
@@ -1520,26 +1526,73 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                 "LLVMBINDIR    " | // .
                                 "NVCOMPILER    " | // .
                                 "STDINC        " | // .
-                                "SYSTEMINC     " => {
-                                    line.find('=')
-                                        .map(|idx| {
-                                            line.split_off(idx + 1)
-                                                .trim()
-                                                .split(' ')
-                                                .map(PathBuf::from)
-                                                .collect::<Vec<_>>()
-                                        })
-                                        .map(|dirs| (line, dirs))
+                                "SYSTEMINC     " | // .
+                                "USECUDAROOT   " | // .
+                                "DEFCUDAVERSION" => {
+                                    Some(line)
                                 }
                                 _ => None,
                             })
                         })
-                        .try_filter_map(|(line, dirs)| {
+                        .try_collect::<Vec<_>>()
+                        .await?;
+
+                    // Search for the CUDA version first
+                    let cuda_version = lines.iter().find_map(|line| match &line[0..14] {
+                        "DEFCUDAVERSION" => {
+                            line.split_once('=').map(|(_, ver)| ver.trim().to_owned())
+                        }
+                        _ => None,
+                    });
+
+                    lines
+                        .into_iter()
+                        .filter_map(|line| {
+                            let name_and_dirs = line.split_once('=').map(|(name, dirs)| {
+                                // `name` is the left-hand side of the '=', i.e. "NAME    Description of NAME "
+                                //
+                                //  There's always a space after NAME so it's safe to use `split_once(' ')`,
+                                //  but I'm being defensive in case a future version of NVHPC emits lines
+                                //  without any spaces between the name and value (like "NAME=/foo/bar")
+                                //
+                                // `dirs` is the right-hand side of the '=', i.e. "/foo/bar /foo/baz"
+                                let (name, _) = name.split_once(' ').unwrap_or((name, ""));
+                                (
+                                    name.trim().to_owned(),
+                                    dirs.trim()
+                                        .split(' ')
+                                        .map(|s| s.trim())
+                                        .map(PathBuf::from)
+                                        .collect::<Vec<_>>(),
+                                )
+                            });
+
+                            name_and_dirs.and_then(|(name, dirs)| {
+                                match &name[..] {
+                                    "DCUDADIR" | "USECUDAROOT" => {
+                                        // Append the CUDA version to these paths since they don't have them.
+                                        // This is important if CUDAROOT isn't set.
+                                        cuda_version.as_ref().map(|cuda_version| {
+                                            (
+                                                name,
+                                                dirs.into_iter()
+                                                    .flat_map(|dir| {
+                                                        [dir.as_path().join(cuda_version), dir]
+                                                    })
+                                                    .collect::<Vec<_>>(),
+                                            )
+                                        })
+                                    }
+                                    _ => Some((name, dirs)),
+                                }
+                            })
+                        })
+                        .map(|(name, dirs)| {
                             let mut contents = vec![];
                             let mut files = vec![];
 
-                            match &line[0..14] {
-                                "NVCOMPILER    " => {
+                            match &name[..] {
+                                "NVCOMPILER" => {
                                     files.extend(dirs.iter().flat_map(|root| {
                                         use crate::util::OsStrExt;
                                         walkdir::WalkDir::new(root)
@@ -1547,16 +1600,19 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                             .same_file_system(true)
                                             .into_iter()
                                             .filter_map_ok(|e| {
-                                                if e.file_type().is_file()
-                                                {
+                                                if e.file_type().is_file() {
                                                     let name = e.file_name();
                                                     None
                                                         // rcfiles
                                                         .or(name.ends_with("rc").then_some(true))
                                                         .or(name.ends_with(".bc").then_some(true))
                                                         // mpic++-wrapper-data.txt
-                                                        .or(name.ends_with("-wrapper-data.txt").then_some(true))
-                                                        .or(name.ends_with("help-opal-wrapper.txt").then_some(true))
+                                                        .or(name
+                                                            .ends_with("-wrapper-data.txt")
+                                                            .then_some(true))
+                                                        .or(name
+                                                            .ends_with("help-opal-wrapper.txt")
+                                                            .then_some(true))
                                                         .map(|_| e.into_path())
                                                 } else {
                                                     None
@@ -1565,10 +1621,10 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                             .filter_map(|r| r.ok())
                                     }));
                                 }
-                                "COMPBIN       " => {
+                                "COMPBIN" => {
                                     contents.extend(dirs.iter().map(|root| root.join("rcfiles")));
                                 }
-                                "COMPLIB       " => {
+                                "COMPLIB" => {
                                     files.extend(dirs.iter().flat_map(|root| {
                                         [
                                             "acc_init_link_cuda.o",
@@ -1582,8 +1638,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                         .map(|name| root.join(name))
                                     }));
                                 }
-                                "CCOMPDIR      " | // .
-                                "CPPCOMPDIR    " => {
+                                "CCOMPDIR" | "CPPCOMPDIR" => {
                                     // Add everything under `compilers/bin/tools`
                                     contents.extend_from_slice(dirs.as_slice());
                                 }
@@ -1591,20 +1646,16 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                     // NVHPC uses internal LLVM header files, so add them.
                                     contents.extend_from_slice(dirs.as_slice());
                                 }
-                                "DCUDADIR      " => {
-                                    files.extend(dirs.iter().map(|root| root.join("nvvm/bin/cicc")));
-                                    files.extend(
-                                        dirs.iter().flat_map(|root| {
-                                            [
-                                                "include/cuda.h",
-                                                "nvvm/lib64/libnvvm.so"
-                                            ]
+                                "CUDAROOT" | "DCUDADIR" | "USECUDAROOT" => {
+                                    files
+                                        .extend(dirs.iter().map(|root| root.join("nvvm/bin/cicc")));
+                                    files.extend(dirs.iter().flat_map(|root| {
+                                        ["include/cuda.h", "nvvm/lib64/libnvvm.so"]
                                             .iter()
                                             .map(|name| root.join(name))
-                                        })
-                                    );
+                                    }));
                                 }
-                                "CUDADIR       " => {
+                                "CUDADIR" => {
                                     files.extend(dirs.iter().flat_map(|root| {
                                         [
                                             "bin2c",
@@ -1619,8 +1670,8 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                     }));
                                     files.extend(dirs.iter().map(|root| root.join("nvcc.profile")));
                                 }
-                                "CUDALIBDIR    " => {}
-                                "LLVMBINDIR    " => {
+                                "CUDALIBDIR" => {}
+                                "LLVMBINDIR" => {
                                     files.extend(dirs.iter().flat_map(|root| {
                                         ["llc", "opt", "llvm-as", "llvm-link", "llvm-mc"]
                                             .iter()
@@ -1630,17 +1681,14 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                 _ => {}
                             }
 
-                            future::ok(Some((contents, dirs, files)))
+                            (contents, dirs, files)
                         })
-                        .try_fold((vec![], vec![], vec![]), |mut acc, res| {
-                            future::ok({
-                                acc.0.extend(res.0);
-                                acc.1.extend(res.1);
-                                acc.2.extend(res.2);
-                                acc
-                            })
+                        .fold((vec![], vec![], vec![]), |mut acc, res| {
+                            acc.0.extend(res.0);
+                            acc.1.extend(res.1);
+                            acc.2.extend(res.2);
+                            acc
                         })
-                        .await?
                 };
 
                 if let Ok(as_path) = which::which("as") {
