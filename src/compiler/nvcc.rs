@@ -268,6 +268,11 @@ impl CCompilerImpl for Nvcc {
 
         match parsed_args {
             CompilerArguments::Ok(mut parsed_args) => {
+                // Drop jobserver flags
+                parsed_args.unhashed_args.retain(|arg| {
+                    !matches!(arg.to_str(), Some("--jobserver") | Some("-jobserver"))
+                });
+
                 let compile_flag = parsed_args.compilation_flag.as_os_str().into();
 
                 match compile_flag {
@@ -2217,6 +2222,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("--gpu-architecture", OsString, CanBeSeparated(b'='), PassThrough),
     take_arg!("--gpu-code", OsString, CanBeSeparated(b'='), PassThrough),
     take_arg!("--include-path", PathBuf, CanBeSeparated(b'='), PreprocessorArgumentPath),
+    flag!("--jobserver", UnhashedFlag),
     flag!("--keep", UnhashedFlag),
     take_arg!("--keep-dir", OsString, CanBeSeparated(b'='), Unhashed),
     take_arg!("--linker-options", OsString, CanBeSeparated(b'='), PassThrough),
@@ -2276,6 +2282,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     flag!("-gen-opt-lto", PassThroughFlag),
     take_arg!("-gencode", OsString, CanBeSeparated(b'='), PassThrough),
     take_arg!("-isystem", PathBuf, CanBeSeparated(b'='), PreprocessorArgumentPath),
+    flag!("-jobserver", UnhashedFlag),
     flag!("-keep", UnhashedFlag),
     take_arg!("-keep-dir", OsString, CanBeSeparated(b'='), Unhashed),
     flag!("-lto", PassThroughFlag),
