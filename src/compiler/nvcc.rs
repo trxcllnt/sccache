@@ -30,7 +30,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use fs_err as fs;
-use futures::{AsyncBufReadExt, FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
+use futures::{FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
 use itertools::Itertools;
 use regex::Regex;
 use std::collections::HashMap;
@@ -38,7 +38,6 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tempfile::TempPath;
-use tokio_util::compat::TokioAsyncReadCompatExt;
 use which::which_in;
 
 use crate::errors::*;
@@ -1613,6 +1612,8 @@ where
     F: Fn(&str, &[String]) -> bool,
     T: CommandCreatorSync,
 {
+    use std::io::BufRead;
+
     let mut nvcc_dryrun_cmd = creator.clone().new_command_sync(executable);
 
     nvcc_dryrun_cmd
@@ -1626,18 +1627,27 @@ where
         output_path.display()
     );
 
+    let mut output = run_input_output(nvcc_dryrun_cmd, None).await?;
+
+    if !output.status.success() {
+        // nvcc on windows outputs errors on stdout
+        if cfg!(windows) {
+            output.stderr = output.stdout;
+        }
+        output.stdout = vec![];
+        bail!(ProcessError(output));
+    }
+
     #[cfg(unix)]
-    let (status, errors, output) =
-        crate::util::run_with_input_buffer_stdout(nvcc_dryrun_cmd, None).await?;
+    let lines = std::io::BufReader::new(&output.stderr[..]).lines();
+
     #[cfg(windows)]
-    let (status, output, errors) =
-        crate::util::run_with_input_buffer_stderr(nvcc_dryrun_cmd, None).await?;
+    let lines = std::io::BufReader::new(&output.stdout[..]).lines();
 
     let mut dryrun_env_vars = Vec::<(OsString, OsString)>::new();
     let mut dryrun_env_vars_re_map = HashMap::<String, regex::Regex>::new();
 
-    let output = futures::io::BufReader::new(output.compat())
-        .lines()
+    let lines = futures::stream::iter(lines)
         .map_err(anyhow::Error::new)
         .try_filter_map(|line| {
             // Select lines that match the `#$ ` prefix from nvcc --dryrun
@@ -1662,20 +1672,9 @@ where
                 }
                 Ok((idx + 1, lines))
             })
-        });
-
-    let (status, (_, output), errors) = futures::future::try_join3(status, output, errors).await?;
-
-    if !status.success() {
-        bail!(ProcessError(
-            std::process::Output {
-                status,
-                stdout: vec![],
-                stderr: errors,
-            }
-            .into()
-        ))
-    }
+        })
+        .await
+        .map(|(_, lines)| lines)?;
 
     for pair in dryrun_env_vars {
         env_vars.splice(
@@ -1688,7 +1687,7 @@ where
         );
     }
 
-    Ok(output)
+    Ok(lines)
 }
 
 fn select_valid_dryrun_lines(re: &Regex, line: &str) -> Option<String> {
