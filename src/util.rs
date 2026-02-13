@@ -614,52 +614,6 @@ where
     ))
 }
 
-fn wait_with_input_buffer_stdout<T>(
-    mut child: T,
-    input: Option<Vec<u8>>,
-) -> Result<(
-    impl std::future::Future<Output = Result<process::ExitStatus>>,
-    impl std::future::Future<Output = Result<Vec<u8>>>, // stdout
-    <T as CommandChild>::E,                             // stderr
-)>
-where
-    T: CommandChild + 'static,
-{
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let stdin = input.and_then(|i| {
-        child.take_stdin().map(|mut stdin| async move {
-            stdin.write_all(&i).await.context("failed to write stdin")
-        })
-    });
-
-    let stdout = child.take_stdout();
-    let stdout = async move {
-        let mut buf = Vec::new();
-        if let Some(mut stdout) = stdout {
-            stdout
-                .read_to_end(&mut buf)
-                .await
-                .context("failed to read stdout")?;
-        }
-        Ok(buf)
-    };
-
-    let stderr = child.take_stderr().unwrap();
-
-    Ok((
-        async move {
-            // Finish writing stdin before waiting, because waiting drops stdin.
-            if let Some(stdin) = stdin {
-                let _ = stdin.await;
-            }
-
-            child.wait().await.context("failed to wait for child")
-        },
-        stdout,
-        stderr,
-    ))
-}
-
 /// If `input`, write it to `child`'s stdin while also reading `child`'s stdout and stderr, then wait on `child` and return its status and output.
 ///
 /// This was lifted from `std::process::Child::wait_with_output` and modified
@@ -823,31 +777,6 @@ where
         .await?;
 
     wait_with_input_buffer_stderr(child, input)
-}
-
-pub async fn run_with_input_buffer_stdout<C>(
-    mut command: C,
-    input: Option<Vec<u8>>,
-) -> Result<(
-    impl std::future::Future<Output = Result<process::ExitStatus>>,
-    impl std::future::Future<Output = Result<Vec<u8>>>, // stdout
-    <C::C as CommandChild>::E,                          // stderr
-)>
-where
-    C: RunCommand,
-{
-    let child = command
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::inherit()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .await?;
-
-    wait_with_input_buffer_stdout(child, input)
 }
 
 /// Write `data` to `writer` with bincode serialization, prefixed by a `u32` length.
