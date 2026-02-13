@@ -392,6 +392,7 @@ impl CCompilerImpl for Nvcc {
             // Gather the nvcc preprocessor subcommands
             // * one preprocessor call for the host (CPU) code
             // * one preprocessor call for device (GPU) code, per device architecture defined by the user
+            trace!("preprocess");
             let commands = select_nvcc_subcommands(
                 creator,
                 executable,
@@ -1627,23 +1628,32 @@ where
         output_path.display()
     );
 
-    let mut output = run_input_output(nvcc_dryrun_cmd, None).await?;
-
-    if !output.status.success() {
-        // nvcc on windows outputs errors on stdout
-        if cfg!(windows) {
-            output.stderr = output.stdout;
+    let lines = match run_input_output(nvcc_dryrun_cmd, None).await {
+        Ok(output) => {
+            #[cfg(unix)]
+            let lines = output.stderr;
+            #[cfg(windows)]
+            let lines = output.stdout;
+            lines
         }
-        output.stdout = vec![];
-        bail!(ProcessError(output));
-    }
+        Err(err) => {
+            match err.downcast::<ProcessError>() {
+                Ok(ProcessError(mut output)) => {
+                    // nvcc on windows outputs errors on stdout
+                    if cfg!(windows) {
+                        output.stderr = output.stdout;
+                    }
+                    output.stdout = vec![];
+                    bail!(ProcessError(output));
+                }
+                Err(err) => {
+                    bail!(err);
+                }
+            }
+        }
+    };
 
-    #[cfg(unix)]
-    let lines = std::io::BufReader::new(&output.stderr[..]).lines();
-
-    #[cfg(windows)]
-    let lines = std::io::BufReader::new(&output.stdout[..]).lines();
-
+    let lines = std::io::BufReader::new(&lines[..]).lines();
     let mut dryrun_env_vars = Vec::<(OsString, OsString)>::new();
     let mut dryrun_env_vars_re_map = HashMap::<String, regex::Regex>::new();
 
