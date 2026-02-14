@@ -66,4 +66,4 @@ SCCACHE_NO_DAEMON=1 \
 SCCACHE_START_SERVER=1 \
 SCCACHE_IDLE_TIMEOUT=0 \
 SCCACHE_CONF="$(pwd)/.devcontainer/.config/sccache/client.conf" \
-    "./target/x86_64-unknown-linux-musl/${BUILD_TYPE}/sccache" | tee sccache.log 2>&1
+    "./target/${CARGO_BUILD_TARGET:-x86_64-unknown-linux-musl}/${BUILD_TYPE}/sccache" | tee sccache.log 2>&1

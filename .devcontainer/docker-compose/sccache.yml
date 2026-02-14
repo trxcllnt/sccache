@@ -31,7 +31,7 @@ services:
       SCCACHE_LOG: "celery=warn,tower_http=info,axum::rejection=trace,sccache=${SCCACHE_LOG:-info}"
     volumes:
       - /tmp/sccache:/sccache:z
-      - ../../target/x86_64-unknown-linux-musl/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
+      - ../../target/${CARGO_BUILD_TARGET:-x86_64-unknown-linux-musl}/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
     command: >
       bash -c "
       sleep 10;
@@ -58,10 +58,10 @@ services:
       SCCACHE_DIST_SERVER_CACHE_DIR: "/sccache/server-1"
       SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE: "10737418240" # 10 GiBytes
       SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT: "http://vector-ingest:9091/metrics/job/server-1"
-      SCCACHE_LOG: "celery=warn,sccache=${SCCACHE_LOG:-debug}"
+      SCCACHE_LOG: "celery=warn,sccache=${SCCACHE_LOG:-trace}"
     volumes:
       - /tmp/sccache:/sccache:z
-      - ../../target/x86_64-unknown-linux-musl/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
+      - ../../target/${CARGO_BUILD_TARGET:-x86_64-unknown-linux-musl}/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
     command: >
       bash -c "
       sleep 10;
@@ -85,7 +85,7 @@ services:
       SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT: "http://vector-ingest:9091/metrics/job/server-2"
     volumes:
       - /tmp/sccache:/sccache:z
-      - ../../target/x86_64-unknown-linux-musl/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
+      - ../../target/${CARGO_BUILD_TARGET:-x86_64-unknown-linux-musl}/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
     command: >
       bash -c "
       sleep 10;
