@@ -991,9 +991,16 @@ impl CompileCommandImpl for NvccCompileCommand {
                         if dst == src || !src.exists() {
                             continue;
                         }
-                        tokio::fs::rename(src, dst)
-                            .await
-                            .map_err(anyhow::Error::new)?;
+                        match tokio::fs::rename(&src, &dst).await {
+                            Ok(_) => {}
+                            Err(err) => match err.kind() {
+                                std::io::ErrorKind::CrossesDevices => {
+                                    tokio::fs::copy(&src, &dst).await?;
+                                    tokio::fs::remove_file(&src).await?;
+                                }
+                                _ => bail!(err),
+                            },
+                        }
                     }
 
                     // Move intermediate files to `--keep-dir`
@@ -1005,9 +1012,16 @@ impl CompileCommandImpl for NvccCompileCommand {
                             if dst == src || !src.exists() {
                                 continue;
                             }
-                            tokio::fs::rename(src, dst)
-                                .await
-                                .map_err(anyhow::Error::new)?;
+                            match tokio::fs::rename(&src, &dst).await {
+                                Ok(_) => {}
+                                Err(err) => match err.kind() {
+                                    std::io::ErrorKind::CrossesDevices => {
+                                        tokio::fs::copy(&src, &dst).await?;
+                                        tokio::fs::remove_file(&src).await?;
+                                    }
+                                    _ => bail!(err),
+                                },
+                            }
                         }
                     }
                 }
