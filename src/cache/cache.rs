@@ -519,7 +519,8 @@ impl PreprocessorCacheModeConfig {
     feature = "redis",
     feature = "s3",
     feature = "webdav",
-    feature = "oss"
+    feature = "oss",
+    feature = "cos"
 ))]
 mod operator {
     use super::*;
@@ -599,7 +600,8 @@ mod operator {
     feature = "redis",
     feature = "s3",
     feature = "webdav",
-    feature = "oss"
+    feature = "oss",
+    feature = "cos"
 ))]
 #[async_trait]
 impl Storage for opendal::Operator {
@@ -707,6 +709,7 @@ impl Storage for opendal::Operator {
     feature = "s3",
     feature = "webdav",
     feature = "oss",
+    feature = "cos",
     test
 ))]
 /// Normalize key `abcdef` into `a/b/c/abcdef`
