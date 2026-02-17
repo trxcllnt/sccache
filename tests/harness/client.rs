@@ -73,6 +73,7 @@ pub fn sccache_client_cfg(data_dir: &Path, preprocessor_cache_mode: bool) -> Fil
             s3: None,
             webdav: None,
             oss: None,
+            cos: None,
         },
         dist: DistConfig {
             auth: Default::default(), // dangerously_insecure

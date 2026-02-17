@@ -191,6 +191,7 @@ enum TieredCacheOrder {
     Azure = 6,
     Webdav = 7,
     Oss = 8,
+    Cos = 9,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -539,6 +540,31 @@ impl OSSCacheConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct COSCacheConfig {
+    #[serde(default)]
+    pub bucket: String,
+    #[serde(default)]
+    pub key_prefix: String,
+    pub endpoint: Option<String>,
+    pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
+    #[serde(default = "COSCacheConfig::default_order")]
+    pub order: u64,
+}
+
+impl Default for COSCacheConfig {
+    fn default() -> Self {
+        serde_json::from_str("{}").unwrap()
+    }
+}
+
+impl COSCacheConfig {
+    fn default_order() -> u64 {
+        TieredCacheOrder::Cos as u64
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CacheType {
     Azure(AzureCacheConfig),
@@ -550,6 +576,7 @@ pub enum CacheType {
     S3(S3CacheConfig),
     Webdav(WebdavCacheConfig),
     OSS(OSSCacheConfig),
+    COS(COSCacheConfig),
 }
 
 impl CacheType {
@@ -564,6 +591,7 @@ impl CacheType {
             Self::S3(cfg) => cfg.order,
             Self::Webdav(cfg) => cfg.order,
             Self::OSS(cfg) => cfg.order,
+            Self::COS(cfg) => cfg.order,
         }
     }
     pub fn preprocessor_cache_mode(&self) -> Option<PreprocessorCacheModeConfig> {
@@ -577,6 +605,7 @@ impl CacheType {
             Self::S3(cfg) => cfg.preprocessor_cache_mode.clone(),
             Self::Webdav(cfg) => cfg.preprocessor_cache_mode.clone(),
             Self::OSS(cfg) => cfg.preprocessor_cache_mode.clone(),
+            Self::COS(cfg) => cfg.preprocessor_cache_mode.clone(),
         }
     }
 }
@@ -605,6 +634,7 @@ pub struct CacheConfigs {
     pub s3: Option<S3CacheConfig>,
     pub webdav: Option<WebdavCacheConfig>,
     pub oss: Option<OSSCacheConfig>,
+    pub cos: Option<COSCacheConfig>,
 }
 
 impl CacheConfigs {
@@ -620,6 +650,7 @@ impl CacheConfigs {
             s3,
             webdav,
             oss,
+            cos,
         } = other;
 
         if azure.is_some() {
@@ -648,6 +679,9 @@ impl CacheConfigs {
         }
         if oss.is_some() {
             self.oss = oss;
+        }
+        if cos.is_some() {
+            self.cos = cos;
         }
 
         self
@@ -696,6 +730,7 @@ impl From<CacheType> for CacheConfigs {
             CacheType::S3(c) => caches.s3 = Some(c),
             CacheType::Webdav(c) => caches.webdav = Some(c),
             CacheType::OSS(c) => caches.oss = Some(c),
+            CacheType::COS(c) => caches.cos = Some(c),
         }
         caches
     }
@@ -1476,6 +1511,31 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         );
     }
 
+    // ======= COS =======
+    let cos = if let Ok(bucket) = env::var("SCCACHE_COS_BUCKET") {
+        let endpoint = env::var("SCCACHE_COS_ENDPOINT").ok();
+        let key_prefix = key_prefix_from_env_var("SCCACHE_COS_KEY_PREFIX").unwrap_or_default();
+
+        Some(COSCacheConfig {
+            bucket,
+            endpoint,
+            key_prefix,
+            preprocessor_cache_mode: Some(PreprocessorCacheModeConfig {
+                use_preprocessor_cache_mode: bool_from_env_var(&envvar(
+                    "COS_USE_PREPROCESSOR_CACHE_MODE",
+                ))?
+                .unwrap_or_default(),
+                key_prefix: key_prefix_from_env_var(&envvar("COS_PREPROCESSOR_CACHE_KEY_PREFIX"))
+                    .unwrap_or_else(PreprocessorCacheModeConfig::default_key_prefix),
+            }),
+            order: number_from_env_var(&envvar("COS_CACHE_ORDER"))
+                .unwrap_or(Ok(COSCacheConfig::default_order()))
+                .unwrap_or(COSCacheConfig::default_order()),
+        })
+    } else {
+        None
+    };
+
     // ======= Local =======
     let disk_dir = env::var_os(envvar("DIR"))
         .or(env::var_os(envvar("DISK_CACHE_PATH")))
@@ -1548,6 +1608,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         s3,
         webdav,
         oss,
+        cos,
     };
 
     Ok(EnvConfig { cache })
@@ -3306,6 +3367,11 @@ bucket = "name"
 endpoint = "oss-us-east-1.aliyuncs.com"
 key_prefix = "ossprefix"
 no_credentials = true
+
+[cache.cos]
+bucket = "name"
+endpoint = "cos.na-siliconvalley.myqcloud.com"
+key_prefix = "cosprefix"
 "#;
 
     let file_config: FileConfig = toml::from_str(CONFIG_STR).expect("Is valid toml.");
@@ -3383,6 +3449,12 @@ no_credentials = true
                     endpoint: Some("oss-us-east-1.aliyuncs.com".to_owned()),
                     key_prefix: "ossprefix".into(),
                     no_credentials: true,
+                    ..Default::default()
+                }),
+                cos: Some(COSCacheConfig {
+                    bucket: "name".to_owned(),
+                    endpoint: Some("cos.na-siliconvalley.myqcloud.com".to_owned()),
+                    key_prefix: "cosprefix".into(),
                     ..Default::default()
                 }),
             },

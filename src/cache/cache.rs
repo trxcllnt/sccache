@@ -36,6 +36,8 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter, write::FileOptions};
 use crate::cache::watch::WatchStorage;
 #[cfg(feature = "azure")]
 use crate::{cache::azure::AzureBlobCache, config::AzureCacheConfig};
+#[cfg(feature = "cos")]
+use crate::{cache::cos::COSCache, config::COSCacheConfig};
 #[cfg(feature = "gcs")]
 use crate::{cache::gcs::GCSCache, config::GCSCacheConfig};
 #[cfg(feature = "gha")]
@@ -61,7 +63,8 @@ use crate::{cache::webdav::WebdavCache, config::WebdavCacheConfig};
     feature = "redis",
     feature = "s3",
     feature = "webdav",
-    feature = "oss"
+    feature = "oss",
+    feature = "cos"
 ))]
 use {crate::util::retry_with_jitter, tokio_retry2::RetryError};
 
@@ -1185,6 +1188,31 @@ impl From<(StorageKind, OSSCacheConfig)> for StorageBuilder {
     }
 }
 
+#[cfg(feature = "cos")]
+impl From<(StorageKind, COSCacheConfig)> for StorageBuilder {
+    fn from((storage_kind, config): (StorageKind, COSCacheConfig)) -> Self {
+        let COSCacheConfig {
+            bucket,
+            endpoint,
+            key_prefix,
+            preprocessor_cache_mode,
+            ..
+        } = config;
+
+        let key_prefix = storage_kind.key_prefix(key_prefix, preprocessor_cache_mode.as_ref());
+
+        Self::default()
+            .create_storage(move || {
+                debug!("Init cos {storage_kind} cache with bucket {bucket}, endpoint {endpoint:?}");
+
+                COSCache::build(&bucket, &key_prefix, endpoint.as_deref())
+                    .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                    .map_err(|err| anyhow!("create oss cache failed: {err:?}"))
+            })
+            .preprocessor_cache_mode(preprocessor_cache_mode)
+    }
+}
+
 impl From<(StorageKind, CacheType)> for StorageBuilder {
     fn from((storage_kind, cache_type): (StorageKind, CacheType)) -> Self {
         #[allow(unreachable_patterns)]
@@ -1205,6 +1233,8 @@ impl From<(StorageKind, CacheType)> for StorageBuilder {
             CacheType::Webdav(cfg) => (storage_kind, cfg).into(),
             #[cfg(feature = "oss")]
             CacheType::OSS(cfg) => (storage_kind, cfg).into(),
+            #[cfg(feature = "cos")]
+            CacheType::COS(cfg) => (storage_kind, cfg).into(),
             CacheType::Disk(cfg) => (storage_kind, cfg).into(),
             _ => Self::default(),
         }

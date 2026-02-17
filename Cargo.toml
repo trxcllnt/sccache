@@ -215,7 +215,9 @@ cloud-storage = [
   "gha",
   "webdav",
   "oss",
+  "cos",
 ]
+cos = ["opendal/services-cos", "reqsign", "reqwest"]
 default = ["all"]
 gcs = ["opendal/services-gcs", "reqsign", "url", "reqwest"]
 gha = ["opendal/services-ghac", "reqwest"]
