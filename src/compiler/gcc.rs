@@ -1566,6 +1566,41 @@ mod test {
     }
 
     #[test]
+    fn test_parse_arguments_objc_header_language() {
+        let args = stringvec!["-x", "objective-c-header", "-c", "foo.h", "-o", "foo.o"];
+        let ParsedArguments {
+            input,
+            language,
+            compilation_flag,
+            outputs,
+            preprocessor_args,
+            msvc_show_includes,
+            common_args,
+            ..
+        } = match parse_arguments_(args, false) {
+            CompilerArguments::Ok(args) => args,
+            o => panic!("Got unexpected parse result: {:?}", o),
+        };
+        assert_eq!(Some("foo.h"), input.to_str());
+        assert_eq!(Language::ObjectiveCHeader, language);
+        assert_eq!(Some("-c"), compilation_flag.to_str());
+        assert_map_contains!(
+            outputs,
+            (
+                "obj",
+                ArtifactDescriptor {
+                    path: "foo.o".into(),
+                    optional: false,
+                    must_be_non_empty: false,
+                }
+            )
+        );
+        assert!(preprocessor_args.is_empty());
+        assert!(common_args.is_empty());
+        assert!(!msvc_show_includes);
+    }
+
+    #[test]
     fn test_parse_arguments_split_dwarf() {
         let args = stringvec!["-gsplit-dwarf", "-c", "foo.cpp", "-o", "foo.o"];
         let ParsedArguments {

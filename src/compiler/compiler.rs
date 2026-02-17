@@ -266,6 +266,7 @@ pub enum Language {
     CxxHeader,
     CxxPreprocessed,
     ObjectiveC,
+    ObjectiveCHeader,
     ObjectiveCPreprocessed,
     ObjectiveCxx,
     ObjectiveCxxPreprocessed,
@@ -321,7 +322,7 @@ impl Language {
             Language::CxxHeader => "c++Header",
             Language::CxxPreprocessed => "c++Preprocessed",
             Language::GenericHeader => "c/c++",
-            Language::ObjectiveC => "objc",
+            Language::ObjectiveC | Language::ObjectiveCHeader => "objc",
             Language::ObjectiveCPreprocessed => "objcPreprocessed",
             Language::ObjectiveCxx | Language::ObjectiveCxxHeader => "objc++",
             Language::ObjectiveCxxPreprocessed => "objc++Preprocessed",
@@ -351,6 +352,8 @@ impl Language {
                 }
             }
             _ => match lang {
+                // From https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html
+                // and https://github.com/llvm/llvm-project/blob/main/clang/include/clang/Driver/Types.def
                 "assembler" => Some(Language::Assembler),
                 "assembler-with-cpp" => Some(Language::AssemblerToPreprocess),
                 "c" => Some(Language::C),
@@ -360,6 +363,7 @@ impl Language {
                 "c++-header" => Some(Language::CxxHeader),
                 "c++-cpp-output" => Some(Language::CxxPreprocessed),
                 "objective-c" => Some(Language::ObjectiveC),
+                "objective-c-header" => Some(Language::ObjectiveCHeader),
                 "objective-c-cpp-output" => Some(Language::ObjectiveCPreprocessed),
                 "objective-c++" => Some(Language::ObjectiveCxx),
                 "objective-c++-header" => Some(Language::ObjectiveCxxHeader),
@@ -405,6 +409,7 @@ impl Language {
                 Language::CxxHeader => Some("c++-header"),
                 Language::CxxPreprocessed => Some("c++-cpp-output"),
                 Language::ObjectiveC => Some("objective-c"),
+                Language::ObjectiveCHeader => Some("objective-c-header"),
                 Language::ObjectiveCPreprocessed => Some("objective-c-cpp-output"),
                 Language::ObjectiveCxx => Some("objective-c++"),
                 Language::ObjectiveCxxHeader => Some("objective-c++-header"),
@@ -452,6 +457,7 @@ impl CompilerKind {
             | Language::CxxPreprocessed
             | Language::GenericHeader
             | Language::ObjectiveC
+            | Language::ObjectiveCHeader
             | Language::ObjectiveCPreprocessed
             | Language::ObjectiveCxx
             | Language::ObjectiveCxxHeader
