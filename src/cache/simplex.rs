@@ -80,4 +80,8 @@ impl Storage for SimplexCache {
     fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
         self.1.preprocessor_cache_mode_config()
     }
+
+    async fn basedirs(&self) -> Vec<Vec<u8>> {
+        self.0.basedirs().await
+    }
 }

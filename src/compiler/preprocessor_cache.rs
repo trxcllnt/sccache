@@ -477,7 +477,7 @@ pub async fn preprocessor_cache_entry_hash_key(
     cwd: &Path,
     input: &Path,
     plusplus: bool,
-    basedirs: &[Vec<u8>],
+    basedirs: Vec<Vec<u8>>,
 ) -> Result<Option<String>> {
     // If you change any of the inputs to the hash, you should change `FORMAT_VERSION`.
 
@@ -564,7 +564,7 @@ pub async fn preprocessor_cache_entry_hash_key(
         let mut buf = vec![];
         encode_path(&mut buf, &input_path)?;
         // Strip basedirs from the input file path if configured
-        let buf_to_hash = strip_basedirs(&buf, basedirs);
+        let buf_to_hash = strip_basedirs(&buf, &basedirs);
         digest.update(&buf_to_hash);
     }
 
@@ -1573,7 +1573,7 @@ mod test {
             dir1.path(),
             file_path,
             false,
-            &dirs,
+            dirs.clone(),
         )
         .wait()
         .unwrap()
@@ -1588,7 +1588,7 @@ mod test {
             dir2.path(),
             file_path,
             false,
-            &dirs,
+            dirs.clone(),
         )
         .wait()
         .unwrap()
@@ -1609,7 +1609,7 @@ mod test {
             dir1.path(),
             file_path,
             false,
-            &dirs[..1],
+            dirs[..1].to_vec(),
         )
         .wait()
         .unwrap()
@@ -1624,7 +1624,7 @@ mod test {
             dir2.path(),
             file_path,
             false,
-            &dirs[1..],
+            dirs[1..].to_vec(),
         )
         .wait()
         .unwrap()
@@ -1645,7 +1645,7 @@ mod test {
             dir1.path(),
             file_path,
             false,
-            &[],
+            vec![],
         )
         .wait()
         .unwrap()
@@ -1660,7 +1660,7 @@ mod test {
             dir2.path(),
             file_path,
             false,
-            &[],
+            vec![],
         )
         .wait()
         .unwrap()

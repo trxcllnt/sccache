@@ -526,7 +526,7 @@ where
             cwd,
             &parsed_args.input,
             compiler.plusplus(),
-            storage.basedirs(),
+            storage.basedirs().await,
         )
         .await?
         .filter(|_| !matches!(cache_control, CacheControl::ForceNoCache));
@@ -633,7 +633,7 @@ where
                     parsed_args: self.parsed_args,
                     rewrite_includes_only,
                     service: service.to_owned(),
-                    basedirs: storage.basedirs().to_vec(),
+                    basedirs: storage.basedirs().await,
                 }),
                 weak_toolchain_key,
             });
@@ -683,7 +683,7 @@ where
                         parsed_args: self.parsed_args,
                         rewrite_includes_only,
                         service: service.to_owned(),
-                        basedirs: storage.basedirs().to_vec(),
+                        basedirs: storage.basedirs().await,
                     }),
                     weak_toolchain_key,
                 });
@@ -798,7 +798,7 @@ where
                 &env_vars,
                 preprocessor_output,
                 compiler.plusplus(),
-                storage.basedirs().to_vec(),
+                storage.basedirs().await,
             )
             .await
         );
@@ -897,7 +897,7 @@ where
                 parsed_args: self.parsed_args,
                 rewrite_includes_only,
                 service: service.to_owned(),
-                basedirs: storage.basedirs().to_vec(),
+                basedirs: storage.basedirs().await,
             }),
             weak_toolchain_key,
         })
@@ -1812,6 +1812,7 @@ pub async fn hash_key_async(
 
     let start = Instant::now();
     let preprocessor_output = preprocessor_output.try_collect::<Vec<_>>().await?;
+
     let digest = tokio::task::spawn_blocking(move || {
         let preprocessor_output = preprocessor_output.concat();
         let preprocessor_output = strip_basedirs(&preprocessor_output, &basedirs);

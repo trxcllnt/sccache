@@ -213,8 +213,9 @@ impl Storage for DiskCache {
     async fn current_size(&self) -> Result<Option<u64>> {
         Ok(self.lru.lock().await.get().map(|l| l.size()))
     }
-    fn basedirs(&self) -> &[Vec<u8>] {
-        &self.basedirs
+
+    async fn basedirs(&self) -> Vec<Vec<u8>> {
+        self.basedirs.clone()
     }
 
     async fn max_size(&self) -> Result<Option<u64>> {

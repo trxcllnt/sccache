@@ -2406,12 +2406,13 @@ impl ServerInfo {
                         s.current_size(),
                         s.max_size(),
                         async { Ok(s.location().await) },
-                        futures::future::ok(
-                            s.basedirs()
+                        async {
+                            Ok(s.basedirs()
+                                .await
                                 .iter()
                                 .map(|p| String::from_utf8_lossy(p).to_string())
-                                .collect(),
-                        ),
+                                .collect())
+                        },
                     )
                     .boxed()
                 })

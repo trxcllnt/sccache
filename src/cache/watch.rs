@@ -225,4 +225,8 @@ impl Storage for WatchStorage {
     fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
         self.preprocessor_cache_mode_config.clone()
     }
+
+    async fn basedirs(&self) -> Vec<Vec<u8>> {
+        self.inner().await.basedirs().await
+    }
 }

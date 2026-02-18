@@ -116,9 +116,7 @@ pub trait Storage: Send + Sync {
         PreprocessorCacheModeConfig::default()
     }
     /// Return the base directories for path normalization if configured
-    fn basedirs(&self) -> &[Vec<u8>] {
-        &[]
-    }
+    async fn basedirs(&self) -> Vec<Vec<u8>>;
 }
 
 #[cfg(any(
@@ -354,8 +352,8 @@ impl Storage for RemoteStorage {
         Ok(None)
     }
 
-    fn basedirs(&self) -> &[Vec<u8>] {
-        &self.basedirs
+    async fn basedirs(&self) -> Vec<Vec<u8>> {
+        self.basedirs.clone()
     }
 }
 
@@ -412,6 +410,10 @@ impl Storage for PreprocessorCache {
     /// Return the config for preprocessor cache mode if applicable
     fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
         self.1.clone()
+    }
+
+    async fn basedirs(&self) -> Vec<Vec<u8>> {
+        self.0.basedirs().await
     }
 }
 
@@ -503,7 +505,7 @@ impl From<(StorageKind, Vec<Vec<u8>>, DiskCacheConfig)> for StorageBuilder {
         Self::default()
             .create_storage(
                 move || {
-                    debug!("Init disk {storage_kind} cache with dir={dir:?}, size={size}, rw_mode={rw_mode:?})");
+                    debug!("Init disk {storage_kind} cache with dir={dir:?}, size={size}, rw_mode={rw_mode:?}, basedirs={:?})", basedirs.iter().map(|b| String::from_utf8_lossy(b)).collect::<Vec<_>>());
                     Ok(Arc::new(DiskCache::new(&dir, size, rw_mode, basedirs.clone())))
                 }
             )
@@ -1009,6 +1011,7 @@ impl StorageKind {
 mod test {
     use super::*;
     use crate::config::{CacheModeConfig, Config};
+    use crate::test::utils::*;
     use fs_err as fs;
 
     #[test]
@@ -1087,10 +1090,11 @@ mod test {
         let storage = RemoteStorage::new(operator, basedirs.clone());
 
         // Verify basedirs are stored and retrieved correctly
-        assert_eq!(storage.basedirs(), basedirs.as_slice());
-        assert_eq!(storage.basedirs().len(), 2);
-        assert_eq!(storage.basedirs()[0], b"/home/user/project".to_vec());
-        assert_eq!(storage.basedirs()[1], b"/opt/build".to_vec());
+        let basedirs_actual = storage.basedirs().wait();
+        assert_eq!(basedirs_actual, basedirs.as_slice());
+        assert_eq!(basedirs_actual.len(), 2);
+        assert_eq!(basedirs_actual[0], b"/home/user/project".to_vec());
+        assert_eq!(basedirs_actual[1], b"/opt/build".to_vec());
     }
 
     #[test]
@@ -1114,7 +1118,8 @@ mod test {
         let storage = RemoteStorage::new(operator, basedirs.clone());
 
         // Verify basedirs work
-        assert_eq!(storage.basedirs(), basedirs.as_slice());
-        assert_eq!(storage.basedirs().len(), 1);
+        let basedirs_actual = storage.basedirs().wait();
+        assert_eq!(basedirs_actual, basedirs.as_slice());
+        assert_eq!(basedirs_actual.len(), 1);
     }
 }

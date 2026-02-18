@@ -148,6 +148,12 @@ impl Storage for TieredCache {
     fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
         self.0.preprocessor_cache_mode_config()
     }
+
+    async fn basedirs(&self) -> Vec<Vec<u8>> {
+        futures::future::join_all([self.0.basedirs(), self.1.basedirs()])
+            .await
+            .concat()
+    }
 }
 
 #[cfg(test)]

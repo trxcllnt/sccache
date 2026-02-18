@@ -1146,7 +1146,8 @@ pub async fn parse_dependencies(
                 } else {
                     line
                 }
-                .trim_end_matches('\\'),
+                .trim_end_matches('\\')
+                .trim_end_matches(':'),
             ))
         })
         .map_ok(|lines| futures::stream::iter(lines.into_iter().map(Ok)))

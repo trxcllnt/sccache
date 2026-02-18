@@ -106,4 +106,7 @@ impl Storage for MockStorage {
             ..Default::default()
         }
     }
+    async fn basedirs(&self) -> Vec<Vec<u8>> {
+        vec![]
+    }
 }

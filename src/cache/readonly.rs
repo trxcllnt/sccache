@@ -87,8 +87,8 @@ impl Storage for ReadOnlyStorage {
     }
 
     /// Return the base directories for path normalization if configured
-    fn basedirs(&self) -> &[Vec<u8>] {
-        self.0.basedirs()
+    async fn basedirs(&self) -> Vec<Vec<u8>> {
+        self.0.basedirs().await
     }
 }
 
@@ -98,6 +98,7 @@ mod test {
 
     use super::*;
     use crate::test::mock_storage::MockStorage;
+    use crate::test::utils::*;
 
     #[test]
     fn readonly_storage_is_readonly() {
@@ -150,7 +151,7 @@ mod test {
 
         let readonly_storage = ReadOnlyStorage(std::sync::Arc::new(disk_cache));
 
-        assert_eq!(readonly_storage.basedirs(), basedirs.as_slice());
+        assert_eq!(readonly_storage.basedirs().wait(), basedirs.as_slice());
     }
 
     #[test]
