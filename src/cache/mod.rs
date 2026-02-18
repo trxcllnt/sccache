@@ -16,6 +16,7 @@
 pub mod azure;
 #[allow(clippy::module_inception)]
 pub mod cache;
+pub mod cache_io;
 #[cfg(feature = "cos")]
 pub mod cos;
 pub mod disk;
@@ -34,6 +35,7 @@ pub mod readonly;
 pub mod redis;
 #[cfg(feature = "s3")]
 pub mod s3;
+pub(crate) mod utils;
 #[cfg(feature = "webdav")]
 pub mod webdav;
 
@@ -55,4 +57,5 @@ pub(crate) mod simplex;
 pub(crate) mod tiered;
 
 pub use crate::cache::cache::*;
+pub use crate::cache::cache_io::*;
 pub use crate::cache::lazy_disk_cache::*;

@@ -240,18 +240,7 @@ mod tests {
     #[test]
     fn test_disk_cache_type_name() {
         let tempdir = tempfile::tempdir().unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-
-        let disk = DiskCache::new(
-            tempdir.path(),
-            1024 * 1024,
-            runtime.handle(),
-            PreprocessorCacheModeConfig::default(),
-            CacheMode::ReadWrite,
-            vec![],
-        );
+        let disk = DiskCache::new(tempdir.path(), 1024 * 1024, CacheMode::ReadWrite, vec![]);
 
         assert_eq!(disk.cache_type_name(), "disk");
     }

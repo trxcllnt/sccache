@@ -177,12 +177,6 @@ mod test {
 
     #[test]
     fn readonly_storage_forwards_cache_type_name() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .worker_threads(1)
-            .build()
-            .unwrap();
-
         let tempdir = tempfile::Builder::new()
             .prefix("readonly_cache_type_name")
             .tempdir()
@@ -193,8 +187,6 @@ mod test {
         let disk_cache = crate::cache::disk::DiskCache::new(
             &cache_dir,
             1024 * 1024,
-            runtime.handle(),
-            super::PreprocessorCacheModeConfig::default(),
             super::CacheMode::ReadWrite,
             vec![],
         );
