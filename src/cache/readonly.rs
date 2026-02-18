@@ -67,6 +67,11 @@ impl Storage for ReadOnlyStorage {
         self.0.location().await
     }
 
+    /// Get the cache backend type name.
+    fn cache_type_name(&self) -> &'static str {
+        self.0.cache_type_name()
+    }
+
     /// Get the current storage usage, if applicable.
     async fn current_size(&self) -> Result<Option<u64>> {
         self.0.current_size().await
@@ -168,5 +173,34 @@ mod test {
                 "Cannot write to read-only storage"
             );
         });
+    }
+
+    #[test]
+    fn readonly_storage_forwards_cache_type_name() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+
+        let tempdir = tempfile::Builder::new()
+            .prefix("readonly_cache_type_name")
+            .tempdir()
+            .expect("Failed to create tempdir");
+        let cache_dir = tempdir.path().join("cache");
+        std::fs::create_dir(&cache_dir).unwrap();
+
+        let disk_cache = crate::cache::disk::DiskCache::new(
+            &cache_dir,
+            1024 * 1024,
+            runtime.handle(),
+            super::PreprocessorCacheModeConfig::default(),
+            super::CacheMode::ReadWrite,
+            vec![],
+        );
+
+        let readonly_storage = ReadOnlyStorage(std::sync::Arc::new(disk_cache));
+
+        assert_eq!(readonly_storage.cache_type_name(), "disk");
     }
 }

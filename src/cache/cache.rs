@@ -462,6 +462,12 @@ pub trait Storage: Send + Sync {
     /// Get the storage location.
     async fn location(&self) -> String;
 
+    /// Get the cache backend type name (e.g., "disk", "redis", "s3").
+    /// Used for statistics and display purposes.
+    fn cache_type_name(&self) -> &'static str {
+        "unknown"
+    }
+
     /// Get the current storage usage, if applicable.
     async fn current_size(&self) -> Result<Option<u64>>;
 
@@ -730,6 +736,12 @@ impl Storage for RemoteStorage {
             meta.name(),
             meta.root()
         )
+    }
+
+    fn cache_type_name(&self) -> &'static str {
+        // Use opendal's scheme as the cache type name
+        // This returns "s3", "redis", "azure", "gcs", etc.
+        self.operator.info().scheme()
     }
 
     async fn current_size(&self) -> Result<Option<u64>> {
