@@ -1203,7 +1203,7 @@ pub fn generate_compile_commands(
     // Pass the language explicitly as we might have gotten it from the
     // command line.
     let language = parsed_args.language.as_compiler_str(kind.into());
-    if let Some(lang) = &language {
+    if let Some(lang) = language {
         arguments.extend(vec!["-x".into(), lang.into()]);
     }
     arguments.extend(vec![
@@ -1254,32 +1254,21 @@ pub fn generate_compile_commands(
                     let mut language = language.map(|lang| lang.to_owned());
 
                     // https://gcc.gnu.org/onlinedocs/gcc-4.9.0/gcc/Overall-Options.html
-                    if !rewrite_includes_only {
-                        if let CCompilerKind::Nvhpc = kind {
-                            // -x=c|cpp|c++|i|cpp-output|asm|assembler|ASM|assembler-with-cpp|none
-                            // Specify the language for any following input files, instead of letting
-                            // the compiler choose based on suffix. Turn off with -x none
-                            match parsed_args.language {
-                                Language::GenericHeader
-                                | Language::CHeader
-                                | Language::CxxHeader => {}
-                                Language::C
-                                | Language::CPreprocessed
-                                | Language::Cxx
-                                | Language::CxxPreprocessed => language = Some("cpp-output".into()),
-                                _ => language = Some("none".into()),
-                            }
-                        } else {
-                            match parsed_args.language {
-                                Language::GenericHeader
-                                | Language::CHeader
-                                | Language::CxxHeader => {}
-                                Language::C => language = Some("cpp-output".into()),
-                                _ => {
-                                    if let Some(lang) = language.as_mut() {
-                                        lang.push_str("-cpp-output")
-                                    }
-                                }
+                    if !rewrite_includes_only && !parsed_args.language.is_c_like_header() {
+                        if let Some(processed_lang) =
+                            parsed_args.language.to_c_preprocessed_language()
+                        {
+                            language = processed_lang
+                                .as_compiler_str(kind.into())
+                                .map(|lang| lang.to_owned());
+                        } else if parsed_args.language.needs_c_preprocessing() {
+                            if let CCompilerKind::Nvhpc = kind {
+                                // -x=c|cpp|c++|i|cpp-output|asm|assembler|ASM|assembler-with-cpp|none
+                                // Specify the language for any following input files, instead of letting
+                                // the compiler choose based on suffix. Turn off with -x none
+                                language = Some("none".into())
+                            } else if let Some(lang) = language.as_mut() {
+                                lang.push_str("-cpp-output")
                             }
                         }
                     }
