@@ -1823,7 +1823,7 @@ mod tests {
         assert!(!a.starts_with("b"));
 
         let a: &OsStr = "".as_ref();
-        assert!(!a.starts_with("a"))
+        assert!(!a.starts_with("a"));
     }
 
     #[test]

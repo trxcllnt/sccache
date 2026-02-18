@@ -162,7 +162,7 @@ impl WatchStorage {
                 match create().await {
                     Ok(storage) => *guard = storage,
                     Err(err) => {
-                        error!("Failed to recreate storage: {err:?}")
+                        error!("Failed to recreate storage: {err:?}");
                     }
                 }
                 drop(guard);

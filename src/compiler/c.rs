@@ -880,7 +880,7 @@ where
                 .await
                 // Don't fail if updating the preprocessor cache entry fails, just log it
                 .inspect_err(|err| {
-                    debug!("[{out_pretty}]: Failed to update preprocessor cache entry: {err}")
+                    debug!("[{out_pretty}]: Failed to update preprocessor cache entry: {err}");
                 })
                 .ok();
         }

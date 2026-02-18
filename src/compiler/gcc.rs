@@ -1266,9 +1266,9 @@ pub fn generate_compile_commands(
                                 // -x=c|cpp|c++|i|cpp-output|asm|assembler|ASM|assembler-with-cpp|none
                                 // Specify the language for any following input files, instead of letting
                                 // the compiler choose based on suffix. Turn off with -x none
-                                language = Some("none".into())
+                                language = Some("none".into());
                             } else if let Some(lang) = language.as_mut() {
-                                lang.push_str("-cpp-output")
+                                lang.push_str("-cpp-output");
                             }
                         }
                     }
@@ -2595,7 +2595,7 @@ mod test {
                     ],
                     false
                 )
-            )
+            );
         });
     }
 

@@ -2261,7 +2261,7 @@ impl pkg::ToolchainPackager for RustToolchainPackager {
         package_builder.add_dir_contents(&[], &bins_path)?;
         if BINS_DIR != LIBS_DIR {
             let libs_path = sysroot.join(LIBS_DIR);
-            package_builder.add_dir_contents(&[], &libs_path)?
+            package_builder.add_dir_contents(&[], &libs_path)?;
         }
 
         // Return the builder so the archive can be lazily created, depending
@@ -2384,7 +2384,7 @@ src/bin/sccache-dist/token_check.rs:
         .unwrap()
         .read_to_string(&mut s)
         .unwrap();
-    assert_eq!(s, depinfo_resulting_data)
+    assert_eq!(s, depinfo_resulting_data);
 }
 
 #[cfg(feature = "dist-client")]
@@ -2927,7 +2927,7 @@ LLVM version: 15.0.2
             "-C",
             "incremental=/foo"
         );
-        assert_eq!(r, CompilerArguments::CannotCache("incremental", None))
+        assert_eq!(r, CompilerArguments::CannotCache("incremental", None));
     }
 
     #[test]

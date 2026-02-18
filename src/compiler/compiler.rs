@@ -1682,7 +1682,7 @@ where
                         if e.kind() != io::ErrorKind::NotFound {
                             debug!(
                                 "[{out_pretty}, {job_id}]: {e} while attempting to remove {path:?}"
-                            )
+                            );
                         }
                     }
                 }
@@ -2670,7 +2670,7 @@ mod test {
                     !lang.is_c_like_header(),
                     "{:?} should not be processed, but it is a C-like header and can be used as preprocessor input",
                     lang
-                )
+                );
             }
         }
     }

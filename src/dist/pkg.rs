@@ -287,7 +287,7 @@ mod toolchain_imp {
                 }
                 trace!("walkdir add_file {}", path.display());
                 // It's either a file, or a symlink pointing to a file
-                self.add_file(env_vars, path.to_owned())?
+                self.add_file(env_vars, path.to_owned())?;
             }
             Ok(())
         }
@@ -442,7 +442,7 @@ mod toolchain_imp {
             trace!(
                 "ldd stderr non-empty: {:?}",
                 String::from_utf8_lossy(&stderr)
-            )
+            );
         }
 
         let stdout = str::from_utf8(&stdout).context("ldd output not utf8")?;
@@ -482,7 +482,7 @@ mod toolchain_imp {
                     // Workaround: add libname to deps if it's abusolute and exists.
                     let libname_path = PathBuf::from(libname);
                     if libname_path.is_absolute() && libname_path.exists() {
-                        libs.push(libname_path)
+                        libs.push(libname_path);
                     }
 
                     PathBuf::from(libpath)
@@ -496,7 +496,7 @@ mod toolchain_imp {
                 continue;
             }
 
-            libs.push(libpath)
+            libs.push(libpath);
         }
 
         libs
@@ -525,7 +525,7 @@ mod toolchain_imp {
                 "/lib64/ld-linux-x86-64.so.2",
                 "/lib/x86_64-linux-gnu/libpthread.so.0",
             ]
-        )
+        );
     }
 
     #[test]
@@ -535,7 +535,7 @@ mod toolchain_imp {
             "\tldd (0x7f79ef662000)", // musl ldd output
         ];
         for static_output in static_outputs {
-            assert_eq!(parse_ldd_output(static_output).len(), 0)
+            assert_eq!(parse_ldd_output(static_output).len(), 0);
         }
     }
 
@@ -559,7 +559,7 @@ mod toolchain_imp {
                 "/lib64/ld-linux-x86-64.so.2",
                 "/usr/lib64/ld-linux-x86-64.so.2",
             ]
-        )
+        );
     }
 }
 

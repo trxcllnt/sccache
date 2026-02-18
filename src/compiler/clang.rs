@@ -731,7 +731,7 @@ mod test {
             ovec!["-Xclang", "-include", "-Xclang", "pch.hxx"],
             a.preprocessor_args
         );
-        assert_eq!(ovec!["-Xclang", "-emit-pch"], a.common_args)
+        assert_eq!(ovec!["-Xclang", "-emit-pch"], a.common_args);
     }
 
     #[test]

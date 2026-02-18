@@ -694,7 +694,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 }
 
                 Ok::<(), anyhow::Error>(())
-            })?
+            })?;
         }
         Command::InternalStartServer => {
             trace!("Command::InternalStartServer");

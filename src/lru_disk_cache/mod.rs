@@ -291,7 +291,7 @@ impl LruDiskCache {
             } else {
                 self.add_file(AddFile::AbsPath(path.clone()), size)
                     .unwrap_or_else(|e| {
-                        error!("LruDiskCache: Error adding entry {path:?}:\n{e:?}")
+                        error!("LruDiskCache: Error adding entry {path:?}:\n{e:?}");
                     });
             }
         }
@@ -324,7 +324,7 @@ impl LruDiskCache {
                             abs_path
                         );
                     } else {
-                        error!("LruDiskCache: Error removing entry {abs_path:?}:\n{e:?}")
+                        error!("LruDiskCache: Error removing entry {abs_path:?}:\n{e:?}");
                     }
                 }
             });
@@ -345,7 +345,7 @@ impl LruDiskCache {
             remove_entry_from_disk_async(&abs_path)
                 .await
                 .unwrap_or_else(|e| {
-                    error!("LruDiskCache: Error removing entry {abs_path:?}:\n{e:?}")
+                    error!("LruDiskCache: Error removing entry {abs_path:?}:\n{e:?}");
                 });
         }
         Ok(())
@@ -387,7 +387,7 @@ impl LruDiskCache {
                 remove_entry_from_disk(&abs_path).unwrap_or_else(|e| {
                     error!(
                         "LruDiskCache: Error removing entry for failed insertion {abs_path:?}:\n{e:?}"
-                    )
+                    );
                 });
                 e
             })
@@ -427,7 +427,7 @@ impl LruDiskCache {
                 remove_entry_from_disk_async(&abs_path).await.unwrap_or_else(|e| {
                     error!(
                         "LruDiskCache: Error removing entry for failed insertion {abs_path:?}:\n{e:?}"
-                    )
+                    );
                 });
                 Err(Error::Io(err))
             }

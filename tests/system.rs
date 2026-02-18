@@ -118,7 +118,7 @@ fn compile_cuda_cmdline<T: AsRef<OsStr>>(
         _ => panic!("Unsupported compiler: {compiler}"),
     };
     if !extra_args.is_empty() {
-        args.append(&mut extra_args.to_vec())
+        args.append(&mut extra_args.to_vec());
     }
     args.iter()
         .filter(|x| !x.is_empty())

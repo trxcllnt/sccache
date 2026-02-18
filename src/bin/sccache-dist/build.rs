@@ -199,7 +199,7 @@ impl OverlayBuilder {
         if self.dir.exists() {
             tokio::fs::remove_dir_all(&self.dir)
                 .await
-                .context("Failed to clean up builder directory")?
+                .context("Failed to clean up builder directory")?;
         }
         Ok(())
     }
@@ -473,14 +473,14 @@ impl OverlayBuilder {
                                 Err(err) => {
                                     tracing::error!(
                                         "[perform_build({job_id})]: Failed to read and compress output file host={host_path:?}, overlay={abs_path:?}: {err}"
-                                    )
+                                    );
                                 }
                             },
                             Err(err) => {
                                 if err.kind() == io::ErrorKind::NotFound {
                                     tracing::debug!(
                                         "[perform_build({job_id})]: Missing output path host={host_path:?}, overlay={abs_path:?}"
-                                    )
+                                    );
                                 } else {
                                     return Err(BuildError::ReadBuildResult(abs_path, err));
                                 }
@@ -881,14 +881,14 @@ impl DockerBuilder {
                             Err(err) => {
                                 tracing::error!(
                                     "[perform_build({job_id})]: Failed to read and compress output file host={host_path:?}, container={path:?}: {err}"
-                                )
+                                );
                             }
                         },
                         Err(err) => {
                             if err.kind() == io::ErrorKind::NotFound {
                                 tracing::debug!(
                                     "[perform_build({job_id})]: Missing output path host={host_path:?}, container={path:?}"
-                                )
+                                );
                             } else {
                                 return Err(BuildError::ReadBuildResult(abs_path, err));
                             }

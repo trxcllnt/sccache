@@ -75,7 +75,7 @@ fn retry<F: FnMut() -> Option<T>, T>(interval: Duration, until: Duration, mut f:
         if let Some(res) = f() {
             return Some(res);
         } else {
-            thread::sleep(interval)
+            thread::sleep(interval);
         }
     }
     None
@@ -183,7 +183,7 @@ impl Drop for SeleniumContainer {
             String::from_utf8_lossy(&stdout),
             String::from_utf8_lossy(&stderr)
         );
-        check_output(&output)
+        check_output(&output);
     }
 }
 

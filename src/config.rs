@@ -3987,7 +3987,7 @@ key_prefix = "cosprefix"
             server_startup_timeout_ms: Some(10000),
             basedirs: vec![],
         }
-    )
+    );
 }
 
 #[test]
@@ -4068,7 +4068,7 @@ key_prefix = "sccache-dist-toolchains"
             scheduler_id: "scheduler-1".into(),
             ..Default::default()
         }
-    )
+    );
 }
 
 #[test]
@@ -4165,7 +4165,7 @@ key_prefix = "sccache-dist-toolchains"
             toolchain_cache_size: 10737418240,
             ..Default::default()
         }
-    )
+    );
 }
 
 #[test]

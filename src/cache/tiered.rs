@@ -51,7 +51,7 @@ impl Storage for TieredCache {
                     async move {
                         if !cache.has(&key).await {
                             let _ = cache.put(&key, entry).await.inspect_err(|err| {
-                                warn!("Failed to put key {key:?} in secondary cache: {err}")
+                                warn!("Failed to put key {key:?} in secondary cache: {err}");
                             });
                         }
                     }
@@ -66,7 +66,7 @@ impl Storage for TieredCache {
                         let cache = self.0.clone();
                         async move {
                             let _ = cache.put(&key, entry.clone()).await.inspect_err(|err| {
-                                warn!("Failed to put key {key:?} in primary cache: {err}")
+                                warn!("Failed to put key {key:?} in primary cache: {err}");
                             });
                         }
                     });
@@ -84,7 +84,7 @@ impl Storage for TieredCache {
             let cache = self.1.clone();
             async move {
                 let _ = cache.del(&key).await.inspect_err(|err| {
-                    warn!("Failed to delete key {key:?} from secondary cache: {err}")
+                    warn!("Failed to delete key {key:?} from secondary cache: {err}");
                 });
             }
         });
@@ -108,7 +108,7 @@ impl Storage for TieredCache {
             let cache = self.1.clone();
             async move {
                 let _ = cache.put(&key, entry.clone()).await.inspect_err(|err| {
-                    warn!("Failed to put key {key:?} in secondary cache: {err}")
+                    warn!("Failed to put key {key:?} in secondary cache: {err}");
                 });
             }
         });
