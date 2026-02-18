@@ -67,6 +67,12 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+      - name: Upload failure
+        if: failure()
+        uses: ./.github/actions/artifact_failure
+        with:
+          name: integration-tests-${{ matrix.type }}
+
   gha:
     runs-on: ubuntu-24.04
     needs: build

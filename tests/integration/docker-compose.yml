@@ -1,13 +1,15 @@
 x-common-env: &common-env
   RUST_BACKTRACE: full
   RUSTC_WRAPPER: ${SCCACHE_PATH:-/sccache/target/debug/sccache}
-  RUST_LOG: debug
+  RUST_LOG: sccache=trace
+  SCCACHE_SERVER_LOG: sccache=trace
   SCCACHE_PATH: ${SCCACHE_PATH:-/sccache/target/debug/sccache}
   LLVM_PROFILE_FILE: ${LLVM_PROFILE_FILE:-}
 
 x-test-runner: &test-runner
   user: "${UID:-1000}:${GID:-1000}"
   volumes:
+    - /tmp:/tmp
     - ../../:/sccache:ro
     - ../../target/integration-cargo-cache:/usr/local/cargo/registry:rw
     - ../../target/integration-coverage:/coverage:rw
@@ -128,6 +130,7 @@ services:
       SCCACHE_REDIS: redis://redis:6379
       TEST_NAME: redis-deprecated
       BACKEND_CHECK: redis
+      SCCACHE_ERROR_LOG: /tmp/sccache-redis-deprecated.log
     profiles:
       - test
       - redis
@@ -144,6 +147,7 @@ services:
       SCCACHE_REDIS_ENDPOINT: tcp://redis:6379
       TEST_NAME: redis
       BACKEND_CHECK: redis
+      SCCACHE_ERROR_LOG: /tmp/sccache-redis.log
     profiles:
       - test
       - redis
@@ -160,6 +164,7 @@ services:
       SCCACHE_MEMCACHED: tcp://memcached:11211
       TEST_NAME: memcached-deprecated
       BACKEND_CHECK: memcached
+      SCCACHE_ERROR_LOG: /tmp/sccache-memcached-deprecated.log
     profiles:
       - test
       - memcached
@@ -176,6 +181,7 @@ services:
       SCCACHE_MEMCACHED_ENDPOINT: tcp://memcached:11211
       TEST_NAME: memcached
       BACKEND_CHECK: memcached
+      SCCACHE_ERROR_LOG: /tmp/sccache-memcached.log
     profiles:
       - test
       - memcached
@@ -199,6 +205,7 @@ services:
       AWS_EC2_METADATA_DISABLED: "true"
       TEST_NAME: s3
       BACKEND_CHECK: s3
+      SCCACHE_ERROR_LOG: /tmp/sccache-s3.log
     profiles:
       - test
       - s3
@@ -218,6 +225,7 @@ services:
       SCCACHE_AZURE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;"
       TEST_NAME: azblob
       BACKEND_CHECK: azblob
+      SCCACHE_ERROR_LOG: /tmp/sccache-azblob.log
     profiles:
       - test
       - azblob
@@ -235,6 +243,7 @@ services:
       SCCACHE_WEBDAV_PASSWORD: "baz"
       TEST_NAME: webdav
       BACKEND_CHECK: webdav
+      SCCACHE_ERROR_LOG: /tmp/sccache-webdav.log
     profiles:
       - test
       - webdav
@@ -246,6 +255,7 @@ services:
     environment:
       <<: *common-env
       SCCACHE_DIR: /tmp/sccache
+      SCCACHE_ERROR_LOG: /tmp/sccache-gcc.log
     profiles:
       - test
       - gcc
@@ -257,6 +267,7 @@ services:
     environment:
       <<: *common-env
       SCCACHE_DIR: /tmp/sccache
+      SCCACHE_ERROR_LOG: /tmp/sccache-clang.log
     profiles:
       - test
       - clang
@@ -268,6 +279,7 @@ services:
     environment:
       <<: *common-env
       SCCACHE_DIR: /build/sccache
+      SCCACHE_ERROR_LOG: /tmp/sccache-cmake.log
     profiles:
       - test
       - cmake
@@ -279,6 +291,7 @@ services:
     environment:
       <<: *common-env
       SCCACHE_DIR: /build/sccache
+      SCCACHE_ERROR_LOG: /tmp/sccache-autotools.log
     profiles:
       - test
       - autotools
@@ -290,6 +303,7 @@ services:
     environment:
       <<: *common-env
       SCCACHE_DIR: /build/sccache
+      SCCACHE_ERROR_LOG: /tmp/sccache-coverage.log
     profiles:
       - test
       - coverage
@@ -301,6 +315,7 @@ services:
     environment:
       <<: *common-env
       CARGO_INCREMENTAL: "0"
+      SCCACHE_ERROR_LOG: /tmp/sccache-zstd.log
     profiles:
       - test
       - zstd
@@ -326,6 +341,7 @@ services:
         condition: service_started
     environment:
       <<: *common-env
+      SCCACHE_ERROR_LOG: /tmp/sccache-basedirs.log
     profiles:
       - test
       - basedirs
