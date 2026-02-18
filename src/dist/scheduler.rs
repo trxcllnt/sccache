@@ -32,6 +32,7 @@ use crate::{
 
 use std::{
     collections::HashMap,
+    net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -315,7 +316,7 @@ impl Scheduler {
 
     pub async fn start(
         &self,
-        handle: axum_server::Handle,
+        handle: axum_server::Handle<SocketAddr>,
         server: impl futures::Future<Output = Result<()>>,
         heartbeat_interval: Duration,
         shutdown_timeout: Duration,

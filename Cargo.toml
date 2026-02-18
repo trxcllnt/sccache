@@ -88,9 +88,9 @@ linked-hash-map = "0.5"
 log = "0.4"
 memchr = "2"
 memmap2 = "0.9.4"
-metrics = { git = "https://github.com/metrics-rs/metrics.git", branch = "main", default-features = false, optional = true }
-metrics-exporter-dogstatsd = { git = "https://github.com/metrics-rs/metrics.git", branch = "main", default-features = false, optional = true }
-metrics-exporter-prometheus = { git = "https://github.com/metrics-rs/metrics.git", branch = "main", default-features = false, optional = true, features = [
+metrics = { version = "0.24", default-features = false, optional = true }
+metrics-exporter-dogstatsd = { version = "0.9", default-features = false, optional = true }
+metrics-exporter-prometheus = { version = "0.18", default-features = false, optional = true, features = [
   "http-listener",
   "push-gateway-no-tls-provider",
 ] }
@@ -148,9 +148,9 @@ zip = { version = "0.6", default-features = false }
 zstd = "0.13"
 
 # dist-server only
-axum = { version = "0.7", features = ["http2", "macros"], optional = true }
-axum-extra = { version = "0.9.6", features = ["typed-header"], optional = true }
-axum-server = { version = "0.7", default-features = false, optional = true }
+axum = { version = "0.8", features = ["http2", "macros"], optional = true }
+axum-extra = { version = "0.12", features = ["typed-header"], optional = true }
+axum-server = { version = "0.8", default-features = false, optional = true }
 celery = { git = "https://github.com/trxcllnt/rusty-celery.git", branch = "sccache", optional = true, features = [
   "extra_content_types",
 ] }
