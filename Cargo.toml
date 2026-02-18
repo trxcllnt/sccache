@@ -154,7 +154,7 @@ axum-server = { version = "0.7", default-features = false, optional = true }
 celery = { git = "https://github.com/trxcllnt/rusty-celery.git", branch = "sccache", optional = true, features = [
   "extra_content_types",
 ] }
-nix = { version = "0.28.0", optional = true, features = [
+nix = { version = "0.30.0", optional = true, features = [
   "mount",
   "user",
   "sched",
