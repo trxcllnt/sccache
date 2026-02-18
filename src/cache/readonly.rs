@@ -14,12 +14,11 @@ use async_trait::async_trait;
 
 use crate::{
     cache::{Cache, CacheMode, Storage},
+    config::PreprocessorCacheModeConfig,
     errors::*,
 };
 
 use std::{sync::Arc, time::Duration};
-
-use super::PreprocessorCacheModeConfig;
 
 pub struct ReadOnlyStorage(pub Arc<dyn Storage>);
 

@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cache::disk::DiskCache;
-use crate::cache::{CacheMode, PreprocessorCache, PreprocessorCacheModeConfig};
-use crate::client::connect_to_server;
-use crate::commands::{do_compile, request_shutdown, request_stats};
-use crate::jobserver::Client;
-use crate::mock_command::*;
-use crate::server::{DistClientContainer, SccacheServer, ServerMessage};
-use crate::test::utils::*;
+use crate::{
+    cache::{CacheMode, PreprocessorCache, disk::DiskCache},
+    client::connect_to_server,
+    commands::{do_compile, request_shutdown, request_stats},
+    config::PreprocessorCacheModeConfig,
+    jobserver::Client,
+    mock_command::*,
+    server::{DistClientContainer, SccacheServer, ServerMessage},
+    test::utils::*,
+};
 use fs::File;
 use fs_err as fs;
 use futures::channel::oneshot::{self, Sender};

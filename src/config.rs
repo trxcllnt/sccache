@@ -39,7 +39,6 @@ use std::{
 };
 use typed_path::Utf8TypedPathBuf;
 
-pub use crate::cache::PreprocessorCacheModeConfig;
 use crate::errors::*;
 
 static CACHED_CONFIG_PATH: LazyLock<PathBuf> = LazyLock::new(CachedConfig::file_config_path);
@@ -222,6 +221,43 @@ impl Default for AzureCacheConfig {
 impl AzureCacheConfig {
     fn default_order() -> u64 {
         TieredCacheOrder::Azure as u64
+    }
+}
+
+/// Configuration switches for preprocessor cache mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(default)]
+pub struct PreprocessorCacheModeConfig {
+    /// Whether to use preprocessor cache mode entirely
+    pub use_preprocessor_cache_mode: bool,
+    /// The prefix in cache storage where the preprocessor cache files are stored.
+    /// For example, the disk preprocessor cache will be `$SCCACHE_DIR/{key_prefix}`,
+    /// the S3 preprocessor cache files will be under `$SCCACHE_BUCKET/{key_prefix}`,
+    /// etc.
+    pub key_prefix: String,
+}
+
+impl Default for PreprocessorCacheModeConfig {
+    fn default() -> Self {
+        Self {
+            use_preprocessor_cache_mode: false,
+            key_prefix: "preprocessor".into(),
+        }
+    }
+}
+
+impl PreprocessorCacheModeConfig {
+    /// Return a default [`Self`], but with the cache active.
+    pub fn activated() -> Self {
+        Self {
+            use_preprocessor_cache_mode: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn default_key_prefix() -> String {
+        "preprocessor".into()
     }
 }
 

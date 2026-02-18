@@ -18,8 +18,11 @@ use notify_debouncer_full::{
 };
 use std::{ffi::OsString, future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
-use crate::cache::{Cache, CacheMode, PreprocessorCacheModeConfig, Storage};
-use crate::errors::*;
+use crate::{
+    cache::{Cache, CacheMode, Storage},
+    config::PreprocessorCacheModeConfig,
+    errors::*,
+};
 
 pub struct WatchStorage {
     storage: Arc<futures::lock::Mutex<Arc<dyn Storage>>>,

@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use crate::{
-    cache::{Cache, CacheMode, PreprocessorCacheModeConfig, Storage},
+    cache::{Cache, CacheMode, Storage},
+    config::PreprocessorCacheModeConfig,
     errors::*,
 };
 

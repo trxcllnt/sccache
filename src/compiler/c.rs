@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::{
-    cache::{Cache, FileObjectSource, PreprocessorCacheModeConfig, Storage},
+    cache::{Cache, FileObjectSource, Storage},
     compiler::{
         Cacheable, ColorMode, Compilation, CompileCommand, CompileCommandImpl, Compiler,
         CompilerArguments, CompilerHasher, CompilerKind, HashResult, Language,
@@ -22,6 +22,7 @@ use crate::{
             preprocessor_cache_entry_hash_key,
         },
     },
+    config::PreprocessorCacheModeConfig,
     dist,
     errors::*,
     lru_disk_cache::LruCache,

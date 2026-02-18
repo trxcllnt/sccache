@@ -2598,11 +2598,12 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::cache::disk::DiskCache;
-    use crate::cache::{CacheMode, PreprocessorCache, PreprocessorCacheModeConfig};
-    use crate::mock_command::*;
-    use crate::test::mock_storage::MockStorage;
-    use crate::test::utils::*;
+    use crate::{
+        cache::{CacheMode, PreprocessorCache, disk::DiskCache},
+        config::PreprocessorCacheModeConfig,
+        mock_command::*,
+        test::{mock_storage::MockStorage, utils::*},
+    };
     use fs::File;
     use std::io::{Cursor, Write};
     use std::sync::Arc;

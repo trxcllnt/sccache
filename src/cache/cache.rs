@@ -13,15 +13,16 @@
 // limitations under the License.
 
 use crate::{
-    cache::{disk::DiskCache, readonly::ReadOnlyStorage, tiered::TieredCache},
-    config::{CacheType, DiskCacheConfig},
+    cache::{
+        disk::DiskCache, readonly::ReadOnlyStorage, tiered::TieredCache, utils::normalize_key,
+    },
+    config::{CacheType, DiskCacheConfig, PreprocessorCacheModeConfig},
     errors::*,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{FutureExt, StreamExt, TryFutureExt};
 use itertools::Itertools;
-use serde::{Deserialize, Serialize};
 use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 
 use super::cache_io::*;
@@ -117,43 +118,6 @@ pub trait Storage: Send + Sync {
     /// Return the base directories for path normalization if configured
     fn basedirs(&self) -> &[Vec<u8>] {
         &[]
-    }
-}
-
-/// Configuration switches for preprocessor cache mode.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[serde(default)]
-pub struct PreprocessorCacheModeConfig {
-    /// Whether to use preprocessor cache mode entirely
-    pub use_preprocessor_cache_mode: bool,
-    /// The prefix in cache storage where the preprocessor cache files are stored.
-    /// For example, the disk preprocessor cache will be `$SCCACHE_DIR/{key_prefix}`,
-    /// the S3 preprocessor cache files will be under `$SCCACHE_BUCKET/{key_prefix}`,
-    /// etc.
-    pub key_prefix: String,
-}
-
-impl Default for PreprocessorCacheModeConfig {
-    fn default() -> Self {
-        Self {
-            use_preprocessor_cache_mode: false,
-            key_prefix: "preprocessor".into(),
-        }
-    }
-}
-
-impl PreprocessorCacheModeConfig {
-    /// Return a default [`Self`], but with the cache active.
-    pub fn activated() -> Self {
-        Self {
-            use_preprocessor_cache_mode: true,
-            ..Default::default()
-        }
-    }
-
-    pub fn default_key_prefix() -> String {
-        "preprocessor".into()
     }
 }
 
@@ -393,23 +357,6 @@ impl Storage for RemoteStorage {
     fn basedirs(&self) -> &[Vec<u8>] {
         &self.basedirs
     }
-}
-
-#[cfg(any(
-    feature = "azure",
-    feature = "gcs",
-    feature = "gha",
-    feature = "memcached",
-    feature = "redis",
-    feature = "s3",
-    feature = "webdav",
-    feature = "oss",
-    feature = "cos",
-    test
-))]
-/// Normalize key `abcdef` into `a/b/c/abcdef`
-pub(in crate::cache) fn normalize_key(key: &str) -> String {
-    format!("{}/{}/{}/{}", &key[0..1], &key[1..2], &key[2..3], &key)
 }
 
 pub struct PreprocessorCache(pub Arc<dyn Storage>, pub PreprocessorCacheModeConfig);
@@ -1063,14 +1010,6 @@ mod test {
     use super::*;
     use crate::config::{CacheModeConfig, Config};
     use fs_err as fs;
-
-    #[test]
-    fn test_normalize_key() {
-        assert_eq!(
-            normalize_key("0123456789abcdef0123456789abcdef"),
-            "0/1/2/0123456789abcdef0123456789abcdef"
-        );
-    }
 
     #[test]
     fn test_read_write_mode_local() {
