@@ -91,6 +91,7 @@ pub fn sccache_client_cfg(data_dir: &Path, preprocessor_cache_mode: bool) -> Fil
             ..Default::default()
         },
         server_startup_timeout_ms: None,
+        basedirs: vec![],
     }
 }
 

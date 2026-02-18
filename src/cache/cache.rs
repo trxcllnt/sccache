@@ -472,6 +472,10 @@ pub trait Storage: Send + Sync {
     fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
         PreprocessorCacheModeConfig::default()
     }
+    /// Return the base directories for path normalization if configured
+    fn basedirs(&self) -> &[Vec<u8>] {
+        &[]
+    }
 }
 
 /// Configuration switches for preprocessor cache mode.
@@ -591,6 +595,38 @@ mod operator {
     }
 }
 
+/// Wrapper for opendal::Operator that adds basedirs support
+#[cfg(any(
+    feature = "azure",
+    feature = "gcs",
+    feature = "gha",
+    feature = "memcached",
+    feature = "redis",
+    feature = "s3",
+    feature = "webdav",
+    feature = "oss",
+))]
+pub struct RemoteStorage {
+    operator: opendal::Operator,
+    basedirs: Vec<Vec<u8>>,
+}
+
+#[cfg(any(
+    feature = "azure",
+    feature = "gcs",
+    feature = "gha",
+    feature = "memcached",
+    feature = "redis",
+    feature = "s3",
+    feature = "webdav",
+    feature = "oss",
+))]
+impl RemoteStorage {
+    pub fn new(operator: opendal::Operator, basedirs: Vec<Vec<u8>>) -> Self {
+        Self { operator, basedirs }
+    }
+}
+
 /// Implement storage for operator.
 #[cfg(any(
     feature = "azure",
@@ -604,35 +640,38 @@ mod operator {
     feature = "cos"
 ))]
 #[async_trait]
-impl Storage for opendal::Operator {
+impl Storage for RemoteStorage {
     async fn get(&self, key: &str) -> Result<Cache<Bytes>> {
-        match operator::read_with_retry(self, key).await {
+        match operator::read_with_retry(&self.operator, key).await {
             Ok(data) => Ok(Cache::Hit(data)),
-            Err(err) => match err.kind() {
-                opendal::ErrorKind::NotFound => Ok(Cache::Miss),
-                _ => Err(err.into()),
-            },
+            Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(Cache::Miss),
+            Err(e) => Err(e.into()),
         }
     }
 
     async fn del(&self, key: &str) -> Result<()> {
-        self.delete(&normalize_key(key))
+        self.operator
+            .delete(&normalize_key(key))
             .await
             .map_err(anyhow::Error::new)
     }
 
     async fn has(&self, key: &str) -> bool {
-        self.stat(&normalize_key(key)).await.is_ok()
+        self.operator.stat(&normalize_key(key)).await.is_ok()
     }
 
     async fn put(&self, key: &str, entry: Bytes) -> Result<Duration> {
         let start = std::time::Instant::now();
-        operator::write_with_retry(self, key, entry).await?;
+        operator::write_with_retry(&self.operator, key, entry).await?;
         Ok(start.elapsed())
     }
 
     async fn size(&self, key: &str) -> Result<u64> {
-        Ok(self.stat_with(&normalize_key(key)).await?.content_length())
+        Ok(self
+            .operator
+            .stat_with(&normalize_key(key))
+            .await?
+            .content_length())
     }
 
     async fn check(&self) -> Result<CacheMode> {
@@ -641,7 +680,7 @@ impl Storage for opendal::Operator {
         let path = ".sccache_check";
 
         // Read is required, return error directly if we can't read .
-        match self.read(path).await {
+        match self.operator.read(path).await {
             Ok(_) => (),
             // Read not exist file with not found is ok.
             Err(err) if err.kind() == ErrorKind::NotFound => (),
@@ -660,7 +699,7 @@ impl Storage for opendal::Operator {
             Err(err) => bail!("cache storage failed to read: {:?}", err),
         }
 
-        let can_write = match self.write(path, "Hello, World!").await {
+        let can_write = match self.operator.write(path, "Hello, World!").await {
             Ok(_) => true,
             Err(err) if err.kind() == ErrorKind::AlreadyExists => true,
             // Tolerate all other write errors because we can do read at least.
@@ -682,7 +721,7 @@ impl Storage for opendal::Operator {
     }
 
     async fn location(&self) -> String {
-        let meta = self.info();
+        let meta = self.operator.info();
         format!(
             "{}, name: {}, prefix: {}",
             meta.scheme(),
@@ -697,6 +736,10 @@ impl Storage for opendal::Operator {
 
     async fn max_size(&self) -> Result<Option<u64>> {
         Ok(None)
+    }
+
+    fn basedirs(&self) -> &[Vec<u8>] {
+        &self.basedirs
     }
 }
 
@@ -843,8 +886,10 @@ impl StorageBuilder {
     }
 }
 
-impl From<(StorageKind, DiskCacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, DiskCacheConfig)) -> Self {
+impl From<(StorageKind, Vec<Vec<u8>>, DiskCacheConfig)> for StorageBuilder {
+    fn from(
+        (storage_kind, basedirs, config): (StorageKind, Vec<Vec<u8>>, DiskCacheConfig),
+    ) -> Self {
         let DiskCacheConfig {
             dir,
             size,
@@ -860,7 +905,7 @@ impl From<(StorageKind, DiskCacheConfig)> for StorageBuilder {
             .create_storage(
                 move || {
                     debug!("Init disk {storage_kind} cache with dir={dir:?}, size={size}, rw_mode={rw_mode:?})");
-                    Ok(Arc::new(DiskCache::new(&dir, size, rw_mode)))
+                    Ok(Arc::new(DiskCache::new(&dir, size, rw_mode, basedirs.to_vec())))
                 }
             )
             .preprocessor_cache_mode(preprocessor_cache_mode)
@@ -868,8 +913,10 @@ impl From<(StorageKind, DiskCacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "azure")]
-impl From<(StorageKind, AzureCacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, AzureCacheConfig)) -> Self {
+impl From<(StorageKind, Vec<Vec<u8>>, AzureCacheConfig)> for StorageBuilder {
+    fn from(
+        (storage_kind, basedirs, config): (StorageKind, Vec<Vec<u8>>, AzureCacheConfig),
+    ) -> Self {
         let AzureCacheConfig {
             connection_string,
             container,
@@ -885,7 +932,7 @@ impl From<(StorageKind, AzureCacheConfig)> for StorageBuilder {
                 debug!("Init azure {storage_kind} cache with container {container}, key_prefix {key_prefix}");
 
                 AzureBlobCache::build(&connection_string, &container, &key_prefix)
-                    .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                    .map(|storage| Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>)
                     .map_err(|err| anyhow!("create azure cache failed: {err:?}"))
             })
             .preprocessor_cache_mode(preprocessor_cache_mode)
@@ -893,8 +940,8 @@ impl From<(StorageKind, AzureCacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "gcs")]
-impl From<(StorageKind, GCSCacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, GCSCacheConfig)) -> Self {
+impl From<(StorageKind, Vec<Vec<u8>>, GCSCacheConfig)> for StorageBuilder {
+    fn from((storage_kind, basedirs, config): (StorageKind, Vec<Vec<u8>>, GCSCacheConfig)) -> Self {
         let GCSCacheConfig {
             bucket,
             key_prefix,
@@ -922,7 +969,9 @@ impl From<(StorageKind, GCSCacheConfig)> for StorageBuilder {
                     rw_mode.into(),
                     credential_url.as_deref(),
                 )
-                .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                .map(|storage| {
+                    Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>
+                })
                 .map_err(|err| anyhow!("create gcs cache failed: {err:?}"))
             })
             .preprocessor_cache_mode(preprocessor_cache_mode)
@@ -930,8 +979,8 @@ impl From<(StorageKind, GCSCacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "gha")]
-impl From<(StorageKind, GHACacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, GHACacheConfig)) -> Self {
+impl From<(StorageKind, Vec<Vec<u8>>, GHACacheConfig)> for StorageBuilder {
+    fn from((storage_kind, basedirs, config): (StorageKind, Vec<Vec<u8>>, GHACacheConfig)) -> Self {
         let GHACacheConfig {
             version,
             preprocessor_cache_mode,
@@ -946,7 +995,9 @@ impl From<(StorageKind, GHACacheConfig)> for StorageBuilder {
                 debug!("Init gha {storage_kind} cache with version {version}");
 
                 GHACache::build(&version, key_prefix.as_str())
-                    .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                    .map(|storage| {
+                        Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>
+                    })
                     .map_err(|err| anyhow!("create gha cache failed: {err:?}"))
             })
             .preprocessor_cache_mode(preprocessor_cache_mode)
@@ -954,8 +1005,10 @@ impl From<(StorageKind, GHACacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "memcached")]
-impl From<(StorageKind, MemcachedCacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, MemcachedCacheConfig)) -> Self {
+impl From<(StorageKind, Vec<Vec<u8>>, MemcachedCacheConfig)> for StorageBuilder {
+    fn from(
+        (storage_kind, basedirs, config): (StorageKind, Vec<Vec<u8>>, MemcachedCacheConfig),
+    ) -> Self {
         let MemcachedCacheConfig {
             url,
             username,
@@ -982,7 +1035,9 @@ impl From<(StorageKind, MemcachedCacheConfig)> for StorageBuilder {
                     expiration,
                     connection_pool_max_size,
                 )
-                .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                .map(|storage| {
+                    Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>
+                })
                 .map_err(|err| anyhow!("create memcached cache failed: {err:?}"))
             })
             .preprocessor_cache_mode(preprocessor_cache_mode)
@@ -990,8 +1045,10 @@ impl From<(StorageKind, MemcachedCacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "redis")]
-impl From<(StorageKind, RedisCacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, RedisCacheConfig)) -> Self {
+impl From<(StorageKind, Vec<Vec<u8>>, RedisCacheConfig)> for StorageBuilder {
+    fn from(
+        (storage_kind, basedirs, config): (StorageKind, Vec<Vec<u8>>, RedisCacheConfig),
+    ) -> Self {
         use crate::cache::simplex::SimplexCache;
 
         let RedisCacheConfig {
@@ -1049,7 +1106,6 @@ impl From<(StorageKind, RedisCacheConfig)> for StorageBuilder {
                     }
                     _ => bail!("Only one of `endpoint`, `cluster_endpoints`, `url` must be set"),
                 }
-                .map(Arc::new)
                 .and_then(|storage| {
                     if let Some(reader_endpoints) = &reader_endpoints {
                         debug!("Init redis cluster {storage_kind} cache with reader endpoints {reader_endpoints}");
@@ -1074,9 +1130,11 @@ impl From<(StorageKind, RedisCacheConfig)> for StorageBuilder {
                                 connection_pool_max_size,
                             )?
                         };
-                        Ok(SimplexCache::create(Arc::new(reader), storage))
+                        let reader = Arc::new(RemoteStorage::new(reader, basedirs.clone()));
+                        let storage = Arc::new(RemoteStorage::new(storage, basedirs.to_vec()));
+                        Ok(SimplexCache::create(reader, storage))
                     } else {
-                        Ok(storage)
+                        Ok(Arc::new(RemoteStorage::new(storage, basedirs.to_vec())))
                     }
                 })
                 .map_err(|err| anyhow!("create redis cache failed: {err:?}"))
@@ -1086,8 +1144,8 @@ impl From<(StorageKind, RedisCacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "s3")]
-impl From<(StorageKind, S3CacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, S3CacheConfig)) -> Self {
+impl From<(StorageKind, Vec<Vec<u8>>, S3CacheConfig)> for StorageBuilder {
+    fn from((storage_kind, basedirs, config): (StorageKind, Vec<Vec<u8>>, S3CacheConfig)) -> Self {
         let S3CacheConfig {
             bucket,
             enable_virtual_host_style,
@@ -1114,7 +1172,7 @@ impl From<(StorageKind, S3CacheConfig)> for StorageBuilder {
                 .with_server_side_encryption(server_side_encryption)
                 .with_enable_virtual_host_style(enable_virtual_host_style)
                 .build()
-                .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                .map(|storage| Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>)
                 .map_err(|err| anyhow!("create s3 cache failed: {err:?}"))
         })
         .preprocessor_cache_mode(preprocessor_cache_mode)
@@ -1133,8 +1191,10 @@ impl From<(StorageKind, S3CacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "webdav")]
-impl From<(StorageKind, WebdavCacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, WebdavCacheConfig)) -> Self {
+impl From<(StorageKind, Vec<Vec<u8>>, WebdavCacheConfig)> for StorageBuilder {
+    fn from(
+        (storage_kind, basedirs, config): (StorageKind, Vec<Vec<u8>>, WebdavCacheConfig),
+    ) -> Self {
         let WebdavCacheConfig {
             endpoint,
             key_prefix,
@@ -1158,7 +1218,9 @@ impl From<(StorageKind, WebdavCacheConfig)> for StorageBuilder {
                     password.as_deref(),
                     token.as_deref(),
                 )
-                .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                .map(|storage| {
+                    Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>
+                })
                 .map_err(|err| anyhow!("create webdav cache failed: {err:?}"))
             })
             .preprocessor_cache_mode(preprocessor_cache_mode)
@@ -1166,8 +1228,8 @@ impl From<(StorageKind, WebdavCacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "oss")]
-impl From<(StorageKind, OSSCacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, OSSCacheConfig)) -> Self {
+impl From<(StorageKind, Vec<Vec<u8>>, OSSCacheConfig)> for StorageBuilder {
+    fn from((storage_kind, basedirs, config): (StorageKind, Vec<Vec<u8>>, OSSCacheConfig)) -> Self {
         let OSSCacheConfig {
             bucket,
             endpoint,
@@ -1184,7 +1246,9 @@ impl From<(StorageKind, OSSCacheConfig)> for StorageBuilder {
                 debug!("Init oss {storage_kind} cache with bucket {bucket}, endpoint {endpoint:?}");
 
                 OSSCache::build(&bucket, &key_prefix, endpoint.as_deref(), no_credentials)
-                    .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                    .map(|storage| {
+                        Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>
+                    })
                     .map_err(|err| anyhow!("create oss cache failed: {err:?}"))
             })
             .preprocessor_cache_mode(preprocessor_cache_mode)
@@ -1192,8 +1256,8 @@ impl From<(StorageKind, OSSCacheConfig)> for StorageBuilder {
 }
 
 #[cfg(feature = "cos")]
-impl From<(StorageKind, COSCacheConfig)> for StorageBuilder {
-    fn from((storage_kind, config): (StorageKind, COSCacheConfig)) -> Self {
+impl From<(StorageKind, Vec<Vec<u8>>, COSCacheConfig)> for StorageBuilder {
+    fn from((storage_kind, basedirs, config): (StorageKind, Vec<Vec<u8>>, COSCacheConfig)) -> Self {
         let COSCacheConfig {
             bucket,
             endpoint,
@@ -1209,36 +1273,38 @@ impl From<(StorageKind, COSCacheConfig)> for StorageBuilder {
                 debug!("Init cos {storage_kind} cache with bucket {bucket}, endpoint {endpoint:?}");
 
                 COSCache::build(&bucket, &key_prefix, endpoint.as_deref())
-                    .map(|storage| Arc::new(storage) as Arc<dyn Storage>)
+                    .map(|storage| {
+                        Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>
+                    })
                     .map_err(|err| anyhow!("create oss cache failed: {err:?}"))
             })
             .preprocessor_cache_mode(preprocessor_cache_mode)
     }
 }
 
-impl From<(StorageKind, CacheType)> for StorageBuilder {
-    fn from((storage_kind, cache_type): (StorageKind, CacheType)) -> Self {
+impl From<(StorageKind, Vec<Vec<u8>>, CacheType)> for StorageBuilder {
+    fn from((storage_kind, basedirs, cache_type): (StorageKind, Vec<Vec<u8>>, CacheType)) -> Self {
         #[allow(unreachable_patterns)]
         match cache_type {
             #[cfg(feature = "azure")]
-            CacheType::Azure(cfg) => (storage_kind, cfg).into(),
+            CacheType::Azure(cfg) => (storage_kind, basedirs, cfg).into(),
             #[cfg(feature = "gcs")]
-            CacheType::GCS(cfg) => (storage_kind, cfg).into(),
+            CacheType::GCS(cfg) => (storage_kind, basedirs, cfg).into(),
             #[cfg(feature = "gha")]
-            CacheType::GHA(cfg) => (storage_kind, cfg).into(),
+            CacheType::GHA(cfg) => (storage_kind, basedirs, cfg).into(),
             #[cfg(feature = "memcached")]
-            CacheType::Memcached(cfg) => (storage_kind, cfg).into(),
+            CacheType::Memcached(cfg) => (storage_kind, basedirs, cfg).into(),
             #[cfg(feature = "redis")]
-            CacheType::Redis(cfg) => (storage_kind, cfg).into(),
+            CacheType::Redis(cfg) => (storage_kind, basedirs, cfg).into(),
             #[cfg(feature = "s3")]
-            CacheType::S3(cfg) => (storage_kind, cfg).into(),
+            CacheType::S3(cfg) => (storage_kind, basedirs, cfg).into(),
             #[cfg(feature = "webdav")]
-            CacheType::Webdav(cfg) => (storage_kind, cfg).into(),
+            CacheType::Webdav(cfg) => (storage_kind, basedirs, cfg).into(),
             #[cfg(feature = "oss")]
-            CacheType::OSS(cfg) => (storage_kind, cfg).into(),
+            CacheType::OSS(cfg) => (storage_kind, basedirs, cfg).into(),
             #[cfg(feature = "cos")]
-            CacheType::COS(cfg) => (storage_kind, cfg).into(),
-            CacheType::Disk(cfg) => (storage_kind, cfg).into(),
+            CacheType::COS(cfg) => (storage_kind, basedirs, cfg).into(),
+            CacheType::Disk(cfg) => (storage_kind, basedirs, cfg).into(),
             _ => Self::default(),
         }
     }
@@ -1261,7 +1327,11 @@ impl fmt::Display for StorageKind {
 
 impl StorageKind {
     /// Create suitable `Storage` implementations from a list of storage configurations.
-    pub async fn create(&self, cache_types: &[CacheType]) -> Result<Arc<dyn Storage>> {
+    pub async fn create(
+        &self,
+        cache_types: &[CacheType],
+        basedirs: &[Vec<u8>],
+    ) -> Result<Arc<dyn Storage>> {
         let kind = *self;
         futures::stream::iter(
             cache_types
@@ -1270,11 +1340,11 @@ impl StorageKind {
                 .rev()
                 .filter({
                     let use_preprocessor_cache_mode = matches!(kind, StorageKind::Preprocessor);
-                    move |&config| {
+                    move |&cache| {
                         if use_preprocessor_cache_mode {
-                            match config {
+                            match cache {
                                 CacheType::Disk(_) => true,
-                                _ => config
+                                _ => cache
                                     .preprocessor_cache_mode()
                                     .map(|cache| cache.use_preprocessor_cache_mode)
                                     .filter(|&f| f == use_preprocessor_cache_mode)
@@ -1285,7 +1355,7 @@ impl StorageKind {
                         }
                     }
                 })
-                .map(|config| StorageBuilder::from((kind, config.clone()))),
+                .map(|cache| StorageBuilder::from((kind, basedirs.to_vec(), cache.clone()))),
         )
         .fold(None, |prev, curr| async move {
             match prev {
@@ -1304,7 +1374,7 @@ impl StorageKind {
             } else {
                 // If we build only with `cargo build --no-default-features`
                 // only use sccache with a local cache (no remote storage)
-                StorageBuilder::from((kind, DiskCacheConfig::default()))
+                StorageBuilder::from((kind, basedirs.to_vec(), DiskCacheConfig::default()))
                     .build()
                     .await
             }
@@ -1378,7 +1448,10 @@ mod test {
         {
             let caches = make_config(CacheModeConfig::ReadWrite).caches;
             runtime.block_on(async {
-                let storage = StorageKind::Compilations.create(&caches).await.unwrap();
+                let storage = StorageKind::Compilations
+                    .create(&caches, &[])
+                    .await
+                    .unwrap();
                 storage.put("test1", "entry".into()).await.unwrap();
             });
         }
@@ -1387,7 +1460,10 @@ mod test {
         {
             let caches = make_config(CacheModeConfig::ReadOnly).caches;
             runtime.block_on(async {
-                let storage = StorageKind::Compilations.create(&caches).await.unwrap();
+                let storage = StorageKind::Compilations
+                    .create(&caches, &[])
+                    .await
+                    .unwrap();
                 assert_eq!(
                     storage
                         .put("test1", "entry".into())
@@ -1398,5 +1474,55 @@ mod test {
                 );
             });
         }
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn test_operator_storage_s3_with_basedirs() {
+        // Create S3 operator (doesn't need real credentials for this test)
+        let operator = crate::cache::s3::S3Cache::new(
+            "test-bucket".to_string(),
+            "test-prefix".to_string(),
+            true, // no_credentials = true
+        )
+        .with_region(Some("us-east-1".to_string()))
+        .build()
+        .expect("Failed to create S3 cache operator");
+
+        let basedirs = vec![b"/home/user/project".to_vec(), b"/opt/build".to_vec()];
+
+        // Wrap with OperatorStorage
+        let storage = RemoteStorage::new(operator, basedirs.clone());
+
+        // Verify basedirs are stored and retrieved correctly
+        assert_eq!(storage.basedirs(), basedirs.as_slice());
+        assert_eq!(storage.basedirs().len(), 2);
+        assert_eq!(storage.basedirs()[0], b"/home/user/project".to_vec());
+        assert_eq!(storage.basedirs()[1], b"/opt/build".to_vec());
+    }
+
+    #[test]
+    #[cfg(feature = "redis")]
+    fn test_operator_storage_redis_with_basedirs() {
+        // Create Redis operator
+        let operator = crate::cache::redis::RedisCache::build_single(
+            "redis://localhost:6379",
+            None,
+            None,
+            0,
+            "test-prefix",
+            0,
+            10,
+        )
+        .expect("Failed to create Redis cache operator");
+
+        let basedirs = vec![b"/workspace".to_vec()];
+
+        // Wrap with OperatorStorage
+        let storage = RemoteStorage::new(operator, basedirs.clone());
+
+        // Verify basedirs work
+        assert_eq!(storage.basedirs(), basedirs.as_slice());
+        assert_eq!(storage.basedirs().len(), 1);
     }
 }

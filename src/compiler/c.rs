@@ -27,10 +27,10 @@ use crate::{
     lru_disk_cache::LruCache,
     mock_command::{CommandCreatorSync, ProcessOutput},
     server::SccacheService,
-    util::{Digest, HashToDigest, hash_all},
+    util::{Digest, HashToDigest, hash_all, strip_basedirs},
 };
 use async_trait::async_trait;
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use fs_err as fs;
 use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt, lock::Mutex};
 use itertools::Itertools;
@@ -161,6 +161,7 @@ struct CCompilation<T: CommandCreatorSync, I: CCompilerImpl> {
     cwd: PathBuf,
     env_vars: Vec<(OsString, OsString)>,
     rewrite_includes_only: bool,
+    basedirs: Vec<Vec<u8>>,
 }
 
 /// Supported C compilers.
@@ -524,6 +525,7 @@ where
             cwd,
             &parsed_args.input,
             compiler.plusplus(),
+            storage.basedirs(),
         )
         .await?
         .filter(|_| !matches!(cache_control, CacheControl::ForceNoCache));
@@ -630,6 +632,7 @@ where
                     parsed_args: self.parsed_args,
                     rewrite_includes_only,
                     service: service.to_owned(),
+                    basedirs: storage.basedirs().to_vec(),
                 }),
                 weak_toolchain_key,
             });
@@ -679,6 +682,7 @@ where
                         parsed_args: self.parsed_args,
                         rewrite_includes_only,
                         service: service.to_owned(),
+                        basedirs: storage.basedirs().to_vec(),
                     }),
                     weak_toolchain_key,
                 });
@@ -793,6 +797,7 @@ where
                 &env_vars,
                 preprocessor_output,
                 compiler.plusplus(),
+                storage.basedirs().to_vec(),
             )
             .await
         );
@@ -891,6 +896,7 @@ where
                 parsed_args: self.parsed_args,
                 rewrite_includes_only,
                 service: service.to_owned(),
+                basedirs: storage.basedirs().to_vec(),
             }),
             weak_toolchain_key,
         })
@@ -1159,6 +1165,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
             env_vars,
             parsed_args,
             rewrite_includes_only,
+            basedirs,
             ..
         } = *self;
 
@@ -1258,10 +1265,15 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                     .with_context(|| format!("unable to transform input path {input_path:?}"))?;
                 let (mut header, dist_input_path) =
                     pkg::make_tar_header(&input_path, &dist_input_path)?;
-                let stdout = output.try_collect::<Vec<Bytes>>().await?.concat();
-                header.set_size(stdout.len() as u64); // The metadata is from non-preprocessed
+                let preprocessor_output = output.try_collect::<Vec<Bytes>>().await?;
+                let preprocessor_output = tokio::task::spawn_blocking(move || {
+                    strip_basedirs(&preprocessor_output.concat(), &basedirs).into_owned()
+                })
+                .await?;
+                // The current size is from the non-preprocessed path, so set the actual size.
+                header.set_size(preprocessor_output.len() as u64);
                 header.set_cksum();
-                builder.append_data(&mut header, dist_input_path, &stdout[..])?;
+                builder.append_data(&mut header, dist_input_path, &preprocessor_output[..])?;
             }
             _ => unreachable!(),
         }
@@ -1732,7 +1744,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 }
 
 /// The cache is versioned by the inputs to `hash_key_async`.
-pub const CACHE_VERSION: &[u8] = b"11";
+pub const CACHE_VERSION: &[u8] = b"12";
 
 /// Environment variables that are factored into the cache key.
 static CACHED_ENV_VARS: LazyLock<HashSet<&'static OsStr>> = LazyLock::new(|| {
@@ -1755,6 +1767,7 @@ static CACHED_ENV_VARS: LazyLock<HashSet<&'static OsStr>> = LazyLock::new(|| {
 });
 
 /// Compute the hash key of `compiler` compiling `preprocessor_output` with `args`.
+#[allow(clippy::too_many_arguments)]
 pub async fn hash_key_async(
     compiler_digest: &str,
     language: Language,
@@ -1763,6 +1776,7 @@ pub async fn hash_key_async(
     env_vars: &[(OsString, OsString)],
     preprocessor_output: Pin<Box<ProcessOutputStream>>,
     plusplus: bool,
+    basedirs: Vec<Vec<u8>>,
 ) -> Result<(String, Duration)> {
     // If you change any of the inputs to the hash, you should change `CACHE_VERSION`.
     let mut digest = Digest::new();
@@ -1795,18 +1809,16 @@ pub async fn hash_key_async(
         }
     }
 
-    let (digest, hash_time) = preprocessor_output
-        .try_fold(
-            (digest, Duration::default()),
-            |(digest, hash_time), bytes| async move {
-                let start = Instant::now();
-                let res = digest.with_reader_sync(bytes.reader());
-                res.map(|digest| (digest, hash_time + start.elapsed()))
-            },
-        )
-        .await?;
+    let start = Instant::now();
+    let preprocessor_output = preprocessor_output.try_collect::<Vec<_>>().await?;
+    let digest = tokio::task::spawn_blocking(move || {
+        let preprocessor_output = preprocessor_output.concat();
+        let preprocessor_output = strip_basedirs(&preprocessor_output, &basedirs);
+        digest.with_reader_sync(&preprocessor_output[..])
+    })
+    .await??;
 
-    Ok((digest.finish(), hash_time))
+    Ok((digest.finish(), start.elapsed()))
 }
 
 #[cfg(test)]
@@ -1835,7 +1847,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -1847,7 +1860,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -1867,7 +1881,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -1879,7 +1894,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                true
+                true,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -1899,7 +1915,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -1911,7 +1928,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -1931,7 +1949,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                true
+                true,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -1943,7 +1962,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                true
+                true,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -1963,7 +1983,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -1975,7 +1996,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -1999,7 +2021,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -2011,7 +2034,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -2026,7 +2050,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -2038,7 +2063,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -2053,7 +2079,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -2065,7 +2092,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -2084,7 +2112,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(b"hello world"),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -2096,7 +2125,8 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(b"goodbye"),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -2118,6 +2148,7 @@ mod test {
                 &[],
                 into_process_output_stream(PREPROCESSED),
                 false,
+                vec![],
             )
             .wait()
             .unwrap()
@@ -2131,6 +2162,7 @@ mod test {
                 &vars,
                 into_process_output_stream(PREPROCESSED),
                 false,
+                vec![],
             )
             .wait()
             .unwrap()
@@ -2144,6 +2176,7 @@ mod test {
                 &vars,
                 into_process_output_stream(PREPROCESSED),
                 false,
+                vec![],
             )
             .wait()
             .unwrap()
@@ -2168,7 +2201,8 @@ mod test {
                 &extra_data,
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
@@ -2180,12 +2214,127 @@ mod test {
                 &[],
                 &[],
                 into_process_output_stream(PREPROCESSED),
-                false
+                false,
+                vec![]
             )
             .wait()
             .unwrap()
             .0
         );
+    }
+
+    #[test]
+    fn test_hash_key_basedirs() {
+        let args = ovec!["a", "b", "c"];
+        let preprocessed1 = b"# 1 \"/home/user1/project/src/main.c\"\nint main() { return 0; }";
+        let preprocessed2 = b"# 1 \"/home/user2/project/src/main.c\"\nint main() { return 0; }";
+        let basedirs = [
+            b"/home/user1/project".to_vec(),
+            b"/home/user2/project".to_vec(),
+        ];
+
+        // Helper to compute with basedirs
+        let hash_with_basedirs = |output: &[u8], dirs: &[Vec<u8>]| {
+            hash_key_async(
+                "abcd",
+                Language::C,
+                &args,
+                &[],
+                &[],
+                into_process_output_stream(output),
+                false,
+                dirs.to_vec(),
+            )
+            .wait()
+            .unwrap()
+            .0
+        };
+
+        // Test 1: Same hash with different absolute paths when basedir is used
+        let h1 = hash_with_basedirs(preprocessed1, &basedirs);
+        let h2 = hash_with_basedirs(preprocessed2, &basedirs);
+        assert_eq!(h1, h2);
+
+        // Test 2: Same hash with single basedir that matches each
+        assert_eq!(
+            hash_with_basedirs(preprocessed1, &basedirs[..1]),
+            hash_with_basedirs(preprocessed2, &basedirs[1..])
+        );
+
+        // Test 3: Different hashes without basedir
+        assert_neq!(
+            hash_key_async(
+                "abcd",
+                Language::C,
+                &args,
+                &[],
+                &[],
+                into_process_output_stream(preprocessed1),
+                false,
+                vec![]
+            )
+            .wait()
+            .unwrap()
+            .0,
+            hash_key_async(
+                "abcd",
+                Language::C,
+                &args,
+                &[],
+                &[],
+                into_process_output_stream(preprocessed2),
+                false,
+                vec![]
+            )
+            .wait()
+            .unwrap()
+            .0
+        );
+
+        // Test 4: Works for C++ files too
+        let preprocessed_cpp1 =
+            b"# 1 \"/home/user1/project/src/main.cpp\"\nint main() { return 0; }";
+        let preprocessed_cpp2 =
+            b"# 1 \"/home/user2/project/src/main.cpp\"\nint main() { return 0; }";
+        let h_cpp1 = hash_key_async(
+            "abcd",
+            Language::Cxx,
+            &args,
+            &[],
+            &[],
+            into_process_output_stream(preprocessed_cpp1),
+            true,
+            basedirs.to_vec(),
+        )
+        .wait()
+        .unwrap()
+        .0;
+        let h_cpp2 = hash_key_async(
+            "abcd",
+            Language::Cxx,
+            &args,
+            &[],
+            &[],
+            into_process_output_stream(preprocessed_cpp2),
+            true,
+            basedirs.to_vec(),
+        )
+        .wait()
+        .unwrap()
+        .0;
+        assert_eq!(h_cpp1, h_cpp2);
+
+        // Test 5: Doesn't work with trailing slash in basedir, they must be normalized in config
+        let basedir_slash = b"/home/user1/project/".to_vec();
+        let h_slash = hash_with_basedirs(preprocessed1, std::slice::from_ref(&basedir_slash));
+        assert_neq!(h1, h_slash);
+
+        // Test 6: Multiple basedirs - longest match wins
+        let multi_basedirs = vec![
+            b"/home/user1".to_vec(),
+            b"/home/user1/project".to_vec(), // This should match (longest)
+        ];
+        assert_eq!(h1, hash_with_basedirs(preprocessed1, &multi_basedirs));
     }
 
     #[test]
@@ -2287,7 +2436,10 @@ mod test {
         {
             let caches = make_config(CacheModeConfig::ReadWrite).caches;
             runtime.block_on(async {
-                let storage = StorageKind::Preprocessor.create(&caches).await.unwrap();
+                let storage = StorageKind::Preprocessor
+                    .create(&caches, &[])
+                    .await
+                    .unwrap();
                 PreprocessorCacheEntry::default()
                     .put(storage.as_ref(), "test1")
                     .await
@@ -2299,7 +2451,10 @@ mod test {
         {
             let caches = make_config(CacheModeConfig::ReadOnly).caches;
             runtime.block_on(async {
-                let storage = StorageKind::Preprocessor.create(&caches).await.unwrap();
+                let storage = StorageKind::Preprocessor
+                    .create(&caches, &[])
+                    .await
+                    .unwrap();
                 assert_eq!(
                     PreprocessorCacheEntry::default()
                         .put(storage.as_ref(), "test1",)

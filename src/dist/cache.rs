@@ -633,6 +633,7 @@ mod server {
                     root,
                     max_size,
                     crate::cache::CacheMode::ReadWrite,
+                    vec![],
                 )),
                 store,
                 metrics: ServerToolchainsMetrics::new(metrics),

@@ -80,7 +80,12 @@ where
         let runtime = Runtime::new().unwrap();
         let dist_client = DistClientContainer::new_disabled();
         let storage = Arc::new(PreprocessorCache(
-            Arc::new(DiskCache::new(&cache_dir, cache_size, CacheMode::ReadWrite)),
+            Arc::new(DiskCache::new(
+                &cache_dir,
+                cache_size,
+                CacheMode::ReadWrite,
+                vec![],
+            )),
             PreprocessorCacheModeConfig::default(),
         ));
 

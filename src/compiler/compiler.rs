@@ -40,7 +40,7 @@ use crate::dist::pkg;
 use crate::lru_disk_cache;
 use crate::mock_command::{CommandChild, CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::server;
-use crate::util::{fmt_duration_as_secs, run_input_output};
+use crate::util::{fmt_duration_as_secs, run_input_output, strip_basedirs};
 use crate::{counted_array, dist};
 use async_trait::async_trait;
 use filetime::FileTime;
@@ -696,7 +696,13 @@ where
                     (res, start.elapsed())
                 };
 
-                let (hash_key, outputs, cacheable, dist_type, output) = compile?;
+                let (hash_key, outputs, cacheable, dist_type, mut output) = compile?;
+
+                output.stdout =
+                    strip_basedirs(&output.stdout, compilations_storage.basedirs()).into_owned();
+
+                output.stderr =
+                    strip_basedirs(&output.stderr, compilations_storage.basedirs()).into_owned();
 
                 if !output.success() {
                     trace!(
@@ -3359,6 +3365,7 @@ LLVM version: 6.0",
                 f.tempdir.path().join("cache"),
                 u64::MAX,
                 CacheMode::ReadWrite,
+                vec![],
             )),
             PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: preprocessor_cache_mode,
@@ -3524,6 +3531,7 @@ LLVM version: 6.0",
                 f.tempdir.path().join("cache"),
                 u64::MAX,
                 CacheMode::ReadWrite,
+                vec![],
             )),
             PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: preprocessor_cache_mode,
@@ -3913,6 +3921,7 @@ LLVM version: 6.0",
                 f.tempdir.path().join("cache"),
                 u64::MAX,
                 CacheMode::ReadWrite,
+                vec![],
             )),
             PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: preprocessor_cache_mode,
@@ -4072,6 +4081,7 @@ LLVM version: 6.0",
                 f.tempdir.path().join("cache"),
                 u64::MAX,
                 CacheMode::ReadWrite,
+                vec![],
             )),
             PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: preprocessor_cache_mode,
@@ -4197,6 +4207,7 @@ LLVM version: 6.0",
                 f.tempdir.path().join("cache"),
                 u64::MAX,
                 CacheMode::ReadWrite,
+                vec![],
             )),
             PreprocessorCacheModeConfig {
                 use_preprocessor_cache_mode: preprocessor_cache_mode,

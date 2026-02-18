@@ -81,6 +81,11 @@ impl Storage for ReadOnlyStorage {
     fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
         self.0.preprocessor_cache_mode_config()
     }
+
+    /// Return the base directories for path normalization if configured
+    fn basedirs(&self) -> &[Vec<u8>] {
+        self.0.basedirs()
+    }
 }
 
 #[cfg(test)]
@@ -116,6 +121,32 @@ mod test {
                 .preprocessor_cache_mode_config()
                 .use_preprocessor_cache_mode
         );
+    }
+
+    #[test]
+    fn readonly_storage_forwards_basedirs() {
+        let tempdir = tempfile::Builder::new()
+            .prefix("readonly_storage_forwards_basedirs")
+            .tempdir()
+            .expect("Failed to create tempdir");
+        let cache_dir = tempdir.path().join("cache");
+        std::fs::create_dir(&cache_dir).unwrap();
+
+        let basedirs = vec![
+            b"/home/user/project".to_vec(),
+            b"/home/user/workspace".to_vec(),
+        ];
+
+        let disk_cache = crate::cache::disk::DiskCache::new(
+            &cache_dir,
+            1024 * 1024,
+            super::CacheMode::ReadWrite,
+            basedirs.clone(),
+        );
+
+        let readonly_storage = ReadOnlyStorage(std::sync::Arc::new(disk_cache));
+
+        assert_eq!(readonly_storage.basedirs(), basedirs.as_slice());
     }
 
     #[test]

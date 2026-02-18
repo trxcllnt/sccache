@@ -445,8 +445,12 @@ pub fn start_server(config: Config, addr: &crate::net::SocketAddr) -> Result<()>
     let init_storage = || -> Result<(Arc<dyn Storage>, Arc<dyn Storage>)> {
         runtime.block_on(async {
             Ok((
-                StorageKind::Compilations.create(&config.caches).await?,
-                StorageKind::Preprocessor.create(&config.caches).await?,
+                StorageKind::Compilations
+                    .create(&config.caches, &config.basedirs)
+                    .await?,
+                StorageKind::Preprocessor
+                    .create(&config.caches, &config.basedirs)
+                    .await?,
             ))
         })
     };
@@ -2010,6 +2014,7 @@ pub struct ServerInfo {
     pub preprocessor_max_cache_size: Option<u64>,
     pub use_preprocessor_cache_mode: bool,
     pub version: String,
+    pub basedirs: Vec<String>,
 }
 
 /// Status of the dist client.
@@ -2394,21 +2399,31 @@ impl ServerInfo {
         storage: Option<&dyn Storage>,
         preprocessor_storage: Option<&dyn Storage>,
     ) -> Result<Self> {
-        async fn storage_info(storage: Option<&dyn Storage>) -> (Option<u64>, Option<u64>, String) {
+        async fn storage_info(
+            storage: Option<&dyn Storage>,
+        ) -> (Option<u64>, Option<u64>, String, Vec<String>) {
             storage
                 .map(|s| {
-                    futures::future::try_join3(s.current_size(), s.max_size(), async {
-                        Ok(s.location().await)
-                    })
+                    futures::future::try_join4(
+                        s.current_size(),
+                        s.max_size(),
+                        async { Ok(s.location().await) },
+                        futures::future::ok(
+                            s.basedirs()
+                                .iter()
+                                .map(|p| String::from_utf8_lossy(p).to_string())
+                                .collect(),
+                        ),
+                    )
                     .boxed()
                 })
-                .unwrap_or_else(|| async { Ok((None, None, String::new())) }.boxed())
+                .unwrap_or_else(|| async { Ok((None, None, String::new(), vec![])) }.boxed())
                 .await
-                .unwrap_or_else(|_| (None, None, String::new()))
+                .unwrap_or_else(|_| (None, None, String::new(), vec![]))
         }
 
-        let (cache_size, max_cache_size, cache_location) = storage_info(storage).await;
-        let (preprocessor_cache_size, preprocessor_max_cache_size, preprocessor_cache_location) =
+        let (cache_size, max_cache_size, cache_location, basedirs) = storage_info(storage).await;
+        let (preprocessor_cache_size, preprocessor_max_cache_size, preprocessor_cache_location, _) =
             storage_info(preprocessor_storage).await;
 
         let use_preprocessor_cache_mode = preprocessor_storage
@@ -2429,6 +2444,7 @@ impl ServerInfo {
             preprocessor_max_cache_size,
             use_preprocessor_cache_mode,
             version,
+            basedirs,
         })
     }
 
@@ -2466,6 +2482,17 @@ impl ServerInfo {
             },
             name_width = name_width
         );
+        println!(
+            "{:<name_width$} {}",
+            "Base directories",
+            if self.basedirs.is_empty() {
+                "(none)".to_string()
+            } else {
+                self.basedirs.join(", ")
+            },
+            name_width = name_width
+        );
+
         if self.use_preprocessor_cache_mode {
             for (i, preprocessor_cache_location) in
                 self.preprocessor_cache_location.split("\n").enumerate()

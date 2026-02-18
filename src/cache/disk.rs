@@ -70,17 +70,24 @@ pub struct DiskCache {
     /// `LruDiskCache` does all the real work here.
     lru: Arc<Mutex<LazyDiskCache>>,
     rw_mode: CacheMode,
+    basedirs: Vec<Vec<u8>>,
 }
 
 impl DiskCache {
     /// Create a new `DiskCache` rooted at `root`, with `max_size` as the maximum cache size on-disk, in bytes.
-    pub fn new<T: AsRef<OsStr>>(root: T, max_size: u64, rw_mode: CacheMode) -> Self {
+    pub fn new<T: AsRef<OsStr>>(
+        root: T,
+        max_size: u64,
+        rw_mode: CacheMode,
+        basedirs: Vec<Vec<u8>>,
+    ) -> Self {
         DiskCache {
             lru: Arc::new(Mutex::new(LazyDiskCache::Uninit {
                 root: root.as_ref().to_os_string(),
                 max_size,
             })),
             rw_mode,
+            basedirs,
         }
     }
 
@@ -236,6 +243,9 @@ impl Storage for DiskCache {
     async fn current_size(&self) -> Result<Option<u64>> {
         Ok(self.lru.lock().await.get().map(|l| l.size()))
     }
+    fn basedirs(&self) -> &[Vec<u8>] {
+        &self.basedirs
+    }
 
     async fn max_size(&self) -> Result<Option<u64>> {
         Ok(Some(self.lru.lock().await.capacity()))
@@ -248,6 +258,7 @@ impl From<&DiskCacheConfig> for Arc<dyn Storage> {
             &config.dir,
             config.size,
             config.rw_mode.into(),
+            vec![],
         ))
     }
 }

@@ -119,7 +119,7 @@ fn run(command: Command) -> Result<()> {
                     )?;
 
                     let jobs = StorageKind::Compilations
-                        .create(&jobs)
+                        .create(&jobs, &[])
                         .await
                         .context("Failed to initialize jobs storage")?;
 
@@ -132,7 +132,7 @@ fn run(command: Command) -> Result<()> {
                     }
 
                     let toolchains = StorageKind::Compilations
-                        .create(&toolchains)
+                        .create(&toolchains, &[])
                         .await
                         .context("Failed to initialize toolchain storage")?;
 
@@ -209,7 +209,7 @@ fn run(command: Command) -> Result<()> {
                     )?;
 
                     let jobs = StorageKind::Compilations
-                        .create(&jobs)
+                        .create(&jobs, &[])
                         .await
                         .context("Failed to initialize jobs storage")?;
 
@@ -222,7 +222,7 @@ fn run(command: Command) -> Result<()> {
                     }
 
                     let toolchains = StorageKind::Compilations
-                        .create(&toolchains)
+                        .create(&toolchains, &[])
                         .await
                         .context("Failed to initialize toolchain storage")?;
 
