@@ -525,7 +525,7 @@ pub fn start_server(config: Config, addr: &crate::net::SocketAddr) -> Result<()>
                 );
                 Ok((
                     srv.local_addr()
-                        .unwrap_or_else(|| crate::net::SocketAddr::UnixAbstract(p.to_vec())),
+                        .unwrap_or_else(|| crate::net::SocketAddr::UnixAbstract(p.clone())),
                     Box::new(move |f| srv.run(f)) as Box<dyn FnOnce(_) -> _>,
                 ))
             }
@@ -1761,9 +1761,7 @@ where
     let path = Path::new(&compile.exe);
     let cwd = Path::new(&compile.cwd);
     let args = &compile.args;
-    let env = &compile.env_vars;
-
-    let env = env.to_vec();
+    let env = compile.env_vars.clone();
 
     let resolved_with_proxy = {
         let compiler_proxies_borrow = compiler_proxies.read().await;

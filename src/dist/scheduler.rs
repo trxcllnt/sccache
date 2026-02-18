@@ -456,7 +456,7 @@ impl Scheduler {
             .lock()
             .await
             .values()
-            .map(|s| s.queue.to_owned())
+            .map(|s| s.queue.clone())
             .collect::<Vec<_>>();
 
         futures::future::try_join_all(

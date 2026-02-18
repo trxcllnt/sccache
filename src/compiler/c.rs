@@ -1116,9 +1116,9 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
 
         let toolchain_packager = Box::new(CToolchainPackager {
             kind: self.compiler.kind(),
-            env_vars: self.env_vars.to_owned(),
-            executable: self.executable.to_owned(),
-            parsed_args: self.parsed_args.to_owned(),
+            env_vars: self.env_vars.clone(),
+            executable: self.executable.clone(),
+            parsed_args: self.parsed_args.clone(),
         });
 
         let outputs_rewriter = Box::new(NoopOutputsRewriter);

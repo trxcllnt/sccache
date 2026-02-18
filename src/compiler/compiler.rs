@@ -238,7 +238,7 @@ impl CompileCommandImpl for SingleCompileCommand {
         let mut cmd = creator.clone().new_command_sync(executable);
         cmd.args(arguments)
             .env_clear()
-            .envs(env_vars.to_vec())
+            .envs(env_vars.clone())
             .current_dir(cwd);
         run_input_output(cmd, None).await
     }
@@ -1082,7 +1082,7 @@ impl<'a> CacheLookup<'a> {
                 let mut entry = CacheRead::from(std::io::Cursor::new(entry))?;
                 let stdout = entry.get_stdout();
                 let stderr = entry.get_stderr();
-                match entry.extract_objects(outputs.to_vec(), runtime).await {
+                match entry.extract_objects(outputs.clone(), runtime).await {
                     Ok(()) => Ok(CacheLookupResult::Success(
                         CompileResult::CacheHit(duration),
                         ProcessOutput::new(0, stdout, stderr),

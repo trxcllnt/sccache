@@ -905,7 +905,7 @@ impl From<(StorageKind, Vec<Vec<u8>>, DiskCacheConfig)> for StorageBuilder {
             .create_storage(
                 move || {
                     debug!("Init disk {storage_kind} cache with dir={dir:?}, size={size}, rw_mode={rw_mode:?})");
-                    Ok(Arc::new(DiskCache::new(&dir, size, rw_mode, basedirs.to_vec())))
+                    Ok(Arc::new(DiskCache::new(&dir, size, rw_mode, basedirs.clone())))
                 }
             )
             .preprocessor_cache_mode(preprocessor_cache_mode)
@@ -932,7 +932,7 @@ impl From<(StorageKind, Vec<Vec<u8>>, AzureCacheConfig)> for StorageBuilder {
                 debug!("Init azure {storage_kind} cache with container {container}, key_prefix {key_prefix}");
 
                 AzureBlobCache::build(&connection_string, &container, &key_prefix)
-                    .map(|storage| Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>)
+                    .map(|storage| Arc::new(RemoteStorage::new(storage, basedirs.clone())) as Arc<dyn Storage>)
                     .map_err(|err| anyhow!("create azure cache failed: {err:?}"))
             })
             .preprocessor_cache_mode(preprocessor_cache_mode)
@@ -970,7 +970,7 @@ impl From<(StorageKind, Vec<Vec<u8>>, GCSCacheConfig)> for StorageBuilder {
                     credential_url.as_deref(),
                 )
                 .map(|storage| {
-                    Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>
+                    Arc::new(RemoteStorage::new(storage, basedirs.clone())) as Arc<dyn Storage>
                 })
                 .map_err(|err| anyhow!("create gcs cache failed: {err:?}"))
             })
@@ -996,7 +996,7 @@ impl From<(StorageKind, Vec<Vec<u8>>, GHACacheConfig)> for StorageBuilder {
 
                 GHACache::build(&version, key_prefix.as_str())
                     .map(|storage| {
-                        Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>
+                        Arc::new(RemoteStorage::new(storage, basedirs.clone())) as Arc<dyn Storage>
                     })
                     .map_err(|err| anyhow!("create gha cache failed: {err:?}"))
             })
@@ -1036,7 +1036,7 @@ impl From<(StorageKind, Vec<Vec<u8>>, MemcachedCacheConfig)> for StorageBuilder 
                     connection_pool_max_size,
                 )
                 .map(|storage| {
-                    Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>
+                    Arc::new(RemoteStorage::new(storage, basedirs.clone())) as Arc<dyn Storage>
                 })
                 .map_err(|err| anyhow!("create memcached cache failed: {err:?}"))
             })
@@ -1131,10 +1131,10 @@ impl From<(StorageKind, Vec<Vec<u8>>, RedisCacheConfig)> for StorageBuilder {
                             )?
                         };
                         let reader = Arc::new(RemoteStorage::new(reader, basedirs.clone()));
-                        let storage = Arc::new(RemoteStorage::new(storage, basedirs.to_vec()));
+                        let storage = Arc::new(RemoteStorage::new(storage, basedirs.clone()));
                         Ok(SimplexCache::create(reader, storage))
                     } else {
-                        Ok(Arc::new(RemoteStorage::new(storage, basedirs.to_vec())))
+                        Ok(Arc::new(RemoteStorage::new(storage, basedirs.clone())))
                     }
                 })
                 .map_err(|err| anyhow!("create redis cache failed: {err:?}"))
@@ -1172,7 +1172,7 @@ impl From<(StorageKind, Vec<Vec<u8>>, S3CacheConfig)> for StorageBuilder {
                 .with_server_side_encryption(server_side_encryption)
                 .with_enable_virtual_host_style(enable_virtual_host_style)
                 .build()
-                .map(|storage| Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>)
+                .map(|storage| Arc::new(RemoteStorage::new(storage, basedirs.clone())) as Arc<dyn Storage>)
                 .map_err(|err| anyhow!("create s3 cache failed: {err:?}"))
         })
         .preprocessor_cache_mode(preprocessor_cache_mode)
@@ -1219,7 +1219,7 @@ impl From<(StorageKind, Vec<Vec<u8>>, WebdavCacheConfig)> for StorageBuilder {
                     token.as_deref(),
                 )
                 .map(|storage| {
-                    Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>
+                    Arc::new(RemoteStorage::new(storage, basedirs.clone())) as Arc<dyn Storage>
                 })
                 .map_err(|err| anyhow!("create webdav cache failed: {err:?}"))
             })
@@ -1247,7 +1247,7 @@ impl From<(StorageKind, Vec<Vec<u8>>, OSSCacheConfig)> for StorageBuilder {
 
                 OSSCache::build(&bucket, &key_prefix, endpoint.as_deref(), no_credentials)
                     .map(|storage| {
-                        Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>
+                        Arc::new(RemoteStorage::new(storage, basedirs.clone())) as Arc<dyn Storage>
                     })
                     .map_err(|err| anyhow!("create oss cache failed: {err:?}"))
             })
@@ -1274,7 +1274,7 @@ impl From<(StorageKind, Vec<Vec<u8>>, COSCacheConfig)> for StorageBuilder {
 
                 COSCache::build(&bucket, &key_prefix, endpoint.as_deref())
                     .map(|storage| {
-                        Arc::new(RemoteStorage::new(storage, basedirs.to_vec())) as Arc<dyn Storage>
+                        Arc::new(RemoteStorage::new(storage, basedirs.clone())) as Arc<dyn Storage>
                     })
                     .map_err(|err| anyhow!("create oss cache failed: {err:?}"))
             })

@@ -356,7 +356,7 @@ impl From<&ServerState> for StatusUpdate {
         };
 
         StatusUpdate {
-            id: state.id.to_owned(),
+            id: state.id.clone(),
             queue: state.queue.clone(),
             info: dist::SysStats {
                 cpu_usage,

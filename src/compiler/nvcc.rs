@@ -411,7 +411,7 @@ impl CCompilerImpl for Nvcc {
             // Get the CCompiler impl for each preprocessor subcommand
             let commands_and_compilers = preprocessor_commands_and_compilers(
                 service.to_owned(),
-                env_vars.to_vec(),
+                env_vars.clone(),
                 cwd.to_owned(),
                 self.host_compiler.clone(),
                 commands,
@@ -421,7 +421,7 @@ impl CCompilerImpl for Nvcc {
             let outputs = preprocessor_outputs_for_compilers(
                 service.to_owned(),
                 creator.to_owned(),
-                env_vars.to_vec(),
+                env_vars.clone(),
                 parsed_args.clone(),
                 cwd.to_owned(),
                 rewrite_includes_only,
@@ -1635,7 +1635,7 @@ where
         .args(&[arguments, &["--dryrun".into(), "--keep".into()][..]].concat())
         .env_clear()
         .current_dir(cwd)
-        .envs(env_vars.to_vec());
+        .envs(env_vars.clone());
 
     debug_if_trace!(
         "[{}]: nvcc dryrun command: {nvcc_dryrun_cmd}",
@@ -1769,7 +1769,7 @@ fn fold_env_vars_or_split_into_exe_and_args(
         let line = line.replace("\"\"", "\"");
         match host_compiler {
             NvccHostCompiler::Msvc => line.replace(" -E ", " -P ").replace(" > ", " -Fi"),
-            _ => line.to_owned(),
+            _ => line,
         }
     } else {
         line.to_owned()
@@ -2086,10 +2086,7 @@ where
 
     let mut cmd = creator.clone().new_command_sync(exe);
 
-    cmd.args(&args)
-        .current_dir(cwd)
-        .env_clear()
-        .envs(env_vars.to_vec());
+    cmd.args(&args).current_dir(cwd).env_clear().envs(env_vars);
 
     debug_if_trace!("[{}]: run_nvcc_subcommand: {cmd}", output_path.display());
 

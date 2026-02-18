@@ -254,8 +254,7 @@ mod toolchain_imp {
                 tar_link_name.display(),
                 tar_file_path.display()
             );
-            self.symlinks
-                .insert(tar_link_name.to_path_buf(), tar_file_path.to_path_buf());
+            self.symlinks.insert(tar_link_name, tar_file_path);
             Ok(())
         }
 
