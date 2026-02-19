@@ -104,7 +104,6 @@ rustls = { version = "0.23", default-features = false, features = [
 
 mime = "0.3"
 notify-debouncer-full = { version = "0.4", optional = true }
-number_prefix = "0.4"
 object = "0.37"
 opendal = { version = "0.55.0", optional = true, default-features = false }
 openssl = { version = "0.10.75", optional = true }
@@ -139,6 +138,7 @@ tokio-util = { version = "0.7", features = ["codec", "compat", "io", "rt"] }
 toml = "0.9"
 tower = { version = "0.4", features = ["util"] }
 typed-path = "0.12.0"
+unit-prefix = "0.5"
 url = { version = "2", optional = true }
 uuid = { version = "1.9", features = ["v4"] }
 walkdir = "2"
@@ -180,7 +180,7 @@ cc = "1.0"
 chrono = "0.4.42"
 divan = { package = "codspeed-divan-compat", version = "4" }
 filetime = "0.2"
-paste = "1.0.15"
+pastey = "0.2"
 predicates = "=3.1.0"
 serial_test = "3.1"
 temp-env = "0.3.6"

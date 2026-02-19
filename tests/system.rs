@@ -29,7 +29,7 @@ use harness::{
     client::{SccacheClient, make_sccache_client},
     compile_cmdline, find_compilers, write_source,
 };
-use paste::paste;
+use pastey::paste;
 use predicates::prelude::*;
 use regex::Regex;
 #[cfg(unix)]

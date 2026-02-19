@@ -33,7 +33,6 @@ use filetime::FileTime;
 use fs::metadata;
 use fs_err as fs;
 use futures::{FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt, channel::mpsc, future};
-use number_prefix::NumberPrefix;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "dist-client")]
 use std::mem;
@@ -67,6 +66,7 @@ use tokio::{
 use tokio_serde::Framed;
 use tokio_util::codec::{LengthDelimitedCodec, length_delimited};
 use tower::Service;
+use unit_prefix::NumberPrefix;
 
 use crate::errors::*;
 

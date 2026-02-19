@@ -27,7 +27,7 @@ use harness::{
     compile_cmdline, find_compilers, write_source,
 };
 use itertools::Itertools;
-use paste::paste;
+use pastey::paste;
 use sccache::compiler::{Language, PreprocessorCacheEntry};
 use std::{ffi::OsString, io::Read, path::Path};
 

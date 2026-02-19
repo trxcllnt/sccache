@@ -16,7 +16,7 @@ use harness::{
 #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 use harness::{find_compilers, find_cuda_compilers};
 #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
-use paste::paste;
+use pastey::paste;
 use sccache::{config::HTTPUrl, errors::*};
 use std::path::Path;
 use std::process::Output;
