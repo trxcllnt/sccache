@@ -491,6 +491,14 @@ fn handle_compile_finished(
 
     if let Some(code) = response.output.code() {
         trace!("compiler exited with status {}", code);
+        if cfg!(not(windows)) && code == 139 {
+            write_output(
+                std::io::stderr(),
+                stderr,
+                b"segmentation fault",
+                response.color_mode,
+            )?;
+        }
         Ok(code as i32)
     } else if let Some(signal) = response.output.signal() {
         println!("sccache: Compiler killed by signal {signal}");
