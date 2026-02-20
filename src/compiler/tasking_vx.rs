@@ -104,13 +104,7 @@ impl CCompilerImpl for TaskingVX {
 
         preprocess(creator, executable, parsed_args, cwd, env_vars)
             .await
-            .map(|output| {
-                if let Some(dependencies) = dependencies {
-                    PreprocessorOutput::OutputWithDepedencies(output.into(), dependencies)
-                } else {
-                    PreprocessorOutput::Output(output.into())
-                }
-            })
+            .map(|output| PreprocessorOutput::Output(output.into(), dependencies))
     }
 
     async fn generate_dependencies<T>(

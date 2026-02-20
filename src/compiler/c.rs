@@ -227,9 +227,11 @@ pub enum PreprocessorOutput {
     // cudafe++, cicc, and ptxas return this. Their output is always
     // saved to an intermediate file, and no preprocessor caching should
     // be done on them.
-    File(fs::File),
-    Output(Pin<Box<ProcessOutputStream>>),
-    OutputWithDepedencies(Pin<Box<ProcessOutputStream>>, Pin<Box<DependenciesFuture>>),
+    File(fs::File, Option<Pin<Box<DependenciesFuture>>>, Vec<u8>),
+    Output(
+        Pin<Box<ProcessOutputStream>>,
+        Option<Pin<Box<DependenciesFuture>>>,
+    ),
 }
 
 impl From<ProcessOutput> for Pin<Box<ProcessOutputStream>> {
@@ -750,7 +752,7 @@ where
         let needs_c_preprocessing = parsed_args.language.needs_c_preprocessing();
 
         let preprocessor_output = if !needs_c_preprocessing {
-            PreprocessorOutput::File(fs::File::open(cwd.join(&parsed_args.input))?)
+            PreprocessorOutput::File(fs::File::open(cwd.join(&parsed_args.input))?, None, vec![])
         } else {
             try_or_cleanup!(
                 compiler
@@ -779,16 +781,16 @@ where
         common_and_arch_args.extend_from_slice(&parsed_args.arch_args[..]);
 
         let (preprocessor_output, dependencies) = match preprocessor_output {
-            PreprocessorOutput::File(res) => {
+            PreprocessorOutput::File(res, dependencies, _stderr) => {
                 let file = tokio::fs::File::open(res.path()).await?;
                 let bytes = tokio_util::io::ReaderStream::new(file);
                 let bytes = bytes.map_err(|e| e.into());
-                (Box::pin(bytes) as Pin<Box<ProcessOutputStream>>, None)
+                (
+                    Box::pin(bytes) as Pin<Box<ProcessOutputStream>>,
+                    dependencies,
+                )
             }
-            PreprocessorOutput::Output(res) => (res, None),
-            PreprocessorOutput::OutputWithDepedencies(res, dependencies) => {
-                (res, Some(dependencies))
-            }
+            PreprocessorOutput::Output(res, dependencies) => (res, dependencies),
         };
 
         let (key, hash_time) = try_or_cleanup!(
@@ -930,7 +932,7 @@ fn use_preprocessor_cache_mode(
     let out_pretty = parsed_args.output_pretty();
 
     if !parsed_args.language.needs_c_preprocessing() {
-        debug!(
+        trace!(
             "[{out_pretty}]: Disabling preprocessor cache because {} language doesn't need C preprocessing",
             parsed_args.language.as_str()
         );
@@ -1177,7 +1179,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
         let needs_c_preprocessing = parsed_args.language.needs_c_preprocessing();
 
         let preprocessor_output = if !needs_c_preprocessing {
-            PreprocessorOutput::File(fs::File::open(&input_path)?)
+            PreprocessorOutput::File(fs::File::open(&input_path)?, None, vec![])
         } else {
             // Preprocess again but this time with line numbers
             compiler
@@ -1197,26 +1199,31 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
 
         let (preprocessor_output, dependencies) = {
             match preprocessor_output {
-                PreprocessorOutput::File(file) => (PreprocessorOutput::File(file), vec![]),
-                PreprocessorOutput::OutputWithDepedencies(output, dependencies) => {
+                PreprocessorOutput::File(file, dependencies, stderr) => {
+                    (PreprocessorOutput::File(file, None, stderr), dependencies)
+                }
+                PreprocessorOutput::Output(output, dependencies) => {
                     // Collect the preprocessor output before reading the dependencies file
                     let output = output.collect::<Vec<Result<Bytes>>>().await;
-
-                    // Track how long the preprocessor took
-                    {
-                        let preprocessor_time = preprocessor_start.elapsed();
-                        let mut stats = service.stats.lock().await;
-                        stats.preprocessed += 1;
-                        stats.preprocessor_duration += preprocessor_time;
-                    }
-
-                    let dependencies = dependencies.await?;
                     let output = futures::stream::iter(output).boxed();
 
-                    (PreprocessorOutput::Output(output), dependencies)
+                    (PreprocessorOutput::Output(output, None), dependencies)
                 }
-                _ => unreachable!(),
             }
+        };
+
+        // Track how long the preprocessor took
+        if needs_c_preprocessing {
+            let preprocessor_time = preprocessor_start.elapsed();
+            let mut stats = service.stats.lock().await;
+            stats.preprocessed += 1;
+            stats.preprocessor_duration += preprocessor_time;
+        }
+
+        let dependencies = if let Some(dependencies) = dependencies {
+            dependencies.await?
+        } else {
+            vec![]
         };
 
         let mut builder = tar::Builder::new(compressor);
@@ -1251,7 +1258,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
         }
 
         match preprocessor_output {
-            PreprocessorOutput::File(file) => {
+            PreprocessorOutput::File(file, _, _) => {
                 builder.append_path_with_name(
                     file.path(),
                     path_transformer
@@ -1262,7 +1269,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                         })?,
                 )?;
             }
-            PreprocessorOutput::Output(output) => {
+            PreprocessorOutput::Output(output, _) => {
                 let dist_input_path = path_transformer
                     .as_dist_input_path(&input_path)
                     .with_context(|| format!("unable to transform input path {input_path:?}"))?;
@@ -1278,7 +1285,6 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                 header.set_cksum();
                 builder.append_data(&mut header, dist_input_path, &preprocessor_output[..])?;
             }
-            _ => unreachable!(),
         }
 
         tokio::task::spawn_blocking(move || -> Result<_> {

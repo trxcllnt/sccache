@@ -1075,24 +1075,24 @@ where
         }
     }
 
-    if generate_dependencies {
+    let (output, dependencies) = if generate_dependencies {
         match parse_dependencies(parsed_args, cwd, output).await? {
+            (output, Ok(deps)) => (output, Some(futures::future::ok(deps).boxed())),
             (output, Err(err)) => {
                 debug!(
                     "[{}]: Failed to parse dependencies from preprocessor result: {err:?}",
                     parsed_args.output_pretty()
                 );
-                Ok(PreprocessorOutput::Output(output.into()))
+                (output, None)
             }
-            (output, Ok(dependencies)) => Ok(PreprocessorOutput::OutputWithDepedencies(
-                output.into(),
-                futures::future::ok(dependencies).boxed(),
-            )),
         }
     } else {
-        Ok(PreprocessorOutput::Output(output.into()))
-    }
+        (output, None)
+    };
+
+    Ok(PreprocessorOutput::Output(output.into(), dependencies))
 }
+
 async fn generate_dependencies<T>(
     creator: &T,
     executable: &Path,

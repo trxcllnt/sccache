@@ -267,9 +267,11 @@ where
 pub async fn preprocess(cwd: &Path, parsed_args: &ParsedArguments) -> Result<PreprocessorOutput> {
     let path = cwd.join(&parsed_args.input);
     let file = tokio::fs::File::open(&path).await?.into_std().await;
-    Ok(PreprocessorOutput::File(fs_err::File::from_parts(
-        file, path,
-    )))
+    Ok(PreprocessorOutput::File(
+        fs_err::File::from_parts(file, path),
+        None,
+        vec![],
+    ))
 }
 
 pub fn generate_compile_commands(

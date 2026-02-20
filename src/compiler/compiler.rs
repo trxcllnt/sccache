@@ -3334,6 +3334,7 @@ LLVM version: 6.0",
     #[test_case(true ; "with preprocessor cache")]
     #[test_case(false ; "without preprocessor cache")]
     fn test_preprocessed_file_works_without_preprocessor_call(preprocessor_cache_mode: bool) {
+        drop(env_logger::try_init());
         let f = TestFixture::new();
         let clang = f.mk_bin("clang").unwrap();
         let creator = new_creator();

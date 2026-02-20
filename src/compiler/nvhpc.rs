@@ -212,20 +212,11 @@ impl CCompilerImpl for Nvhpc {
             &extra_preprocessor_flags,
         )
         .await
-        .map(|res| {
-            if let PreprocessorOutput::File(_) = res {
-                return res;
+        .map(|res| match res {
+            PreprocessorOutput::File(file, _, stderr) => {
+                PreprocessorOutput::File(file, dependencies, stderr)
             }
-            let out = match res {
-                PreprocessorOutput::Output(out)
-                | PreprocessorOutput::OutputWithDepedencies(out, _) => out,
-                _ => unreachable!(),
-            };
-            if let Some(deps) = dependencies {
-                PreprocessorOutput::OutputWithDepedencies(out, deps)
-            } else {
-                PreprocessorOutput::Output(out)
-            }
+            PreprocessorOutput::Output(out, _) => PreprocessorOutput::Output(out, dependencies),
         })
     }
 

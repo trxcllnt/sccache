@@ -399,14 +399,11 @@ where
 
     let output = run_input_output(cmd, None).await?;
 
-    if let Some(depfile) = depfile {
-        Ok(PreprocessorOutput::OutputWithDepedencies(
-            output.into(),
-            gcc::parse_dependencies(cwd.to_owned(), cwd.join(&parsed_args.input), depfile).boxed(),
-        ))
-    } else {
-        Ok(PreprocessorOutput::Output(output.into()))
-    }
+    let dependencies = depfile.map(|depfile| {
+        gcc::parse_dependencies(cwd.to_owned(), cwd.join(&parsed_args.input), depfile).boxed()
+    });
+
+    Ok(PreprocessorOutput::Output(output.into(), dependencies))
 }
 
 async fn generate_dependencies<T>(

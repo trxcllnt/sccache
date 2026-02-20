@@ -351,6 +351,14 @@ impl CCompilerImpl for Nvcc {
                 .await?
                 .map(|depfile| {
                     gcc::parse_dependencies(cwd.to_owned(), cwd.join(&parsed_args.input), depfile)
+                        .map_ok(|dependencies| {
+                            dependencies
+                                .into_iter()
+                                .sorted()
+                                .unique()
+                                .collect::<Vec<_>>()
+                        })
+                        .boxed()
                 })
         } else {
             None
@@ -433,24 +441,7 @@ impl CCompilerImpl for Nvcc {
             flatten_preprocessor_outputs(outputs).boxed()
         };
 
-        if let Some(dependencies) = dependencies {
-            Ok(PreprocessorOutput::OutputWithDepedencies(
-                output,
-                dependencies
-                    .and_then(|dependencies| {
-                        futures::future::ok(
-                            dependencies
-                                .into_iter()
-                                .sorted()
-                                .unique()
-                                .collect::<Vec<_>>(),
-                        )
-                    })
-                    .boxed(),
-            ))
-        } else {
-            Ok(PreprocessorOutput::Output(output))
-        }
+        Ok(PreprocessorOutput::Output(output, dependencies))
     }
 
     async fn generate_dependencies<T>(
@@ -659,7 +650,7 @@ where
     async_stream::try_stream! {
         for await preprocessor_output in preprocessor_outputs {
             match preprocessor_output? {
-                PreprocessorOutput::File(res) => {
+                PreprocessorOutput::File(res, _, _) => {
                     let src = tokio::fs::File::open(res.path()).await?;
                     let src = tokio_util::io::ReaderStream::new(src);
                     let src = src.map_err(anyhow::Error::new);
@@ -667,8 +658,7 @@ where
                         yield bytes?;
                     }
                 }
-                PreprocessorOutput::Output(src)
-                | PreprocessorOutput::OutputWithDepedencies(src, _) => {
+                PreprocessorOutput::Output(src, _) => {
                     for await bytes in src {
                         yield bytes?;
                     }
