@@ -613,6 +613,8 @@ where
             ..
         } = self.as_ref();
 
+        let basedirs = storage.basedirs().await;
+
         // A compiler binary may be a symlink to another and so has the same digest, but that means
         // the toolchain will not contain the correct path to invoke the compiler! Add the compiler
         // executable path to try and prevent this
@@ -633,7 +635,7 @@ where
                     parsed_args: self.parsed_args,
                     rewrite_includes_only,
                     service: service.to_owned(),
-                    basedirs: storage.basedirs().await,
+                    basedirs,
                 }),
                 weak_toolchain_key,
             });
@@ -683,7 +685,7 @@ where
                         parsed_args: self.parsed_args,
                         rewrite_includes_only,
                         service: service.to_owned(),
-                        basedirs: storage.basedirs().await,
+                        basedirs,
                     }),
                     weak_toolchain_key,
                 });
@@ -790,16 +792,16 @@ where
         };
 
         let (key, hash_time) = try_or_cleanup!(
-            hash_key_async(
-                executable_digest,
-                parsed_args.language,
+            HashKeyParams::new(
+                &self.executable_digest,
+                self.parsed_args.language,
                 &common_and_arch_args,
-                &extra_hashes,
-                &env_vars,
-                preprocessor_output,
-                compiler.plusplus(),
-                storage.basedirs().await,
             )
+            .with_extra_hashes(&extra_hashes)
+            .with_env_vars(&env_vars)
+            .with_plusplus(self.compiler.plusplus())
+            .with_basedirs(&basedirs)
+            .compute(preprocessor_output)
             .await
         );
 
@@ -897,7 +899,7 @@ where
                 parsed_args: self.parsed_args,
                 rewrite_includes_only,
                 service: service.to_owned(),
-                basedirs: storage.basedirs().await,
+                basedirs,
             }),
             weak_toolchain_key,
         })
@@ -1744,7 +1746,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
     }
 }
 
-/// The cache is versioned by the inputs to `hash_key_async`.
+/// The cache is versioned by the inputs to `HashKeyParams`.
 pub const CACHE_VERSION: &[u8] = b"12";
 
 /// Environment variables that are factored into the cache key.
@@ -1767,60 +1769,130 @@ static CACHED_ENV_VARS: LazyLock<HashSet<&'static OsStr>> = LazyLock::new(|| {
     .collect()
 });
 
-/// Compute the hash key of `compiler` compiling `preprocessor_output` with `args`.
-#[allow(clippy::too_many_arguments)]
-pub async fn hash_key_async(
-    compiler_digest: &str,
+/// Parameters for computing a hash key for C/C++ compilation caching.
+///
+/// Construct with required fields via [`HashKeyParams::new`], then add optional
+/// fields with builder methods.
+///
+/// # Example
+/// ```ignore
+/// let hash = HashKeyParams::new(
+///     "abc123",          // compiler_digest
+///     Language::C,        // language
+///     &args,             // arguments
+/// )
+/// .with_extra_hashes(&extra)
+/// .with_plusplus(true)
+/// .compute(preprocessor_output);
+/// ```
+// #[derive(Debug, Clone)]
+pub struct HashKeyParams<'a> {
+    compiler_digest: &'a str,
     language: Language,
-    arguments: &[OsString],
-    extra_hashes: &[String],
-    env_vars: &[(OsString, OsString)],
-    preprocessor_output: Pin<Box<ProcessOutputStream>>,
+    arguments: &'a [OsString],
+    extra_hashes: &'a [String],
+    env_vars: &'a [(OsString, OsString)],
     plusplus: bool,
-    basedirs: Vec<Vec<u8>>,
-) -> Result<(String, Duration)> {
-    // If you change any of the inputs to the hash, you should change `CACHE_VERSION`.
-    let mut digest = Digest::new();
-    digest.update(compiler_digest.as_bytes());
-    // clang and clang++ have different behavior despite being byte-for-byte identical binaries, so
-    // we have to incorporate that into the hash as well.
-    digest.update(&[plusplus as u8]);
-    digest.update(CACHE_VERSION);
-    digest.update(language.as_str().as_bytes());
+    basedirs: &'a [Vec<u8>],
+}
 
-    for arg in arguments {
-        arg.hash(&mut HashToDigest {
-            digest: &mut digest,
-        });
-    }
-
-    for hash in extra_hashes {
-        digest.update(hash.as_bytes());
-    }
-
-    for (var, val) in env_vars.iter() {
-        if CACHED_ENV_VARS.contains(var.as_os_str()) {
-            var.hash(&mut HashToDigest {
-                digest: &mut digest,
-            });
-            digest.update(&b"="[..]);
-            val.hash(&mut HashToDigest {
-                digest: &mut digest,
-            });
+impl<'a> HashKeyParams<'a> {
+    /// Creates a new hash key parameter set with required fields.
+    ///
+    /// Optional fields have default values and can be set via `with_*` methods.
+    ///
+    /// # Arguments
+    /// * `compiler_digest` - Hash of the compiler executable
+    /// * `language` - Source language being compiled
+    /// * `arguments` - Compiler arguments
+    pub fn new(compiler_digest: &'a str, language: Language, arguments: &'a [OsString]) -> Self {
+        Self {
+            compiler_digest,
+            language,
+            arguments,
+            extra_hashes: &[],
+            env_vars: &[],
+            plusplus: false,
+            basedirs: &[],
         }
     }
 
-    let start = Instant::now();
-    let preprocessor_output = preprocessor_output.try_collect::<Vec<_>>().await?;
+    /// Sets additional hash data to include in the cache key.
+    pub fn with_extra_hashes(mut self, extra_hashes: &'a [String]) -> Self {
+        self.extra_hashes = extra_hashes;
+        self
+    }
 
-    let digest = tokio::task::spawn_blocking(move || {
-        let preprocessor_output = preprocessor_output.concat();
-        let preprocessor_output = strip_basedirs(&preprocessor_output, &basedirs);
-        digest.with_reader_sync(&preprocessor_output[..])
-    })
-    .await??;
+    /// Sets the environment variables to consider for caching.
+    pub fn with_env_vars(mut self, env_vars: &'a [(OsString, OsString)]) -> Self {
+        self.env_vars = env_vars;
+        self
+    }
 
-    Ok((digest.finish(), start.elapsed()))
+    /// Sets whether this is a C++ compiler (affects clang/clang++ distinction).
+    pub fn with_plusplus(mut self, plusplus: bool) -> Self {
+        self.plusplus = plusplus;
+        self
+    }
+
+    /// Sets the base directories for path normalization.
+    pub fn with_basedirs(mut self, basedirs: &'a [Vec<u8>]) -> Self {
+        self.basedirs = basedirs;
+        self
+    }
+
+    /// Computes the hash key based on the configured parameters.
+    ///
+    /// If `basedirs` are provided, paths in the preprocessor output will be normalized by
+    /// stripping the longest matching basedir prefix. This enables cache hits across different
+    /// absolute paths (similar to ccache's CCACHE_BASEDIR).
+    ///
+    /// # Note
+    /// If you change any of the inputs to the hash, you should change `CACHE_VERSION`.
+    ///
+    /// # Arguments
+    /// * `preprocessor_output` - Preprocessed source to hash
+    pub async fn compute(
+        &self,
+        preprocessor_output: Pin<Box<ProcessOutputStream>>,
+    ) -> Result<(String, Duration)> {
+        let mut m = Digest::new();
+        m.update(self.compiler_digest.as_bytes());
+        // clang and clang++ have different behavior despite being byte-for-byte identical binaries, so
+        // we have to incorporate that into the hash as well.
+        m.update(&[self.plusplus as u8]);
+        m.update(CACHE_VERSION);
+        m.update(self.language.as_str().as_bytes());
+        for arg in self.arguments {
+            arg.hash(&mut HashToDigest { digest: &mut m });
+        }
+        for hash in self.extra_hashes {
+            m.update(hash.as_bytes());
+        }
+
+        for (var, val) in self.env_vars.iter() {
+            if CACHED_ENV_VARS.contains(var.as_os_str()) {
+                var.hash(&mut HashToDigest { digest: &mut m });
+                m.update(&b"="[..]);
+                val.hash(&mut HashToDigest { digest: &mut m });
+            }
+        }
+
+        // Strip basedirs from preprocessor output if configured
+        let start = Instant::now();
+        let basedirs = self.basedirs.to_vec();
+        let preprocessor_output = preprocessor_output.try_collect::<Vec<_>>().await?;
+
+        let digest = tokio::task::spawn_blocking(move || {
+            let preprocessor_output = preprocessor_output.concat();
+            // Strip basedirs from preprocessor output if configured
+            let preprocessor_output = strip_basedirs(&preprocessor_output, &basedirs);
+            m.with_reader_sync(&preprocessor_output[..])
+        })
+        .await??;
+
+        Ok((digest.finish(), start.elapsed()))
+    }
 }
 
 #[cfg(test)]
@@ -1841,348 +1913,167 @@ mod test {
     fn test_same_content() {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
-        assert_eq!(
-            hash_key_async(
-                "abcd",
-                Language::C,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![]
-            )
+        let h1 = HashKeyParams::new("abcd", Language::C, &args)
+            .compute(into_process_output_stream(PREPROCESSED))
             .wait()
             .unwrap()
-            .0,
-            hash_key_async(
-                "abcd",
-                Language::C,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![]
-            )
+            .0;
+        let h2 = HashKeyParams::new("abcd", Language::C, &args)
+            .compute(into_process_output_stream(PREPROCESSED))
             .wait()
             .unwrap()
-            .0
-        );
+            .0;
+        assert_eq!(h1, h2);
     }
 
     #[test]
     fn test_plusplus_differs() {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
-        assert_neq!(
-            hash_key_async(
-                "abcd",
-                Language::C,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![]
-            )
+        let h1 = HashKeyParams::new("abcd", Language::C, &args)
+            .compute(into_process_output_stream(PREPROCESSED))
             .wait()
             .unwrap()
-            .0,
-            hash_key_async(
-                "abcd",
-                Language::C,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                true,
-                vec![]
-            )
+            .0;
+        let h2 = HashKeyParams::new("abcd", Language::C, &args)
+            .with_plusplus(true)
+            .compute(into_process_output_stream(PREPROCESSED))
             .wait()
             .unwrap()
-            .0
-        );
+            .0;
+        assert_neq!(h1, h2);
     }
 
     #[test]
     fn test_header_differs() {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
-        assert_neq!(
-            hash_key_async(
-                "abcd",
-                Language::C,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![]
-            )
+        let h1 = HashKeyParams::new("abcd", Language::C, &args)
+            .compute(into_process_output_stream(PREPROCESSED))
             .wait()
             .unwrap()
-            .0,
-            hash_key_async(
-                "abcd",
-                Language::CHeader,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![]
-            )
+            .0;
+        let h2 = HashKeyParams::new("abcd", Language::CHeader, &args)
+            .compute(into_process_output_stream(PREPROCESSED))
             .wait()
             .unwrap()
-            .0
-        );
+            .0;
+        assert_neq!(h1, h2);
     }
 
     #[test]
     fn test_plusplus_header_differs() {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
-        assert_neq!(
-            hash_key_async(
-                "abcd",
-                Language::Cxx,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                true,
-                vec![]
-            )
+        let h1 = HashKeyParams::new("abcd", Language::Cxx, &args)
+            .with_plusplus(true)
+            .compute(into_process_output_stream(PREPROCESSED))
             .wait()
             .unwrap()
-            .0,
-            hash_key_async(
-                "abcd",
-                Language::CxxHeader,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                true,
-                vec![]
-            )
+            .0;
+        let h2 = HashKeyParams::new("abcd", Language::CxxHeader, &args)
+            .with_plusplus(true)
+            .compute(into_process_output_stream(PREPROCESSED))
             .wait()
             .unwrap()
-            .0
-        );
+            .0;
+        assert_neq!(h1, h2);
     }
 
     #[test]
     fn test_hash_key_executable_contents_differs() {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
-        assert_neq!(
-            hash_key_async(
-                "abcd",
-                Language::C,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![]
-            )
+        let h1 = HashKeyParams::new("abcd", Language::C, &args)
+            .compute(into_process_output_stream(PREPROCESSED))
             .wait()
             .unwrap()
-            .0,
-            hash_key_async(
-                "wxyz",
-                Language::C,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![]
-            )
+            .0;
+        let h2 = HashKeyParams::new("wxyz", Language::C, &args)
+            .compute(into_process_output_stream(PREPROCESSED))
             .wait()
             .unwrap()
-            .0
-        );
+            .0;
+        assert_neq!(h1, h2);
     }
 
     #[test]
     fn test_hash_key_args_differs() {
-        let digest = "abcd";
         let abc = ovec!["a", "b", "c"];
         let xyz = ovec!["x", "y", "z"];
         let ab = ovec!["a", "b"];
         let a = ovec!["a"];
+
         const PREPROCESSED: &[u8] = b"hello world";
-        assert_neq!(
-            hash_key_async(
-                digest,
-                Language::C,
-                &abc,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![]
-            )
+        let h_abc = HashKeyParams::new("abcd", Language::C, &abc)
+            .compute(into_process_output_stream(PREPROCESSED))
             .wait()
             .unwrap()
-            .0,
-            hash_key_async(
-                digest,
-                Language::C,
-                &xyz,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![]
-            )
+            .0;
+        let h_xyz = HashKeyParams::new("abcd", Language::C, &xyz)
+            .compute(into_process_output_stream(PREPROCESSED))
             .wait()
             .unwrap()
-            .0
-        );
+            .0;
+        let h_ab = HashKeyParams::new("abcd", Language::C, &ab)
+            .compute(into_process_output_stream(PREPROCESSED))
+            .wait()
+            .unwrap()
+            .0;
+        let h_a = HashKeyParams::new("abcd", Language::C, &a)
+            .compute(into_process_output_stream(PREPROCESSED))
+            .wait()
+            .unwrap()
+            .0;
 
-        assert_neq!(
-            hash_key_async(
-                digest,
-                Language::C,
-                &abc,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![]
-            )
-            .wait()
-            .unwrap()
-            .0,
-            hash_key_async(
-                digest,
-                Language::C,
-                &ab,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![]
-            )
-            .wait()
-            .unwrap()
-            .0
-        );
-
-        assert_neq!(
-            hash_key_async(
-                digest,
-                Language::C,
-                &abc,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![]
-            )
-            .wait()
-            .unwrap()
-            .0,
-            hash_key_async(
-                digest,
-                Language::C,
-                &a,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![]
-            )
-            .wait()
-            .unwrap()
-            .0
-        );
+        assert_neq!(h_abc, h_xyz);
+        assert_neq!(h_abc, h_ab);
+        assert_neq!(h_abc, h_a);
     }
 
     #[test]
     fn test_hash_key_preprocessed_content_differs() {
         let args = ovec!["a", "b", "c"];
-        assert_neq!(
-            hash_key_async(
-                "abcd",
-                Language::C,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(b"hello world"),
-                false,
-                vec![]
-            )
+        let h1 = HashKeyParams::new("abcd", Language::C, &args)
+            .compute(into_process_output_stream(b"hello world"))
             .wait()
             .unwrap()
-            .0,
-            hash_key_async(
-                "abcd",
-                Language::C,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(b"goodbye"),
-                false,
-                vec![]
-            )
+            .0;
+        let h2 = HashKeyParams::new("abcd", Language::C, &args)
+            .compute(into_process_output_stream(b"goodbye"))
             .wait()
             .unwrap()
-            .0
-        );
+            .0;
+        assert_neq!(h1, h2);
     }
 
     #[test]
     fn test_hash_key_env_var_differs() {
         let args = ovec!["a", "b", "c"];
-        let digest = "abcd";
         const PREPROCESSED: &[u8] = b"hello world";
         for var in CACHED_ENV_VARS.iter() {
-            let h1 = hash_key_async(
-                digest,
-                Language::C,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![],
-            )
-            .wait()
-            .unwrap()
-            .0;
-            let vars = vec![(OsString::from(var), OsString::from("something"))];
-            let h2 = hash_key_async(
-                digest,
-                Language::C,
-                &args,
-                &[],
-                &vars,
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![],
-            )
-            .wait()
-            .unwrap()
-            .0;
-            let vars = vec![(OsString::from(var), OsString::from("something else"))];
-            let h3 = hash_key_async(
-                digest,
-                Language::C,
-                &args,
-                &[],
-                &vars,
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![],
-            )
-            .wait()
-            .unwrap()
-            .0;
+            let h1 = HashKeyParams::new("abcd", Language::C, &args)
+                .compute(into_process_output_stream(PREPROCESSED))
+                .wait()
+                .unwrap()
+                .0;
+
+            let vars1 = vec![(OsString::from(var), OsString::from("something"))];
+            let h2 = HashKeyParams::new("abcd", Language::C, &args)
+                .with_env_vars(&vars1)
+                .compute(into_process_output_stream(PREPROCESSED))
+                .wait()
+                .unwrap()
+                .0;
+
+            let vars2 = vec![(OsString::from(var), OsString::from("something else"))];
+            let h3 = HashKeyParams::new("abcd", Language::C, &args)
+                .with_env_vars(&vars2)
+                .compute(into_process_output_stream(PREPROCESSED))
+                .wait()
+                .unwrap()
+                .0;
+
             assert_neq!(h1, h2);
             assert_neq!(h2, h3);
         }
@@ -2191,38 +2082,22 @@ mod test {
     #[test]
     fn test_extra_hash_data() {
         let args = ovec!["a", "b", "c"];
-        let digest = "abcd";
-        const PREPROCESSED: &[u8] = b"hello world";
         let extra_data = stringvec!["hello", "world"];
+        const PREPROCESSED: &[u8] = b"hello world";
 
-        assert_neq!(
-            hash_key_async(
-                digest,
-                Language::C,
-                &args,
-                &extra_data,
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![]
-            )
+        let h1 = HashKeyParams::new("abcd", Language::C, &args)
+            .with_extra_hashes(&extra_data)
+            .compute(into_process_output_stream(PREPROCESSED))
             .wait()
             .unwrap()
-            .0,
-            hash_key_async(
-                digest,
-                Language::C,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(PREPROCESSED),
-                false,
-                vec![]
-            )
+            .0;
+        let h2 = HashKeyParams::new("abcd", Language::C, &args)
+            .compute(into_process_output_stream(PREPROCESSED))
             .wait()
             .unwrap()
-            .0
-        );
+            .0;
+
+        assert_neq!(h1, h2);
     }
 
     #[test]
@@ -2237,19 +2112,12 @@ mod test {
 
         // Helper to compute with basedirs
         let hash_with_basedirs = |output: &[u8], dirs: &[Vec<u8>]| {
-            hash_key_async(
-                "abcd",
-                Language::C,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(output),
-                false,
-                dirs.to_vec(),
-            )
-            .wait()
-            .unwrap()
-            .0
+            HashKeyParams::new("abcd", Language::C, &args)
+                .with_basedirs(dirs)
+                .compute(into_process_output_stream(output))
+                .wait()
+                .unwrap()
+                .0
         };
 
         // Test 1: Same hash with different absolute paths when basedir is used
@@ -2265,32 +2133,16 @@ mod test {
 
         // Test 3: Different hashes without basedir
         assert_neq!(
-            hash_key_async(
-                "abcd",
-                Language::C,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(preprocessed1),
-                false,
-                vec![]
-            )
-            .wait()
-            .unwrap()
-            .0,
-            hash_key_async(
-                "abcd",
-                Language::C,
-                &args,
-                &[],
-                &[],
-                into_process_output_stream(preprocessed2),
-                false,
-                vec![]
-            )
-            .wait()
-            .unwrap()
-            .0
+            HashKeyParams::new("abcd", Language::C, &args)
+                .compute(into_process_output_stream(preprocessed1))
+                .wait()
+                .unwrap()
+                .0,
+            HashKeyParams::new("abcd", Language::C, &args)
+                .compute(into_process_output_stream(preprocessed2))
+                .wait()
+                .unwrap()
+                .0
         );
 
         // Test 4: Works for C++ files too
@@ -2298,32 +2150,20 @@ mod test {
             b"# 1 \"/home/user1/project/src/main.cpp\"\nint main() { return 0; }";
         let preprocessed_cpp2 =
             b"# 1 \"/home/user2/project/src/main.cpp\"\nint main() { return 0; }";
-        let h_cpp1 = hash_key_async(
-            "abcd",
-            Language::Cxx,
-            &args,
-            &[],
-            &[],
-            into_process_output_stream(preprocessed_cpp1),
-            true,
-            basedirs.to_vec(),
-        )
-        .wait()
-        .unwrap()
-        .0;
-        let h_cpp2 = hash_key_async(
-            "abcd",
-            Language::Cxx,
-            &args,
-            &[],
-            &[],
-            into_process_output_stream(preprocessed_cpp2),
-            true,
-            basedirs.to_vec(),
-        )
-        .wait()
-        .unwrap()
-        .0;
+        let h_cpp1 = HashKeyParams::new("abcd", Language::Cxx, &args)
+            .with_plusplus(true)
+            .with_basedirs(&basedirs)
+            .compute(into_process_output_stream(preprocessed_cpp1))
+            .wait()
+            .unwrap()
+            .0;
+        let h_cpp2 = HashKeyParams::new("abcd", Language::Cxx, &args)
+            .with_plusplus(true)
+            .with_basedirs(&basedirs)
+            .compute(into_process_output_stream(preprocessed_cpp2))
+            .wait()
+            .unwrap()
+            .0;
         assert_eq!(h_cpp1, h_cpp2);
 
         // Test 5: Doesn't work with trailing slash in basedir, they must be normalized in config
