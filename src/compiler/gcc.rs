@@ -29,7 +29,7 @@ use crate::{
     mock_command::{CommandCreatorSync, RunCommand},
     server::SccacheService,
     util::{
-        OsStrExt, normal_temp_path, run_input_output, run_input_stream_output,
+        HASH_BUFFER_SIZE, OsStrExt, normal_temp_path, run_input_output, run_input_stream_output,
         split_quoted_shell_str,
     },
 };
@@ -972,7 +972,9 @@ where
     debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
     debug_if_trace!("[{}]: depfile: {depfile:?}", parsed_args.output_pretty());
 
-    let output = run_input_stream_output(cmd, None).await?.boxed();
+    let output = run_input_stream_output(cmd, HASH_BUFFER_SIZE, None)
+        .await?
+        .boxed();
 
     let dependencies = depfile.map(|depfile| {
         parse_dependencies(cwd.to_owned(), parsed_args.input.clone(), depfile).boxed()

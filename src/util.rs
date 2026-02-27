@@ -16,7 +16,7 @@ use crate::mock_command::{CommandChild, ProcessOutput, RunCommand};
 use async_trait::async_trait;
 use blake3::Hasher as blake3_Hasher;
 use byteorder::{BigEndian, ByteOrder};
-use bytes::Bytes;
+use bytes::BytesMut;
 use fs_err as fs;
 use futures::{
     AsyncRead, AsyncReadExt, FutureExt, StreamExt,
@@ -45,6 +45,7 @@ use std::{
 };
 use tokio_retry2::Retry;
 use tokio_retry2::strategy::FibonacciBackoff;
+use tokio_util::codec::{Decoder, FramedRead};
 
 use crate::errors::*;
 
@@ -716,8 +717,9 @@ where
 /// high-concurrency scenarios).
 pub async fn run_input_stream_output<C>(
     command: C,
+    batch_size: usize,
     input: Option<Vec<u8>>,
-) -> Result<impl futures::Stream<Item = Result<Bytes>>>
+) -> Result<impl futures::Stream<Item = Result<BytesMut>>>
 where
     C: RunCommand + 'static,
 {
@@ -741,8 +743,7 @@ where
     }
     .boxed();
 
-    let mut stdout =
-        tokio_util::io::ReaderStream::with_capacity(stdout, HASH_BUFFER_SIZE).take_until(status);
+    let mut stdout = Box::pin(read_line_batches(stdout, batch_size)).take_until(status);
 
     Ok(async_stream::try_stream! {
         // Yield each stdout bytes chunk
@@ -754,6 +755,82 @@ where
             res?;
         }
     })
+}
+
+pub fn read_line_batches<R>(
+    source: R,
+    batch_size: usize,
+) -> impl futures::Stream<Item = Result<BytesMut>>
+where
+    R: tokio::io::AsyncRead + Send,
+{
+    let stream = FramedRead::new(source, LineBatchesCodec::new(batch_size));
+    async_stream::try_stream! {
+        for await batch in stream {
+            yield batch?;
+        }
+    }
+}
+
+///
+/// Similar to tokio_util::codec::LinesCodec, but yields batches of lines instead of a single line.
+/// Line batches include their trailing carriage returns and/or newlines.
+///
+struct LineBatchesCodec {
+    batch_size: usize,
+    bytes_read: usize,
+    finder: memchr::memmem::Finder<'static>,
+}
+
+impl LineBatchesCodec {
+    fn new(batch_size: usize) -> LineBatchesCodec {
+        LineBatchesCodec {
+            batch_size,
+            bytes_read: 0,
+            finder: memchr::memmem::Finder::new("\n").into_owned(),
+        }
+    }
+}
+
+impl Decoder for LineBatchesCodec {
+    type Item = BytesMut;
+    type Error = anyhow::Error;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<BytesMut>> {
+        let start = self.bytes_read;
+        let size = self.batch_size.min(buf.len());
+
+        for offset in self.finder.find_iter(&buf[start..]) {
+            // Found a line!
+            let pos = start + offset + 1;
+            if pos >= size {
+                // Filled the batch, so split after the last trailing newline
+                self.bytes_read = 0;
+                return Ok(Some(buf.split_to(pos)));
+            }
+        }
+
+        // Didn't fill the batch or didn't find a newline.
+        // Resume searching at the current offset next time.
+        self.bytes_read = buf.len();
+
+        Ok(None)
+    }
+
+    fn decode_eof(&mut self, buf: &mut BytesMut) -> Result<Option<BytesMut>> {
+        match self.decode(buf)? {
+            Some(frame) => Ok(Some(frame)),
+            None => {
+                self.bytes_read = 0;
+                // No terminating newline - return remaining data, if any
+                if buf.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(buf.split_to(buf.len())))
+                }
+            }
+        }
+    }
 }
 
 pub async fn run_with_input_buffer_stderr<C>(

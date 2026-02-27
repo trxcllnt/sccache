@@ -27,7 +27,7 @@ use crate::{
     lru_disk_cache::LruCache,
     mock_command::{CommandCreatorSync, ProcessOutput},
     server::SccacheService,
-    util::{Digest, HashToDigest, hash_all, strip_basedirs},
+    util::{Digest, HASH_BUFFER_SIZE, HashToDigest, hash_all, read_line_batches, strip_basedirs},
 };
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
@@ -218,7 +218,7 @@ impl From<&CCompilerKind> for CompilerKind {
     }
 }
 
-pub type ProcessOutputStream = dyn futures::stream::Stream<Item = Result<Bytes>> + Send;
+pub type ProcessOutputStream = dyn futures::stream::Stream<Item = Result<BytesMut>> + Send;
 pub type DependenciesFuture = dyn futures::Future<Output = Result<Vec<PathBuf>>> + Send;
 
 pub enum PreprocessorOutput {
@@ -240,7 +240,9 @@ impl From<ProcessOutput> for Pin<Box<ProcessOutputStream>> {
             res.stdout = vec![];
             Box::pin(futures::stream::iter([Err(ProcessError(res).into())]))
         } else {
-            Box::pin(futures::stream::iter([Ok(Bytes::from(res.stdout))]))
+            Box::pin(futures::stream::iter([Ok(BytesMut::from(Bytes::from(
+                res.stdout,
+            )))]))
         }
     }
 }
@@ -778,16 +780,9 @@ where
 
         let (preprocessor_output, dependencies) = match preprocessor_output {
             PreprocessorOutput::File(path, dependencies) => {
-                let file = tokio::fs::File::open(path).await?;
-                let bytes = tokio_util::io::ReaderStream::with_capacity(
-                    file,
-                    crate::util::HASH_BUFFER_SIZE,
-                );
-                let bytes = bytes.map_err(|e| e.into());
-                (
-                    Box::pin(bytes) as Pin<Box<ProcessOutputStream>>,
-                    dependencies,
-                )
+                let src = tokio::fs::File::open(path).await?;
+                let src = read_line_batches(src, HASH_BUFFER_SIZE);
+                (Box::pin(src) as Pin<Box<ProcessOutputStream>>, dependencies)
             }
             PreprocessorOutput::Output(res, dependencies) => (res, dependencies),
         };
@@ -1215,12 +1210,12 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
 
         let (preprocessor_output, dependencies) = {
             match preprocessor_output {
-                PreprocessorOutput::File(file, dependencies) => {
-                    (PreprocessorOutput::File(file, None), dependencies)
+                PreprocessorOutput::File(path, dependencies) => {
+                    (PreprocessorOutput::File(path, None), dependencies)
                 }
                 PreprocessorOutput::Output(output, dependencies) => {
                     // Collect the preprocessor output before reading the dependencies file
-                    let output = output.collect::<Vec<Result<Bytes>>>().await;
+                    let output = output.collect::<Vec<Result<BytesMut>>>().await;
                     let output = futures::stream::iter(output).boxed();
 
                     (PreprocessorOutput::Output(output, None), dependencies)
@@ -1321,7 +1316,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                 .await??
             }
             PreprocessorOutput::Output(output, _) => {
-                let preprocessor_output = output.map_ok(BytesMut::from).try_concat().await?;
+                let preprocessor_output = output.try_concat().await?;
                 tokio::task::spawn_blocking(move || {
                     let dist_input_path = path_transformer
                         .as_dist_input_path(&input_path)
@@ -1917,37 +1912,21 @@ impl<'a> HashKeyParams<'a> {
         }
 
         // Hash the preprocessor output and track how long we spent
-        let (m, hash_time) = if self.basedirs.is_empty() {
-            self.preprocessor_output
-                .try_fold(
-                    (m, Duration::default()),
-                    |(mut m, hash_time), bytes| async move {
-                        tokio::task::spawn_blocking(move || {
-                            let start = Instant::now();
-                            m.update(&bytes[..]);
-                            Ok((m, hash_time + start.elapsed()))
-                        })
-                        .await?
-                    },
-                )
-                .await?
-        } else {
-            let basedirs = self.basedirs.to_vec();
-            let preprocessor_output = self
-                .preprocessor_output
-                .map_ok(BytesMut::from)
-                .try_concat()
-                .await?;
-
-            tokio::task::spawn_blocking(move || {
-                let start = Instant::now();
-                // Strip basedirs from preprocessor output if configured
-                let preprocessor_output = strip_basedirs(&preprocessor_output, &basedirs);
-                m.with_reader_sync(&preprocessor_output[..])
-                    .map(|m| (m, start.elapsed()))
-            })
-            .await??
-        };
+        let (m, hash_time, _) = self
+            .preprocessor_output
+            .try_fold(
+                (m, Duration::default(), self.basedirs.to_vec()),
+                |(mut m, hash_time, basedirs), lines| async move {
+                    tokio::task::spawn_blocking(move || {
+                        let start = Instant::now();
+                        // Strip basedirs from preprocessor output if configured
+                        m.update(&strip_basedirs(&lines, &basedirs)[..]);
+                        Ok((m, hash_time + start.elapsed(), basedirs))
+                    })
+                    .await?
+                },
+            )
+            .await?;
 
         Ok((m.finish(), hash_time))
     }
@@ -1966,7 +1945,7 @@ mod test {
     use fs_err as fs;
 
     fn into_process_output_stream(buf: &[u8]) -> Pin<Box<ProcessOutputStream>> {
-        Box::pin(futures::stream::iter([Ok(Bytes::copy_from_slice(buf))]))
+        Box::pin(futures::stream::iter([Ok(BytesMut::from(buf))]))
     }
 
     #[test]

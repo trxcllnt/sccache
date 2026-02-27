@@ -26,7 +26,10 @@ use crate::{
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     protocol,
     server::{SccacheGaugeIncrement, SccacheService},
-    util::{Digest, OsStrExt, SCCACHE_GLOBAL_TMPDIR, run_input_output, split_quoted_shell_str},
+    util::{
+        Digest, HASH_BUFFER_SIZE, OsStrExt, SCCACHE_GLOBAL_TMPDIR, read_line_batches,
+        run_input_output, split_quoted_shell_str,
+    },
 };
 use async_trait::async_trait;
 use fs_err as fs;
@@ -645,7 +648,7 @@ where
 
 fn flatten_preprocessor_outputs<S>(
     preprocessor_outputs: S,
-) -> impl Stream<Item = Result<bytes::Bytes>>
+) -> impl Stream<Item = Result<bytes::BytesMut>>
 where
     S: Stream<Item = Result<PreprocessorOutput>>,
 {
@@ -654,8 +657,7 @@ where
             match preprocessor_output? {
                 PreprocessorOutput::File(path, _) => {
                     let src = tokio::fs::File::open(path).await?;
-                    let src = tokio_util::io::ReaderStream::with_capacity(src, crate::util::HASH_BUFFER_SIZE);
-                    let src = src.map_err(anyhow::Error::new);
+                    let src = read_line_batches(src, HASH_BUFFER_SIZE);
                     for await bytes in src {
                         yield bytes?;
                     }
