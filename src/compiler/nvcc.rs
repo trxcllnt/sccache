@@ -26,7 +26,7 @@ use crate::{
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     protocol,
     server::{SccacheGaugeIncrement, SccacheService},
-    util::{Digest, OsStrExt, SCCACHE_GLOBAL_TMPDIR, run_input_output},
+    util::{Digest, OsStrExt, SCCACHE_GLOBAL_TMPDIR, run_input_output, split_quoted_shell_str},
 };
 use async_trait::async_trait;
 use fs_err as fs;
@@ -198,7 +198,7 @@ impl CCompilerImpl for Nvcc {
             .find(|(k, _)| k == "NVCC_PREPEND_FLAGS")
             .and_then(|(_, p)| p.to_str())
         {
-            arguments = shlex::split(flags)
+            arguments = split_quoted_shell_str(flags)
                 .unwrap_or_default()
                 .iter()
                 .map(|s| s.clone().into_arg_os_string())
@@ -212,7 +212,7 @@ impl CCompilerImpl for Nvcc {
             .and_then(|(_, p)| p.to_str())
         {
             arguments.extend(
-                shlex::split(flags)
+                split_quoted_shell_str(flags)
                     .unwrap_or_default()
                     .iter()
                     .map(|s| s.clone().into_arg_os_string()),
@@ -1776,7 +1776,7 @@ fn fold_env_vars_or_split_into_exe_and_args(
         }
     }
 
-    let args = match shlex::split(&line) {
+    let args = match split_quoted_shell_str(&line) {
         Some(args) => args,
         None => return Err(anyhow!("Could not parse shell line")),
     };

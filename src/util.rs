@@ -935,6 +935,12 @@ pub fn encode_path(dst: &mut dyn Write, path: &Path) -> std::io::Result<()> {
 
     let bytes = path.as_os_str().as_bytes();
     dst.write_all(bytes)
+pub fn split_quoted_shell_str(s: &str) -> Option<Vec<String>> {
+    #[cfg(unix)]
+    let args = shlex::split(s);
+    #[cfg(windows)]
+    let args = Some(winsplit::split(s));
+    args
 }
 
 #[cfg(windows)]
