@@ -90,7 +90,7 @@ impl WatchStorage {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DebounceEventResult>();
 
         let mut debouncer = new_debouncer(
-            Duration::from_secs(5),
+            Duration::from_secs(4),
             None,
             move |res: DebounceEventResult| {
                 let _ = tx.send(res);
@@ -121,7 +121,7 @@ impl WatchStorage {
             };
 
             while let Some(res) = rx.recv().await {
-                let events = match res {
+                let recreate_storage = match res {
                     Ok(events) => events
                         .into_iter()
                         .filter(|event| {
@@ -133,39 +133,33 @@ impl WatchStorage {
                                     | EventKind::Remove(_)
                             )
                         })
-                        .map(|event| (event.kind, event.paths.clone()))
-                        .collect::<Vec<_>>(),
+                        .any(|event| {
+                            paths.iter().any(|path| {
+                                if event.paths.contains(path) {
+                                    info!("[WatchStorage::watch]: Recreating storage after changes to {path:?}");
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                        }),
                     Err(err) => {
                         error!("Notify error: {err:?}");
                         continue;
                     }
                 };
 
-                trace!("Notify events: {events:?}");
-
                 // Only respond if the changes are to paths we care about
-                let changes = paths
-                    .iter()
-                    .filter(|path| events.iter().any(|(_, changes)| changes.contains(path)));
-
-                if !changes.clone().any(|_| true) {
-                    trace!("Ignoring changes");
-                    continue;
-                }
-
-                info!(
-                    "[WatchStorage::watch]: Recreating storage after changes to: [{:?}]",
-                    changes.collect::<Vec<_>>()
-                );
-
-                let mut guard = storage.lock().await;
-                match create().await {
-                    Ok(storage) => *guard = storage,
-                    Err(err) => {
-                        error!("Failed to recreate storage: {err:?}");
+                if recreate_storage {
+                    let mut guard = storage.lock().await;
+                    match create().await {
+                        Ok(storage) => *guard = storage,
+                        Err(err) => {
+                            error!("Failed to recreate storage: {err:?}");
+                        }
                     }
+                    drop(guard);
                 }
-                drop(guard);
             }
         });
 
