@@ -145,6 +145,7 @@ mod pkg {
 #[cfg(target_os = "windows")]
 mod path_transform {
     use std::collections::HashMap;
+    use std::ffi::OsStr;
     use std::path::{Component, Components, Path, PathBuf, Prefix, PrefixComponent};
     use std::str;
 
@@ -193,7 +194,13 @@ mod path_transform {
             }
         }
         pub fn as_dist_input_path(&mut self, input_path: &Path) -> Option<String> {
-            self.as_dist(&input_path.with_extension("").with_extension("preprocessed"))
+            self.as_dist(
+                &(if let Some(ext) = input_path.extension() {
+                    input_path.with_extension([OsStr::new("dist"), ext].join(OsStr::new(".")))
+                } else {
+                    input_path.with_extension("dist")
+                }),
+            )
         }
         pub fn as_dist_abs(&mut self, p: &Path) -> Option<String> {
             if !p.is_absolute() {
@@ -358,6 +365,7 @@ mod path_transform {
 
 #[cfg(unix)]
 mod path_transform {
+    use std::ffi::OsStr;
     use std::iter;
     use std::path::{Path, PathBuf};
 
@@ -402,7 +410,13 @@ mod path_transform {
         /// ```
         ///
         pub fn as_dist_input_path(&mut self, input_path: &Path) -> Option<String> {
-            self.as_dist(&input_path.with_extension("").with_extension("preprocessed"))
+            self.as_dist(
+                &(if let Some(ext) = input_path.extension() {
+                    input_path.with_extension([OsStr::new("dist"), ext].join(OsStr::new(".")))
+                } else {
+                    input_path.with_extension("dist")
+                }),
+            )
         }
         pub fn as_dist_abs(&mut self, p: &Path) -> Option<String> {
             if !p.is_absolute() {
