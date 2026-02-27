@@ -400,7 +400,7 @@ where
     let output = run_input_output(cmd, None).await?;
 
     let dependencies = depfile.map(|depfile| {
-        gcc::parse_dependencies(cwd.to_owned(), cwd.join(&parsed_args.input), depfile).boxed()
+        gcc::parse_dependencies(cwd.to_owned(), parsed_args.input.clone(), depfile).boxed()
     });
 
     Ok(PreprocessorOutput::Output(output.into(), dependencies))

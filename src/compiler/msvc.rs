@@ -174,7 +174,7 @@ impl CCompilerImpl for Msvc {
 }
 
 #[cfg(not(windows))]
-fn from_local_codepage(multi_byte_str: Vec<u8>) -> io::Result<String> {
+pub fn from_local_codepage(multi_byte_str: Vec<u8>) -> io::Result<String> {
     String::from_utf8(multi_byte_str).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
 }
 
@@ -1154,27 +1154,29 @@ where
     Ok((cmd, (path, temp)))
 }
 
-pub async fn parse_dependencies(
+async fn parse_dependencies(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     mut output: ProcessOutput,
 ) -> Result<(ProcessOutput, Result<Vec<PathBuf>>)> {
     let cwd = cwd.to_owned();
     let input = cwd.join(&parsed_args.input);
-    Ok(tokio::task::spawn_blocking(move || {
-        match process_preprocessed_file(
+    tokio::task::spawn_blocking(move || {
+        let mut included_files = Default::default();
+        let mut normalized_include_paths = Default::default();
+        let deps = process_preprocessed_file(
             input.as_path(),
             cwd.as_path(),
             &mut output.stdout,
             StandardFsAbstraction,
             false,
-        ) {
-            Err(err) => (output, Err(err)),
-            Ok(None) => (output, Ok(vec![])),
-            Ok(Some(deps)) => (output, Ok(deps)),
-        }
+            &mut included_files,
+            &mut normalized_include_paths,
+        )
+        .map(|_| included_files.drain().map(|(k, _)| k).collect::<Vec<_>>());
+        Ok((output, deps))
     })
-    .await?)
+    .await?
 }
 
 fn generate_compile_commands(

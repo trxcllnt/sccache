@@ -12,34 +12,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compiler::CompileCommandImpl;
-use crate::mock_command::{CommandCreatorSync, RunCommand};
-use crate::util::{OsStrExt, run_input_output, run_input_stream_output};
 use crate::{
     compiler::{
-        Cacheable, ColorMode, CompilerArguments, Language, SingleCompileCommand,
+        Cacheable, ColorMode, CompileCommandImpl, CompilerArguments, Language,
+        SingleCompileCommand,
         args::*,
         c::{
             ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
         },
         clang,
+        msvc::from_local_codepage,
+        preprocessor_cache::normalize_path,
     },
-    util::normal_temp_path,
+    counted_array, debug_if_trace, dist,
+    errors::*,
+    mock_command::{CommandCreatorSync, RunCommand},
+    server::SccacheService,
+    util::{
+        OsStrExt, normal_temp_path, run_input_output, run_input_stream_output,
+        split_quoted_shell_str,
+    },
 };
-use crate::{counted_array, debug_if_trace, dist, server::SccacheService};
+
 use async_trait::async_trait;
 use fs::File;
 use fs_err as fs;
-use futures::{AsyncBufReadExt, FutureExt, StreamExt, TryStreamExt};
+use futures::{FutureExt, StreamExt};
+use itertools::Itertools;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use tempfile::TempPath;
-use tokio_util::compat::TokioAsyncReadCompatExt;
-
-use crate::errors::*;
 
 /// A struct on which to implement `CCompilerImpl`.
 #[derive(Clone, Debug, Default)]
@@ -970,7 +975,7 @@ where
     let output = run_input_stream_output(cmd, None).await?.boxed();
 
     let dependencies = depfile.map(|depfile| {
-        parse_dependencies(cwd.to_owned(), cwd.join(&parsed_args.input), depfile).boxed()
+        parse_dependencies(cwd.to_owned(), parsed_args.input.clone(), depfile).boxed()
     });
 
     Ok(PreprocessorOutput::Output(output, dependencies))
@@ -1120,51 +1125,104 @@ where
     cmd
 }
 
-pub async fn parse_dependencies(
-    cwd: PathBuf,
-    input: PathBuf,
+pub async fn parse_dependencies<P: AsRef<Path>>(
+    cwd: P,
+    input: P,
     (depfile, _): (PathBuf, Option<TempPath>),
 ) -> Result<Vec<PathBuf>> {
-    let dependencies = tokio::fs::File::open(depfile).await?;
-    futures::io::BufReader::new(dependencies.compat())
-        .lines()
-        .map_err(anyhow::Error::new)
-        .enumerate()
-        .map(|(idx, line)| line.map(|line| (idx, line)))
-        .try_filter_map(|(idx, line)| async move {
-            let line = line.as_str();
-            Ok(shlex::split(
-                if idx == 0 {
-                    if let Some((_, rest)) = line.split_once(':') {
-                        rest
-                    } else {
-                        line
-                    }
-                } else {
-                    line
+    let cwd = cwd.as_ref();
+    let input_path = input.as_ref();
+    let parent_dir = cwd
+        .join(input_path)
+        .parent()
+        // The only reason `parent()` will be None is if cwd is the root dir and
+        // `input_path` is a path directly under it. If that's the case, `cwd`
+        // is the absolute parent dir of `input_path`.
+        .unwrap_or(cwd)
+        .to_path_buf();
+
+    let lines = {
+        // Retry times in case the compiler hasn't finished writing the depfile yet
+        let mut attempts = 0;
+        loop {
+            match tokio::fs::read(&depfile).await {
+                Ok(lines) if !lines.is_empty() => {
+                    // Avoid dropping Windows wide chars in paths
+                    break from_local_codepage(lines)?;
                 }
-                .trim_end_matches('\\')
-                .trim_end_matches(':'),
-            ))
-        })
-        .map_ok(|lines| futures::stream::iter(lines.into_iter().map(Ok)))
-        .try_flatten()
-        .try_filter_map(|path| async move {
-            let path = path.trim();
-            if path.is_empty() {
-                Ok(None::<PathBuf>)
+                res => {
+                    if attempts <= 5 {
+                        attempts += 1;
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    } else if let Err(err) = res {
+                        return Err(err.into());
+                    } else {
+                        break String::new();
+                    }
+                }
+            }
+        }
+    };
+
+    // trace!("[parse_dependencies]: (0) lines:\n{lines}");
+
+    let lines = lines
+        .split("\n")
+        .enumerate()
+        // The path to the left of the colon is the `-MT <path>`, so take everything to the right.
+        .map(|(idx, line)| {
+            if idx == 0
+                && let Some((_, rest)) = line.split_once(":")
+            {
+                rest
             } else {
-                Ok(Some(PathBuf::from(path)))
+                line
             }
         })
-        .try_fold(Vec::<PathBuf>::new(), |mut paths, path| async {
-            let path = cwd.join(path);
-            if path != input {
-                paths.push(path);
-            }
-            Ok(paths)
+        .map(|line| {
+            // Trim whitespace and trailing backslashes + colons
+            line.trim().trim_end_matches(r"\").trim_end_matches(r":")
         })
-        .await
+        .filter(|line| !line.is_empty())
+        // .inspect(|line| {
+        //     trace!("[parse_dependencies]: (1) line: {line}");
+        // })
+        ;
+
+    let paths = lines
+        .flat_map(|line| {
+            split_quoted_shell_str(line).unwrap_or_default()
+            // let deps = split_quoted_shell_str(line).unwrap_or_default();
+            // trace!("[parse_dependencies]: (2) deps:\n{}", deps.join("\n"));
+            // deps
+        })
+        .map(PathBuf::from);
+
+    let paths = paths
+        .sorted()
+        .unique()
+        // Skip the input file path
+        .filter_map(|path| {
+            // Compare to the unmodified input file path
+            if path == input_path {
+                return None;
+            }
+            // Make an absolute path from the input file path
+            let path = normalize_path(&parent_dir.join(path));
+            // Compare to the absolute input file path
+            if path == input_path {
+                return None;
+            }
+            Some(path)
+        })
+        .collect::<Vec<_>>();
+
+    // trace!(
+    //     "[parse_dependencies]: (3) paths:\n{}",
+    //     paths.iter().filter_map(|p| p.to_str()).join("\n")
+    // );
+
+    Ok(paths)
 }
 
 #[allow(clippy::too_many_arguments)]

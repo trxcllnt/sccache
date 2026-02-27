@@ -195,6 +195,7 @@ fn test_preprocessor_cache_mode_single_entry_multiple_hashes(
             src,
             &format!(
                 r#"
+#include <stdio.h>
 #include "{dep_a}"
 int main(int argc, char** argv) {{
     return a();

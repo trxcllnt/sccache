@@ -352,7 +352,7 @@ impl CCompilerImpl for Nvcc {
             self.generate_dependencies(creator, executable, parsed_args, cwd, &env_vars)
                 .await?
                 .map(|depfile| {
-                    gcc::parse_dependencies(cwd.to_owned(), cwd.join(&parsed_args.input), depfile)
+                    gcc::parse_dependencies(cwd.to_owned(), parsed_args.input.clone(), depfile)
                         .map_ok(|dependencies| {
                             dependencies
                                 .into_iter()

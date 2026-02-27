@@ -38,7 +38,7 @@ use crate::{
     errors::*,
     lru_disk_cache::{LruCache, lru_cache},
     util::{
-        Digest, HashToDigest, MetadataCtimeExt, OsStrExt, Timestamp, decode_path, encode_path,
+        Digest, HashToDigest, MetadataCtimeExt, OsStrExt, Timestamp, bytes_to_path, path_to_bytes,
         strip_basedirs,
     },
 };
@@ -551,7 +551,7 @@ pub async fn preprocessor_cache_entry_hash_key(
         }
     }
 
-    let input_path = cwd.join(input);
+    let input_path = dunce::canonicalize(cwd.join(input))?;
 
     {
         // Hash the input file path, otherwise:
@@ -561,8 +561,7 @@ pub async fn preprocessor_cache_entry_hash_key(
         // - Compiling a/x.c records a/r.h in the preprocessor cache entry.
         // - Compiling b/x.c results in a false cache hit since a/x.c and b/x.c
         // share preprocessor cache entries and a/r.h exists.
-        let mut buf = vec![];
-        encode_path(&mut buf, &input_path)?;
+        let buf = path_to_bytes(&input_path)?;
         // Strip basedirs from the input file path if configured
         let buf_to_hash = strip_basedirs(&buf, &basedirs);
         digest.update(&buf_to_hash);
@@ -591,17 +590,17 @@ const INCBIN_DIRECTIVE: &[u8] = b".incbin";
 /// Remember the include files in the preprocessor output if it can be cached.
 /// Returns `Ok(None)` if preprocessor cache mode should be disabled.
 pub fn process_preprocessed_file(
-    input_file: &Path,
-    cwd: &Path,
+    input_file_path: &Path,
+    input_file_path_parent: &Path,
     bytes: &mut [u8],
     fs_impl: impl PreprocessorFSAbstraction,
     skip_system_headers: bool,
-) -> Result<Option<Vec<PathBuf>>> {
+    included_files: &mut HashMap<PathBuf, bool>,
+    normalized_include_paths: &mut HashMap<Vec<u8>, PathBuf>,
+) -> Result<()> {
     let mut start = 0;
     let mut hash_start = 0;
     let total_len = bytes.len();
-    let mut included_files = HashMap::new();
-    let mut normalized_include_paths = HashMap::new();
     // There must be at least 7 characters (# 1 "x") left to potentially find an
     // include file path.
     while start < total_len.saturating_sub(7) {
@@ -636,14 +635,14 @@ pub fn process_preprocessed_file(
         && (start == 0 || bytes[start - 1] == b'\n')
         {
             match process_preprocessor_line(
-                input_file,
-                cwd,
-                &mut included_files,
+                input_file_path,
+                input_file_path_parent,
+                included_files,
                 bytes,
                 start,
                 hash_start,
                 total_len,
-                &mut normalized_include_paths,
+                normalized_include_paths,
                 &fs_impl,
                 skip_system_headers,
             )? {
@@ -653,7 +652,7 @@ pub fn process_preprocessed_file(
                 }
                 ControlFlow::Break((s, h, continue_preprocessor_cache_mode)) => {
                     if !continue_preprocessor_cache_mode {
-                        return Ok(None);
+                        return Ok(());
                     }
                     start = s;
                     hash_start = h;
@@ -672,7 +671,7 @@ pub fn process_preprocessed_file(
             // changes, the hash should change as well, but finding out what file to
             // hash is too hard for sccache, so just bail out.
             debug!("Found potential unsupported .inc bin directive in source code");
-            return Ok(None);
+            return Ok(());
         } else if slice.starts_with(b"___________") && (start == 0 || bytes[start - 1] == b'\n') {
             // Unfortunately the distcc-pump wrapper outputs standard output lines:
             // __________Using distcc-pump from /usr/bin
@@ -694,9 +693,7 @@ pub fn process_preprocessed_file(
             start += 1;
         }
     }
-    Ok(Some(
-        included_files.drain().map(|(k, _)| k).collect::<Vec<_>>(),
-    ))
+    Ok(())
 }
 
 /// What to do after handling a preprocessor number line.
@@ -706,14 +703,14 @@ type PreprocessedLineAction = ControlFlow<(usize, usize, bool), (usize, usize)>;
 
 #[allow(clippy::too_many_arguments)]
 fn process_preprocessor_line(
-    input_file: &Path,
-    cwd: &Path,
+    input_file_path: &Path,
+    input_file_path_parent: &Path,
     included_files: &mut HashMap<PathBuf, bool>,
     bytes: &mut [u8],
     mut start: usize,
     mut hash_start: usize,
     total_len: usize,
-    normalized_include_paths: &mut HashMap<Vec<u8>, Option<Vec<u8>>>,
+    normalized_include_paths: &mut HashMap<Vec<u8>, PathBuf>,
     fs_impl: &impl PreprocessorFSAbstraction,
     skip_system_headers: bool,
 ) -> Result<PreprocessedLineAction> {
@@ -779,36 +776,26 @@ fn process_preprocessor_line(
 
     // `hash_start` and `start` span the include file path.
     let include_path = &bytes[hash_start..start];
+
     // We need to normalize the path now since it's part of the
     // hash and since we need to deduplicate the include files.
     // We cache the results since they are often quite a bit repeated.
-    let include_path: &[u8] = if let Some(opt) = normalized_include_paths.get(include_path) {
-        match opt {
-            Some(normalized) => normalized,
-            None => include_path,
-        }
-    } else {
-        let path_buf = decode_path(include_path)?;
-        let normalized = normalize_path(&path_buf);
-        if normalized == path_buf {
-            // `None` is a marker that the normalization is the same
-            normalized_include_paths.insert(include_path.to_owned(), None);
-            include_path
+    let include_path_normalized =
+        if let Some(normalized) = normalized_include_paths.get(include_path) {
+            normalized.as_path()
         } else {
-            let mut encoded = Vec::with_capacity(include_path.len());
-            encode_path(&mut encoded, &normalized)?;
+            let path_buf = bytes_to_path(include_path).context("failed to decode include path")?;
+            let normalized = normalize_path(&path_buf);
             normalized_include_paths
                 .entry(include_path.to_owned())
-                .or_insert(Some(encoded))
-                .as_ref()
-                .unwrap()
-        }
-    };
+                .or_insert(normalized.clone())
+                .as_path()
+        };
 
     if !remember_include_file(
-        include_path,
-        input_file,
-        cwd,
+        include_path_normalized,
+        input_file_path,
+        input_file_path_parent,
         included_files,
         fs_impl,
         system,
@@ -902,57 +889,56 @@ impl PreprocessorFSAbstraction for StandardFsAbstraction {}
 // the preprocessor cache mode, otherwise true.
 #[allow(clippy::too_many_arguments)]
 fn remember_include_file(
-    mut path: &[u8],
-    input_file: &Path,
-    cwd: &Path,
+    include_path: &Path,
+    input_file_path: &Path,
+    input_file_path_parent: &Path,
     included_files: &mut HashMap<PathBuf, bool>,
     fs_impl: &impl PreprocessorFSAbstraction,
     #[allow(unused_variables)] system: bool,
     #[allow(unused_variables)] skip_system_headers: bool,
 ) -> Result<bool> {
+    let include_path_str = include_path.as_os_str();
+
     // TODO if precompiled header.
-    if path.len() >= 2 && path[0] == b'<' && path[path.len() - 1] == b'>' {
+    if include_path_str.len() >= 2
+        && include_path_str.starts_with("<")
+        && include_path_str.ends_with(">")
+    {
         // Typically <built-in> or <command-line>.
         return Ok(true);
     }
 
+    // Only allow skipping system includes in tests
     #[cfg(test)]
-    // Allow skipping system includes in tests
     if system && skip_system_headers {
         // Don't remember this system header.
         return Ok(true);
     }
 
-    // Canonicalize path for comparison; Clang uses ./header.h.
-    #[cfg(windows)]
-    {
-        if path.starts_with(br".\") || path.starts_with(b"./") {
-            path = &path[2..];
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        if path.starts_with(b"./") {
-            path = &path[2..];
-        }
-    }
-
-    let path = cwd.join(decode_path(path).context("failed to decode path")?);
-
-    if included_files.contains_key(&path) {
-        // Already known include file
-        return Ok(true);
-    }
-
-    if path == input_file {
+    // Compare to the unmodified input file path
+    if include_path == input_file_path {
         // Don't remember the input file.
         return Ok(true);
     }
 
-    let meta = match fs_impl.metadata(&path) {
+    // Make an absolute path from the input file path
+    let include_path = normalize_path(&input_file_path_parent.join(include_path));
+
+    // Compare to the absolute input file path
+    if include_path == input_file_path {
+        // Don't remember the input file.
+        return Ok(true);
+    }
+
+    if included_files.contains_key(&include_path) {
+        // Already known include file
+        return Ok(true);
+    }
+
+    let meta = match fs_impl.metadata(&include_path) {
         Ok(meta) => meta,
         Err(e) => {
-            debug!("Failed to stat include file {path:?}: {e}");
+            debug!("Failed to stat include file {include_path:?}: {e}");
             return Ok(false);
         }
     };
@@ -964,12 +950,12 @@ fn remember_include_file(
 
     if !meta.is_file {
         // Device, pipe, socket or other strange creature.
-        debug!("Non-regular include file {path:?}");
+        debug!("Non-regular include file {include_path:?}");
         return Ok(false);
     }
 
     // Remember this include file
-    included_files.insert(path, true);
+    included_files.insert(include_path, true);
 
     Ok(true)
 }
@@ -1272,21 +1258,22 @@ mod test {
         let path = path.join("tests/test.c.gcc-13.2.0-preproc");
         let mut bytes = std::fs::read(path).unwrap();
         let original_bytes = bytes.clone();
+        let mut included_files = HashMap::new();
+        let mut normalized_include_paths = HashMap::new();
 
-        let result = process_preprocessed_file(
+        let include_files = process_preprocessed_file(
             input_file,
             Path::new(""),
             &mut bytes,
             StandardFsAbstraction,
             true,
+            &mut included_files,
+            &mut normalized_include_paths,
         )
-        .unwrap_or(None);
+        .map(|_| included_files.drain().map(|(k, _)| k).collect::<Vec<_>>())
+        .unwrap_or_default();
 
         assert_eq!(&bytes, &original_bytes);
-
-        assert!(result.is_some());
-
-        let include_files = result.unwrap();
         assert_eq!(include_files.len(), 0);
     }
 
