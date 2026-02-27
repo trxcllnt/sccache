@@ -227,7 +227,7 @@ pub enum PreprocessorOutput {
     // cudafe++, cicc, and ptxas return this. Their output is always
     // saved to an intermediate file, and no preprocessor caching should
     // be done on them.
-    File(fs::File, Option<Pin<Box<DependenciesFuture>>>, Vec<u8>),
+    File(PathBuf, Option<Pin<Box<DependenciesFuture>>>),
     Output(
         Pin<Box<ProcessOutputStream>>,
         Option<Pin<Box<DependenciesFuture>>>,
@@ -752,7 +752,7 @@ where
         let needs_c_preprocessing = parsed_args.language.needs_c_preprocessing();
 
         let preprocessor_output = if !needs_c_preprocessing {
-            PreprocessorOutput::File(fs::File::open(cwd.join(&parsed_args.input))?, None, vec![])
+            PreprocessorOutput::File(cwd.join(&parsed_args.input), None)
         } else {
             try_or_cleanup!(
                 compiler
@@ -781,9 +781,12 @@ where
         common_and_arch_args.extend_from_slice(&parsed_args.arch_args[..]);
 
         let (preprocessor_output, dependencies) = match preprocessor_output {
-            PreprocessorOutput::File(res, dependencies, _stderr) => {
-                let file = tokio::fs::File::open(res.path()).await?;
-                let bytes = tokio_util::io::ReaderStream::new(file);
+            PreprocessorOutput::File(path, dependencies) => {
+                let file = tokio::fs::File::open(path).await?;
+                let bytes = tokio_util::io::ReaderStream::with_capacity(
+                    file,
+                    crate::util::HASH_BUFFER_SIZE,
+                );
                 let bytes = bytes.map_err(|e| e.into());
                 (
                     Box::pin(bytes) as Pin<Box<ProcessOutputStream>>,
@@ -1175,11 +1178,10 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
         } = *self;
 
         let preprocessor_start = Instant::now();
-        let input_path = cwd.join(&parsed_args.input);
         let needs_c_preprocessing = parsed_args.language.needs_c_preprocessing();
 
         let preprocessor_output = if !needs_c_preprocessing {
-            PreprocessorOutput::File(fs::File::open(&input_path)?, None, vec![])
+            PreprocessorOutput::File(cwd.join(&parsed_args.input), None)
         } else {
             // Preprocess again but this time with line numbers
             compiler
@@ -1199,8 +1201,8 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
 
         let (preprocessor_output, dependencies) = {
             match preprocessor_output {
-                PreprocessorOutput::File(file, dependencies, stderr) => {
-                    (PreprocessorOutput::File(file, None, stderr), dependencies)
+                PreprocessorOutput::File(file, dependencies) => {
+                    (PreprocessorOutput::File(file, None), dependencies)
                 }
                 PreprocessorOutput::Output(output, dependencies) => {
                     // Collect the preprocessor output before reading the dependencies file
@@ -1226,97 +1228,108 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
             vec![]
         };
 
-        let mut builder = tar::Builder::new(compressor);
         let mut path_transformer = path_transformer.clone();
-        let mut symlinks = BTreeMap::<PathBuf, PathBuf>::new();
-
-        // Find and add symlinks to the tar archive before adding files
-        // to ensure the symlinks exist before creating files at paths
-        // that traverse them when unpacking
-        let tarified_extra_paths = [
-            &dependencies[..],
-            &parsed_args.extra_dist_files[..],
-            &parsed_args.extra_hash_files[..],
-        ]
-        .into_iter()
-        .flatten()
-        .map(|path| pkg::tarify_path(&mut symlinks, path))
-        .try_collect::<_, Vec<_>, _>()?;
-
-        // The input path may traverse a symlink too
-        let input_path = pkg::tarify_path(&mut symlinks, &input_path)?;
 
         // Add all the symlinks to the archive first
-        for (from_path, to_path) in symlinks.iter() {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(0);
-            header.set_mtime(0);
-            header.set_entry_type(tar::EntryType::Symlink);
-            // Leave `to_path` as absolute, assuming the tar will
-            // be used in a chroot-like environment.
-            builder.append_link(&mut header, pkg::tar_safe_path(from_path), to_path)?;
-        }
+        let (mut builder, mut path_transformer, input_path) =
+            tokio::task::spawn_blocking(move || {
+                let mut builder = tar::Builder::new(compressor);
+                let mut symlinks = BTreeMap::<PathBuf, PathBuf>::new();
 
-        match preprocessor_output {
-            PreprocessorOutput::File(file, _, _) => {
-                builder.append_path_with_name(
-                    file.path(),
-                    path_transformer
-                        .as_dist(&input_path)
-                        .map(pkg::tar_safe_path)
-                        .with_context(|| {
-                            format!("unable to transform input path {input_path:?}")
-                        })?,
-                )?;
-            }
-            PreprocessorOutput::Output(output, _) => {
-                let dist_input_path = path_transformer
-                    .as_dist_input_path(&input_path)
-                    .with_context(|| format!("unable to transform input path {input_path:?}"))?;
-                let (mut header, dist_input_path) =
-                    pkg::make_tar_header(&input_path, &dist_input_path)?;
-                let preprocessor_output = output.try_collect::<Vec<Bytes>>().await?;
-                let preprocessor_output = tokio::task::spawn_blocking(move || {
-                    strip_basedirs(&preprocessor_output.concat(), &basedirs).into_owned()
-                })
-                .await?;
-                // The current size is from the non-preprocessed path, so set the actual size.
-                header.set_size(preprocessor_output.len() as u64);
-                header.set_cksum();
-                builder.append_data(&mut header, dist_input_path, &preprocessor_output[..])?;
-            }
-        }
+                // Find and add symlinks to the tar archive before adding files
+                // to ensure the symlinks exist before creating files at paths
+                // that traverse them when unpacking
+                let tarified_extra_paths = [
+                    &dependencies[..],
+                    &parsed_args.extra_dist_files[..],
+                    &parsed_args.extra_hash_files[..],
+                ]
+                .into_iter()
+                .flatten()
+                .map(|path| pkg::tarify_path(&mut symlinks, path))
+                .try_collect::<_, Vec<_>, _>()?;
 
-        tokio::task::spawn_blocking(move || -> Result<_> {
-            for path in tarified_extra_paths {
-                if !super::CAN_DIST_DYLIBS
-                    && path
-                        .extension()
-                        .is_some_and(|ext| ext == std::env::consts::DLL_EXTENSION)
-                {
-                    bail!(
-                        "Cannot distribute dylib input {} on this platform",
-                        path.display()
-                    )
+                // The input path may traverse a symlink too
+                let input_path = pkg::tarify_path(&mut symlinks, &cwd.join(&parsed_args.input))?;
+
+                for (from_path, to_path) in symlinks.iter() {
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(0);
+                    header.set_mtime(0);
+                    header.set_entry_type(tar::EntryType::Symlink);
+                    // Leave `to_path` as absolute, assuming the tar will
+                    // be used in a chroot-like environment.
+                    builder.append_link(&mut header, pkg::tar_safe_path(from_path), to_path)?;
                 }
 
-                builder.append_path_with_name(
-                    &path,
-                    path_transformer
-                        .as_dist(&path)
-                        .map(pkg::tar_safe_path)
-                        .with_context(|| {
-                            format!("unable to transform input path {}", path.display())
-                        })?,
-                )?;
+                for path in tarified_extra_paths {
+                    if !super::CAN_DIST_DYLIBS
+                        && path
+                            .extension()
+                            .is_some_and(|ext| ext == std::env::consts::DLL_EXTENSION)
+                    {
+                        bail!(
+                            "Cannot distribute dylib input {} on this platform",
+                            path.display()
+                        )
+                    }
+
+                    builder.append_path_with_name(
+                        &path,
+                        path_transformer
+                            .as_dist(&path)
+                            .map(pkg::tar_safe_path)
+                            .with_context(|| {
+                                format!("unable to transform input path {}", path.display())
+                            })?,
+                    )?;
+                }
+
+                Ok::<_, anyhow::Error>((builder, path_transformer, input_path))
+            })
+            .await??;
+
+        let builder = match preprocessor_output {
+            PreprocessorOutput::File(path, _) => {
+                tokio::task::spawn_blocking(move || {
+                    builder.append_path_with_name(
+                        path,
+                        path_transformer
+                            .as_dist(&input_path)
+                            .map(pkg::tar_safe_path)
+                            .with_context(|| {
+                                format!("unable to transform input path {input_path:?}")
+                            })?,
+                    )?;
+
+                    Ok::<_, anyhow::Error>(builder)
+                })
+                .await??
             }
+            PreprocessorOutput::Output(output, _) => {
+                let preprocessor_output = output.map_ok(BytesMut::from).try_concat().await?;
+                tokio::task::spawn_blocking(move || {
+                    let dist_input_path = path_transformer
+                        .as_dist_input_path(&input_path)
+                        .with_context(|| {
+                            format!("unable to transform input path {input_path:?}")
+                        })?;
+                    let (mut header, dist_input_path) =
+                        pkg::make_tar_header(&input_path, &dist_input_path)?;
+                    // The current size is from the non-preprocessed path, so set the actual size.
+                    header.set_size(preprocessor_output.len() as u64);
+                    header.set_cksum();
+                    builder.append_data(&mut header, dist_input_path, &preprocessor_output[..])?;
 
-            // Finish archive
-            let _ = builder.into_inner()?.finish()?;
+                    Ok::<_, anyhow::Error>(builder)
+                })
+                .await??
+            }
+        };
 
-            Ok(())
-        })
-        .await?
+        // Finish archive
+        let _ = builder.into_inner()?.finish()?;
+        Ok(())
     }
 }
 

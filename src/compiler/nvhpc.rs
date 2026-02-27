@@ -213,9 +213,7 @@ impl CCompilerImpl for Nvhpc {
         )
         .await
         .map(|res| match res {
-            PreprocessorOutput::File(file, _, stderr) => {
-                PreprocessorOutput::File(file, dependencies, stderr)
-            }
+            PreprocessorOutput::File(file, _) => PreprocessorOutput::File(file, dependencies),
             PreprocessorOutput::Output(out, _) => PreprocessorOutput::Output(out, dependencies),
         })
     }

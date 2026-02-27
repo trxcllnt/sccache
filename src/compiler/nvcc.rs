@@ -652,9 +652,9 @@ where
     async_stream::try_stream! {
         for await preprocessor_output in preprocessor_outputs {
             match preprocessor_output? {
-                PreprocessorOutput::File(res, _, _) => {
-                    let src = tokio::fs::File::open(res.path()).await?;
-                    let src = tokio_util::io::ReaderStream::new(src);
+                PreprocessorOutput::File(path, _) => {
+                    let src = tokio::fs::File::open(path).await?;
+                    let src = tokio_util::io::ReaderStream::with_capacity(src, crate::util::HASH_BUFFER_SIZE);
                     let src = src.map_err(anyhow::Error::new);
                     for await bytes in src {
                         yield bytes?;
