@@ -18,8 +18,7 @@ use crate::{
         Cacheable, ColorMode, Compilation, CompileCommand, CompileCommandImpl, Compiler,
         CompilerArguments, CompilerHasher, CompilerKind, HashResult, Language,
         preprocessor_cache::{
-            CachedIncludeEntry, include_is_too_new, normalize_path,
-            preprocessor_cache_entry_hash_key,
+            CachedIncludeEntry, include_is_too_new, preprocessor_cache_entry_hash_key,
         },
     },
     config::PreprocessorCacheModeConfig,
@@ -31,9 +30,9 @@ use crate::{
     util::{Digest, HashToDigest, hash_all, strip_basedirs},
 };
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use fs_err as fs;
-use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt, lock::Mutex};
+use futures::{StreamExt, TryFutureExt, TryStreamExt, lock::Mutex};
 use itertools::Itertools;
 use std::{
     borrow::Cow,
@@ -812,6 +811,46 @@ where
 
         drop(common_and_arch_args);
 
+        let preprocessor_key_and_dependencies = dependencies.and_then(|dependencies| {
+            if let PreprocessorCacheLookup::Miss(preprocessor_key) = preprocessor_cache_lookup {
+                Some((preprocessor_key, dependencies))
+            } else {
+                None
+            }
+        });
+
+        let preprocessor_key_and_dependencies =
+            if let Some((preprocessor_key, dependencies)) = preprocessor_key_and_dependencies {
+                let cwd = cwd.clone();
+                let dependencies = futures::future::lazy(|_| async {
+                    let dependencies = dependencies.await?;
+                    tokio::task::spawn_blocking(move || {
+                        dependencies
+                            .into_iter()
+                            // Each dependency in a preprocessor cache entry must exist,
+                            // and we must use the absolute path to the dependency.
+                            .map(|path| dunce::canonicalize(cwd.join(&path)))
+                            .try_collect::<_, Vec<_>, _>()
+                            .map_err(anyhow::Error::new)
+                            .map(|dependencies| {
+                                futures::stream::iter(
+                                    dependencies
+                                        .into_iter()
+                                        // Dedupe first to ensure we only hash each file once
+                                        .sorted_unstable_by(|a, b| a.cmp(b))
+                                        .dedup()
+                                        .map(Ok),
+                                )
+                            })
+                    })
+                    .await?
+                })
+                .await;
+                Some((preprocessor_key, dependencies))
+            } else {
+                None
+            };
+
         if needs_c_preprocessing {
             // Track how long the preprocessor took
             let preprocessor_time = preprocessor_start.elapsed() - hash_time;
@@ -820,32 +859,10 @@ where
             stats.preprocessor_duration += preprocessor_time;
         }
 
-        let dependencies_and_preprocessor_key = dependencies.and_then(|dependencies| {
-            if let PreprocessorCacheLookup::Miss(preprocessor_key) = preprocessor_cache_lookup {
-                Some((dependencies, preprocessor_key))
-            } else {
-                None
-            }
-        });
-
-        if let Some((dependencies, preprocessor_key)) = dependencies_and_preprocessor_key {
+        if let Some((preprocessor_key, dependencies)) = preprocessor_key_and_dependencies {
             dependencies
-                .map(|dependencies| {
-                    dependencies
-                        .map(|dependencies| {
-                            // Dedupe first to ensure we only hash each file once
-                            dependencies
-                                .into_iter()
-                                .map(|path| cwd.join(normalize_path(&path)))
-                                .sorted_unstable_by(|a, b| a.cmp(b))
-                                .dedup()
-                        })
-                        .into_iter()
-                        .flatten()
-                })
-                .map(futures::stream::iter)
-                .flatten_stream()
-                .flat_map_unordered(None, |path| {
+                .try_flatten_stream()
+                .map_ok(|path| {
                     futures::stream::once(Box::pin(async {
                         let (digest, finder) =
                             Digest::from_file_with_time_macros(&path, &env_vars).await?;
@@ -862,6 +879,7 @@ where
                         Ok((digest.finish(), path, meta))
                     }))
                 })
+                .try_flatten_unordered(None)
                 .try_collect::<Vec<_>>()
                 .and_then(|dependencies| async {
                     // Load the latest cache entry for this preprocessor key

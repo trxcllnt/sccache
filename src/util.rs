@@ -741,7 +741,8 @@ where
     }
     .boxed();
 
-    let mut stdout = tokio_util::io::ReaderStream::new(stdout).take_until(status);
+    let mut stdout =
+        tokio_util::io::ReaderStream::with_capacity(stdout, HASH_BUFFER_SIZE).take_until(status);
 
     Ok(async_stream::try_stream! {
         // Yield each stdout bytes chunk
