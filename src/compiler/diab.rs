@@ -620,7 +620,7 @@ impl Iterator for ExpandAtArgs<'_> {
             // considered as a unneeded edge case for now.
 
             let mut contents = String::new();
-            let file = self.cwd.join(&value);
+            let file = self.cwd.join(value);
             let res = fs::File::open(file).and_then(|mut f| f.read_to_string(&mut contents));
             if res.is_err() {
                 // Failed to read the file, so return the argument as it is.

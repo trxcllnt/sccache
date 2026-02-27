@@ -796,28 +796,30 @@ where
 }
 
 pub trait OsStrExt {
-    fn find(&self, s: &str) -> Option<usize>;
-    fn contains(&self, s: &str) -> bool;
+    fn find<P: AsRef<OsStr>>(&self, pat: P) -> Option<usize>;
+    fn contains<P: AsRef<OsStr>>(&self, pat: P) -> bool;
     fn encode_to_bytes(&self) -> Result<Vec<u8>>;
-    fn ends_with(&self, s: &str) -> bool;
-    fn starts_with(&self, s: &str) -> bool;
-    fn split(&self, s: &str) -> impl Iterator<Item = &'_ OsStr>;
-    fn split_once(&self, s: &str) -> Option<(&'_ OsStr, &'_ OsStr)>;
-    fn split_prefix(&self, s: &str) -> Option<OsString>;
+    fn ends_with<P: AsRef<OsStr>>(&self, pat: P) -> bool;
+    fn starts_with<P: AsRef<OsStr>>(&self, pat: P) -> bool;
+    fn split<P: AsRef<OsStr>>(&self, pat: P) -> impl Iterator<Item = &'_ OsStr>;
+    fn split_once<P: AsRef<OsStr>>(&self, pat: P) -> Option<(&'_ OsStr, &'_ OsStr)>;
+    fn split_prefix<P: AsRef<OsStr>>(&self, pat: P) -> Option<&'_ OsStr>;
     fn trim(&self) -> &OsStr;
+    fn trim_start_matches<P: AsRef<OsStr>>(&self, pat: P) -> &OsStr;
+    fn trim_end_matches<P: AsRef<OsStr>>(&self, pat: P) -> &OsStr;
 }
 
 impl OsStrExt for OsStr {
-    fn contains(&self, s: &str) -> bool {
-        self.find(s).is_some()
+    fn contains<P: AsRef<OsStr>>(&self, pat: P) -> bool {
+        self.find(pat).is_some()
     }
 
     fn encode_to_bytes(&self) -> Result<Vec<u8>> {
-        Ok(encode_osstr_to_bytes(self)?)
+        Ok(os_str_to_bytes(self)?)
     }
 
-    fn find(&self, s: &str) -> Option<usize> {
-        let p = OsStr::new(s).as_encoded_bytes();
+    fn find<P: AsRef<OsStr>>(&self, pat: P) -> Option<usize> {
+        let p = pat.as_ref().as_encoded_bytes();
         let s = self.as_encoded_bytes();
         let (m, n) = (s.len(), p.len());
         if m < n {
@@ -830,24 +832,24 @@ impl OsStrExt for OsStr {
         }
     }
 
-    fn ends_with(&self, s: &str) -> bool {
-        let p = OsStr::new(s).as_encoded_bytes();
+    fn ends_with<P: AsRef<OsStr>>(&self, pat: P) -> bool {
+        let p = pat.as_ref().as_encoded_bytes();
         let s = self.as_encoded_bytes();
         let (m, n) = (s.len(), p.len());
         if m < n { false } else { p == &s[m - n..] }
     }
 
-    fn starts_with(&self, s: &str) -> bool {
-        let p = OsStr::new(s).as_encoded_bytes();
+    fn starts_with<P: AsRef<OsStr>>(&self, pat: P) -> bool {
+        let p = pat.as_ref().as_encoded_bytes();
         let s = self.as_encoded_bytes();
         let (m, n) = (s.len(), p.len());
         if m < n { false } else { p == &s[0..n] }
     }
 
-    fn split(&self, s: &str) -> impl Iterator<Item = &'_ OsStr> {
+    fn split<P: AsRef<OsStr>>(&self, pat: P) -> impl Iterator<Item = &'_ OsStr> {
         struct Split<'a> {
             rest: &'a OsStr,
-            delim: String,
+            delim: OsString,
         }
         impl<'a> Iterator for Split<'a> {
             type Item = &'a OsStr;
@@ -862,32 +864,29 @@ impl OsStrExt for OsStr {
         }
         Split::<'_> {
             rest: self,
-            delim: s.to_owned(),
+            delim: pat.as_ref().to_owned(),
         }
     }
 
-    fn split_once(&self, s: &str) -> Option<(&'_ OsStr, &'_ OsStr)> {
-        self.find(s).map(|idx| {
-            let p = OsStr::new(s).as_encoded_bytes();
+    fn split_once<P: AsRef<OsStr>>(&self, pat: P) -> Option<(&'_ OsStr, &'_ OsStr)> {
+        self.find(pat.as_ref()).map(|idx| {
+            let p = pat.as_ref().as_encoded_bytes();
             let s = self.as_encoded_bytes();
             let a = &s[..idx];
             let b = &s[idx + p.len()..];
-            let a = (!a.is_empty()).then(|| unsafe { OsStr::from_encoded_bytes_unchecked(a) });
-            let b = (!b.is_empty()).then(|| unsafe { OsStr::from_encoded_bytes_unchecked(b) });
-            (a.unwrap_or_default(), b.unwrap_or_default())
+            (
+                unsafe { OsStr::from_encoded_bytes_unchecked(a) }, //
+                unsafe { OsStr::from_encoded_bytes_unchecked(b) },
+            )
         })
     }
 
-    fn split_prefix(&self, s: &str) -> Option<OsString> {
-        self.starts_with(s).then(|| {
-            let p = OsStr::new(s).as_encoded_bytes();
+    fn split_prefix<P: AsRef<OsStr>>(&self, pat: P) -> Option<&'_ OsStr> {
+        self.starts_with(pat.as_ref()).then(|| {
+            let p = pat.as_ref().as_encoded_bytes();
             let s = self.as_encoded_bytes();
             let b = &s[p.len()..];
-            if b.is_empty() {
-                OsString::new()
-            } else {
-                unsafe { OsStr::from_encoded_bytes_unchecked(b) }.to_owned()
-            }
+            unsafe { OsStr::from_encoded_bytes_unchecked(b) }
         })
     }
 
@@ -918,23 +917,34 @@ impl OsStrExt for OsStr {
 
         unsafe { OsStr::from_encoded_bytes_unchecked(buf) }
     }
+
+    fn trim_start_matches<P: AsRef<OsStr>>(&self, pat: P) -> &OsStr {
+        let pat = pat.as_ref().as_encoded_bytes();
+        let mut buf = self.as_encoded_bytes();
+        loop {
+            if pat.len() > buf.len() || &buf[0..pat.len()] != pat {
+                break;
+            } else {
+                buf = &buf[pat.len()..];
+            }
+        }
+        unsafe { OsStr::from_encoded_bytes_unchecked(buf) }
+    }
+
+    fn trim_end_matches<P: AsRef<OsStr>>(&self, pat: P) -> &OsStr {
+        let pat = pat.as_ref().as_encoded_bytes();
+        let mut buf = self.as_encoded_bytes();
+        loop {
+            if pat.len() > buf.len() || &buf[buf.len() - pat.len()..] != pat {
+                break;
+            } else {
+                buf = &buf[..buf.len() - pat.len()];
+            }
+        }
+        unsafe { OsStr::from_encoded_bytes_unchecked(buf) }
+    }
 }
 
-#[cfg(windows)]
-use std::os::windows::ffi::OsStringExt;
-
-#[cfg(unix)]
-fn encode_osstr_to_bytes(os_str: &OsStr) -> std::io::Result<Vec<u8>> {
-    use std::os::unix::prelude::*;
-    Ok(os_str.as_bytes().to_vec())
-}
-
-#[cfg(unix)]
-pub fn encode_path(dst: &mut dyn Write, path: &Path) -> std::io::Result<()> {
-    use std::os::unix::prelude::*;
-
-    let bytes = path.as_os_str().as_bytes();
-    dst.write_all(bytes)
 pub fn split_quoted_shell_str(s: &str) -> Option<Vec<String>> {
     #[cfg(unix)]
     let args = shlex::split(s);
@@ -943,35 +953,42 @@ pub fn split_quoted_shell_str(s: &str) -> Option<Vec<String>> {
     args
 }
 
-#[cfg(windows)]
-fn encode_osstr_to_bytes(os_str: &OsStr) -> std::io::Result<Vec<u8>> {
-    use std::os::windows::prelude::*;
-    wide_char_to_multi_byte(&os_str.encode_wide().collect::<Vec<_>>()) // use_default_char_flag
+pub fn bytes_to_path(bytes: &[u8]) -> std::io::Result<PathBuf> {
+    Ok(bytes_to_os_string(bytes)?.into())
 }
 
-#[cfg(windows)]
-pub fn encode_path(dst: &mut dyn Write, path: &Path) -> std::io::Result<()> {
-    use std::os::windows::prelude::*;
-
-    let points = path.as_os_str().encode_wide().collect::<Vec<_>>();
-    let bytes = wide_char_to_multi_byte(&points)?; // use_default_char_flag
-    dst.write_all(&bytes)
+pub fn path_to_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+    os_str_to_bytes(path.as_os_str())
 }
 
 #[cfg(unix)]
-pub fn decode_path(bytes: &[u8]) -> std::io::Result<PathBuf> {
+pub fn bytes_to_os_string(buf: &[u8]) -> std::io::Result<OsString> {
     use std::os::unix::prelude::*;
-    Ok(OsStr::from_bytes(bytes).into())
+    Ok(OsStr::from_bytes(buf).into())
 }
 
 #[cfg(windows)]
-pub fn decode_path(bytes: &[u8]) -> std::io::Result<PathBuf> {
+pub fn bytes_to_os_string(buf: &[u8]) -> std::io::Result<OsString> {
+    use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::Globalization::{CP_OEMCP, MB_ERR_INVALID_CHARS};
 
     let codepage = CP_OEMCP;
     let flags = MB_ERR_INVALID_CHARS;
 
-    Ok(OsString::from_wide(&multi_byte_to_wide_char(codepage, flags, bytes)?).into())
+    OsString::from_wide(&multi_byte_to_wide_char(codepage, flags, buf)?)
+}
+
+#[cfg(unix)]
+pub fn os_str_to_bytes(os_str: &OsStr) -> std::io::Result<Vec<u8>> {
+    use std::os::unix::prelude::*;
+    Ok(os_str.as_bytes().to_vec())
+}
+
+#[cfg(windows)]
+pub fn os_str_to_bytes(os_str: &OsStr) -> std::io::Result<Vec<u8>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::prelude::*;
+    wide_char_to_multi_byte(&os_str.encode_wide().collect::<Vec<_>>()) // use_default_char_flag
 }
 
 #[cfg(windows)]
@@ -1815,7 +1832,7 @@ pub fn normalize_win_path(path: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{OsStrExt, TimeMacroFinder};
-    use std::ffi::{OsStr, OsString};
+    use std::ffi::OsStr;
 
     #[test]
     fn simple_starts_with() {
@@ -1836,10 +1853,10 @@ mod tests {
     fn simple_strip_prefix() {
         let a: &OsStr = "foo".as_ref();
 
-        assert_eq!(a.split_prefix(""), Some(OsString::from("foo")));
-        assert_eq!(a.split_prefix("f"), Some(OsString::from("oo")));
-        assert_eq!(a.split_prefix("fo"), Some(OsString::from("o")));
-        assert_eq!(a.split_prefix("foo"), Some(OsString::from("")));
+        assert_eq!(a.split_prefix(""), Some(OsStr::new("foo")));
+        assert_eq!(a.split_prefix("f"), Some(OsStr::new("oo")));
+        assert_eq!(a.split_prefix("fo"), Some(OsStr::new("o")));
+        assert_eq!(a.split_prefix("foo"), Some(OsStr::new("")));
         assert_eq!(a.split_prefix("foo2"), None);
         assert_eq!(a.split_prefix("b"), None);
     }

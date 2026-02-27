@@ -227,11 +227,12 @@ impl CCompilerImpl for Nvcc {
             if let Some(idx) = arguments.iter().position(|x| x.starts_with(flag)) {
                 let meta_arch = arguments[idx]
                     .split_prefix(flag)
-                    .and_then(|s| s.to_str().map(|s| s.to_owned()));
-                let real_archs = match meta_arch.as_deref() {
-                    Some("all") => &self.archs_all,
-                    Some("all-major") => &self.archs_major,
-                    Some("native") => &self.archs_native,
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default();
+                let real_archs = match meta_arch {
+                    "all" => &self.archs_all,
+                    "all-major" => &self.archs_major,
+                    "native" => &self.archs_native,
                     _ => continue,
                 };
                 if !real_archs.is_empty() {
@@ -244,11 +245,12 @@ impl CCompilerImpl for Nvcc {
             if let Some(idx) = arguments.iter().position(|x| x == flag) {
                 let meta_arch = arguments
                     .get(idx + 1)
-                    .and_then(|s| s.to_str().map(|s| s.to_owned()));
-                let real_archs = match meta_arch.as_deref() {
-                    Some("all") => &self.archs_all,
-                    Some("all-major") => &self.archs_major,
-                    Some("native") => &self.archs_native,
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default();
+                let real_archs = match meta_arch {
+                    "all" => &self.archs_all,
+                    "all-major" => &self.archs_major,
+                    "native" => &self.archs_native,
                     _ => continue,
                 };
                 if !real_archs.is_empty() {

@@ -22,7 +22,7 @@ use crate::compiler::{
 };
 use crate::compiler::{CompileCommandImpl, args::*};
 use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
-use crate::util::{OsStrExt, encode_path, normal_temp_path, run_input_output};
+use crate::util::{OsStrExt, normal_temp_path, path_to_bytes, run_input_output};
 use crate::{counted_array, debug_if_trace, dist, server::SccacheService};
 use async_trait::async_trait;
 use fs::File;
@@ -1034,11 +1034,15 @@ where
             let f = File::create(cwd.join(depfile))?;
             let mut f = BufWriter::new(f);
 
-            encode_path(&mut f, objfile)
-                .with_context(|| format!("Couldn't encode objfile filename: '{objfile:?}'"))?;
+            f.write_all(
+                &path_to_bytes(objfile)
+                    .with_context(|| format!("Couldn't encode objfile filename: '{objfile:?}'"))?,
+            )?;
             write!(f, ": ")?;
-            encode_path(&mut f, &parsed_args.input)
-                .with_context(|| format!("Couldn't encode input filename: '{objfile:?}'"))?;
+            f.write_all(
+                &path_to_bytes(&parsed_args.input)
+                    .with_context(|| format!("Couldn't encode input filename: '{objfile:?}'"))?,
+            )?;
             write!(f, " ")?;
             let stderr = from_local_codepage(output.stderr)
                 .context("Failed to convert preprocessor stderr")?;
@@ -1059,10 +1063,10 @@ where
                 stderr_bytes.push(b'\n');
             }
             writeln!(f)?;
-            // Write extra rules for each dependency to handle
-            // removed files.
-            encode_path(&mut f, &parsed_args.input)
-                .with_context(|| format!("Couldn't encode filename: '{:?}'", parsed_args.input))?;
+            // Write extra rules for each dependency to handle removed files.
+            f.write_all(&path_to_bytes(&parsed_args.input).with_context(|| {
+                format!("Couldn't encode filename: '{:?}'", parsed_args.input)
+            })?)?;
             writeln!(f, ":")?;
             let mut sorted = deps.into_iter().collect::<Vec<_>>();
             sorted.sort();
