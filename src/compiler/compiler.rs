@@ -3194,7 +3194,7 @@ LLVM version: 6.0",
         let creator = new_creator();
         let runtime = single_threaded_runtime();
         let pool = runtime.handle();
-        let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
+        let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
         let cwd = f.tempdir.path();
         let compilations_storage = Arc::new(MockStorage::new(None, false));
         let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
@@ -3224,10 +3224,13 @@ LLVM version: 6.0",
                 .unwrap()
                 .0;
                 // The generate_hash_key preprocessor invocation.
-                next_command(
-                    &creator,
-                    Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-                );
+                let dep = f.tempdir.path().join("foo.d");
+                next_command_calls(&creator, move |_| {
+                    // Pretend to preprocess something.
+                    let mut f = File::create(&dep)?;
+                    f.write_all(b"foo.o :")?;
+                    Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+                });
                 let hasher = match c.parse_arguments(&arguments, cwd, &[]) {
                     CompilerArguments::Ok(h) => h,
                     o => panic!("Bad result from parse_arguments: {o:?}"),
@@ -3509,10 +3512,14 @@ LLVM version: 6.0",
         .unwrap()
         .0;
         // The generate_hash_key preprocessor invocation.
-        next_command(
-            &creator,
-            Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-        );
+        let dep = f.tempdir.path().join("foo.d");
+        let d = dep.clone();
+        next_command_calls(&creator, move |_| {
+            // Pretend to preprocess something.
+            let mut f = File::create(&d)?;
+            f.write_all(b"foo.o :")?;
+            Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+        });
         // The compiler invocation.
         const COMPILER_STDOUT: &[u8] = b"compiler stdout";
         const COMPILER_STDERR: &[u8] = b"compiler stderr";
@@ -3529,7 +3536,7 @@ LLVM version: 6.0",
             ))
         });
         let cwd = f.tempdir.path();
-        let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
+        let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
         let hasher = match c.parse_arguments(&arguments, cwd, &[]) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
@@ -3554,6 +3561,8 @@ LLVM version: 6.0",
                     .await
             })
             .unwrap();
+        // Ensure that the dependency file was created.
+        assert!(fs::metadata(&dep).map(|m| m.len() > 0).unwrap());
         // Ensure that the object file was created.
         assert!(fs::metadata(&obj).map(|m| m.len() > 0).unwrap());
         match cached {
@@ -3669,10 +3678,14 @@ LLVM version: 6.0",
         .unwrap()
         .0;
         // The generate_hash_key preprocessor invocation.
-        next_command(
-            &creator,
-            Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-        );
+        let dep = f.tempdir.path().join("foo.d");
+        let d = dep.clone();
+        next_command_calls(&creator, move |_| {
+            // Pretend to preprocess something.
+            let mut f = File::create(&d)?;
+            f.write_all(b"foo.o :")?;
+            Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+        });
         // The inputs_packager preprocessor invocation.
         next_command(
             &creator,
@@ -3697,7 +3710,7 @@ LLVM version: 6.0",
         );
 
         let cwd = f.tempdir.path();
-        let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
+        let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
         let hasher = match c.parse_arguments(&arguments, cwd, &[]) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
@@ -3722,6 +3735,8 @@ LLVM version: 6.0",
                     .await
             })
             .unwrap();
+        // Ensure that the dependency file was created.
+        assert!(fs::metadata(&dep).map(|m| m.len() > 0).unwrap());
         // Ensure that the object file was created.
         assert!(fs::metadata(&obj).map(|m| m.len() > 0).unwrap());
         match cached {
@@ -3829,10 +3844,14 @@ LLVM version: 6.0",
         .unwrap()
         .0;
         // The generate_hash_key preprocessor invocation.
-        next_command(
-            &creator,
-            Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-        );
+        let dep = f.tempdir.path().join("foo.d");
+        let d = dep.clone();
+        next_command_calls(&creator, move |_| {
+            // Pretend to preprocess something.
+            let mut f = File::create(&d)?;
+            f.write_all(b"foo.o :")?;
+            Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+        });
         // The compiler invocation.
         const COMPILER_STDOUT: &[u8] = b"compiler stdout";
         const COMPILER_STDERR: &[u8] = b"compiler stderr";
@@ -3849,7 +3868,7 @@ LLVM version: 6.0",
             ))
         });
         let cwd = f.tempdir.path();
-        let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
+        let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
         let hasher = match c.parse_arguments(&arguments, cwd, &[]) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
@@ -3871,6 +3890,8 @@ LLVM version: 6.0",
                 pending.increment(),
             ))
             .unwrap();
+        // Ensure that the dependency file was created.
+        assert!(fs::metadata(&dep).map(|m| m.len() > 0).unwrap());
         // Ensure that the object file was created.
         assert!(fs::metadata(&obj).map(|m| m.len() > 0).unwrap());
         match cached {
@@ -3945,10 +3966,14 @@ LLVM version: 6.0",
         .unwrap()
         .0;
         // The generate_hash_key preprocessor invocation.
-        next_command(
-            &creator,
-            Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-        );
+        let dep = f.tempdir.path().join("foo.d");
+        let d = dep.clone();
+        next_command_calls(&creator, move |_| {
+            // Pretend to preprocess something.
+            let mut f = File::create(&d)?;
+            f.write_all(b"foo.o :")?;
+            Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+        });
         // The compiler invocation.
         const COMPILER_STDOUT: &[u8] = b"compiler stdout";
         const COMPILER_STDERR: &[u8] = b"compiler stderr";
@@ -3968,7 +3993,7 @@ LLVM version: 6.0",
         let entry = cachewrite.finish().expect("Failed to finish cache entry");
 
         let cwd = f.tempdir.path();
-        let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
+        let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
         let hasher = match c.parse_arguments(&arguments, cwd, &[]) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
@@ -3989,6 +4014,8 @@ LLVM version: 6.0",
                 pending.increment(),
             ))
             .unwrap();
+        // Ensure that the dependency file was created.
+        assert!(fs::metadata(&dep).map(|m| m.len() > 0).unwrap());
         match cached {
             CompileResult::CacheHit(duration) => {
                 assert!(duration >= storage_delay);
@@ -4068,12 +4095,16 @@ LLVM version: 6.0",
         // The compiler should be invoked twice, since we're forcing
         // recaching.
         let obj = f.tempdir.path().join("foo.o");
+        let dep = f.tempdir.path().join("foo.d");
         for _ in 0..2 {
             // The generate_hash_key preprocessor invocation.
-            next_command(
-                &creator,
-                Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-            );
+            let d = dep.clone();
+            next_command_calls(&creator, move |_| {
+                // Pretend to preprocess something.
+                let mut f = File::create(&d)?;
+                f.write_all(b"foo.o :")?;
+                Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+            });
             // The compiler invocation.
             let o = obj.clone();
             next_command_calls(&creator, move |_| {
@@ -4088,7 +4119,7 @@ LLVM version: 6.0",
             });
         }
         let cwd = f.tempdir.path();
-        let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
+        let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
         let hasher = match c.parse_arguments(&arguments, cwd, &[]) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
@@ -4113,6 +4144,8 @@ LLVM version: 6.0",
                     .await
             })
             .unwrap();
+        // Ensure that the dependency file was created.
+        assert!(fs::metadata(&dep).map(|m| m.len() > 0).unwrap());
         // Ensure that the object file was created.
         assert!(fs::metadata(&obj).map(|m| m.len() > 0).unwrap());
         match cached {
@@ -4126,6 +4159,7 @@ LLVM version: 6.0",
         assert_eq!(COMPILER_STDOUT, res.stdout.as_slice());
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
         // Now compile again, but force recaching.
+        fs::remove_file(&dep).unwrap();
         fs::remove_file(&obj).unwrap();
         let (cached, res) = hasher
             .get_cached_or_compile(
@@ -4143,6 +4177,8 @@ LLVM version: 6.0",
             )
             .wait()
             .unwrap();
+        // Ensure that the dependency file was created.
+        assert!(fs::metadata(&dep).map(|m| m.len() > 0).unwrap());
         // Ensure that the object file was created.
         assert!(fs::metadata(&obj).map(|m| m.len() > 0).unwrap());
         match cached {
@@ -4347,12 +4383,16 @@ LLVM version: 6.0",
         // The compiler should be invoked twice, since we're forcing
         // recaching.
         let obj = f.tempdir.path().join("foo.o");
+        let dep = f.tempdir.path().join("foo.d");
         for (attempts_compile, _) in dist_clients.iter() {
             // The generate_hash_key preprocessor invocation.
-            next_command(
-                &creator,
-                Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-            );
+            let d = dep.clone();
+            next_command_calls(&creator, move |_| {
+                // Pretend to preprocess something.
+                let mut f = File::create(&d)?;
+                f.write_all(b"foo.o :")?;
+                Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+            });
             if *attempts_compile {
                 // The inputs_packager preprocessor invocation.
                 next_command(
@@ -4374,7 +4414,7 @@ LLVM version: 6.0",
             });
         }
         let cwd = f.tempdir.path();
-        let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
+        let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
         let hasher = match c.parse_arguments(&arguments, cwd, &[]) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
@@ -4390,6 +4430,9 @@ LLVM version: 6.0",
 
             if obj.is_file() {
                 fs::remove_file(&obj).unwrap();
+            }
+            if dep.is_file() {
+                fs::remove_file(&dep).unwrap();
             }
             let hasher = hasher.clone();
             let (cached, res) = hasher
@@ -4408,6 +4451,8 @@ LLVM version: 6.0",
                 )
                 .wait()
                 .expect("Does not error if storage put fails. qed");
+            // Ensure that the dependency file was created.
+            assert!(fs::metadata(&dep).map(|m| m.len() > 0).unwrap());
             // Ensure that the object file was created.
             assert!(fs::metadata(&obj).map(|m| m.len() > 0).unwrap());
             match cached {
@@ -4418,8 +4463,14 @@ LLVM version: 6.0",
                 _ => panic!("Unexpected compile result: {cached:?}"),
             }
             assert_eq!(0, res.code().unwrap());
-            assert_eq!(COMPILER_STDOUT, res.stdout.as_slice());
-            assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
+            assert_eq!(
+                String::from_utf8_lossy(COMPILER_STDOUT),
+                String::from_utf8_lossy(&res.stdout)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(COMPILER_STDERR),
+                String::from_utf8_lossy(&res.stderr)
+            );
         }
     }
 }

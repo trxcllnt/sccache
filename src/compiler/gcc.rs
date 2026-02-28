@@ -29,7 +29,7 @@ use crate::{
     mock_command::{CommandCreatorSync, RunCommand},
     server::SccacheService,
     util::{
-        HASH_BUFFER_SIZE, OsStrExt, normal_temp_path, run_input_output, run_input_stream_output,
+        OsStrExt, normal_temp_path, run_input_output, run_input_stream_output,
         split_quoted_shell_str,
     },
 };
@@ -817,7 +817,11 @@ where
         },
     );
 
-    let extra_dist_files = vec![cwd.join(&input)];
+    let mut extra_dist_files = vec![];
+
+    if language.needs_c_preprocessing() {
+        extra_dist_files.push(cwd.join(&input));
+    };
 
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),
@@ -972,9 +976,7 @@ where
     debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
     debug_if_trace!("[{}]: depfile: {depfile:?}", parsed_args.output_pretty());
 
-    let output = run_input_stream_output(cmd, HASH_BUFFER_SIZE, None)
-        .await?
-        .boxed();
+    let output = run_input_stream_output(cmd, 4 * 1024, None).await?.boxed();
 
     let dependencies = depfile.map(|depfile| {
         parse_dependencies(cwd.to_owned(), parsed_args.input.clone(), depfile).boxed()
@@ -1154,11 +1156,23 @@ pub async fn parse_dependencies<P: AsRef<Path>>(
                 }
                 res => {
                     if attempts <= 5 {
+                        warn!(
+                            "[{}]: [parse_dependencies]: failed to read depfile {depfile:?}",
+                            input_path.display()
+                        );
                         attempts += 1;
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     } else if let Err(err) = res {
-                        return Err(err.into());
+                        warn!(
+                            "[{}]: [parse_dependencies]: failed to read depfile {depfile:?}: {err:#}",
+                            input_path.display()
+                        );
+                        return Err(err).with_context(|| format!("reading {depfile:?}"));
                     } else {
+                        warn!(
+                            "[{}]: [parse_dependencies]: empty depfile: {depfile:?}",
+                            input_path.display()
+                        );
                         break String::new();
                     }
                 }
@@ -1404,7 +1418,11 @@ pub fn generate_compile_commands(
                     arguments.extend_from_slice(
                         &[
                             parsed_args.compilation_flag.clone().into_string().ok()?,
-                            path_transformer.as_dist_input_path(&parsed_args.input)?,
+                            if !parsed_args.language.needs_c_preprocessing() {
+                                path_transformer.as_dist(&parsed_args.input)?
+                            } else {
+                                path_transformer.as_dist_input_path(&parsed_args.input)?
+                            },
                             "-o".into(),
                             path_transformer.as_dist(out_file)?,
                         ][..],

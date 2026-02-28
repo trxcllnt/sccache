@@ -31,7 +31,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use fs_err as fs;
 use futures::{StreamExt, TryFutureExt, TryStreamExt, lock::Mutex};
 use itertools::Itertools;
 use std::{
@@ -43,7 +42,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, LazyLock},
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tempfile::TempPath;
 
@@ -698,111 +697,33 @@ where
             _ => {}
         };
 
-        let out_pretty = parsed_args.output_pretty();
-
-        macro_rules! try_or_cleanup {
-            ($res:expr) => {{
-                match $res {
-                    Ok(res) => res,
-                    Err(err) => {
-                        let outputs = &parsed_args.outputs;
-                        // Errors remove all traces of potential output.
-                        trace!("[{out_pretty}]: removing files {outputs:?}");
-
-                        let v = outputs.values().try_for_each(|output| {
-                            let path = cwd.join(&output.path);
-                            match fs::metadata(&path) {
-                                // File exists, remove it.
-                                Ok(_) => fs::remove_file(&path),
-                                _ => Ok(()),
-                            }
-                        });
-
-                        if v.is_err() {
-                            warn!(
-                                "[{out_pretty}]: Could not remove files after preprocessing failed: {outputs:?}"
-                            );
-                        }
-
-                        match err.downcast::<ProcessError>() {
-                            Ok(ProcessError(mut output)) => {
-                                debug!(
-                                    "[{out_pretty}]: preprocessor returned error (code={:?}, desc={:?})",
-                                    output.code(),
-                                    output.desc()
-                                );
-                                // Drop the stdout since it's the preprocessor output,
-                                // just hand back stderr and the exit status.
-                                output.stdout = vec![];
-                                bail!(ProcessError(output));
-                            }
-                            Err(err) => {
-                                warn!("[{out_pretty}]: preprocessor failed: {err:?}");
-                                return Err(err);
-                            }
-                        }
-                    }
-                }
-            }};
-        }
-
-        let preprocessor_start = Instant::now();
-        let needs_c_preprocessing = parsed_args.language.needs_c_preprocessing();
-
-        let preprocessor_output = if !needs_c_preprocessing {
-            PreprocessorOutput::File(cwd.join(&parsed_args.input), None)
-        } else {
-            try_or_cleanup!(
-                compiler
-                    .preprocess(
-                        service,
-                        creator,
-                        executable,
-                        parsed_args,
-                        &cwd,
-                        &env_vars,
-                        rewrite_includes_only,
-                        // Generate dependencies if we're going to read them below
-                        !matches!(preprocessor_cache_lookup, PreprocessorCacheLookup::Disabled),
-                        // include line numbers when `-fprofile-generate` is enabled
-                        // to guarantee the profile data embedded in the cached object
-                        // matches the line numbers in this source file
-                        parsed_args.profile_generate,
-                    )
-                    .await
-            )
-        };
-
-        // Create an argument vector containing both common and arch args, to
-        // use in creating a hash key
-        let mut common_and_arch_args = parsed_args.common_args.clone();
-        common_and_arch_args.extend_from_slice(&parsed_args.arch_args[..]);
-
-        let (preprocessor_output, dependencies) = match preprocessor_output {
-            PreprocessorOutput::File(path, dependencies) => {
-                let src = tokio::fs::File::open(path).await?;
-                let src = read_line_batches(src, HASH_BUFFER_SIZE);
-                (Box::pin(src) as Pin<Box<ProcessOutputStream>>, dependencies)
-            }
-            PreprocessorOutput::Output(res, dependencies) => (res, dependencies),
-        };
-
-        let (key, hash_time) = try_or_cleanup!(
-            HashKeyParams::new(
-                &self.executable_digest,
-                self.parsed_args.language,
-                &common_and_arch_args,
-                preprocessor_output,
-            )
-            .with_extra_hashes(&extra_hashes)
+        let preprocessor = Preprocess::new(creator, service, compiler, parsed_args)
+            .with_cwd(&cwd)
+            .with_exe(executable)
             .with_env_vars(&env_vars)
-            .with_plusplus(self.compiler.plusplus())
             .with_basedirs(&basedirs)
-            .compute()
-            .await
-        );
+            .with_extra_hashes(&extra_hashes)
+            .with_executable_digest(executable_digest)
+            .rewrite_includes_only(rewrite_includes_only)
+            // Generate dependencies if we're going to read them below
+            .generate_dependencies(!matches!(
+                preprocessor_cache_lookup,
+                PreprocessorCacheLookup::Disabled
+            ))
+            // Include line numbers when `-fprofile-generate` is enabled
+            // to guarantee the profile data embedded in the cached object
+            // matches the line numbers in this source file
+            .include_line_numbers(parsed_args.profile_generate);
 
-        drop(common_and_arch_args);
+        let (key, dependencies) = preprocessor
+            .preprocess()
+            .and_then(|(preprocessor_output, dependencies)| {
+                preprocessor
+                    .compute_hash_key(preprocessor_output)
+                    .map_ok(|key| (key, dependencies))
+            })
+            .or_else(|err| preprocessor.clean_up(err))
+            .await?;
 
         let preprocessor_key_and_dependencies = dependencies.and_then(|dependencies| {
             if let PreprocessorCacheLookup::Miss(preprocessor_key) = preprocessor_cache_lookup {
@@ -812,48 +733,18 @@ where
             }
         });
 
-        let preprocessor_key_and_dependencies =
-            if let Some((preprocessor_key, dependencies)) = preprocessor_key_and_dependencies {
-                let cwd = cwd.clone();
-                let dependencies = futures::future::lazy(|_| async {
-                    let dependencies = dependencies.await?;
-                    tokio::task::spawn_blocking(move || {
-                        dependencies
-                            .into_iter()
-                            // Each dependency in a preprocessor cache entry must exist,
-                            // and we must use the absolute path to the dependency.
-                            .map(|path| dunce::canonicalize(cwd.join(&path)))
-                            .try_collect::<_, Vec<_>, _>()
-                            .map_err(anyhow::Error::new)
-                            .map(|dependencies| {
-                                futures::stream::iter(
-                                    dependencies
-                                        .into_iter()
-                                        // Dedupe first to ensure we only hash each file once
-                                        .sorted_unstable_by(|a, b| a.cmp(b))
-                                        .dedup()
-                                        .map(Ok),
-                                )
-                            })
-                    })
-                    .await?
-                })
-                .await;
-                Some((preprocessor_key, dependencies))
-            } else {
-                None
-            };
-
-        if needs_c_preprocessing {
-            // Track how long the preprocessor took
-            let preprocessor_time = preprocessor_start.elapsed() - hash_time;
-            let mut stats = service.stats.lock().await;
-            stats.preprocessed += 1;
-            stats.preprocessor_duration += preprocessor_time;
-        }
-
         if let Some((preprocessor_key, dependencies)) = preprocessor_key_and_dependencies {
             dependencies
+                .map_ok(|dependencies| {
+                    // Dedupe dependencies up front to ensure we only hash each file once
+                    futures::stream::iter(
+                        dependencies
+                            .into_iter()
+                            .sorted_unstable_by(|a, b| a.cmp(b))
+                            .dedup()
+                            .map(Ok),
+                    )
+                })
                 .try_flatten_stream()
                 .map_ok(|path| {
                     futures::stream::once(Box::pin(async {
@@ -898,7 +789,10 @@ where
                 .await
                 // Don't fail if updating the preprocessor cache entry fails, just log it
                 .inspect_err(|err| {
-                    debug!("[{out_pretty}]: Failed to update preprocessor cache entry: {err}");
+                    debug!(
+                        "[{}]: Failed to update preprocessor cache entry: {err}",
+                        parsed_args.output_pretty()
+                    );
                 })
                 .ok();
         }
@@ -986,6 +880,285 @@ fn use_preprocessor_cache_mode(
     }
 
     use_preprocessor_cache_mode
+}
+
+struct Preprocess<'a, T: Send, I> {
+    basedirs: &'a [Vec<u8>],
+    compiler: &'a I,
+    creator: &'a T,
+    cwd: &'a Path,
+    env_vars: &'a [(OsString, OsString)],
+    exe: &'a Path,
+    executable_digest: &'a str,
+    extra_hashes: &'a [String],
+    generate_dependencies: bool,
+    include_line_numbers: bool,
+    out_pretty: Cow<'a, str>,
+    parsed_args: &'a ParsedArguments,
+    rewrite_includes_only: bool,
+    service: &'a SccacheService<T>,
+}
+
+impl<'a, T, I> Preprocess<'a, T, I>
+where
+    T: CommandCreatorSync,
+    I: CCompilerImpl,
+{
+    fn new(
+        creator: &'a T,
+        service: &'a SccacheService<T>,
+        compiler: &'a I,
+        parsed_args: &'a ParsedArguments,
+    ) -> Self {
+        Self {
+            creator,
+            service,
+            compiler,
+            parsed_args,
+            out_pretty: parsed_args.output_pretty(),
+            cwd: Path::new(""),
+            exe: Path::new(""),
+            env_vars: &[],
+            rewrite_includes_only: false,
+            generate_dependencies: false,
+            include_line_numbers: false,
+            executable_digest: "",
+            extra_hashes: &[],
+            basedirs: &[],
+        }
+    }
+
+    /// Sets the base directories for path normalization.
+    fn with_basedirs(mut self, basedirs: &'a [Vec<u8>]) -> Self {
+        self.basedirs = basedirs;
+        self
+    }
+
+    fn with_cwd(mut self, cwd: &'a Path) -> Self {
+        self.cwd = cwd;
+        self
+    }
+
+    /// Sets the environment variables to consider for caching.
+    fn with_env_vars(mut self, env_vars: &'a [(OsString, OsString)]) -> Self {
+        self.env_vars = env_vars;
+        self
+    }
+
+    fn with_exe(mut self, exe: &'a Path) -> Self {
+        self.exe = exe;
+        self
+    }
+
+    fn with_executable_digest(mut self, executable_digest: &'a str) -> Self {
+        self.executable_digest = executable_digest;
+        self
+    }
+
+    /// Sets additional hash data to include in the cache key.
+    fn with_extra_hashes(mut self, extra_hashes: &'a [String]) -> Self {
+        self.extra_hashes = extra_hashes;
+        self
+    }
+
+    fn generate_dependencies(mut self, generate_dependencies: bool) -> Self {
+        self.generate_dependencies = generate_dependencies;
+        self
+    }
+
+    fn include_line_numbers(mut self, include_line_numbers: bool) -> Self {
+        self.include_line_numbers = include_line_numbers;
+        self
+    }
+
+    fn rewrite_includes_only(mut self, rewrite_includes_only: bool) -> Self {
+        self.rewrite_includes_only = rewrite_includes_only;
+        self
+    }
+
+    async fn preprocess(
+        &self,
+    ) -> Result<(
+        Pin<Box<ProcessOutputStream>>,
+        Option<Pin<Box<DependenciesFuture>>>,
+    )> {
+        let Self {
+            creator,
+            service,
+            compiler,
+            parsed_args,
+            cwd,
+            exe,
+            env_vars,
+            rewrite_includes_only,
+            generate_dependencies,
+            include_line_numbers,
+            ..
+        } = *self;
+
+        let needs_c_preprocessing = parsed_args.language.needs_c_preprocessing();
+        let preprocessor_start = Instant::now();
+
+        let preprocessor_output = if !needs_c_preprocessing {
+            PreprocessorOutput::File(cwd.join(&parsed_args.input), None)
+        } else {
+            compiler
+                .preprocess(
+                    service,
+                    creator,
+                    exe,
+                    parsed_args,
+                    cwd,
+                    env_vars,
+                    rewrite_includes_only,
+                    generate_dependencies,
+                    include_line_numbers,
+                )
+                .await?
+        };
+
+        let (preprocessor_output, dependencies) = match preprocessor_output {
+            PreprocessorOutput::File(path, dependencies) => {
+                let src = tokio::fs::File::open(path).await?;
+                let src = read_line_batches(src, HASH_BUFFER_SIZE);
+                (Box::pin(src) as Pin<Box<ProcessOutputStream>>, dependencies)
+            }
+            PreprocessorOutput::Output(preprocessor_output, dependencies) => {
+                (preprocessor_output, dependencies)
+            }
+        };
+
+        let (preprocessor_output, dependencies) = if !needs_c_preprocessing {
+            (preprocessor_output, dependencies)
+        } else {
+            let cwd = cwd.to_path_buf();
+            let service = service.clone();
+            let has_dependencies = dependencies.is_some();
+            let (dependencies_tx, dependencies_rx) = tokio::sync::oneshot::channel();
+
+            let preprocessor_output = Box::pin(async_stream::try_stream! {
+                for await lines in preprocessor_output {
+                    yield lines?;
+                }
+
+                if let Some(dependencies) = dependencies {
+                    // Canonicalize the dependency paths in a background thread
+                    let dependencies = dependencies.and_then(|dependencies| async move {
+                        tokio::task::spawn_blocking(move || {
+                            dependencies
+                                .into_iter()
+                                // Each dependency in a preprocessor cache entry must exist,
+                                // and we must use the absolute path to the dependency.
+                                .map(|path| dunce::canonicalize(cwd.join(&path)))
+                                .try_collect::<_, Vec<_>, _>()
+                                .map_err(anyhow::Error::new)
+                        })
+                        .await?
+                    })
+                    .await;
+
+                    let _ = dependencies_tx.send(dependencies);
+                }
+
+                // Track how long the preprocessor took
+                let preprocessor_time = preprocessor_start.elapsed();
+                let mut stats = service.stats.lock().await;
+                stats.preprocessed += 1;
+                stats.preprocessor_duration += preprocessor_time;
+            }) as Pin<Box<ProcessOutputStream>>;
+
+            let dependencies = if has_dependencies {
+                Some(Box::pin(async {
+                    dependencies_rx
+                        .await
+                        .unwrap_or_else(|_| bail!("channel error"))
+                }) as Pin<Box<DependenciesFuture>>)
+            } else {
+                None
+            };
+
+            (preprocessor_output, dependencies)
+        };
+
+        Ok((preprocessor_output, dependencies))
+    }
+
+    async fn compute_hash_key(
+        &self,
+        preprocessor_output: Pin<Box<ProcessOutputStream>>,
+    ) -> Result<String> {
+        // Create an argument vector containing both common and arch args
+        let common_and_arch_args = [
+            &self.parsed_args.common_args[..],
+            &self.parsed_args.arch_args[..],
+        ]
+        .concat();
+
+        HashKeyParams::new(
+            self.executable_digest,
+            self.parsed_args.language,
+            &common_and_arch_args,
+            preprocessor_output,
+        )
+        .with_extra_hashes(self.extra_hashes)
+        .with_env_vars(self.env_vars)
+        .with_plusplus(self.compiler.plusplus())
+        .with_basedirs(self.basedirs)
+        .compute()
+        .await
+    }
+
+    async fn clean_up<R, E: Into<anyhow::Error>>(
+        &self,
+        err: E,
+    ) -> std::result::Result<R, anyhow::Error> {
+        let Self {
+            cwd,
+            out_pretty,
+            parsed_args,
+            ..
+        } = self;
+
+        let outputs = &parsed_args.outputs;
+        // Errors remove all traces of potential output.
+        trace!("[{out_pretty}]: removing files {outputs:?}");
+
+        // Remove any files written by failed preprocessor call
+        let v = futures::stream::iter(outputs.values())
+            .map(Ok)
+            .try_filter_map(|output| async {
+                let path = cwd.join(&output.path);
+                if tokio::fs::metadata(&path).await.is_ok() {
+                    Ok(Some(path))
+                } else {
+                    Ok(None)
+                }
+            })
+            .try_for_each_concurrent(None, tokio::fs::remove_file)
+            .await;
+
+        if v.is_err() {
+            warn!("[{out_pretty}]: Could not remove files after preprocessing failed: {outputs:?}");
+        }
+
+        match err.into().downcast::<ProcessError>() {
+            Ok(ProcessError(mut output)) => {
+                debug!(
+                    "[{out_pretty}]: preprocessor returned error (code={:?}, desc={:?})",
+                    output.code(),
+                    output.desc()
+                );
+                // Drop the stdout since it's the preprocessor output,
+                // just hand back stderr and the exit status.
+                output.stdout = vec![];
+                Err(ProcessError(output).into())
+            }
+            Err(err) => {
+                warn!("[{out_pretty}]: preprocessor failed: {err:?}");
+                Err(err)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1111,7 +1284,11 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
         // doesn't generate dependency files because it compiles the preprocessed
         // source. Preprocessor-cache mode means we skip calling the preprocessor,
         // so we have to generate the dependency file after the fact.
-        if let Some(depfile) = parsed_args.depfile.as_ref() {
+        if let Some(depfile) = parsed_args
+            .depfile
+            .as_ref()
+            .map(|depfile| cwd.join(depfile))
+        {
             if !depfile.exists() {
                 compiler
                     .generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
@@ -1125,7 +1302,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
     fn into_dist_packagers(self: Box<Self>) -> Result<DistPackagers> {
         trace!(
             "Dist inputs: {:?}",
-            std::iter::once(&self.parsed_args.input)
+            std::iter::once(&self.cwd.join(&self.parsed_args.input))
                 .chain(self.parsed_args.extra_dist_files.iter())
                 .chain(self.parsed_args.extra_hash_files.iter())
                 .unique()
@@ -1172,7 +1349,6 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
         compressor: Box<dyn InputsWriter>,
     ) -> Result<()> {
         use std::collections::BTreeMap;
-        use std::path::PathBuf;
 
         let CCompilation {
             service,
@@ -1186,155 +1362,108 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
             ..
         } = *self;
 
-        let preprocessor_start = Instant::now();
-        let needs_c_preprocessing = parsed_args.language.needs_c_preprocessing();
+        let preprocessor = Preprocess::new(&creator, &service, &compiler, &parsed_args)
+            .with_cwd(&cwd)
+            .with_exe(&executable)
+            .with_env_vars(&env_vars)
+            .rewrite_includes_only(rewrite_includes_only)
+            .generate_dependencies(true)
+            .include_line_numbers(true);
 
-        let preprocessor_output = if !needs_c_preprocessing {
-            PreprocessorOutput::File(cwd.join(&parsed_args.input), None)
-        } else {
-            // Preprocess again but this time with line numbers
-            compiler
-                .preprocess(
-                    &service,
-                    &creator,
-                    &executable,
-                    &parsed_args,
-                    &cwd,
-                    &env_vars,
-                    rewrite_includes_only,
-                    true, // generate_dependencies
-                    true, // include_line_numbers
-                )
-                .await?
-        };
+        let (preprocessor_output, dependencies) = preprocessor
+            .preprocess()
+            .and_then(|(preprocessor_output, dependencies)| async {
+                // Unfortunate that we have to buffer all the preprocessor output here,
+                // but tar::Builder::append_writer requires the underlying writer
+                // implements io::Seek and the flate2 compressors don't.
+                let preprocessor_output = preprocessor_output.try_concat().await?;
+                let dependencies = if let Some(dependencies) = dependencies {
+                    dependencies.await?
+                } else {
+                    vec![]
+                };
+                Ok((preprocessor_output, dependencies))
+            })
+            .or_else(|err| preprocessor.clean_up(err))
+            .await?;
 
-        let (preprocessor_output, dependencies) = {
-            match preprocessor_output {
-                PreprocessorOutput::File(path, dependencies) => {
-                    (PreprocessorOutput::File(path, None), dependencies)
-                }
-                PreprocessorOutput::Output(output, dependencies) => {
-                    // Collect the preprocessor output before reading the dependencies file
-                    let output = output.collect::<Vec<Result<BytesMut>>>().await;
-                    let output = futures::stream::iter(output).boxed();
-
-                    (PreprocessorOutput::Output(output, None), dependencies)
-                }
-            }
-        };
-
-        // Track how long the preprocessor took
-        if needs_c_preprocessing {
-            let preprocessor_time = preprocessor_start.elapsed();
-            let mut stats = service.stats.lock().await;
-            stats.preprocessed += 1;
-            stats.preprocessor_duration += preprocessor_time;
-        }
-
-        let dependencies = if let Some(dependencies) = dependencies {
-            dependencies.await?
-        } else {
-            vec![]
-        };
-
+        let mut symlinks = BTreeMap::new();
+        let mut builder = tar::Builder::new(compressor);
         let mut path_transformer = path_transformer.clone();
 
-        // Add all the symlinks to the archive first
-        let (mut builder, mut path_transformer, input_path) =
+        let (mut builder, mut symlinks, mut path_transformer) =
             tokio::task::spawn_blocking(move || {
-                let mut builder = tar::Builder::new(compressor);
-                let mut symlinks = BTreeMap::<PathBuf, PathBuf>::new();
-
-                // Find and add symlinks to the tar archive before adding files
-                // to ensure the symlinks exist before creating files at paths
-                // that traverse them when unpacking
-                let tarified_extra_paths = [
-                    &dependencies[..],
-                    &parsed_args.extra_dist_files[..],
-                    &parsed_args.extra_hash_files[..],
-                ]
-                .into_iter()
-                .flatten()
-                .map(|path| pkg::tarify_path(&mut symlinks, path))
-                .try_collect::<_, Vec<_>, _>()?;
-
-                // The input path may traverse a symlink too
-                let input_path = pkg::tarify_path(&mut symlinks, &cwd.join(&parsed_args.input))?;
-
-                for (from_path, to_path) in symlinks.iter() {
-                    let mut header = tar::Header::new_gnu();
-                    header.set_size(0);
-                    header.set_mtime(0);
-                    header.set_entry_type(tar::EntryType::Symlink);
-                    // Leave `to_path` as absolute, assuming the tar will
-                    // be used in a chroot-like environment.
-                    builder.append_link(&mut header, pkg::tar_safe_path(from_path), to_path)?;
+                // Find symlinks and simplify the input path first
+                let input_path = cwd.join(&parsed_args.input);
+                let input_path = pkg::tarify_path(&mut symlinks, &input_path)?;
+                let dist_path = if !parsed_args.language.needs_c_preprocessing() {
+                    path_transformer.as_dist(&input_path)
+                } else {
+                    path_transformer.as_dist_input_path(&input_path)
                 }
+                .with_context(|| format!("unable to transform input path {input_path:?}"))?;
 
-                for path in tarified_extra_paths {
-                    if !super::CAN_DIST_DYLIBS
-                        && path
-                            .extension()
-                            .is_some_and(|ext| ext == std::env::consts::DLL_EXTENSION)
-                    {
-                        bail!(
-                            "Cannot distribute dylib input {} on this platform",
-                            path.display()
-                        )
-                    }
+                let (mut header, dist_path) = pkg::make_tar_header(&input_path, &dist_path)?;
+                // The current size is from the non-preprocessed path, so set the actual size.
+                header.set_size(preprocessor_output.len() as u64);
+                header.set_cksum();
+                builder.append_data(&mut header, dist_path, &preprocessor_output[..])?;
 
-                    builder.append_path_with_name(
-                        &path,
-                        path_transformer
-                            .as_dist(&path)
-                            .map(pkg::tar_safe_path)
-                            .with_context(|| {
-                                format!("unable to transform input path {}", path.display())
-                            })?,
-                    )?;
-                }
-
-                Ok::<_, anyhow::Error>((builder, path_transformer, input_path))
+                Ok::<_, anyhow::Error>((builder, symlinks, path_transformer))
             })
             .await??;
 
-        let builder = match preprocessor_output {
-            PreprocessorOutput::File(path, _) => {
-                tokio::task::spawn_blocking(move || {
-                    builder.append_path_with_name(
-                        path,
-                        path_transformer
-                            .as_dist(&input_path)
-                            .map(pkg::tar_safe_path)
-                            .with_context(|| {
-                                format!("unable to transform input path {input_path:?}")
-                            })?,
-                    )?;
+        // Add the dependencies and extra files
+        let builder = tokio::task::spawn_blocking(move || {
+            // Find and add symlinks to the tar archive before the files.
+            // This ensures the symlinks are unpacked by the receiver before
+            // files which may traverse them.
+            let tarified_extra_paths = [
+                &dependencies[..],
+                &parsed_args.extra_dist_files[..],
+                &parsed_args.extra_hash_files[..],
+            ]
+            .into_iter()
+            .flatten()
+            .map(|path| pkg::tarify_path(&mut symlinks, path))
+            .try_collect::<_, Vec<_>, _>()?;
 
-                    Ok::<_, anyhow::Error>(builder)
-                })
-                .await??
+            for (from_path, to_path) in symlinks.iter() {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(0);
+                header.set_mtime(0);
+                header.set_entry_type(tar::EntryType::Symlink);
+                // Leave `to_path` as absolute, assuming the tar will
+                // be used in a chroot-like environment.
+                builder.append_link(&mut header, pkg::tar_safe_path(from_path), to_path)?;
             }
-            PreprocessorOutput::Output(output, _) => {
-                let preprocessor_output = output.try_concat().await?;
-                tokio::task::spawn_blocking(move || {
-                    let dist_input_path = path_transformer
-                        .as_dist_input_path(&input_path)
+
+            for path in tarified_extra_paths {
+                if !super::CAN_DIST_DYLIBS
+                    && path
+                        .extension()
+                        .is_some_and(|ext| ext == std::env::consts::DLL_EXTENSION)
+                {
+                    bail!(
+                        "Cannot distribute dylib input {} on this platform",
+                        path.display()
+                    )
+                }
+
+                builder.append_path_with_name(
+                    &path,
+                    path_transformer
+                        .as_dist(&path)
+                        .map(pkg::tar_safe_path)
                         .with_context(|| {
-                            format!("unable to transform input path {input_path:?}")
-                        })?;
-                    let (mut header, dist_input_path) =
-                        pkg::make_tar_header(&input_path, &dist_input_path)?;
-                    // The current size is from the non-preprocessed path, so set the actual size.
-                    header.set_size(preprocessor_output.len() as u64);
-                    header.set_cksum();
-                    builder.append_data(&mut header, dist_input_path, &preprocessor_output[..])?;
-
-                    Ok::<_, anyhow::Error>(builder)
-                })
-                .await??
+                            format!("unable to transform input path {}", path.display())
+                        })?,
+                )?;
             }
-        };
+
+            Ok::<_, anyhow::Error>(builder)
+        })
+        .await??;
 
         // Finish archive
         let _ = builder.into_inner()?.finish()?;
@@ -1888,7 +2017,7 @@ impl<'a> HashKeyParams<'a> {
     ///
     /// # Arguments
     /// * `preprocessor_output` - Preprocessed source to hash
-    pub async fn compute(self) -> Result<(String, Duration)> {
+    pub async fn compute(self) -> Result<String> {
         let mut m = Digest::new();
         m.update(self.compiler_digest.as_bytes());
         // clang and clang++ have different behavior despite being byte-for-byte identical binaries, so
@@ -1912,23 +2041,23 @@ impl<'a> HashKeyParams<'a> {
         }
 
         // Hash the preprocessor output and track how long we spent
-        let (m, hash_time, _) = self
+        let m = self
             .preprocessor_output
             .try_fold(
-                (m, Duration::default(), self.basedirs.to_vec()),
-                |(mut m, hash_time, basedirs), lines| async move {
+                (m, self.basedirs.to_vec()),
+                |(mut m, basedirs), lines| async move {
                     tokio::task::spawn_blocking(move || {
-                        let start = Instant::now();
                         // Strip basedirs from preprocessor output if configured
                         m.update(&strip_basedirs(&lines, &basedirs)[..]);
-                        Ok((m, hash_time + start.elapsed(), basedirs))
+                        Ok((m, basedirs))
                     })
                     .await?
                 },
             )
-            .await?;
+            .await?
+            .0;
 
-        Ok((m.finish(), hash_time))
+        Ok(m.finish())
     }
 }
 
@@ -1960,8 +2089,7 @@ mod test {
         )
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         let h2 = HashKeyParams::new(
             "abcd",
             Language::C,
@@ -1970,8 +2098,7 @@ mod test {
         )
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         assert_eq!(h1, h2);
     }
 
@@ -1987,8 +2114,7 @@ mod test {
         )
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         let h2 = HashKeyParams::new(
             "abcd",
             Language::C,
@@ -1998,8 +2124,7 @@ mod test {
         .with_plusplus(true)
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         assert_neq!(h1, h2);
     }
 
@@ -2015,8 +2140,7 @@ mod test {
         )
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         let h2 = HashKeyParams::new(
             "abcd",
             Language::CHeader,
@@ -2025,8 +2149,7 @@ mod test {
         )
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         assert_neq!(h1, h2);
     }
 
@@ -2043,8 +2166,7 @@ mod test {
         .with_plusplus(true)
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         let h2 = HashKeyParams::new(
             "abcd",
             Language::CxxHeader,
@@ -2054,8 +2176,7 @@ mod test {
         .with_plusplus(true)
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         assert_neq!(h1, h2);
     }
 
@@ -2071,8 +2192,7 @@ mod test {
         )
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         let h2 = HashKeyParams::new(
             "wxyz",
             Language::C,
@@ -2081,8 +2201,7 @@ mod test {
         )
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         assert_neq!(h1, h2);
     }
 
@@ -2102,8 +2221,7 @@ mod test {
         )
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         let h_xyz = HashKeyParams::new(
             "abcd",
             Language::C,
@@ -2112,8 +2230,7 @@ mod test {
         )
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         let h_ab = HashKeyParams::new(
             "abcd",
             Language::C,
@@ -2122,8 +2239,7 @@ mod test {
         )
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         let h_a = HashKeyParams::new(
             "abcd",
             Language::C,
@@ -2132,8 +2248,7 @@ mod test {
         )
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
 
         assert_neq!(h_abc, h_xyz);
         assert_neq!(h_abc, h_ab);
@@ -2151,8 +2266,7 @@ mod test {
         )
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         let h2 = HashKeyParams::new(
             "abcd",
             Language::C,
@@ -2161,8 +2275,7 @@ mod test {
         )
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         assert_neq!(h1, h2);
     }
 
@@ -2179,8 +2292,7 @@ mod test {
             )
             .compute()
             .wait()
-            .unwrap()
-            .0;
+            .unwrap();
 
             let vars1 = vec![(OsString::from(var), OsString::from("something"))];
             let h2 = HashKeyParams::new(
@@ -2192,8 +2304,7 @@ mod test {
             .with_env_vars(&vars1)
             .compute()
             .wait()
-            .unwrap()
-            .0;
+            .unwrap();
 
             let vars2 = vec![(OsString::from(var), OsString::from("something else"))];
             let h3 = HashKeyParams::new(
@@ -2205,8 +2316,7 @@ mod test {
             .with_env_vars(&vars2)
             .compute()
             .wait()
-            .unwrap()
-            .0;
+            .unwrap();
 
             assert_neq!(h1, h2);
             assert_neq!(h2, h3);
@@ -2228,8 +2338,7 @@ mod test {
         .with_extra_hashes(&extra_data)
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         let h2 = HashKeyParams::new(
             "abcd",
             Language::C,
@@ -2238,8 +2347,7 @@ mod test {
         )
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
 
         assert_neq!(h1, h2);
     }
@@ -2268,7 +2376,6 @@ mod test {
             .compute()
             .wait()
             .unwrap()
-            .0
         };
 
         // Test 1: Same hash with different absolute paths when basedir is used
@@ -2292,8 +2399,7 @@ mod test {
             )
             .compute()
             .wait()
-            .unwrap()
-            .0,
+            .unwrap(),
             HashKeyParams::new(
                 "abcd",
                 Language::C,
@@ -2303,7 +2409,6 @@ mod test {
             .compute()
             .wait()
             .unwrap()
-            .0
         );
 
         // Test 4: Works for C++ files too
@@ -2321,8 +2426,7 @@ mod test {
         .with_basedirs(&basedirs)
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         let h_cpp2 = HashKeyParams::new(
             "abcd",
             Language::Cxx,
@@ -2333,8 +2437,7 @@ mod test {
         .with_basedirs(&basedirs)
         .compute()
         .wait()
-        .unwrap()
-        .0;
+        .unwrap();
         assert_eq!(h_cpp1, h_cpp2);
 
         // Test 5: Doesn't work with trailing slash in basedir, they must be normalized in config
