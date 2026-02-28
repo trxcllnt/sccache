@@ -1080,7 +1080,7 @@ where
     }
 
     let (output, dependencies) = if generate_dependencies {
-        match parse_dependencies(parsed_args, cwd, output).await? {
+        match parse_dependencies(cwd, &parsed_args.input, output).await? {
             (output, Ok(deps)) => (output, Some(futures::future::ok(deps).boxed())),
             (output, Err(err)) => {
                 debug!(
@@ -1154,19 +1154,29 @@ where
     Ok((cmd, (path, temp)))
 }
 
-async fn parse_dependencies(
-    parsed_args: &ParsedArguments,
-    cwd: &Path,
+async fn parse_dependencies<P: AsRef<Path>>(
+    cwd: P,
+    input: P,
     mut output: ProcessOutput,
 ) -> Result<(ProcessOutput, Result<Vec<PathBuf>>)> {
-    let cwd = cwd.to_owned();
-    let input = cwd.join(&parsed_args.input);
+    let cwd = cwd.as_ref();
+    // This could be relative or absolute depending on what the user provides.
+    let input_path = input.as_ref().to_path_buf();
+    let parent_dir = cwd
+        .join(&input_path)
+        .parent()
+        // The only reason `parent()` will be None is if cwd is the root dir and
+        // `input_path` is a path directly under it. If that's the case, `cwd`
+        // is the absolute parent dir of `input_path`.
+        .unwrap_or(cwd)
+        .to_path_buf();
+
     tokio::task::spawn_blocking(move || {
         let mut included_files = Default::default();
         let mut normalized_include_paths = Default::default();
         let deps = process_preprocessed_file(
-            input.as_path(),
-            cwd.as_path(),
+            &input_path,
+            &parent_dir,
             &mut output.stdout,
             StandardFsAbstraction,
             false,

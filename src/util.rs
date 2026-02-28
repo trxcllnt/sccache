@@ -1053,7 +1053,9 @@ pub fn bytes_to_os_string(buf: &[u8]) -> std::io::Result<OsString> {
     let codepage = CP_OEMCP;
     let flags = MB_ERR_INVALID_CHARS;
 
-    OsString::from_wide(&multi_byte_to_wide_char(codepage, flags, buf)?)
+    Ok(OsString::from_wide(&multi_byte_to_wide_char(
+        codepage, flags, buf,
+    )?))
 }
 
 #[cfg(unix)]
@@ -1065,7 +1067,6 @@ pub fn os_str_to_bytes(os_str: &OsStr) -> std::io::Result<Vec<u8>> {
 #[cfg(windows)]
 pub fn os_str_to_bytes(os_str: &OsStr) -> std::io::Result<Vec<u8>> {
     use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::prelude::*;
     wide_char_to_multi_byte(&os_str.encode_wide().collect::<Vec<_>>()) // use_default_char_flag
 }
 

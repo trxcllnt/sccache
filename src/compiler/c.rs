@@ -1964,6 +1964,7 @@ impl<'a> HashKeyParams<'a> {
     /// * `compiler_digest` - Hash of the compiler executable
     /// * `language` - Source language being compiled
     /// * `arguments` - Compiler arguments
+    /// * `preprocessor_output` - Preprocessed source to hash
     pub fn new(
         compiler_digest: &'a str,
         language: Language,
@@ -2014,9 +2015,6 @@ impl<'a> HashKeyParams<'a> {
     ///
     /// # Note
     /// If you change any of the inputs to the hash, you should change `CACHE_VERSION`.
-    ///
-    /// # Arguments
-    /// * `preprocessor_output` - Preprocessed source to hash
     pub async fn compute(self) -> Result<String> {
         let mut m = Digest::new();
         m.update(self.compiler_digest.as_bytes());

@@ -551,7 +551,7 @@ pub async fn preprocessor_cache_entry_hash_key(
         }
     }
 
-    let input_path = dunce::canonicalize(cwd.join(input))?;
+    let input_path = cwd.join(input);
 
     {
         // Hash the input file path, otherwise:
@@ -788,7 +788,11 @@ fn process_preprocessor_line(
             let normalized = normalize_path(&path_buf);
             normalized_include_paths
                 .entry(include_path.to_owned())
-                .or_insert(normalized.clone())
+                .or_insert(if path_buf == normalized {
+                    path_buf
+                } else {
+                    normalized
+                })
                 .as_path()
         };
 
@@ -922,7 +926,7 @@ fn remember_include_file(
     }
 
     // Make an absolute path from the input file path
-    let include_path = normalize_path(&input_file_path_parent.join(include_path));
+    let include_path = input_file_path_parent.join(include_path);
 
     // Compare to the absolute input file path
     if include_path == input_file_path {
@@ -1431,7 +1435,10 @@ mod test {
         });
         assert_eq!(
             res.unwrap_err().downcast_ref::<String>().unwrap(),
-            "called metadata at /usr/include/stdc-predef.h"
+            &format!(
+                "called metadata at {}",
+                Path::new("/usr/include/stdc-predef.h").display()
+            )
         );
 
         // Test TestFs's safeguard

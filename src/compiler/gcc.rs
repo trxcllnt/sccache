@@ -28,10 +28,7 @@ use crate::{
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
     server::SccacheService,
-    util::{
-        OsStrExt, normal_temp_path, run_input_output, run_input_stream_output,
-        split_quoted_shell_str,
-    },
+    util::{OsStrExt, normal_temp_path, run_input_output, run_input_stream_output},
 };
 
 use async_trait::async_trait;
@@ -1180,17 +1177,17 @@ pub async fn parse_dependencies<P: AsRef<Path>>(
         }
     };
 
-    // trace!("[parse_dependencies]: (0) lines:\n{lines}");
-
     let lines = lines
         .split("\n")
         .enumerate()
         // The path to the left of the colon is the `-MT <path>`, so take everything to the right.
         .map(|(idx, line)| {
-            if idx == 0
-                && let Some((_, rest)) = line.split_once(":")
-            {
-                rest
+            if idx == 0 {
+                if let Some((_, rest)) = line.split_once(":") {
+                    rest
+                } else {
+                    line
+                }
             } else {
                 line
             }
@@ -1199,19 +1196,10 @@ pub async fn parse_dependencies<P: AsRef<Path>>(
             // Trim whitespace and trailing backslashes + colons
             line.trim().trim_end_matches(r"\").trim_end_matches(r":")
         })
-        .filter(|line| !line.is_empty())
-        // .inspect(|line| {
-        //     trace!("[parse_dependencies]: (1) line: {line}");
-        // })
-        ;
+        .filter(|line| !line.is_empty());
 
     let paths = lines
-        .flat_map(|line| {
-            split_quoted_shell_str(line).unwrap_or_default()
-            // let deps = split_quoted_shell_str(line).unwrap_or_default();
-            // trace!("[parse_dependencies]: (2) deps:\n{}", deps.join("\n"));
-            // deps
-        })
+        .flat_map(|line| shlex::split(line).unwrap_or_default())
         .map(PathBuf::from);
 
     let paths = paths
@@ -1232,11 +1220,6 @@ pub async fn parse_dependencies<P: AsRef<Path>>(
             Some(path)
         })
         .collect::<Vec<_>>();
-
-    // trace!(
-    //     "[parse_dependencies]: (3) paths:\n{}",
-    //     paths.iter().filter_map(|p| p.to_str()).join("\n")
-    // );
 
     Ok(paths)
 }
