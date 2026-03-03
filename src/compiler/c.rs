@@ -108,6 +108,8 @@ pub struct ParsedArguments {
     pub language: Language,
     /// The flag required to compile for the given language
     pub compilation_flag: OsString,
+    /// Whether C++20 modules are enabled
+    pub cxx20_modules: bool,
     /// The file in which to generate dependencies.
     pub depfile: Option<PathBuf>,
     /// Output files and whether it's optional, keyed by a simple name, like "obj".

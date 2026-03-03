@@ -701,7 +701,9 @@ pub fn parse_arguments(
                 | Some(PassThroughPath(_))
                 | Some(PedanticFlag)
                 | Some(Standard(_))
-                | Some(SerializeDiagnostics(_)) => &mut common_args,
+                | Some(SerializeDiagnostics(_))
+                | Some(EnableModules)
+                | Some(ModuleMapper(_)) => &mut common_args,
                 Some(UnhashedFlag) | Some(Unhashed(_)) => &mut unhashed_args,
 
                 Some(ProfileGenerate) => {
@@ -721,9 +723,12 @@ pub fn parse_arguments(
                 Some(PreprocessorArgumentFlag)
                 | Some(PreprocessorArgument(_))
                 | Some(PreprocessorArgumentPath(_)) => &mut preprocessor_args,
-                Some(DepArgumentPath(_)) | Some(DepTarget(_)) | Some(NeedDepTarget) => {
-                    &mut dependency_args
-                }
+                Some(DepArgumentPath(_))
+                | Some(DepTarget(_))
+                | Some(NeedDepTarget)
+                | Some(StructuredDepFormat(_))
+                | Some(StructuredDepTarget(_))
+                | Some(StructuredDepArgumentPath(_)) => &mut dependency_args,
             };
             // Normalize attributes such as "-I foo", "-D FOO=bar", as
             // "-Ifoo", "-DFOO=bar", etc. and "-includefoo", "idirafterbar" as

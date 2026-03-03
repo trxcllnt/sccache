@@ -36,11 +36,13 @@ use fs::File;
 use fs_err as fs;
 use futures::{FutureExt, StreamExt};
 use itertools::Itertools;
-use std::collections::HashMap;
-use std::env;
-use std::ffi::OsString;
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    env,
+    ffi::{OsStr, OsString},
+    io::Read,
+    path::{Path, PathBuf},
+};
 use tempfile::TempPath;
 
 /// A struct on which to implement `CCompilerImpl`.
@@ -283,6 +285,9 @@ ArgData! { pub
     // (including any funny make syntax) into the dep file.
     DepTarget(OsString),
     DepArgumentPath(PathBuf),
+    StructuredDepTarget(OsString),
+    StructuredDepFormat(OsString),
+    StructuredDepArgumentPath(PathBuf),
     Language(OsString),
     SplitDwarf,
     ProfileGenerate,
@@ -296,6 +301,9 @@ ArgData! { pub
     PedanticFlag,
     Standard(OsString),
     SerializeDiagnostics(PathBuf),
+    // C++20 modules
+    EnableModules,
+    ModuleMapper(OsString),
 }
 
 use self::ArgData::*;
@@ -338,7 +346,13 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("-aux-info", OsString, Separated, PassThrough),
     take_arg!("-b", OsString, Separated, PassThrough),
     flag!("-c", DoCompilation),
+    take_arg!("-fdeps-file", PathBuf, Concatenated(b'='), StructuredDepArgumentPath),
+    take_arg!("-fdeps-format", OsString, Concatenated(b'='), StructuredDepFormat),
+    take_arg!("-fdeps-target", OsString, Concatenated(b'='), StructuredDepTarget),
     take_arg!("-fdiagnostics-color", OsString, Concatenated(b'='), DiagnosticsColor),
+    take_arg!("-fmodule-mapper", OsString, Concatenated(b'='), ModuleMapper),
+    flag!("-fmodules", EnableModules),
+    flag!("-fmodules-ts", EnableModules),
     flag!("-fno-diagnostics-color", NoDiagnosticsColorFlag),
     flag!("-fno-profile-generate", TooHardFlag),
     flag!("-fno-profile-use", TooHardFlag),
@@ -413,6 +427,7 @@ where
     let mut depfile = None;
     let mut dep_target = None;
     let mut dep_flag = OsString::from("-MT");
+    let mut cxx20_modules = false;
     let mut common_args = vec![];
     let mut arch_args = vec![];
     let mut unhashed_args = vec![];
@@ -489,6 +504,7 @@ where
                 compilation_flag =
                     OsString::from(arg.flag_str().expect("Compilation flag expected"));
             }
+            Some(EnableModules) => cxx20_modules = true,
             Some(ProfileGenerate) => profile_generate = true,
             Some(ClangProfileUse(path)) => {
                 extra_hash_files.push(clang::resolve_profile_use_path(path, cwd));
@@ -537,7 +553,12 @@ where
             | Some(PassThrough(_))
             | Some(PassThroughPath(_))
             | Some(UnhashedFlag)
-            | Some(Unhashed(_)) => {}
+            | Some(Unhashed(_))
+            | Some(ModuleMapper(_))
+            // TODO: parse the JSON instead of using `-MD -MF`?
+            | Some(StructuredDepFormat(_))
+            | Some(StructuredDepTarget(_))
+            | Some(StructuredDepArgumentPath(_)) => {}
             Some(Language(lang)) => {
                 language = match lang
                     .to_str()
@@ -591,7 +612,9 @@ where
             | Some(NoDiagnosticsColorFlag)
             | Some(PassThroughFlag)
             | Some(PassThrough(_))
-            | Some(PassThroughPath(_)) => &mut common_args,
+            | Some(PassThroughPath(_))
+            | Some(EnableModules)
+            | Some(ModuleMapper(_)) => &mut common_args,
             Some(UnhashedFlag) | Some(Unhashed(_)) => &mut unhashed_args,
             Some(Arch(_)) => &mut arch_args,
             Some(ExtraHashFile(path)) => {
@@ -607,7 +630,11 @@ where
             Some(PreprocessorArgumentFlag) | Some(PreprocessorArgumentPath(_)) => {
                 &mut preprocessor_args
             }
-            Some(DepArgumentPath(_)) | Some(NeedDepTarget) => &mut dependency_args,
+            Some(DepArgumentPath(_))
+            | Some(NeedDepTarget)
+            | Some(StructuredDepFormat(_))
+            | Some(StructuredDepTarget(_))
+            | Some(StructuredDepArgumentPath(_)) => &mut dependency_args,
             Some(DoCompilation)
             | Some(Language(_))
             | Some(Output(_))
@@ -674,7 +701,9 @@ where
             | Some(PassThrough(_))
             | Some(PassThroughFlag)
             | Some(PassThroughPath(_))
-            | Some(SerializeDiagnostics(_)) => &mut common_args,
+            | Some(SerializeDiagnostics(_))
+            | Some(EnableModules)
+            | Some(ModuleMapper(_)) => &mut common_args,
             Some(UnhashedFlag) | Some(Unhashed(_)) => &mut unhashed_args,
             Some(ExtraHashFile(path)) => {
                 extra_hash_files.push(cwd.join(path));
@@ -683,9 +712,12 @@ where
             Some(PreprocessorArgumentFlag)
             | Some(PreprocessorArgument(_))
             | Some(PreprocessorArgumentPath(_)) => &mut preprocessor_args,
-            Some(DepTarget(_)) | Some(DepArgumentPath(_)) | Some(NeedDepTarget) => {
-                &mut dependency_args
-            }
+            Some(DepArgumentPath(_))
+            | Some(StructuredDepFormat(_))
+            | Some(StructuredDepTarget(_))
+            | Some(StructuredDepArgumentPath(_))
+            | Some(DepTarget(_))
+            | Some(NeedDepTarget) => &mut dependency_args,
         };
         follows_plugin_arg = match arg.flag_str() {
             Some(s) => s == "-plugin-arg",
@@ -825,6 +857,7 @@ where
         double_dash_input,
         language,
         compilation_flag,
+        cxx20_modules,
         outputs,
         depfile,
         dependency_args,
@@ -1018,7 +1051,19 @@ where
             parsed_args
                 .dependency_args
                 .iter()
-                .find(|&arg| arg == "-M" || arg == "-MD")
+                .find_map(|arg| {
+                    if arg == "-MD" {
+                        Some(arg.as_os_str())
+                    } else if arg == "-M" {
+                        if parsed_args.cxx20_modules {
+                            Some(OsStr::new("-MD"))
+                        } else {
+                            Some(arg.as_os_str())
+                        }
+                    } else {
+                        None
+                    }
+                })
                 .and_then(|s| s.to_str()),
             parsed_args
                 .dependency_args
@@ -1107,7 +1152,15 @@ where
         creator.clone().new_command_sync(executable),
         &ParsedArguments {
             // Replace existing dependency options with flags to generate and write all dependencies to `depfile`
-            dependency_args: vec!["-M".into(), "-MF".into(), depfile.into()],
+            dependency_args: vec![
+                if parsed_args.cxx20_modules {
+                    "-MD".into()
+                } else {
+                    "-M".into()
+                },
+                "-MF".into(),
+                depfile.into(),
+            ],
             ..parsed_args.clone()
         },
         cwd,
