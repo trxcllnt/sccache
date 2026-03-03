@@ -78,8 +78,7 @@
     },
     "ghcr.io/rapidsai/devcontainers/features/gcc:latest": {},
     "ghcr.io/rapidsai/devcontainers/features/llvm:latest": {
-      "version": "19",
-      "packages": "clang lldb lld libc++-dev libc++abi-dev libunwind-dev"
+      "version": "19"
     },
     "ghcr.io/rapidsai/devcontainers/features/nvhpc:latest": {
       "version": "25.7"

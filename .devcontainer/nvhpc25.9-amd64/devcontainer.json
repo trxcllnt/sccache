@@ -79,8 +79,7 @@
     "ghcr.io/rapidsai/devcontainers/features/gcc:latest": {},
     "ghcr.io/rapidsai/devcontainers/features/llvm:latest": {
       "version": "22",
-      "repoVersionOverride": "latest",
-      "packages": "clang lldb lld libc++-dev libc++abi-dev libunwind-dev"
+      "repoVersionOverride": "latest"
     },
     "ghcr.io/rapidsai/devcontainers/features/nvhpc:latest": {
       "version": "25.9"
