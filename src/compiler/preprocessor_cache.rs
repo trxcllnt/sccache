@@ -591,7 +591,7 @@ const INCBIN_DIRECTIVE: &[u8] = b".incbin";
 /// Returns `Ok(None)` if preprocessor cache mode should be disabled.
 pub fn process_preprocessed_file(
     input_file_path: &Path,
-    input_file_path_parent: &Path,
+    cwd: &Path,
     bytes: &mut [u8],
     fs_impl: impl PreprocessorFSAbstraction,
     skip_system_headers: bool,
@@ -636,7 +636,7 @@ pub fn process_preprocessed_file(
         {
             match process_preprocessor_line(
                 input_file_path,
-                input_file_path_parent,
+                cwd,
                 included_files,
                 bytes,
                 start,
@@ -704,7 +704,7 @@ type PreprocessedLineAction = ControlFlow<(usize, usize, bool), (usize, usize)>;
 #[allow(clippy::too_many_arguments)]
 fn process_preprocessor_line(
     input_file_path: &Path,
-    input_file_path_parent: &Path,
+    cwd: &Path,
     included_files: &mut HashMap<PathBuf, bool>,
     bytes: &mut [u8],
     mut start: usize,
@@ -799,7 +799,7 @@ fn process_preprocessor_line(
     if !remember_include_file(
         include_path_normalized,
         input_file_path,
-        input_file_path_parent,
+        cwd,
         included_files,
         fs_impl,
         system,
@@ -817,9 +817,9 @@ fn process_preprocessor_line(
 /// Normalize a path, removing things like `.` and `..`.
 ///
 /// CAUTION: This does not resolve symlinks (unlike [`std::fs::canonicalize`]).
-pub fn normalize_path(path: &Path) -> PathBuf {
+pub fn normalize_path<P: AsRef<Path>>(path: P) -> PathBuf {
     use std::path::Component;
-    let mut components = path.components().peekable();
+    let mut components = path.as_ref().components().peekable();
     let mut ret = if let Some(c @ Component::Prefix(..)) = components.peek().copied() {
         components.next();
         PathBuf::from(c.as_os_str())
@@ -895,7 +895,7 @@ impl PreprocessorFSAbstraction for StandardFsAbstraction {}
 fn remember_include_file(
     include_path: &Path,
     input_file_path: &Path,
-    input_file_path_parent: &Path,
+    cwd: &Path,
     included_files: &mut HashMap<PathBuf, bool>,
     fs_impl: &impl PreprocessorFSAbstraction,
     #[allow(unused_variables)] system: bool,
@@ -925,14 +925,8 @@ fn remember_include_file(
         return Ok(true);
     }
 
-    // Make an absolute path from the input file path
-    let include_path = input_file_path_parent.join(include_path);
-
-    // Compare to the absolute input file path
-    if include_path == input_file_path {
-        // Don't remember the input file.
-        return Ok(true);
-    }
+    // Make relative paths absolute with respect to cwd
+    let include_path = cwd.join(include_path);
 
     if included_files.contains_key(&include_path) {
         // Already known include file

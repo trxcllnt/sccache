@@ -1133,19 +1133,12 @@ pub async fn parse_dependencies<P: AsRef<Path>>(
 ) -> Result<Vec<PathBuf>> {
     let cwd = cwd.as_ref();
     let input_path = input.as_ref();
-    let parent_dir = cwd
-        .join(input_path)
-        .parent()
-        // The only reason `parent()` will be None is if cwd is the root dir and
-        // `input_path` is a path directly under it. If that's the case, `cwd`
-        // is the absolute parent dir of `input_path`.
-        .unwrap_or(cwd)
-        .to_path_buf();
 
     let lines = tokio::fs::read(&depfile)
         .await
         // Avoid dropping Windows wide chars in paths
-        .and_then(from_local_codepage)?;
+        .and_then(from_local_codepage)
+        .with_context(|| format!("{depfile:?}"))?;
 
     let lines = lines
         .split("\n")
@@ -1181,13 +1174,8 @@ pub async fn parse_dependencies<P: AsRef<Path>>(
             if path == input_path {
                 return None;
             }
-            // Make an absolute path from the input file path
-            let path = normalize_path(&parent_dir.join(path));
-            // Compare to the absolute input file path
-            if path == input_path {
-                return None;
-            }
-            Some(path)
+            // Make relative paths absolute with respect to cwd
+            Some(normalize_path(cwd.join(path)))
         })
         .collect::<Vec<_>>();
 

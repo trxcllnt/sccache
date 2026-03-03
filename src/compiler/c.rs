@@ -1049,9 +1049,9 @@ where
                                 .into_iter()
                                 // Each dependency in a preprocessor cache entry must exist,
                                 // and we must use the absolute path to the dependency.
-                                .map(|path| dunce::canonicalize(cwd.join(&path)))
+                                .map(|path| cwd.join(path))
+                                .map(|path| dunce::canonicalize(&path).with_context(|| format!("{path:?}")))
                                 .try_collect::<_, Vec<_>, _>()
-                                .map_err(anyhow::Error::new)
                         })
                         .await?
                     })
