@@ -743,7 +743,7 @@ where
     }
     .shared();
 
-    let mut stdout =
+    let stdout =
         Box::pin(read_line_batches(stdout, batch_size)).take_until(output.clone().and_then(|_| {
             // Take stdout until output resolves to an error.
             // If output resolves to Ok(), don't interrupt stdout.
@@ -752,21 +752,17 @@ where
 
     Ok(async_stream::try_stream! {
         // Yield each stdout bytes chunk
-        for await bytes in stdout.by_ref() {
+        for await bytes in stdout {
             yield bytes?;
         }
 
-        // Unwrap the ProcessOutput result. If result is Err:
-        //
-        // 1. Drop the copy of the output future result so its Arc refcount
-        //    goes to 1.
-        drop(stdout.take_result());
-        drop(stdout.take_future());
-
-        // 2. stdout may finish before the output future resolves, so wait for
-        //    the output future result and unwrap the Err's Arc so we return a
-        //    result containing the original anyhow::Error.
-        output.await.or_else(|err| Arc::into_inner(err).map(Err).unwrap_or_else(|| Ok(())))?;
+        // Unwrap the ProcessOutput result.
+        // The stdout stream may finish before the output future resolves, so
+        // wait for the output future result and unwrap the Err's Arc so we
+        // return a result containing the original anyhow::Error.
+        yield output.await
+            .or_else(|err| Arc::into_inner(err).map(Err).unwrap_or_else(|| Ok(())))
+            .map(|_| BytesMut::new())?;
     })
 }
 
