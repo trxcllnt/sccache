@@ -658,7 +658,7 @@ pub fn process_preprocessed_file(
                     hash_start = h;
                     continue;
                 }
-            };
+            }
         } else if slice
             .strip_prefix(INCBIN_DIRECTIVE)
             .filter(|slice| {
@@ -806,7 +806,7 @@ fn process_preprocessor_line(
         skip_system_headers,
     )? {
         return Ok(ControlFlow::Break((start, hash_start, false)));
-    };
+    }
     // Everything of interest between hash_start and start has been hashed now.
     hash_start = start;
     Ok(ControlFlow::Continue((start, hash_start)))

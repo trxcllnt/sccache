@@ -1438,7 +1438,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         // default version.
         Some(GHACacheConfig {
             enabled: true,
-            version: "".to_string(),
+            version: String::new(),
             key_prefix: key_prefix_from_env_var(&envvar("GHA_CACHE_KEY_PREFIX"))
                 .unwrap_or_default(),
             preprocessor_cache_mode: Some(PreprocessorCacheModeConfig {
@@ -2250,7 +2250,7 @@ pub mod scheduler {
                             .or(rate_limit_on_error_window_size_secs);
                 }
                 _ => {}
-            };
+            }
 
             let into_token = || {
                 Ok(Self::Token {
@@ -2844,7 +2844,7 @@ pub mod server {
                     pot_clone_args = Some(clone_args);
                 }
                 _ => {}
-            };
+            }
 
             match env::var("SCCACHE_DIST_BUILDER_TYPE")
                 .ok()

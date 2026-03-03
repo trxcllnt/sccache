@@ -850,7 +850,7 @@ where
 
     if language.needs_c_preprocessing() {
         extra_dist_files.push(cwd.join(&input));
-    };
+    }
 
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),

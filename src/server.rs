@@ -1196,7 +1196,9 @@ where
         let dist_client = Arc::new(DistClientContainer::new_with_state(DistClientState::Some(
             Box::new(DistClientConfig {
                 scheduler_url: None,
-                auth: config::DistAuth::Token { token: "".into() },
+                auth: config::DistAuth::Token {
+                    token: String::new(),
+                },
                 fallback_to_local_compile: true,
                 max_retries: 0f64,
                 net: Default::default(),
@@ -1640,7 +1642,7 @@ where
                             stats.compile_fails += 1;
                             stats.compiler_write_duration += duration;
                         }
-                    };
+                    }
 
                     match dist_type {
                         DistType::NoDist => {}
@@ -1714,7 +1716,7 @@ where
                         me.dist_client.reset_state().await;
                     }
                 }
-            };
+            }
 
             if let Some(cache_write) = cache_write {
                 match cache_write.await {

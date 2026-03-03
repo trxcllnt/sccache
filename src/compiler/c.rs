@@ -697,7 +697,7 @@ where
                 stats.preprocessor_cache_miss_duration += preprocessor_cache_lookup_duration;
             }
             _ => {}
-        };
+        }
 
         let preprocessor = Preprocess::new(creator, service, compiler, parsed_args)
             .with_cwd(&cwd)
