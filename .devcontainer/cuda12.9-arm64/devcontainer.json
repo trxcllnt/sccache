@@ -79,11 +79,10 @@
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1.6.5": {
       "moby": "false"
     },
-    "ghcr.io/rapidsai/devcontainers/features/gcc:latest": {
-      "version": "11"
-    },
+    "ghcr.io/rapidsai/devcontainers/features/gcc:latest": {},
     "ghcr.io/rapidsai/devcontainers/features/llvm:latest": {
-      "version": "19"
+      "version": "19",
+      "packages": "clang lldb lld libc++-dev libc++abi-dev libunwind-dev"
     },
     "ghcr.io/rapidsai/devcontainers/features/cuda:latest": {
       "version": "12.9",
@@ -103,8 +102,8 @@
     "ghcr.io/devcontainers/features/github-cli",
     "ghcr.io/devcontainers/features/docker-outside-of-docker",
     "ghcr.io/rapidsai/devcontainers/features/gcc",
-    "ghcr.io/rapidsai/devcontainers/features/cuda",
-    "ghcr.io/rapidsai/devcontainers/features/llvm"
+    "ghcr.io/rapidsai/devcontainers/features/llvm",
+    "ghcr.io/rapidsai/devcontainers/features/cuda"
   ],
 
   "customizations": {
