@@ -40,7 +40,9 @@ use crate::dist::pkg;
 use crate::lru_disk_cache;
 use crate::mock_command::{CommandChild, CommandCreatorSync, ProcessOutput, RunCommand};
 use crate::server;
-use crate::util::{fmt_duration_as_secs, run_input_output, strip_basedirs};
+use crate::util::{
+    fmt_duration_as_secs, resolve_compiler_avoiding_ccache, run_input_output, strip_basedirs,
+};
 use crate::{counted_array, dist};
 use async_trait::async_trait;
 use filetime::FileTime;
@@ -2372,8 +2374,10 @@ compiler_version=__VERSION__
     .to_vec();
     let (tempdir, src) = write_temp_file(&pool, "testfile.c".as_ref(), test).await?;
 
-    let executable = executable.as_ref();
-    let mut cmd = creator.clone().new_command_sync(executable);
+    // Resolve compiler avoiding ccache wrappers to prevent double-caching.
+    let executable = resolve_compiler_avoiding_ccache(executable.as_ref(), &env);
+
+    let mut cmd = creator.clone().new_command_sync(&executable);
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .envs(env.iter().map(|s| (&s.0, &s.1)))
@@ -2414,7 +2418,6 @@ compiler_version=__VERSION__
                 .or(Some(String::from("<unknown>")))
         };
 
-        let executable = executable.to_owned();
         let version = next_version();
         match kind {
             "clang" | "clang++" | "apple-clang" | "apple-clang++" => {

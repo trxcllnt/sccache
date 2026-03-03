@@ -28,7 +28,7 @@ use crate::{
     server::{SccacheGaugeIncrement, SccacheService},
     util::{
         Digest, HASH_BUFFER_SIZE, OsStrExt, SCCACHE_GLOBAL_TMPDIR, read_line_batches,
-        run_input_output, split_quoted_shell_str,
+        resolve_compiler_avoiding_ccache, run_input_output, split_quoted_shell_str,
     },
 };
 use async_trait::async_trait;
@@ -1436,7 +1436,8 @@ where
         {
             let args = dist::osstrings_to_strings(&parsed_args.common_args).unwrap_or_default();
             let cmd = NvccGeneratedSubcommand {
-                exe: exe.clone(),
+                // Resolve compiler avoiding ccache wrappers to prevent double-caching.
+                exe: resolve_compiler_avoiding_ccache(exe, &env_vars),
                 args,
                 cwd: dir.to_owned(),
                 env_vars,
