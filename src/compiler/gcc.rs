@@ -1142,40 +1142,10 @@ pub async fn parse_dependencies<P: AsRef<Path>>(
         .unwrap_or(cwd)
         .to_path_buf();
 
-    let lines = {
-        // Retry times in case the compiler hasn't finished writing the depfile yet
-        let mut attempts = 0;
-        loop {
-            match tokio::fs::read(&depfile).await {
-                Ok(lines) if !lines.is_empty() => {
-                    // Avoid dropping Windows wide chars in paths
-                    break from_local_codepage(lines)?;
-                }
-                res => {
-                    if attempts <= 5 {
-                        warn!(
-                            "[{}]: [parse_dependencies]: failed to read depfile {depfile:?}",
-                            input_path.display()
-                        );
-                        attempts += 1;
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    } else if let Err(err) = res {
-                        warn!(
-                            "[{}]: [parse_dependencies]: failed to read depfile {depfile:?}: {err:#}",
-                            input_path.display()
-                        );
-                        return Err(err).with_context(|| format!("reading {depfile:?}"));
-                    } else {
-                        warn!(
-                            "[{}]: [parse_dependencies]: empty depfile: {depfile:?}",
-                            input_path.display()
-                        );
-                        break String::new();
-                    }
-                }
-            }
-        }
-    };
+    let lines = tokio::fs::read(&depfile)
+        .await
+        // Avoid dropping Windows wide chars in paths
+        .and_then(from_local_codepage)?;
 
     let lines = lines
         .split("\n")
