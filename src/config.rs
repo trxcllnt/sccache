@@ -3728,7 +3728,7 @@ fn test_s3_no_credentials_valid_true() {
             assert!(no_credentials);
         }
         None => unreachable!(),
-    };
+    }
 }
 
 #[test]
@@ -3757,7 +3757,7 @@ fn test_s3_no_credentials_valid_false() {
             assert!(!no_credentials);
         }
         None => unreachable!(),
-    };
+    }
 }
 
 #[test]
@@ -3792,7 +3792,7 @@ fn test_gcs_service_account() {
             assert_eq!(rw_mode, CacheModeConfig::ReadWrite);
         }
         None => unreachable!(),
-    };
+    }
 }
 
 #[test]
