@@ -19,7 +19,7 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::BytesMut;
 use fs_err as fs;
 use futures::{
-    AsyncRead, AsyncReadExt, FutureExt, StreamExt,
+    AsyncRead, AsyncReadExt, FutureExt, StreamExt, TryFutureExt,
     io::{AllowStdIo, BufReader},
     lock::Mutex,
 };
@@ -703,18 +703,21 @@ where
         .and_then(|output| output.into())
 }
 
-/// Run a command and return a Stream of Result<Bytes, ProcessError>.
+/// Run a command and return a Stream of Result<Bytes>.
 ///
 /// * Each Ok(Bytes) value is a chunk of the child process's stdout.
+/// * An Err(anyhow::Error) may wrap an io::Error or a ProcessError.
 /// * An Err(ProcessError) value is the exit status and buffered stderr.
 ///
 /// If the process exits cleanly, the stream will complete without yielding
-/// any Err results. If the process exits uncleanly, the stream will yield
-/// a Err(ProcessError) and then complete.
+/// any Err results. If launching the process fails, the stream will yield
+/// an Err(anyhow::Error) that wraps the io::Error, and then complete. If
+/// the process launches successfully and exits uncleanly, the stream will
+/// yield a Err(ProcessError) and then complete.
 ///
-/// This method allows computing a rolling value (such as a hash) on the stdout
-/// without needing to buffer it all in memory (and potentially OOM'ing in
-/// high-concurrency scenarios).
+/// This method allows computing a rolling value (such as a hash) over stdout
+/// without needing to buffer it all in memory, which runs the risk of OOM in
+/// high-concurrency scenarios.
 pub async fn run_input_stream_output<C>(
     command: C,
     batch_size: usize,
@@ -725,35 +728,45 @@ where
 {
     let (status, stdout, stderr) = run_with_input_buffer_stderr(command, input).await?;
 
-    let status = async move {
-        let (status, stderr) = tokio::try_join!(status, stderr)?;
-        if status.success() {
-            // Never complete on success
-            futures::future::pending::<Result<()>>().await
-        } else {
-            Result::Err(
-                ProcessError(ProcessOutput {
-                    status: status.into(),
-                    stdout: vec![],
-                    stderr,
-                })
-                .into(),
-            )
+    let output = async move {
+        match tokio::try_join!(status, stderr) {
+            Err(err) => Err(err),
+            Ok((status, stderr)) => ProcessOutput {
+                status: status.into(),
+                stderr,
+                ..Default::default()
+            }
+            .into(),
         }
+        .map(|_| ())
+        .map_err(Arc::new)
     }
-    .boxed();
+    .shared();
 
-    let mut stdout = Box::pin(read_line_batches(stdout, batch_size)).take_until(status);
+    let mut stdout =
+        Box::pin(read_line_batches(stdout, batch_size)).take_until(output.clone().and_then(|_| {
+            // Take stdout until output resolves to an error.
+            // If output resolves to Ok(), don't interrupt stdout.
+            futures::future::pending::<std::result::Result<(), Arc<anyhow::Error>>>()
+        }));
 
     Ok(async_stream::try_stream! {
         // Yield each stdout bytes chunk
         for await bytes in stdout.by_ref() {
             yield bytes?;
         }
-        // Yield the ProcessError (if any)
-        if let Some(res) = stdout.take_result() {
-            res?;
-        }
+
+        // Unwrap the ProcessOutput result. If result is Err:
+        //
+        // 1. Drop the copy of the output future result so its Arc refcount
+        //    goes to 1.
+        drop(stdout.take_result());
+        drop(stdout.take_future());
+
+        // 2. stdout may finish before the output future resolves, so wait for
+        //    the output future result and unwrap the Err's Arc so we return a
+        //    result containing the original anyhow::Error.
+        output.await.or_else(|err| Arc::into_inner(err).map(Err).unwrap_or_else(|| Ok(())))?;
     })
 }
 
