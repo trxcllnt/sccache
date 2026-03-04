@@ -284,6 +284,7 @@ pub enum Language {
     Cubin,
     Rust,
     Hip,
+    CxxModule,
 }
 
 impl Language {
@@ -301,6 +302,7 @@ impl Language {
             Some("ii") => Some(Language::CxxPreprocessed),
             Some("H") | Some("hh") | Some("hp") | Some("hpp") | Some("HPP") | Some("hxx")
             | Some("h++") | Some("tcc") => Some(Language::CxxHeader),
+            Some("cppm") | Some("ixx") => Some(Language::CxxModule),
             Some("m") => Some(Language::ObjectiveC),
             Some("mi") => Some(Language::ObjectiveCPreprocessed),
             Some("M") | Some("mm") => Some(Language::ObjectiveCxx),
@@ -339,6 +341,7 @@ impl Language {
             Language::Cubin => "cubin",
             Language::Rust => "rust",
             Language::Hip => "hip",
+            Language::CxxModule => "c++-module",
         }
     }
 
@@ -368,6 +371,7 @@ impl Language {
                 "c-header" => Some(Language::CHeader),
                 "cpp-output" => Some(Language::CPreprocessed),
                 "c++-header" => Some(Language::CxxHeader),
+                "c++-module" => Some(Language::CxxModule),
                 "c++-cpp-output" => Some(Language::CxxPreprocessed),
                 "objective-c" => Some(Language::ObjectiveC),
                 "objective-c-header" => Some(Language::ObjectiveCHeader),
@@ -414,6 +418,7 @@ impl Language {
                 Language::CHeader => Some("c-header"),
                 Language::CPreprocessed => Some("cpp-output"),
                 Language::CxxHeader => Some("c++-header"),
+                Language::CxxModule => Some("c++-module"),
                 Language::CxxPreprocessed => Some("c++-cpp-output"),
                 Language::ObjectiveC => Some("objective-c"),
                 Language::ObjectiveCHeader => Some("objective-c-header"),
@@ -483,6 +488,7 @@ impl CompilerKind {
             | Language::CPreprocessed
             | Language::Cxx
             | Language::CxxHeader
+            | Language::CxxModule
             | Language::CxxPreprocessed
             | Language::GenericHeader
             | Language::ObjectiveC
