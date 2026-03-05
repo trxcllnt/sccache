@@ -24,7 +24,6 @@ use crate::{
     },
     counted_array, debug_if_trace, dist,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
-    protocol,
     server::{SccacheGaugeIncrement, SccacheService},
     util::{
         Digest, HASH_BUFFER_SIZE, OsStrExt, SCCACHE_GLOBAL_TMPDIR, read_line_batches,
@@ -2148,7 +2147,7 @@ where
                                 pending,
                             )
                             .await
-                            .map_or_else(error_to_output, result_to_output),
+                            .map_or_else(error_to_output, |res| res.output),
                     },
                 }
             }
@@ -2165,24 +2164,21 @@ where
 }
 
 fn aggregate_output(lhs: ProcessOutput, rhs: ProcessOutput) -> ProcessOutput {
-    if !lhs.success() {
-        ProcessOutput {
-            status: lhs.status,
-            stdout: [lhs.stdout, rhs.stdout].concat(),
-            stderr: [lhs.stderr, rhs.stderr].concat(),
-        }
-    } else if !rhs.success() {
-        ProcessOutput {
-            status: rhs.status,
-            stdout: [lhs.stdout, rhs.stdout].concat(),
-            stderr: [lhs.stderr, rhs.stderr].concat(),
-        }
-    } else {
-        ProcessOutput::new(
-            0,
-            [lhs.stdout, rhs.stdout].concat(),
-            [lhs.stderr, rhs.stderr].concat(),
-        )
+    ProcessOutput {
+        // On Unix, prioritize surfacing SIGSEV exit codes over others
+        status: if cfg!(unix) && matches!(lhs.status.code(), Some(139)) {
+            lhs.status
+        } else if cfg!(unix) && matches!(rhs.status.code(), Some(139)) {
+            rhs.status
+        } else if !lhs.success() {
+            lhs.status
+        } else if !rhs.success() {
+            rhs.status
+        } else {
+            Default::default()
+        },
+        stdout: [lhs.stdout, rhs.stdout].concat(),
+        stderr: [lhs.stderr, rhs.stderr].concat(),
     }
 }
 
@@ -2191,14 +2187,6 @@ fn error_to_output(err: Error) -> ProcessOutput {
         Ok(ProcessError(out)) => out,
         Err(err) => ProcessOutput::new(1, vec![], err.to_string().into_bytes()),
     }
-}
-
-fn result_to_output(res: protocol::CompileFinished) -> ProcessOutput {
-    ProcessOutput::new(
-        !res.output.success() as i64,
-        res.output.stdout,
-        res.output.stderr,
-    )
 }
 
 counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
