@@ -111,11 +111,12 @@ fn run(command: Command) -> Result<()> {
                 }) => {
                     let metrics = Metrics::new(
                         metrics,
-                        vec![
+                        [
                             ("env".into(), env_info()),
                             ("type".into(), "scheduler".into()),
                             ("scheduler_id".into(), scheduler_id.clone()),
-                        ],
+                        ]
+                        .into(),
                     )?;
 
                     let jobs = StorageKind::Compilations
@@ -201,11 +202,12 @@ fn run(command: Command) -> Result<()> {
                 }) => {
                     let metrics = Metrics::new(
                         metrics,
-                        vec![
+                        [
                             ("env".into(), env_info()),
                             ("type".into(), "server".into()),
                             ("server_id".into(), server_id.clone()),
-                        ],
+                        ]
+                        .into(),
                     )?;
 
                     let jobs = StorageKind::Compilations

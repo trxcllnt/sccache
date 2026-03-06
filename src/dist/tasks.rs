@@ -21,7 +21,7 @@ use celery::{
     task::{AsyncResult, Task},
 };
 
-use std::{boxed::Box, sync::Arc};
+use std::{boxed::Box, collections::HashMap, sync::Arc};
 
 use crate::{
     config::MessageBroker,
@@ -230,11 +230,12 @@ pub trait SchedulerTasks: AppTasks + Send + Sync {
 
     async fn run_job(
         &self,
-        job_id: String,
-        reply_to: String,
-        toolchain: Toolchain,
-        command: CompileCommand,
-        outputs: Vec<String>,
+        job_id: &str,
+        reply_to: &str,
+        toolchain: &Toolchain,
+        command: &CompileCommand,
+        outputs: &[String],
+        labels: &Option<HashMap<String, String>>,
     ) -> std::result::Result<AsyncResult, CeleryError>;
 }
 
@@ -250,17 +251,25 @@ impl SchedulerTasks for Tasks {
 
     async fn run_job(
         &self,
-        job_id: String,
-        reply_to: String,
-        toolchain: Toolchain,
-        command: CompileCommand,
-        outputs: Vec<String>,
+        job_id: &str,
+        reply_to: &str,
+        toolchain: &Toolchain,
+        command: &CompileCommand,
+        outputs: &[String],
+        labels: &Option<HashMap<String, String>>,
     ) -> std::result::Result<AsyncResult, CeleryError> {
         self.app()
             .send_task(
-                task_impls::run_job::new(job_id, reply_to, toolchain, command, outputs)
-                    .with_time_limit(self.job_time_limit.saturating_sub(30))
-                    .with_expires_in(self.job_time_limit.saturating_sub(30)),
+                task_impls::run_job::new(
+                    job_id.to_owned(),
+                    reply_to.to_owned(),
+                    toolchain.to_owned(),
+                    command.to_owned(),
+                    outputs.to_owned(),
+                    labels.clone().unwrap_or_default(),
+                )
+                .with_time_limit(self.job_time_limit.saturating_sub(30))
+                .with_expires_in(self.job_time_limit.saturating_sub(30)),
             )
             .await
     }
@@ -306,7 +315,7 @@ mod task_impls {
     use celery::protocol::MessageContentType::MsgPack;
 
     use futures::FutureExt;
-    use std::{boxed::Box, sync::Arc};
+    use std::{boxed::Box, collections::HashMap, sync::Arc};
 
     use crate::{
         dist::{
@@ -348,6 +357,7 @@ mod task_impls {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
+        labels: HashMap<String, String>,
     ) -> TaskResult<RunJobResponse> {
         tracing::trace!(
             "[run_job({job_id}, {}, {:?}, {:?}, {outputs:?})]",
@@ -357,7 +367,7 @@ mod task_impls {
         );
 
         server_service()
-            .map(|svc| svc.run_job(&job_id, &reply_to, toolchain, command, outputs))
+            .map(|svc| svc.run_job(&job_id, &reply_to, toolchain, command, outputs, labels))
             .unwrap_or_else(|err| futures::future::err(err).boxed())
             .await
             .map_err(|err| match err.downcast_ref::<RunJobError>() {
@@ -411,7 +421,7 @@ mod task_impls {
         }
     }
 
-    async fn on_run_job_success(task: &run_job, res: &<run_job as Task>::Returns) {
+    async fn on_run_job_success(task: &run_job, res: &RunJobResponse) {
         let job_id = &task.request().params.job_id;
         let reply_to = &task.request().params.reply_to;
 

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     str::FromStr,
     sync::{Arc, atomic::AtomicU64},
@@ -25,51 +26,53 @@ use crate::{
     },
     errors::*,
 };
+
+use metrics::SharedString;
 use metrics_exporter_dogstatsd::{AggregationMode, DogStatsDBuilder};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
-fn merge_labels(
-    global_labels: &[(String, String)],
-    local_labels: &[(&str, &str)],
-) -> Vec<(String, String)> {
-    let mut all_labels = vec![];
-    for (k, v) in global_labels.iter() {
-        all_labels.push((k.to_owned(), v.to_owned()));
-    }
-    for &(k, v) in local_labels.iter() {
-        all_labels.push((k.to_owned(), v.to_owned()));
-    }
-    all_labels
-}
-
 pub struct CountRecorder {
-    name: String,
-    labels: Vec<(String, String)>,
+    name: SharedString,
+    labels: Option<Arc<HashMap<String, String>>>,
 }
 
 impl Drop for CountRecorder {
     fn drop(&mut self) {
-        metrics::counter!(self.name.clone(), &self.labels).increment(1);
+        self.labels.as_ref().map_or_else(
+            || {
+                metrics::counter!(self.name.clone()).increment(1);
+            },
+            |labels| {
+                metrics::counter!(self.name.clone(), labels.as_ref()).increment(1);
+            },
+        );
     }
 }
 
 #[derive(Default)]
 pub struct GaugeRecorder {
-    name: String,
-    labels: Vec<(String, String)>,
+    name: SharedString,
+    labels: Option<Arc<HashMap<String, String>>>,
     value: AtomicU64,
 }
 
 pub struct GaugeRecorderIncrement<'a> {
-    name: &'a String,
-    labels: &'a [(String, String)],
+    name: SharedString,
+    labels: &'a Option<Arc<HashMap<String, String>>>,
     value: &'a AtomicU64,
 }
 
 impl Drop for GaugeRecorderIncrement<'_> {
     fn drop(&mut self) {
         self.value.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        metrics::gauge!(self.name.clone(), self.labels).decrement(1);
+        self.labels.as_ref().map_or_else(
+            || {
+                metrics::gauge!(self.name.clone()).decrement(1);
+            },
+            |labels| {
+                metrics::gauge!(self.name.clone(), labels.as_ref()).decrement(1);
+            },
+        );
     }
 }
 
@@ -77,9 +80,16 @@ impl GaugeRecorder {
     pub fn increment(&self) -> GaugeRecorderIncrement<'_> {
         let value = &self.value;
         value.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        metrics::gauge!(self.name.clone(), &self.labels).increment(1);
+        self.labels.as_ref().map_or_else(
+            || {
+                metrics::gauge!(self.name.clone()).increment(1);
+            },
+            |labels| {
+                metrics::gauge!(self.name.clone(), labels.as_ref()).increment(1);
+            },
+        );
         GaugeRecorderIncrement {
-            name: &self.name,
+            name: self.name.clone(),
             labels: &self.labels,
             value,
         }
@@ -91,32 +101,47 @@ impl GaugeRecorder {
 }
 
 pub struct HistoRecorder {
-    name: String,
+    name: SharedString,
     value: f64,
-    labels: Vec<(String, String)>,
+    labels: Option<Arc<HashMap<String, String>>>,
 }
 
 impl Drop for HistoRecorder {
     fn drop(&mut self) {
-        metrics::histogram!(self.name.clone(), &self.labels).record(self.value);
+        self.labels.as_ref().map_or_else(
+            || {
+                metrics::histogram!(self.name.clone()).record(self.value);
+            },
+            |labels| {
+                metrics::histogram!(self.name.clone(), labels.as_ref()).record(self.value);
+            },
+        );
     }
 }
 
 pub struct TimeRecorder {
-    name: String,
+    name: SharedString,
     start: Instant,
-    labels: Vec<(String, String)>,
+    labels: Option<Arc<HashMap<String, String>>>,
 }
 
 impl Drop for TimeRecorder {
     fn drop(&mut self) {
-        metrics::histogram!(self.name.clone(), &self.labels).record(self.start.elapsed());
+        self.labels.as_ref().map_or_else(
+            || {
+                metrics::histogram!(self.name.clone()).record(self.start.elapsed());
+            },
+            |labels| {
+                metrics::histogram!(self.name.clone(), labels.as_ref())
+                    .record(self.start.elapsed());
+            },
+        );
     }
 }
 
 #[derive(Clone)]
 pub struct Metrics {
-    global_labels: Arc<Vec<(String, String)>>,
+    global_labels: Arc<HashMap<String, String>>,
     inner: Arc<dyn MetricsInner>,
 }
 
@@ -129,8 +154,12 @@ impl Default for Metrics {
     }
 }
 
+tokio::task_local! {
+    static SCOPED_LABELS: Arc<HashMap<String, String>>;
+}
+
 impl Metrics {
-    pub fn new(config: MetricsConfigs, global_labels: Vec<(String, String)>) -> Result<Self> {
+    pub fn new(config: MetricsConfigs, global_labels: HashMap<String, String>) -> Result<Self> {
         if let Some(config) = config.dogstatsd {
             Ok(Self {
                 global_labels: Arc::new(global_labels),
@@ -138,7 +167,7 @@ impl Metrics {
             })
         } else if let Some(config) = config.prometheus {
             Ok(Self {
-                global_labels: Arc::new(vec![]),
+                global_labels: Arc::new(Default::default()),
                 inner: Arc::new(PrometheusMetrics::new(config, global_labels)?),
             })
         } else {
@@ -149,12 +178,26 @@ impl Metrics {
         }
     }
 
-    pub fn labels(&self, labels: &[(&str, &str)]) -> Vec<(String, String)> {
-        self.global_labels
-            .iter()
-            .map(|(k, v)| (k.to_owned(), v.to_owned()))
-            .chain(labels.iter().map(|&(k, v)| (k.to_owned(), v.to_owned())))
-            .collect::<Vec<_>>()
+    pub fn scoped_labels(&self) -> Option<Arc<HashMap<String, String>>> {
+        SCOPED_LABELS.try_get().ok()
+    }
+
+    pub fn scope_with_labels<F>(
+        &self,
+        local_labels: &HashMap<String, String>,
+        f: F,
+    ) -> tokio::task::futures::TaskLocalFuture<Arc<HashMap<String, String>>, F>
+    where
+        F: Future,
+    {
+        let mut labels = HashMap::new();
+        for (k, v) in self.global_labels.iter() {
+            labels.insert(k.clone(), v.clone());
+        }
+        for (k, v) in local_labels.iter() {
+            labels.insert(k.clone(), v.clone());
+        }
+        SCOPED_LABELS.scope(Arc::new(labels), f)
     }
 
     pub fn render(&self) -> String {
@@ -165,39 +208,38 @@ impl Metrics {
         self.inner.listen_path()
     }
 
-    pub fn gauge<'a>(&self, name: &'a str, labels: &'a [(&'a str, &'a str)]) -> GaugeRecorder {
+    pub fn gauge<S: Into<SharedString>>(&self, name: S) -> GaugeRecorder {
         GaugeRecorder {
-            name: name.to_owned(),
-            labels: merge_labels(self.global_labels.as_ref(), labels),
+            name: name.into(),
+            labels: self.scoped_labels(),
             value: AtomicU64::new(0),
         }
     }
 
-    pub fn count<'a>(&self, name: &'a str, labels: &'a [(&'a str, &'a str)]) -> CountRecorder {
+    pub fn count<S: Into<SharedString>>(&self, name: S) -> CountRecorder {
         CountRecorder {
-            name: name.to_owned(),
-            labels: merge_labels(self.global_labels.as_ref(), labels),
+            name: name.into(),
+            labels: self.scoped_labels(),
         }
     }
 
-    pub fn histo<T: metrics::IntoF64>(
+    pub fn histo<S: Into<SharedString>, T: metrics::IntoF64>(
         &self,
-        name: &str,
-        labels: &[(&str, &str)],
+        name: S,
         value: T,
     ) -> HistoRecorder {
         HistoRecorder {
-            name: name.to_owned(),
+            name: name.into(),
             value: value.into_f64(),
-            labels: merge_labels(self.global_labels.as_ref(), labels),
+            labels: self.scoped_labels(),
         }
     }
 
-    pub fn timer(&self, name: &str, labels: &[(&str, &str)]) -> TimeRecorder {
+    pub fn timer<S: Into<SharedString>>(&self, name: S) -> TimeRecorder {
         TimeRecorder {
-            name: name.to_owned(),
+            name: name.into(),
             start: Instant::now(),
-            labels: merge_labels(self.global_labels.as_ref(), labels),
+            labels: self.scoped_labels(),
         }
     }
 }
@@ -277,7 +319,7 @@ struct PrometheusMetrics {
 impl PrometheusMetrics {
     pub fn new(
         config: PrometheusMetricsConfig,
-        global_labels: Vec<(String, String)>,
+        global_labels: HashMap<String, String>,
     ) -> Result<Self> {
         let builder = global_labels
             .iter()

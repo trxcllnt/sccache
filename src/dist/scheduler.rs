@@ -20,7 +20,7 @@ use futures::lock::Mutex;
 use crate::{
     cache::{Cache, Storage},
     dist::{
-        self, CompileCommand, JobStats, NewJobResponse, RunJobRequest, RunJobResponse,
+        self, CompileCommand, JobStats, NewJobResponse, RunJobRequestV2, RunJobResponse,
         SchedulerService, SchedulerStatus, ServerStatus, StatusUpdate, SubmitToolchainResult,
         SysStats, Toolchain,
         http::bincode_deserialize,
@@ -133,39 +133,39 @@ impl SchedulerMetrics {
     }
 
     pub fn inc_put_job_inputs_error_count(&self) -> CountRecorder {
-        self.metrics.count(PUT_JOB_INPUTS_ERROR_COUNT, &[])
+        self.metrics.count(PUT_JOB_INPUTS_ERROR_COUNT)
     }
 
     pub fn has_job_inputs_timer(&self) -> TimeRecorder {
-        self.metrics.timer(HAS_JOB_INPUTS_TIME, &[])
+        self.metrics.timer(HAS_JOB_INPUTS_TIME)
     }
 
     pub fn has_job_result_timer(&self) -> TimeRecorder {
-        self.metrics.timer(HAS_JOB_RESULT_TIME, &[])
+        self.metrics.timer(HAS_JOB_RESULT_TIME)
     }
 
     pub fn get_job_result_timer(&self) -> TimeRecorder {
-        self.metrics.timer(GET_JOB_RESULT_TIME, &[])
+        self.metrics.timer(GET_JOB_RESULT_TIME)
     }
 
     pub fn del_job_inputs_timer(&self) -> TimeRecorder {
-        self.metrics.timer(DEL_JOB_INPUTS_TIME, &[])
+        self.metrics.timer(DEL_JOB_INPUTS_TIME)
     }
 
     pub fn del_job_result_timer(&self) -> TimeRecorder {
-        self.metrics.timer(DEL_JOB_RESULT_TIME, &[])
+        self.metrics.timer(DEL_JOB_RESULT_TIME)
     }
 
     pub fn put_job_inputs_timer(&self) -> TimeRecorder {
-        self.metrics.timer(PUT_JOB_INPUTS_TIME, &[])
+        self.metrics.timer(PUT_JOB_INPUTS_TIME)
     }
 
     pub fn put_toolchain_timer(&self) -> TimeRecorder {
-        self.metrics.timer(PUT_TOOLCHAIN_TIME, &[])
+        self.metrics.timer(PUT_TOOLCHAIN_TIME)
     }
 
     pub fn del_toolchain_timer(&self) -> TimeRecorder {
-        self.metrics.timer(DEL_TOOLCHAIN_TIME, &[])
+        self.metrics.timer(DEL_TOOLCHAIN_TIME)
     }
 
     pub fn system_metrics(&self) -> (f32, u64, u64) {
@@ -175,14 +175,11 @@ impl SchedulerMetrics {
         let cpu_usage = sys.global_cpu_usage();
         let mem_avail = sys.available_memory();
         let mem_total = sys.total_memory();
-        self.metrics.histo(CPU_USAGE_RATIO, &[], cpu_usage);
-        self.metrics.histo(MEM_AVAIL_BYTES, &[], mem_avail as f64);
-        self.metrics.histo(MEM_TOTAL_BYTES, &[], mem_total as f64);
-        self.metrics.histo(
-            MEM_USED_BYTES,
-            &[],
-            mem_total.saturating_sub(mem_avail) as f64,
-        );
+        self.metrics.histo(CPU_USAGE_RATIO, cpu_usage);
+        self.metrics.histo(MEM_AVAIL_BYTES, mem_avail as f64);
+        self.metrics.histo(MEM_TOTAL_BYTES, mem_total as f64);
+        self.metrics
+            .histo(MEM_USED_BYTES, mem_total.saturating_sub(mem_avail) as f64);
         (cpu_usage, mem_avail, mem_total)
     }
 }
@@ -225,6 +222,7 @@ struct RunJobArgs {
     toolchain: Toolchain,
     command: CompileCommand,
     outputs: Vec<String>,
+    labels: Option<HashMap<String, String>>,
 }
 
 impl AsyncMulticastArgs for RunJobArgs {
@@ -248,6 +246,7 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFn {
             toolchain,
             command,
             outputs,
+            labels,
         } = args;
 
         let (tx, rx) = tokio::sync::oneshot::channel::<RunJobResponse>();
@@ -255,13 +254,7 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFn {
 
         let res = self
             .tasks
-            .run_job(
-                job_id.to_owned(),
-                reply_to.clone(),
-                toolchain.clone(),
-                command.clone(),
-                outputs.clone(),
-            )
+            .run_job(job_id, reply_to, toolchain, command, outputs, labels)
             .await
             .map_err(anyhow::Error::new);
 
@@ -692,11 +685,12 @@ impl SchedulerService for Scheduler {
     async fn run_job(
         &self,
         job_id: &str,
-        RunJobRequest {
+        RunJobRequestV2 {
             toolchain,
             command,
             outputs,
-        }: RunJobRequest,
+            labels,
+        }: RunJobRequestV2,
     ) -> Result<RunJobResponse> {
         if self.has_job_result(job_id).await {
             match self.get_job_result(job_id).await {
@@ -737,6 +731,7 @@ impl SchedulerService for Scheduler {
                 toolchain,
                 command,
                 outputs,
+                labels,
             })
             .await
             .map(|(_, res)| res)

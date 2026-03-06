@@ -138,7 +138,7 @@ pub mod urls {
     }
     pub fn scheduler_run_job(scheduler_url: &reqwest::Url, job_id: &str) -> reqwest::Url {
         scheduler_url
-            .join(&format!("/api/v2/job/{job_id}"))
+            .join(&format!("/api/v3/job/{job_id}"))
             .expect("failed to create run job url")
     }
     pub fn scheduler_del_job(scheduler_url: &reqwest::Url, job_id: &str) -> reqwest::Url {
@@ -202,7 +202,7 @@ mod scheduler {
     use crate::{
         config::DistNetworkingKeepalive,
         dist::{
-            RunJobRequest, SchedulerService, Toolchain,
+            RunJobRequest, RunJobRequestV2, SchedulerService, Toolchain,
             http::{bincode_deserialize, bincode_serialize},
             metrics::Metrics,
         },
@@ -222,6 +222,7 @@ mod scheduler {
     // Tell axum how to convert `AppError` into a response.
     impl IntoResponse for AppError {
         fn into_response(self) -> Response {
+            tracing::error!("AppError: {:?}", self.0);
             (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", self.0)).into_response()
         }
     }
@@ -494,7 +495,9 @@ mod scheduler {
             let app = if let Some(path) = metrics.listen_path() {
                 app.route(
                     &path,
-                    routing::get(move || std::future::ready(metrics.render())),
+                    routing::get(|Extension::<Arc<Metrics>>(metrics)| {
+                        std::future::ready(metrics.render())
+                    }),
                 )
             } else {
                 app
@@ -510,10 +513,12 @@ mod scheduler {
                 let auth = req.extract_parts::<RequireAuth>().await;
 
                 // Labels include auth claims to support `GROUPBY "user_id"` etc.
-                let mut claims = auth.as_ref().map(|auth| auth.0.clone()).unwrap_or_default();
-                claims.insert("authorized".into(), auth.is_ok().to_string());
-                claims.insert("method".into(), req.method().to_string());
-                claims.insert(
+                let mut labels = auth.as_ref().map(|auth| auth.0.clone()).unwrap_or_default();
+                let job_labels = labels.clone();
+
+                labels.insert("authorized".into(), auth.is_ok().to_string());
+                labels.insert("method".into(), req.method().to_string());
+                labels.insert(
                     "path".into(),
                     req.extensions()
                         .get::<MatchedPath>()
@@ -521,12 +526,21 @@ mod scheduler {
                         .unwrap_or_else(|| req.uri().path().to_owned()),
                 );
 
-                let res = CLIENT_AUTH.scope(auth, next.run(req)).await;
+                let metrics = req.extract_parts::<Extension<Arc<Metrics>>>().await;
 
-                claims.insert("status".into(), res.status().as_u16().to_string());
+                let res = metrics.map(|Extension(metrics): Extension<Arc<Metrics>>| {
+                    CLIENT_AUTH.scope(auth, metrics.scope_with_labels(&job_labels, next.run(req)))
+                });
 
-                metrics::counter!("sccache::scheduler::http::request_count", &claims).increment(1);
-                metrics::histogram!("sccache::scheduler::http::request_time", &claims)
+                let res = match res {
+                    Ok(res) => res.await,
+                    Err(err) => AppError(anyhow!(err)).into_response(),
+                };
+
+                labels.insert("status".into(), res.status().as_u16().to_string());
+
+                metrics::counter!("sccache::scheduler::http::request_count", &labels).increment(1);
+                metrics::histogram!("sccache::scheduler::http::request_time", &labels)
                     .record(start.elapsed().as_secs_f64());
 
                 res
@@ -534,6 +548,7 @@ mod scheduler {
 
             // Define this at the end so we also track metrics for the `/metrics` route
             app.route_layer(axum::middleware::from_fn(record_metrics))
+                .layer(Extension(Arc::new(metrics)))
         }
 
         fn routes() -> axum::Router {
@@ -739,14 +754,59 @@ mod scheduler {
                     "/api/v2/job/{job_id}",
                     routing::post(
                         |TypedHeader(AcceptedMimeTypes(mime)),
+                         Extension::<Arc<Metrics>>(metrics),
                          Extension::<Arc<SchedulerState>>(state),
                          Path::<String>(job_id),
                          Bincode(job): Bincode<RunJobRequest>| async move {
+                            let labels = metrics.scoped_labels().map(Arc::unwrap_or_clone);
+
+                            state
+                                .service
+                                .run_job(
+                                    &job_id,
+                                    RunJobRequestV2 {
+                                        labels,
+                                        outputs: job.outputs,
+                                        toolchain: job.toolchain,
+                                        command: job.command,
+                                    },
+                                )
+                                .and_then(|res| mime.serialize(res))
+                                .map_err(|err| AppError(err).into_response())
+                                .await
+                        },
+                    ),
+                )
+                // POST
+                .route(
+                    "/api/v3/job/{job_id}",
+                    routing::post(
+                        |TypedHeader(AcceptedMimeTypes(mime)),
+                         Extension::<Arc<Metrics>>(metrics),
+                         Extension::<Arc<SchedulerState>>(state),
+                         Path::<String>(job_id),
+                         Bincode(mut job): Bincode<RunJobRequestV2>| async move {
+                            // Augment `job.labels` with labels from the auth middleware.
+                            // If `job.labels` is None and auth claims is empty, don't
+                            // allocate the `job.labels` HashMap.
+                            if let Some(claims) = metrics.scoped_labels() {
+                                if !claims.is_empty() {
+                                    if job.labels.is_none() {
+                                        let _ = job.labels.insert(Arc::unwrap_or_clone(claims));
+                                    } else {
+                                        let labels = job.labels.get_or_insert_default();
+                                        for (k, v) in claims.iter() {
+                                            labels.insert(k.clone(), v.clone());
+                                        }
+                                    }
+                                }
+                            }
+
                             state
                                 .service
                                 .run_job(&job_id, job)
                                 .and_then(|res| mime.serialize(res))
-                                .map_err(AppError)
+                                .map_err(|err| AppError(err).into_response())
                                 .await
                         },
                     ),
@@ -834,23 +894,28 @@ mod scheduler {
                     .keep_alive_timeout(Duration::from_secs(keepalive.timeout));
             }
 
+            // Create a handle for graceful shutdown
             let handle = axum_server::Handle::new();
-            let router = Self::routes()
+
+            // Create the application router
+            let app = Self::routes()
                 // Authenticate the client before routing, but after capturing metrics and traces.
                 .route_layer(axum::middleware::from_extractor::<RequireAuth>())
                 // Limit request body size
                 .layer(tower_http::limit::RequestBodyLimitLayer::new(max_body_size));
 
-            let server = server
-                .handle(handle.clone())
-                .serve(
-                    Self::tracing(Self::metrics(router, metrics))
-                        .layer(Extension(self.state.clone()))
-                        .into_make_service_with_connect_info::<SocketAddr>(),
-                )
-                .map_err(|e| anyhow!(e));
+            // Capture metrics for all routes
+            let app = Self::metrics(app, metrics);
+            // Capture traces before metrics
+            let app = Self::tracing(app);
+            // Add SchedulerState layer last so it's available to all middleware
+            let app = app.layer(Extension(self.state.clone()));
+            // Make a service factory that captures client IP addresses
+            let svc = app.into_make_service_with_connect_info::<SocketAddr>();
+            // Serve the application service with the shutdown handle
+            let svc = server.handle(handle.clone()).serve(svc).map_err(Into::into);
 
-            (handle, server)
+            (handle, svc)
         }
     }
 }
@@ -874,7 +939,7 @@ mod client {
     use crate::{
         config,
         dist::{
-            self, CompileCommand, NewJobResponse, RunJobRequest, RunJobResponse, SchedulerStatus,
+            self, CompileCommand, NewJobResponse, RunJobRequestV2, RunJobResponse, SchedulerStatus,
             SubmitToolchainResult, Toolchain,
             pkg::{PackagedToolchain, ToolchainPackager},
         },
@@ -1114,10 +1179,14 @@ mod client {
                     .header(http::header::ACCEPT, "application/octet-stream")
                     .bearer_auth(self.auth_token.clone())
                     .timeout(timeout)
-                    .bincode(&RunJobRequest {
+                    .bincode(&RunJobRequestV2 {
                         command,
                         outputs,
                         toolchain,
+                        // TODO:
+                        // Decide if there's any interesting client details worth
+                        // sending to the server to include in metrics dimensions
+                        labels: None,
                     })?,
             )
             .await

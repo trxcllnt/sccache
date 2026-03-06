@@ -169,8 +169,8 @@ impl ServerMetrics {
             "The time to load and build each job"
         );
 
-        let jobs_pending = Arc::new(metrics.gauge(JOB_PENDING_COUNT, &[]));
-        let jobs_loading = Arc::new(metrics.gauge(JOB_LOADING_COUNT, &[]));
+        let jobs_pending = Arc::new(metrics.gauge(JOB_PENDING_COUNT));
+        let jobs_loading = Arc::new(metrics.gauge(JOB_LOADING_COUNT));
         Self {
             metrics,
             jobs_pending,
@@ -186,73 +186,81 @@ impl ServerMetrics {
         let cpu_usage = sys.global_cpu_usage();
         let mem_avail = sys.available_memory();
         let mem_total = sys.total_memory();
-        self.metrics.histo(CPU_USAGE_RATIO, &[], cpu_usage);
-        self.metrics.histo(MEM_AVAIL_BYTES, &[], mem_avail as f64);
-        self.metrics.histo(MEM_TOTAL_BYTES, &[], mem_total as f64);
-        self.metrics.histo(
-            MEM_USED_BYTES,
-            &[],
-            mem_total.saturating_sub(mem_avail) as f64,
-        );
+        self.metrics.histo(CPU_USAGE_RATIO, cpu_usage);
+        self.metrics.histo(MEM_AVAIL_BYTES, mem_avail as f64);
+        self.metrics.histo(MEM_TOTAL_BYTES, mem_total as f64);
+        self.metrics
+            .histo(MEM_USED_BYTES, mem_total.saturating_sub(mem_avail) as f64);
         (cpu_usage, mem_avail, mem_total)
     }
 
     pub fn inc_toolchain_error_count(&self) -> CountRecorder {
-        self.metrics.count(TOOLCHAIN_ERROR_COUNT, &[])
+        self.metrics.count(TOOLCHAIN_ERROR_COUNT)
     }
 
     pub fn inc_get_job_inputs_error_count(&self) -> CountRecorder {
-        self.metrics.count(GET_JOB_INPUTS_ERROR_COUNT, &[])
+        self.metrics.count(GET_JOB_INPUTS_ERROR_COUNT)
     }
 
     pub fn inc_job_build_error_count(&self) -> CountRecorder {
-        self.metrics.count(JOB_BUILD_ERROR_COUNT, &[])
+        self.metrics.count(JOB_BUILD_ERROR_COUNT)
     }
 
     pub fn inc_put_job_result_error_count(&self) -> CountRecorder {
-        self.metrics.count(PUT_JOB_RESULT_ERROR_COUNT, &[])
+        self.metrics.count(PUT_JOB_RESULT_ERROR_COUNT)
     }
 
     pub fn inc_job_accepted_count(&self) -> CountRecorder {
         self.jobs_accepted
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.metrics.count(JOB_ACCEPTED_COUNT, &[])
+        self.metrics.count(JOB_ACCEPTED_COUNT)
     }
 
     pub fn inc_job_loaded_count(&self) -> CountRecorder {
         self.jobs_loaded
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.metrics.count(JOB_LOADED_COUNT, &[])
+        self.metrics.count(JOB_LOADED_COUNT)
     }
 
     pub fn inc_job_finished_count(&self) -> CountRecorder {
         self.jobs_finished
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.metrics.count(JOB_FINISHED_COUNT, &[])
+        self.metrics.count(JOB_FINISHED_COUNT)
     }
 
     pub fn get_job_inputs_timer(&self) -> TimeRecorder {
-        self.metrics.timer(GET_JOB_INPUTS_TIME, &[])
+        self.metrics.timer(GET_JOB_INPUTS_TIME)
     }
 
     pub fn get_toolchain_timer(&self) -> TimeRecorder {
-        self.metrics.timer(GET_TOOLCHAIN_TIME, &[])
+        self.metrics.timer(GET_TOOLCHAIN_TIME)
     }
 
     pub fn load_job_timer(&self) -> TimeRecorder {
-        self.metrics.timer(LOAD_JOB_TIME, &[])
+        self.metrics.timer(LOAD_JOB_TIME)
     }
 
     pub fn run_build_timer(&self) -> TimeRecorder {
-        self.metrics.timer(RUN_BUILD_TIME, &[])
+        self.metrics.timer(RUN_BUILD_TIME)
     }
 
     pub fn put_job_result_timer(&self) -> TimeRecorder {
-        self.metrics.timer(PUT_JOB_RESULT_TIME, &[])
+        self.metrics.timer(PUT_JOB_RESULT_TIME)
     }
 
     pub fn run_job_timer(&self) -> TimeRecorder {
-        self.metrics.timer(RUN_JOB_TIME, &[])
+        self.metrics.timer(RUN_JOB_TIME)
+    }
+
+    pub fn scope_with_labels<F>(
+        &self,
+        labels: &HashMap<String, String>,
+        f: F,
+    ) -> tokio::task::futures::TaskLocalFuture<Arc<HashMap<String, String>>, F>
+    where
+        F: Future,
+    {
+        self.metrics.scope_with_labels(labels, f)
     }
 }
 
@@ -324,7 +332,7 @@ impl From<&ServerState> for StatusUpdate {
         state
             .metrics
             .metrics
-            .histo(NUM_CPUS_HISTO, &[], state.num_cpus as f64);
+            .histo(NUM_CPUS_HISTO, state.num_cpus as f64);
 
         let running = state
             .occupancy
@@ -419,6 +427,7 @@ struct RunJobArgs {
     toolchain: Toolchain,
     command: CompileCommand,
     outputs: Vec<String>,
+    labels: HashMap<String, String>,
 }
 
 impl AsyncMulticastArgs for RunJobArgs {
@@ -592,16 +601,22 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFunc {
             toolchain,
             command,
             outputs,
+            labels,
         } = args;
         if self.state.is_alive() {
-            self.load_job_and_run_build(
-                job_id,
-                reply_to,
-                toolchain.clone(),
-                command.clone(),
-                outputs.clone(),
-            )
-            .await
+            self.state
+                .metrics
+                .scope_with_labels(
+                    labels,
+                    self.load_job_and_run_build(
+                        job_id,
+                        reply_to,
+                        toolchain.clone(),
+                        command.clone(),
+                        outputs.clone(),
+                    ),
+                )
+                .await
         } else {
             Err(RunJobError::server_terminated())
         }
@@ -854,6 +869,7 @@ impl ServerService for Server {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
+        labels: HashMap<String, String>,
     ) -> Result<RunJobResponse> {
         let reply_to = reply_to.to_owned();
 
@@ -880,6 +896,7 @@ impl ServerService for Server {
                 toolchain,
                 command,
                 outputs,
+                labels,
             })
             .await
             .map(|(_, res)| res)

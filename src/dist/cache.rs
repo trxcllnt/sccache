@@ -578,19 +578,19 @@ mod server {
         }
 
         pub fn load_timer(&self) -> TimeRecorder {
-            self.metrics.timer(TC_LOAD, &[])
+            self.metrics.timer(TC_LOAD)
         }
 
         pub fn load_inflated_timer(&self) -> TimeRecorder {
-            self.metrics.timer(TC_LOAD_INFLATED, &[])
+            self.metrics.timer(TC_LOAD_INFLATED)
         }
 
         pub fn load_deflated_timer(&self) -> TimeRecorder {
-            self.metrics.timer(TC_LOAD_DEFLATED, &[])
+            self.metrics.timer(TC_LOAD_DEFLATED)
         }
 
         pub fn unpack_inflated_timer(&self) -> TimeRecorder {
-            self.metrics.timer(TC_UNPACK_INFLATED, &[])
+            self.metrics.timer(TC_UNPACK_INFLATED)
         }
     }
 

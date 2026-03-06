@@ -17,9 +17,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 #[cfg(feature = "dist-server")]
 use itertools::Itertools;
+
 use serde::{Deserialize, Serialize};
 
 use std::{
+    collections::HashMap,
     ffi::OsString,
     fmt,
     path::{Path, PathBuf},
@@ -627,6 +629,15 @@ pub struct RunJobRequest {
     pub toolchain: Toolchain,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunJobRequestV2 {
+    pub command: CompileCommand,
+    pub outputs: Vec<String>,
+    pub toolchain: Toolchain,
+    pub labels: Option<HashMap<String, String>>,
+}
+
 #[derive(Debug)]
 pub enum RunJobError {
     Fatal(Error),
@@ -818,7 +829,7 @@ pub trait SchedulerService: Send + Sync {
 
     async fn has_job(&self, job_id: &str) -> bool;
     async fn new_job(&self, toolchain: Toolchain, inputs: Bytes) -> Result<NewJobResponse>;
-    async fn run_job(&self, job_id: &str, request: RunJobRequest) -> Result<RunJobResponse>;
+    async fn run_job(&self, job_id: &str, request: RunJobRequestV2) -> Result<RunJobResponse>;
     async fn put_job(&self, job_id: &str, inputs: Bytes) -> Result<()>;
     async fn del_job(&self, job_id: &str) -> Result<()>;
 
@@ -841,6 +852,7 @@ pub trait ServerService: Send + Sync {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
+        labels: HashMap<String, String>,
     ) -> Result<RunJobResponse>;
 
     async fn on_failure(&self, job_id: &str, reply_to: &str, err: RunJobError) -> Result<()>;
