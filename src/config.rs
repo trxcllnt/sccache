@@ -2275,7 +2275,7 @@ pub mod scheduler {
                     url: env_or_cfg_url.with_context(|| format!(
                         "{sccache_dist_auth_url_env} must be set when {sccache_dist_auth_type_env}=proxy_token",
                     ))?,
-                    cache_secs: env_or_cfg_cache_secs,
+                    cache_secs: env_or_cfg_cache_secs.or(Some(300)),
                     decode: env_or_cfg_decode,
                     rate_limit_on_error_count: env_or_cfg_rate_limit_on_error_count,
                     rate_limit_on_error_window_size_secs:
