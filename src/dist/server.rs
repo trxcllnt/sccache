@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use bytes::Bytes;
 
 use std::{
     collections::HashMap,
@@ -462,7 +461,7 @@ impl RunJobFunc {
             })
     }
 
-    async fn get_job_inputs(&self, job_id: &str) -> Result<Bytes> {
+    async fn get_job_inputs(&self, job_id: &str) -> Result<opendal::Buffer> {
         // Record get_job_inputs time
         let _timer = self.state.metrics.get_job_inputs_timer();
         self.jobs_storage
@@ -486,7 +485,7 @@ impl RunJobFunc {
         &self,
         job_id: &str,
         toolchain_dir: PathBuf,
-        inputs: Bytes,
+        inputs: opendal::Buffer,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> std::result::Result<BuildResult, BuildError> {
@@ -509,7 +508,7 @@ impl RunJobFunc {
         &self,
         job_id: &str,
         toolchain: Toolchain,
-    ) -> std::result::Result<(PathBuf, Bytes), RunJobError> {
+    ) -> std::result::Result<(PathBuf, opendal::Buffer), RunJobError> {
         // Record load_job time
         let _timer = self.state.metrics.load_job_timer();
         let _loading = self.state.metrics.jobs_loading.increment();

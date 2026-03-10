@@ -105,7 +105,7 @@ rustls = { version = "0.23", default-features = false, features = [
 mime = "0.3"
 notify-debouncer-full = { version = "0.4", optional = true }
 object = "0.37"
-opendal = { version = "0.55.0", optional = true, default-features = false }
+opendal = { version = "0.55.0", default-features = false }
 openssl = { version = "0.10.75", optional = true }
 rand = "0.8.4"
 regex = "1.10.3"

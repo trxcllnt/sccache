@@ -36,7 +36,7 @@ impl SimplexCache {
 
 #[async_trait]
 impl Storage for SimplexCache {
-    async fn get(&self, key: &str) -> Result<Cache<bytes::Bytes>> {
+    async fn get(&self, key: &str) -> Result<Cache<opendal::Buffer>> {
         self.0.get(key).await
     }
 
@@ -48,7 +48,7 @@ impl Storage for SimplexCache {
         self.0.has(key).await
     }
 
-    async fn put(&self, key: &str, entry: bytes::Bytes) -> Result<Duration> {
+    async fn put(&self, key: &str, entry: opendal::Buffer) -> Result<Duration> {
         self.1.put(key, entry).await
     }
 

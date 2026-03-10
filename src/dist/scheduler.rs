@@ -14,7 +14,6 @@
 
 use async_trait::async_trait;
 
-use bytes::Bytes;
 use futures::lock::Mutex;
 
 use crate::{
@@ -534,7 +533,7 @@ impl Scheduler {
             })
     }
 
-    async fn put_job_inputs(&self, job_id: &str, inputs: Bytes) -> Result<()> {
+    async fn put_job_inputs(&self, job_id: &str, inputs: opendal::Buffer) -> Result<()> {
         // Record put_job_inputs time
         let _timer = self.metrics.put_job_inputs_timer();
         // Store the job inputs
@@ -625,7 +624,7 @@ impl SchedulerService for Scheduler {
     async fn put_toolchain(
         &self,
         toolchain: &Toolchain,
-        toolchain_archive: Bytes,
+        toolchain_archive: opendal::Buffer,
     ) -> Result<SubmitToolchainResult> {
         // Record put_toolchain time
         let _timer = self.metrics.put_toolchain_timer();
@@ -655,7 +654,11 @@ impl SchedulerService for Scheduler {
             })
     }
 
-    async fn new_job(&self, toolchain: Toolchain, inputs: Bytes) -> Result<NewJobResponse> {
+    async fn new_job(
+        &self,
+        toolchain: Toolchain,
+        inputs: opendal::Buffer,
+    ) -> Result<NewJobResponse> {
         let job_id = uuid::Uuid::new_v4().as_simple().to_string();
         let (has_toolchain, has_inputs) = futures::future::join(
             async { Ok::<bool, anyhow::Error>(self.has_toolchain(&toolchain).await) },
@@ -678,7 +681,7 @@ impl SchedulerService for Scheduler {
         })
     }
 
-    async fn put_job(&self, job_id: &str, inputs: Bytes) -> Result<()> {
+    async fn put_job(&self, job_id: &str, inputs: opendal::Buffer) -> Result<()> {
         self.put_job_inputs(job_id, inputs).await
     }
 

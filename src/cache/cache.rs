@@ -20,7 +20,6 @@ use crate::{
     errors::*,
 };
 use async_trait::async_trait;
-use bytes::Bytes;
 use futures::{FutureExt, StreamExt, TryFutureExt};
 use itertools::Itertools;
 use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
@@ -61,7 +60,7 @@ pub trait Storage: Send + Sync {
     /// it should return a `Cache::Miss`.
     /// If the entry is successfully found in the cache, it should
     /// return a `Cache::Hit`.
-    async fn get(&self, key: &str) -> Result<Cache<Bytes>>;
+    async fn get(&self, key: &str) -> Result<Cache<opendal::Buffer>>;
 
     /// Delete the cache entry for `key`.
     async fn del(&self, key: &str) -> Result<()>;
@@ -76,7 +75,7 @@ pub trait Storage: Send + Sync {
     ///
     /// Returns a `Future` that will provide the result or error when the put is
     /// finished.
-    async fn put(&self, key: &str, entry: Bytes) -> Result<Duration>;
+    async fn put(&self, key: &str, entry: opendal::Buffer) -> Result<Duration>;
 
     async fn size(&self, key: &str) -> Result<u64>;
 
@@ -173,13 +172,12 @@ mod operator {
     pub async fn read_with_retry(
         storage: &opendal::Operator,
         key: &str,
-    ) -> std::result::Result<Bytes, opendal::Error> {
+    ) -> std::result::Result<opendal::Buffer, opendal::Error> {
         // TODO: Allow configuring the number of retries
         retry_with_jitter(usize::MAX, || async {
             storage
                 .read(&normalize_key(key))
                 .await
-                .map(|buf| buf.to_bytes())
                 .map_err(|e| to_retry_err("lookup", e))
         })
         .await
@@ -188,7 +186,7 @@ mod operator {
     pub async fn write_with_retry(
         storage: &opendal::Operator,
         key: &str,
-        buf: Bytes,
+        buf: opendal::Buffer,
     ) -> std::result::Result<opendal::Metadata, opendal::Error> {
         // TODO: Allow configuring the number of retries
         retry_with_jitter(usize::MAX, || async {
@@ -249,7 +247,7 @@ impl RemoteStorage {
 ))]
 #[async_trait]
 impl Storage for RemoteStorage {
-    async fn get(&self, key: &str) -> Result<Cache<Bytes>> {
+    async fn get(&self, key: &str) -> Result<Cache<opendal::Buffer>> {
         match operator::read_with_retry(&self.operator, key).await {
             Ok(data) => Ok(Cache::Hit(data)),
             Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(Cache::Miss),
@@ -268,7 +266,7 @@ impl Storage for RemoteStorage {
         self.operator.stat(&normalize_key(key)).await.is_ok()
     }
 
-    async fn put(&self, key: &str, entry: Bytes) -> Result<Duration> {
+    async fn put(&self, key: &str, entry: opendal::Buffer) -> Result<Duration> {
         let start = std::time::Instant::now();
         operator::write_with_retry(&self.operator, key, entry).await?;
         Ok(start.elapsed())
@@ -367,7 +365,7 @@ impl PreprocessorCache {
 
 #[async_trait]
 impl Storage for PreprocessorCache {
-    async fn get(&self, key: &str) -> Result<Cache<Bytes>> {
+    async fn get(&self, key: &str) -> Result<Cache<opendal::Buffer>> {
         self.0.get(key).await
     }
 
@@ -379,7 +377,7 @@ impl Storage for PreprocessorCache {
         self.0.has(key).await
     }
 
-    async fn put(&self, key: &str, entry: Bytes) -> Result<Duration> {
+    async fn put(&self, key: &str, entry: opendal::Buffer) -> Result<Duration> {
         self.0.put(key, entry).await
     }
 

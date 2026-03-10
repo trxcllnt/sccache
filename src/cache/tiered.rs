@@ -19,7 +19,6 @@ use crate::{
 };
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use futures::TryFutureExt;
 use std::{
     sync::Arc,
@@ -41,7 +40,7 @@ impl TieredCache {
 
 #[async_trait]
 impl Storage for TieredCache {
-    async fn get(&self, key: &str) -> Result<Cache<Bytes>> {
+    async fn get(&self, key: &str) -> Result<Cache<opendal::Buffer>> {
         match self.0.get(key).await {
             Ok(Cache::Hit(entry)) => {
                 tokio::spawn({
@@ -99,7 +98,7 @@ impl Storage for TieredCache {
         }
     }
 
-    async fn put(&self, key: &str, entry: Bytes) -> Result<Duration> {
+    async fn put(&self, key: &str, entry: opendal::Buffer) -> Result<Duration> {
         let start = Instant::now();
         self.0.put(key, entry.clone()).await?;
         tokio::spawn({

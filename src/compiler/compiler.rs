@@ -14,36 +14,39 @@
 // limitations under the License.
 
 #[cfg(feature = "dist-client")]
-use crate::cache::UnexpectedFileSize;
-use crate::cache::{
-    Cache, CacheRead, CacheWrite, DecompressionFailure, FileObjectSource, Storage,
-    UnexpectedEmptyFile,
+use crate::{cache::UnexpectedFileSize, dist::pkg, lru_disk_cache};
+
+use crate::{
+    cache::{
+        Cache, CacheRead, CacheWrite, DecompressionFailure, FileObjectSource, Storage,
+        UnexpectedEmptyFile,
+    },
+    compiler::{
+        args::*,
+        c::{CCompiler, CCompilerKind},
+        cicc::Cicc,
+        clang::Clang,
+        cudafe::CudaFE,
+        diab::Diab,
+        gcc::Gcc,
+        msvc,
+        msvc::Msvc,
+        nvcc::Nvcc,
+        nvcc::NvccHostCompiler,
+        nvhpc::Nvhpc,
+        ptxas::Ptxas,
+        rust::{Rust, RustupProxy},
+        tasking_vx::TaskingVX,
+    },
+    counted_array, dist,
+    errors::*,
+    mock_command::{CommandChild, CommandCreatorSync, ProcessOutput, RunCommand},
+    server,
+    util::{
+        fmt_duration_as_secs, resolve_compiler_avoiding_ccache, run_input_output, strip_basedirs,
+    },
 };
-use crate::compiler::args::*;
-use crate::compiler::c::{CCompiler, CCompilerKind};
-use crate::compiler::cicc::Cicc;
-use crate::compiler::clang::Clang;
-use crate::compiler::cudafe::CudaFE;
-use crate::compiler::diab::Diab;
-use crate::compiler::gcc::Gcc;
-use crate::compiler::msvc;
-use crate::compiler::msvc::Msvc;
-use crate::compiler::nvcc::Nvcc;
-use crate::compiler::nvcc::NvccHostCompiler;
-use crate::compiler::nvhpc::Nvhpc;
-use crate::compiler::ptxas::Ptxas;
-use crate::compiler::rust::{Rust, RustupProxy};
-use crate::compiler::tasking_vx::TaskingVX;
-#[cfg(feature = "dist-client")]
-use crate::dist::pkg;
-#[cfg(feature = "dist-client")]
-use crate::lru_disk_cache;
-use crate::mock_command::{CommandChild, CommandCreatorSync, ProcessOutput, RunCommand};
-use crate::server;
-use crate::util::{
-    fmt_duration_as_secs, resolve_compiler_avoiding_ccache, run_input_output, strip_basedirs,
-};
-use crate::{counted_array, dist};
+
 use async_trait::async_trait;
 use filetime::FileTime;
 use fs::File;
@@ -61,8 +64,6 @@ use std::str;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
-
-use crate::errors::*;
 
 /// Can dylibs (shared libraries or proc macros) be distributed on this platform?
 #[cfg(all(
@@ -1098,7 +1099,7 @@ impl<'a> CacheLookup<'a> {
                     "[{out_pretty}]: Cache hit in {}",
                     fmt_duration_as_secs(&duration)
                 );
-                let mut entry = CacheRead::from(std::io::Cursor::new(entry))?;
+                let mut entry = CacheRead::from(std::io::Cursor::new(entry.to_bytes()))?;
                 let stdout = entry.get_stdout();
                 let stderr = entry.get_stderr();
                 match entry.extract_objects(outputs.clone(), runtime).await {

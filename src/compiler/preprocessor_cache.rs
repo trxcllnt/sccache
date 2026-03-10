@@ -126,14 +126,14 @@ impl PreprocessorCacheEntry {
                 match res {
                     Cache::Miss => Err(anyhow!("compressed miss")),
                     Cache::Hit(buf) => {
-                        let reader = futures::io::AllowStdIo::new(&buf[..]);
+                        let reader = futures::io::AllowStdIo::new(buf.reader());
                         let mut reader = ZlibDecoderAsync::new(reader);
                         let mut out = vec![];
                         reader
                             .read_to_end(&mut out)
                             .await
                             .map_err(anyhow::Error::new)?;
-                        Ok(Cache::Hit(Bytes::from(out)))
+                        Ok(Cache::Hit(Bytes::from(out).into()))
                     }
                 }
             })
@@ -165,7 +165,7 @@ impl PreprocessorCacheEntry {
             writer
                 .finish()
                 .map_err(anyhow::Error::new)
-                .map(|writer| writer.into_inner().freeze())
+                .map(|writer| writer.into_inner().freeze().into())
         })
         .await??;
 

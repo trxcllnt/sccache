@@ -25,16 +25,16 @@ pub use self::common::{bincode_deserialize, bincode_serialize};
 
 mod common {
 
-    use bytes::Bytes;
+    use bytes::Buf;
     use reqwest::header;
 
     use crate::errors::*;
 
-    pub async fn bincode_deserialize<T>(bytes: Bytes) -> Result<T>
+    pub async fn bincode_deserialize<T>(bytes: opendal::Buffer) -> Result<T>
     where
         T: for<'de> serde::Deserialize<'de> + Send + 'static,
     {
-        tokio::task::spawn_blocking(move || bincode::deserialize(&bytes[..]))
+        tokio::task::spawn_blocking(move || bincode::deserialize_from(bytes.reader()))
             .await
             .map_err(anyhow::Error::new)?
             .map_err(anyhow::Error::new)
@@ -441,7 +441,7 @@ mod scheduler {
                 return Err((StatusCode::BAD_REQUEST, "Wrong content type".into()));
             };
 
-            let data = bincode_deserialize::<T>(data)
+            let data = bincode_deserialize::<T>(data.into())
                 .await
                 .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
 
@@ -621,7 +621,7 @@ mod scheduler {
                                     .and_then(|tc| unsafe { Mmap::map(&tc) }.map(Bytes::from_owner))
                                     .map_err(|_| AppError(anyhow!("")).into_response())?;
                                 service
-                                    .put_toolchain(&Toolchain { archive_id }, toolchain)
+                                    .put_toolchain(&Toolchain { archive_id }, toolchain.into())
                                     .and_then(|res| mime.serialize(res))
                                     .map_err(|e| AppError(e).into_response())
                                     .await

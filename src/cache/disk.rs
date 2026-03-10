@@ -19,7 +19,7 @@ use crate::{
     lru_disk_cache::Error as LruError,
 };
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use futures::lock::Mutex;
 use memmap2::Mmap;
 use std::{
@@ -126,9 +126,11 @@ impl DiskCache {
 
 #[async_trait]
 impl Storage for DiskCache {
-    async fn get(&self, key: &str) -> Result<Cache<Bytes>> {
+    async fn get(&self, key: &str) -> Result<Cache<opendal::Buffer>> {
         match self.file(key).await {
-            Ok(file) => Ok(Cache::Hit(Bytes::from_owner(unsafe { Mmap::map(&file) }?))),
+            Ok(file) => Ok(Cache::Hit(
+                Bytes::from_owner(unsafe { Mmap::map(&file) }?).into(),
+            )),
             Err(err) => match err.downcast_ref::<LruError>() {
                 Some(LruError::FileNotInCache) => Ok(Cache::Miss),
                 _ => Err(err),
@@ -154,7 +156,7 @@ impl Storage for DiskCache {
         self.size(key).await.is_ok()
     }
 
-    async fn put(&self, key: &str, source: Bytes) -> Result<Duration> {
+    async fn put(&self, key: &str, source: opendal::Buffer) -> Result<Duration> {
         trace!("DiskCache::put({})", key);
 
         if self.rw_mode == CacheMode::ReadOnly {
@@ -173,8 +175,9 @@ impl Storage for DiskCache {
             .with_context(|| format!("[DiskCache::put({key})]"))?;
 
         // Copy source into the tempfile
+        let source = futures::io::AllowStdIo::new(source.reader());
         futures::io::copy_buf(
-            futures::io::AllowStdIo::new(&source[..]),
+            source,
             &mut futures::io::AllowStdIo::new(std::io::BufWriter::new(f.as_file_mut())),
         )
         .await

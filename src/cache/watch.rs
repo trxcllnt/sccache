@@ -175,7 +175,7 @@ impl WatchStorage {
 
 #[async_trait]
 impl Storage for WatchStorage {
-    async fn get(&self, key: &str) -> Result<Cache<bytes::Bytes>> {
+    async fn get(&self, key: &str) -> Result<Cache<opendal::Buffer>> {
         self.inner().await.get(key).await
     }
 
@@ -187,7 +187,7 @@ impl Storage for WatchStorage {
         self.inner().await.has(key).await
     }
 
-    async fn put(&self, key: &str, entry: bytes::Bytes) -> Result<Duration> {
+    async fn put(&self, key: &str, entry: opendal::Buffer) -> Result<Duration> {
         self.inner().await.put(key, entry).await
     }
 

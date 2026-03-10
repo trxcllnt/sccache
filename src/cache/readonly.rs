@@ -30,7 +30,7 @@ impl ReadOnlyStorage {
 
 #[async_trait]
 impl Storage for ReadOnlyStorage {
-    async fn get(&self, key: &str) -> Result<Cache<bytes::Bytes>> {
+    async fn get(&self, key: &str) -> Result<Cache<opendal::Buffer>> {
         self.0.get(key).await
     }
 
@@ -46,7 +46,7 @@ impl Storage for ReadOnlyStorage {
     ///
     /// Returns a `Future` that will provide the result or error when the put is
     /// finished.
-    async fn put(&self, _key: &str, _entry: bytes::Bytes) -> Result<Duration> {
+    async fn put(&self, _key: &str, _entry: opendal::Buffer) -> Result<Duration> {
         Err(anyhow!("Cannot write to read-only storage"))
     }
 

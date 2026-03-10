@@ -18,7 +18,6 @@ use crate::{
     config::PreprocessorCacheModeConfig,
 };
 use async_trait::async_trait;
-use bytes::Bytes;
 use futures::channel::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,8 +26,8 @@ use tokio::time::sleep;
 
 /// A mock `Storage` implementation.
 pub struct MockStorage {
-    rx: Arc<Mutex<mpsc::UnboundedReceiver<Result<Cache<Bytes>>>>>,
-    tx: mpsc::UnboundedSender<Result<Cache<Bytes>>>,
+    rx: Arc<Mutex<mpsc::UnboundedReceiver<Result<Cache<opendal::Buffer>>>>>,
+    tx: mpsc::UnboundedSender<Result<Cache<opendal::Buffer>>>,
     delay: Option<Duration>,
     preprocessor_cache_mode: bool,
 }
@@ -46,14 +45,14 @@ impl MockStorage {
     }
 
     /// Queue up `res` to be returned as the next result from `Storage::get`.
-    pub(crate) fn next_get(&self, res: Result<Cache<Bytes>>) {
+    pub(crate) fn next_get(&self, res: Result<Cache<opendal::Buffer>>) {
         self.tx.unbounded_send(res).unwrap();
     }
 }
 
 #[async_trait]
 impl Storage for MockStorage {
-    async fn get(&self, _key: &str) -> Result<Cache<Bytes>> {
+    async fn get(&self, _key: &str) -> Result<Cache<opendal::Buffer>> {
         if let Some(delay) = self.delay {
             sleep(delay).await;
         }
@@ -73,7 +72,7 @@ impl Storage for MockStorage {
     async fn has(&self, _key: &str) -> bool {
         false
     }
-    async fn put(&self, _key: &str, _entry: Bytes) -> Result<Duration> {
+    async fn put(&self, _key: &str, _entry: opendal::Buffer) -> Result<Duration> {
         Ok(if let Some(delay) = self.delay {
             sleep(delay).await;
             delay

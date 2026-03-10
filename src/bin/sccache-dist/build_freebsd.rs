@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::Buf;
 use flate2::read::ZlibDecoder;
 use futures::lock::Mutex;
 use itertools::Itertools;
@@ -374,7 +374,7 @@ impl PotBuilder {
             cwd,
         }: CompileCommand,
         output_paths: Vec<String>,
-        inputs: Bytes,
+        inputs: opendal::Buffer,
         cid: &str,
         pot_fs_root: &Path,
         job_queue: &tokio::sync::Semaphore,
@@ -401,7 +401,7 @@ impl PotBuilder {
             let jail_root = pot_fs_root.join("jails").join(cid).join("m");
             tokio::task::spawn_blocking(move || {
                 // Copy inputs to jail_root
-                tar::Archive::new(ZlibDecoder::new(&inputs[..]))
+                tar::Archive::new(ZlibDecoder::new(inputs.reader()))
                     .unpack(&jail_root)
                     .context("Failed to unpack inputs to tempdir")
                     .map_err(BuildError::UnpackInputs)
@@ -565,7 +565,7 @@ impl BuilderIncoming for PotBuilder {
         &self,
         job_id: &str,
         toolchain_dir: &Path,
-        inputs: Bytes,
+        inputs: opendal::Buffer,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> BuildResult {
