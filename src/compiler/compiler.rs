@@ -93,7 +93,6 @@ where
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
-        active: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput>;
 
     fn get_executable(&self) -> PathBuf;
@@ -153,9 +152,8 @@ where
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
-        active: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput> {
-        self.cmd.execute(service, creator, active).await
+        self.cmd.execute(service, creator).await
     }
 
     fn box_clone(&self) -> Box<dyn CompileCommand<T>> {
@@ -174,7 +172,6 @@ pub trait CompileCommandImpl: Send + Sync + Clone + 'static {
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
-        active: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync;
@@ -222,9 +219,8 @@ impl CompileCommandImpl for SingleCompileCommand {
 
     async fn execute<T>(
         &self,
-        _service: &server::SccacheService<T>,
+        service: &server::SccacheService<T>,
         creator: &T,
-        _active: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
@@ -236,13 +232,30 @@ impl CompileCommandImpl for SingleCompileCommand {
             executable,
             out_pretty,
         } = self;
+
         trace!("[{out_pretty}]: Compiling locally");
+
         let mut cmd = creator.clone().new_command_sync(executable);
+
         cmd.args(arguments)
             .env_clear()
-            .envs(env_vars.clone())
-            .current_dir(cwd);
-        run_input_output(cmd, None).await
+            .current_dir(cwd)
+            .envs(env_vars.iter().map(|(k, v)| (k, v)));
+
+        let child = cmd
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .await?;
+
+        // Increment active_compilations after spawn() acquires the jobserver token
+        let _active = service.increment_active_compilations();
+
+        let output = child.wait_with_output().await?;
+
+        // ProcessOutput -> Result<ProcessOutput, ProcessError>
+        output.into()
     }
 }
 
@@ -1162,11 +1175,7 @@ where
         } = self.local;
 
         compile_cmd
-            .execute(
-                service,
-                command_creator,
-                service.increment_active_compilations(),
-            )
+            .execute(service, command_creator)
             .await
             .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o))
     }
@@ -1198,11 +1207,7 @@ where
 
         match self.dist {
             None => compile_cmd
-                .execute(
-                    service,
-                    command_creator,
-                    service.increment_active_compilations(),
-                )
+                .execute(service, command_creator)
                 .await
                 .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o)),
             Some(dist) => {
@@ -1231,11 +1236,7 @@ where
                             // `{:#}` prints the error and the causes in a single line.
                             warn!("[{out_pretty}]: Could not perform distributed compile: {e:#}");
                             compile_cmd
-                                .execute(
-                                    service,
-                                    command_creator,
-                                    service.increment_active_compilations(),
-                                )
+                                .execute(service, command_creator)
                                 .await
                                 .map(move |o| (hash_key, outputs, cacheable, DistType::Error, o))
                         }

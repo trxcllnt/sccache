@@ -24,7 +24,7 @@ use crate::{
     },
     counted_array, debug_if_trace, dist,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
-    server::{SccacheGaugeIncrement, SccacheService},
+    server::SccacheService,
     util::{
         Digest, HASH_BUFFER_SIZE, OsStrExt, SCCACHE_GLOBAL_TMPDIR, read_line_batches,
         resolve_compiler_avoiding_ccache, run_input_output, split_quoted_shell_str,
@@ -920,12 +920,7 @@ impl CompileCommandImpl for NvccCompileCommand {
         self.cwd.clone()
     }
 
-    async fn execute<T>(
-        &self,
-        service: &SccacheService<T>,
-        creator: &T,
-        active: SccacheGaugeIncrement,
-    ) -> Result<ProcessOutput>
+    async fn execute<T>(&self, service: &SccacheService<T>, creator: &T) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
@@ -961,7 +956,6 @@ impl CompileCommandImpl for NvccCompileCommand {
             .await?;
 
         drop(pending);
-        drop(active);
 
         let maybe_keep_temps_then_clean = || async move {
             let _active = service.increment_active_compilations();

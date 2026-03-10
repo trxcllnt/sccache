@@ -2810,7 +2810,6 @@ mod test {
 
     #[test]
     fn test_compile_simple() {
-        let active = crate::server::SccacheGauge::default();
         let creator = new_creator();
         let f = TestFixture::new();
         let parsed_args = ParsedArguments {
@@ -2850,9 +2849,7 @@ mod test {
         assert!(dist_command.is_some());
         #[cfg(not(feature = "dist-client"))]
         assert!(dist_command.is_none());
-        let _ = command
-            .execute(&service, &creator, active.increment())
-            .wait();
+        let _ = command.execute(&service, &creator).wait();
         assert_eq!(Cacheable::Yes, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());
@@ -2882,7 +2879,6 @@ mod test {
 
     #[test]
     fn test_compile_not_cacheable_pdb() {
-        let active = crate::server::SccacheGauge::default();
         let creator = new_creator();
         let f = TestFixture::new();
         let pdb = f.touch("foo.pdb").unwrap();
@@ -2933,9 +2929,7 @@ mod test {
         assert!(dist_command.is_some());
         #[cfg(not(feature = "dist-client"))]
         assert!(dist_command.is_none());
-        let _ = command
-            .execute(&service, &creator, active.increment())
-            .wait();
+        let _ = command.execute(&service, &creator).wait();
         assert_eq!(Cacheable::No, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());

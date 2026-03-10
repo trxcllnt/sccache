@@ -1206,13 +1206,8 @@ where
         self.cmd.get_cwd()
     }
 
-    async fn execute(
-        &self,
-        service: &SccacheService<T>,
-        creator: &T,
-        active: crate::server::SccacheGaugeIncrement,
-    ) -> Result<ProcessOutput> {
-        let out = self.cmd.execute(service, creator, active).await?;
+    async fn execute(&self, service: &SccacheService<T>, creator: &T) -> Result<ProcessOutput> {
+        let out = self.cmd.execute(service, creator).await?;
         // Ensure the dependency file exists
         self.compilation.generate_dependencies(creator).await?;
         Ok(out)
