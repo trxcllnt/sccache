@@ -25,12 +25,12 @@ pub struct FileObjectSource {
     /// Identifier for this object. Should be unique within a compilation unit.
     /// Note that a compilation unit is a single source file in C/C++ and a crate in Rust.
     pub key: String,
+    /// Path parent dir (or cwd if parent is None)
+    pub dir: PathBuf,
     /// Absolute path to the file.
     pub path: PathBuf,
     /// Whether the file must be present on disk and is essential for the compilation.
     pub optional: bool,
-    /// Whether the file size must be greater than 0 bytes.
-    pub must_be_non_empty: bool,
 }
 
 /// Result of a cache lookup.
@@ -96,18 +96,6 @@ impl std::fmt::Display for UnexpectedFileSize {
 
 impl std::error::Error for UnexpectedFileSize {}
 
-/// Error that indicates we expected a file to be larger than 0 bytes.
-#[derive(Debug)]
-pub struct UnexpectedEmptyFile(pub PathBuf);
-
-impl std::fmt::Display for UnexpectedEmptyFile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Expected {:?} to be larger than 0 bytes", self.0)
-    }
-}
-
-impl std::error::Error for UnexpectedEmptyFile {}
-
 impl CacheRead {
     /// Create a cache entry from `reader`.
     pub fn from<R>(reader: R) -> Result<CacheRead>
@@ -125,9 +113,9 @@ impl CacheRead {
     where
         T: Write,
     {
-        let file = self.zip.by_name(name).or(Err(DecompressionFailure {
+        let file = self.zip.by_name(name).map_err(|_| DecompressionFailure {
             message: format!("Failed to decompress {name:?}"),
-        }))?;
+        })?;
         if file.compression() != CompressionMethod::Stored {
             bail!(DecompressionFailure {
                 message: format!(
@@ -138,9 +126,9 @@ impl CacheRead {
             });
         }
         let mode = file.unix_mode();
-        zstd::stream::copy_decode(file, to).or(Err(DecompressionFailure {
+        zstd::stream::copy_decode(file, to).map_err(|_| DecompressionFailure {
             message: format!("Failed to decompress {name:?}"),
-        }))?;
+        })?;
         Ok(mode)
     }
 
@@ -175,32 +163,18 @@ impl CacheRead {
         pool.spawn_blocking(move || {
             for FileObjectSource {
                 key,
+                dir,
                 path,
                 optional,
-                must_be_non_empty,
             } in objects
             {
-                let dir = match path.parent() {
-                    Some(d) => d,
-                    None => bail!("Output file without a parent directory!"),
-                };
                 // Write the cache entry to a tempfile and then atomically
                 // move it to its final location so that other rustc invocations
                 // happening in parallel don't see a partially-written file.
                 let mut tmp = crate::util::tempfile_in(dir)?;
                 match (self.get_object(&key, &mut tmp), optional) {
                     (Ok(mode), _) => {
-                        if must_be_non_empty {
-                            let size_on_disk = tmp
-                                .flush()
-                                .and_then(|_| tmp.as_file_mut().metadata())?
-                                .len();
-                            if size_on_disk == 0 {
-                                bail!(anyhow!(UnexpectedEmptyFile(path)));
-                            }
-                        }
-
-                        let file = match tmp.persist(&path) {
+                        match tmp.persist(&path) {
                             Ok(file) => {
                                 if let Some(mode) = mode {
                                     set_file_mode(&path, mode)?;
@@ -212,13 +186,6 @@ impl CacheRead {
                             }
                             Err(err) => Err(err.error),
                         }?;
-
-                        if must_be_non_empty {
-                            let size_on_disk = file.metadata()?.len();
-                            if size_on_disk == 0 {
-                                bail!(anyhow!(UnexpectedEmptyFile(path)));
-                            }
-                        }
                     }
                     (Err(e), false) => return Err(e),
                     // skip if no object found and it's optional
@@ -255,19 +222,13 @@ impl CacheWrite {
                 key,
                 path,
                 optional,
-                must_be_non_empty,
+                ..
             } in objects
             {
                 let file = fs::File::open(&path)
                     .with_context(|| format!("failed to open file `{path:?}`"));
                 match (file, optional) {
                     (Ok(mut file), _) => {
-                        if must_be_non_empty {
-                            let size_on_disk = file.metadata()?.len();
-                            if size_on_disk == 0 {
-                                bail!(anyhow!(UnexpectedEmptyFile(path)));
-                            }
-                        }
                         let mode = get_file_mode(&file)?;
                         entry.put_object(&key, &mut file, mode).with_context(|| {
                             format!("failed to put object `{path:?}` in cache entry")

@@ -831,7 +831,6 @@ where
             ArtifactDescriptor {
                 path: dwo,
                 optional: true,
-                must_be_non_empty: false,
             },
         );
     }
@@ -846,7 +845,6 @@ where
             ArtifactDescriptor {
                 path: gcno,
                 optional: false,
-                must_be_non_empty: false,
             },
         );
         profile_generate = true;
@@ -868,7 +866,6 @@ where
             ArtifactDescriptor {
                 path: p.clone(),
                 optional: false,
-                must_be_non_empty: false,
             },
         );
     }
@@ -879,7 +876,6 @@ where
             ArtifactDescriptor {
                 path: path.clone(),
                 optional: false,
-                must_be_non_empty: false,
             },
         );
     }
@@ -900,7 +896,6 @@ where
         ArtifactDescriptor {
             path: output,
             optional: false,
-            must_be_non_empty: false,
         },
     );
 
@@ -957,7 +952,6 @@ fn module_artifact_descriptor(
     ArtifactDescriptor {
         path,
         optional: false,
-        must_be_non_empty: false,
     }
 }
 
@@ -1648,7 +1642,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -1681,7 +1674,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -1704,7 +1696,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -1736,7 +1727,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -1772,7 +1762,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             ),
             (
@@ -1780,7 +1769,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.dwo".into(),
                     optional: true,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -1828,7 +1816,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -1862,7 +1849,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             ),
             (
@@ -1870,7 +1856,6 @@ mod test {
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.gcno"),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -1905,7 +1890,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             ),
             (
@@ -1913,7 +1897,6 @@ mod test {
                 ArtifactDescriptor {
                     path: PathBuf::from("foo.gcno"),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -1948,7 +1931,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -1982,7 +1964,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -2017,7 +1998,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -2056,7 +2036,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -2102,7 +2081,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             ),
             (
@@ -2110,7 +2088,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o.d".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -2251,7 +2228,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             ),
             (
@@ -2259,7 +2235,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o.d".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -2297,7 +2272,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             ),
             (
@@ -2305,7 +2279,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o.d".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -2347,7 +2320,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             ),
             (
@@ -2355,7 +2327,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o.d".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -2582,7 +2553,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             ),
             (
@@ -2590,7 +2560,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o.d".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -2628,7 +2597,6 @@ mod test {
                 ArtifactDescriptor {
                     path: PathBuf::from("foo/bar.o"),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -2824,7 +2792,6 @@ mod test {
                     ArtifactDescriptor {
                         path: "foo.o".into(),
                         optional: false,
-                        must_be_non_empty: false,
                     }
                 )
             );
@@ -2868,7 +2835,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );
@@ -2890,7 +2856,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 },
             )]
             .into_iter()
@@ -2940,7 +2905,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 },
             )]
             .into_iter()
@@ -2988,7 +2952,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 },
             )]
             .into_iter()
@@ -3073,7 +3036,6 @@ mod test {
                 ArtifactDescriptor {
                     path: "foo.o".into(),
                     optional: false,
-                    must_be_non_empty: false,
                 }
             )
         );

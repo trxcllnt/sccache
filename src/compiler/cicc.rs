@@ -159,7 +159,6 @@ where
             ArtifactDescriptor {
                 path,
                 optional: false,
-                must_be_non_empty: false,
             },
         );
     }
@@ -192,7 +191,6 @@ where
                                             ArtifactDescriptor {
                                                 path: path.to_owned(),
                                                 optional: false,
-                                                must_be_non_empty: false,
                                             },
                                         );
                                     }
@@ -236,7 +234,6 @@ where
                 ArtifactDescriptor {
                     path,
                     optional: false,
-                    must_be_non_empty: true,
                 },
             );
         }

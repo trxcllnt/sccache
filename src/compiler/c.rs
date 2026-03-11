@@ -92,8 +92,6 @@ pub struct ArtifactDescriptor {
     pub path: PathBuf,
     /// Whether the artifact is an optional object file.
     pub optional: bool,
-    /// Whether the artifact size must be greater than 0 bytes.
-    pub must_be_non_empty: bool,
 }
 
 /// The results of parsing a compiler commandline.
@@ -1323,17 +1321,20 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
     }
 
     fn outputs<'a>(&'a self) -> Box<dyn Iterator<Item = FileObjectSource> + 'a> {
-        Box::new(
-            self.parsed_args
-                .outputs
-                .iter()
-                .map(|(k, output)| FileObjectSource {
-                    key: k.to_string(),
-                    path: output.path.clone(),
-                    optional: output.optional,
-                    must_be_non_empty: output.must_be_non_empty,
-                }),
-        )
+        Box::new(self.parsed_args.outputs.iter().map(|(k, output)| {
+            let dir = self
+                .cwd
+                .join(&output.path)
+                .parent()
+                .unwrap_or(self.cwd.as_path())
+                .to_owned();
+            FileObjectSource {
+                key: k.to_string(),
+                dir,
+                path: output.path.clone(),
+                optional: output.optional,
+            }
+        }))
     }
 }
 

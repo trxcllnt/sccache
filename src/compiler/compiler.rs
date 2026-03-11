@@ -17,10 +17,7 @@
 use crate::{cache::UnexpectedFileSize, dist::pkg, lru_disk_cache};
 
 use crate::{
-    cache::{
-        Cache, CacheRead, CacheWrite, DecompressionFailure, FileObjectSource, Storage,
-        UnexpectedEmptyFile,
-    },
+    cache::{Cache, CacheRead, CacheWrite, DecompressionFailure, FileObjectSource, Storage},
     compiler::{
         args::*,
         c::{CCompiler, CCompilerKind},
@@ -1111,9 +1108,6 @@ impl<'a> CacheLookup<'a> {
                         if let Some(err) = e.downcast_ref::<DecompressionFailure>() {
                             debug!("[{out_pretty}]: Failed to decompress object: {err:?}");
                             Ok(CacheLookupResult::Miss(MissType::CacheReadError))
-                        } else if let Some(err) = e.downcast_ref::<UnexpectedEmptyFile>() {
-                            debug!("[{out_pretty}]: {err:?}");
-                            Ok(CacheLookupResult::Miss(MissType::CacheReadError))
                         } else {
                             Err(e)
                         }
@@ -1550,7 +1544,6 @@ where
                 path: PathBuf,
                 data: dist::OutputData,
                 expected_size: u64,
-                must_be_non_empty: bool,
             }
 
             let mut output_paths = Vec::with_capacity(build_outputs_count);
@@ -1569,16 +1562,12 @@ where
 
                 let out = BuildOutput {
                     expected_size: data.lens().actual,
-                    // Do this in the iterator adapter so we can borrow `outputs` as mutable
-                    must_be_non_empty: if let Some(idx) =
-                        outputs.iter().position(|o| o.path == path)
-                    {
-                        outputs.swap_remove(idx).must_be_non_empty
-                    } else {
-                        false
-                    },
                     data,
-                    dir: PathBuf::new(),
+                    // Do this in the iterator adapter so we can borrow `outputs` as mutable
+                    dir: outputs
+                        .swap_remove(outputs.iter().position(|o| o.path == path).unwrap())
+                        .dir
+                        .clone(),
                     path,
                 };
 
@@ -1590,28 +1579,20 @@ where
             let unpack_result = futures::stream::iter(unpack_result);
 
             // Ensure the parent dirs exist
-            let unpack_result = unpack_result.and_then(|mut out| async {
+            let unpack_result = unpack_result.and_then(|out| async {
+                let dir = out.dir.as_path();
                 let path = out.path.as_path();
 
-                out.dir = match path.parent() {
-                    None => {
-                        return Err(anyhow!("Output file without a parent: {path:?}"));
-                    }
-                    Some(path) if path.as_os_str().is_empty() => PathBuf::new(),
-                    Some(path) => {
-                        tokio::fs::try_exists(path)
-                            .and_then(|exists| async move {
-                                if !exists {
-                                    tokio::fs::create_dir_all(path).await
-                                } else {
-                                    Ok(())
-                                }
-                            })
-                            .await
-                            .with_context(|| format!("Failed to create output dir {path:?}"))?;
-                        path.to_path_buf()
-                    }
-                };
+                tokio::fs::try_exists(dir)
+                    .and_then(|exists| async move {
+                        if !exists {
+                            tokio::fs::create_dir_all(dir).await
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .await
+                    .with_context(|| format!("Failed to create output dir {path:?}"))?;
 
                 Ok(out)
             });
@@ -1623,7 +1604,6 @@ where
                 let dir = out.dir.as_path();
                 let path = out.path.as_path();
                 let expected_size = out.expected_size;
-                let must_be_non_empty = out.must_be_non_empty;
 
                 // Create the output tempfile
                 let mut tmp = crate::util::tempfile_in(dir).with_context(|| {
@@ -1642,13 +1622,8 @@ where
                     return Err(UnexpectedFileSize(expected_size, bytes_written).into());
                 }
 
-                // Verify the tempfile file isn't empty
-                if must_be_non_empty && bytes_written == 0 {
-                    return Err(UnexpectedEmptyFile(path.to_owned()).into());
-                }
-
                 // Persist the tempfile to its real location
-                let file = match tmp.persist(path) {
+                match tmp.persist(path) {
                     Ok(file) => {
                         // Sync immediately so other readers see the file.
                         // This is important for nvcc's .module_id files,
@@ -1658,11 +1633,6 @@ where
                     Err(err) => Err(err.error),
                 }
                 .with_context(|| format!("Failed to persist tempfile to {path:?}"))?;
-
-                // Verify the output file isn't empty
-                if must_be_non_empty && file.metadata()?.len() == 0 {
-                    return Err(UnexpectedEmptyFile(path.to_owned()).into());
-                }
 
                 Ok(())
             });
@@ -1698,13 +1668,6 @@ where
                 if err.downcast_ref::<UnexpectedFileSize>().is_some() {
                     debug!("[{out_pretty}]: {err:?}");
                     retry_or_bail!(err);
-                } else if err.downcast_ref::<UnexpectedEmptyFile>().is_some() {
-                    debug!("[{out_pretty}]: {err:?}");
-                    has_inputs = false;
-                    match dist_client.del_job(job_id).await {
-                        Ok(_) => retry_or_bail!(err),
-                        Err(err) => retry_or_bail!(err),
-                    }
                 } else {
                     break Err(err);
                 }
