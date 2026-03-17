@@ -138,7 +138,11 @@ pub mod urls {
     }
     pub fn scheduler_run_job(scheduler_url: &reqwest::Url, job_id: &str) -> reqwest::Url {
         scheduler_url
-            .join(&format!("/api/v3/job/{job_id}"))
+            .join(&format!("/api/v2/job/{job_id}"))
+            .map(|mut url| {
+                url.set_query(Some("v=2"));
+                url
+            })
             .expect("failed to create run job url")
     }
     pub fn scheduler_del_job(scheduler_url: &reqwest::Url, job_id: &str) -> reqwest::Url {
@@ -449,6 +453,72 @@ mod scheduler {
         }
     }
 
+    struct RunJobBody(RunJobRequestV2);
+
+    impl<S> FromRequest<S> for RunJobBody
+    where
+        Bytes: FromRequest<S>,
+        S: Send + Sync,
+    {
+        type Rejection = (StatusCode, String);
+
+        async fn from_request(
+            mut req: Request,
+            _state: &S,
+        ) -> std::result::Result<Self, Self::Rejection> {
+            let Path::<String>(job_id) =
+                req.extract_parts::<Path<String>>().await.map_err(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal server error".into(),
+                    )
+                })?;
+
+            let Extension::<Arc<Metrics>>(metrics) = req
+                .extract_parts::<Extension<Arc<Metrics>>>()
+                .await
+                .map_err(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal server error".into(),
+                    )
+                })?;
+
+            let version_query_param =
+                url::form_urlencoded::parse(req.uri().query().unwrap_or("").as_bytes())
+                    .find_map(|(k, v)| if k == "v" { Some(v) } else { None });
+
+            let mut job = match version_query_param {
+                Some(std::borrow::Cow::Borrowed("2")) => {
+                    req.extract::<Bincode<RunJobRequestV2>, _>().await?.0
+                }
+                _ => {
+                    let job = req.extract::<Bincode<RunJobRequest>, _>().await?.0;
+                    RunJobRequestV2 {
+                        labels: None,
+                        outputs: job.outputs,
+                        toolchain: job.toolchain,
+                        command: job.command,
+                    }
+                }
+            };
+
+            let labels = job.labels.get_or_insert_default();
+
+            // Add labels from the auth middleware to `job.labels`
+            if let Some(claims) = metrics.scoped_labels() {
+                for (k, v) in claims.iter() {
+                    labels.insert(k.clone(), v.clone());
+                }
+            }
+
+            // Add `job_id` to  `job.labels`
+            labels.insert("job_id".into(), job_id.clone());
+
+            Ok(Self(job))
+        }
+    }
+
     struct RequestBodyTokioAsyncRead(Box<dyn tokio::io::AsyncRead + Send + Unpin>);
 
     impl<S> FromRequest<S> for RequestBodyTokioAsyncRead
@@ -754,54 +824,9 @@ mod scheduler {
                     "/api/v2/job/{job_id}",
                     routing::post(
                         |TypedHeader(AcceptedMimeTypes(mime)),
-                         Extension::<Arc<Metrics>>(metrics),
                          Extension::<Arc<SchedulerState>>(state),
                          Path::<String>(job_id),
-                         Bincode(job): Bincode<RunJobRequest>| async move {
-                            let labels = metrics.scoped_labels().map(Arc::unwrap_or_clone);
-
-                            state
-                                .service
-                                .run_job(
-                                    &job_id,
-                                    RunJobRequestV2 {
-                                        labels,
-                                        outputs: job.outputs,
-                                        toolchain: job.toolchain,
-                                        command: job.command,
-                                    },
-                                )
-                                .and_then(|res| mime.serialize(res))
-                                .map_err(|err| AppError(err).into_response())
-                                .await
-                        },
-                    ),
-                )
-                // POST
-                .route(
-                    "/api/v3/job/{job_id}",
-                    routing::post(
-                        |TypedHeader(AcceptedMimeTypes(mime)),
-                         Extension::<Arc<Metrics>>(metrics),
-                         Extension::<Arc<SchedulerState>>(state),
-                         Path::<String>(job_id),
-                         Bincode(mut job): Bincode<RunJobRequestV2>| async move {
-                            // Augment `job.labels` with labels from the auth middleware.
-                            // If `job.labels` is None and auth claims is empty, don't
-                            // allocate the `job.labels` HashMap.
-                            if let Some(claims) = metrics.scoped_labels() {
-                                if !claims.is_empty() {
-                                    if job.labels.is_none() {
-                                        let _ = job.labels.insert(Arc::unwrap_or_clone(claims));
-                                    } else {
-                                        let labels = job.labels.get_or_insert_default();
-                                        for (k, v) in claims.iter() {
-                                            labels.insert(k.clone(), v.clone());
-                                        }
-                                    }
-                                }
-                            }
-
+                         RunJobBody(job): RunJobBody| async move {
                             state
                                 .service
                                 .run_job(&job_id, job)
