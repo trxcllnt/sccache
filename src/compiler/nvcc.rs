@@ -1317,7 +1317,7 @@ where
                     .map(|parsed_args| {
                         fixup_cicc_args(
                             parsed_args,
-                            &keep_dir,
+                            keep_dir.as_deref(),
                             compile_flag,
                             cudafe_has_gen_module_id_file_flag,
                         )
@@ -1495,7 +1495,7 @@ fn parse_args_simple(args: &[String], cwd: &Path) -> ParsedArguments {
 
 fn fixup_cicc_args(
     mut pa: ParsedArguments,
-    keep_dir: &Option<PathBuf>,
+    keep_dir: Option<&Path>,
     compile_flag: &NvccCompileFlag,
     cudafe_has_gen_module_id_file_flag: bool,
 ) -> ParsedArguments {

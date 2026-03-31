@@ -42,20 +42,20 @@ pub struct Clang {
 impl Clang {
     pub fn new(clangplusplus: bool, is_appleclang: bool, version: Option<String>) -> Self {
         Self {
-            supports_fminimize_whitespace: is_minversion(is_appleclang, &version, 14),
+            supports_fminimize_whitespace: is_minversion(is_appleclang, version.as_ref(), 14),
             clangplusplus,
             version,
         }
     }
 }
 
-fn is_minversion(is_appleclang: bool, version: &Option<String>, major: u64) -> bool {
+fn is_minversion(is_appleclang: bool, version: Option<&String>, major: u64) -> bool {
     // Apple clang follows its own versioning scheme.
     if is_appleclang {
         return false;
     }
 
-    let version_val = match version.clone() {
+    let version_val = match version {
         Some(version_val) => version_val,
         None => return false,
     };
