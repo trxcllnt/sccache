@@ -705,8 +705,8 @@ fn generate_compile_commands(
 
     let compile_flag = parsed_args.compilation_flag.as_os_str().into();
 
-    // Only cache compilations that produce object files.
-    let cacheable = if compile_flag == NvccCompileFlag::Device {
+    // Don't cache compilations that produce executables.
+    let cacheable = if compile_flag != NvccCompileFlag::Executable {
         Cacheable::Yes
     } else {
         Cacheable::No
