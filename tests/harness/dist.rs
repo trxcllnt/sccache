@@ -681,7 +681,7 @@ impl DistSystemBuilder {
     }
 
     pub fn with_name(&mut self, name: &str) -> &mut Self {
-        self.dist_system_name = name.to_owned();
+        self.dist_system_name = name.replace("+", "x");
         self
     }
 

@@ -635,8 +635,7 @@ async fn test_dist_cuda_compiles(
 ) -> Result<()> {
     let test_name = format!(
         "test_dist_cuda_compiles_{}_{}_{message_broker}",
-        cuda_compiler.name.trim_end_matches('+'),
-        host_compiler.name.trim_end_matches('+')
+        cuda_compiler.name, host_compiler.name
     );
     let system = DistSystem::builder()
         .with_name(&test_name)
@@ -717,7 +716,7 @@ async fn test_dist_cuda_compiles(
 async fn test_dist_stdpar_compiles(compiler: &Compiler, message_broker: &str) -> Result<()> {
     let test_name = format!(
         "test_dist_stdpar_compiles_{}_{message_broker}",
-        compiler.name.trim_end_matches('+')
+        compiler.name
     );
     let system = DistSystem::builder()
         .with_name(&test_name)
