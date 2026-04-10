@@ -6,7 +6,10 @@ services:
     restart: on-failure
     ports: ["10500:10500"]
     environment: &sccache_scheduler_env
+      # Comment this out to use redis as the message broker
       AMQP_ADDR: "amqp://rabbitmq:5672//"
+      # Uncomment this to use redis as the message broker
+      # REDIS_ADDR: "redis://redis:6379"
       DEBIAN_FRONTEND: "noninteractive"
       RUST_BACKTRACE: "${RUST_BACKTRACE:-1}"
       SCCACHE_NO_DAEMON: "1"
@@ -59,7 +62,7 @@ services:
       SCCACHE_DIST_SERVER_CACHE_DIR: "/sccache/server-1"
       SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE: "10737418240" # 10 GiBytes
       SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT: "http://vector-ingest:9091/metrics/job/server-1"
-      SCCACHE_LOG: "celery=warn,sccache=${SCCACHE_LOG:-trace}"
+      SCCACHE_LOG: "celery=warn,sccache=${SCCACHE_LOG:-debug}"
     volumes:
       - /tmp/sccache:/sccache:z
       - ../../target/${CARGO_BUILD_TARGET:-x86_64-unknown-linux-musl}/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro

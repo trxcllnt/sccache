@@ -285,7 +285,6 @@ impl Default for ServerMetrics {
 
 pub struct JobInfo {
     created_at: Instant,
-    reply_to: String,
 }
 
 #[derive(Clone)]
@@ -422,7 +421,6 @@ impl AsyncMulticastFunc<Toolchain, PathBuf> for LoadToolchainFn {
 #[derive(Clone)]
 struct RunJobArgs {
     job_id: String,
-    reply_to: String,
     toolchain: Toolchain,
     command: CompileCommand,
     outputs: Vec<String>,
@@ -531,7 +529,6 @@ impl RunJobFunc {
     async fn load_job_and_run_build(
         &self,
         job_id: &str,
-        reply_to: &str,
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
@@ -544,7 +541,6 @@ impl RunJobFunc {
             job_id.to_owned(),
             JobInfo {
                 created_at: Instant::now(),
-                reply_to: reply_to.to_owned(),
             },
         );
 
@@ -596,7 +592,6 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFunc {
     async fn call(&self, args: &RunJobArgs) -> Result<RunJobResponse> {
         let RunJobArgs {
             job_id,
-            reply_to,
             toolchain,
             command,
             outputs,
@@ -609,7 +604,6 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFunc {
                     labels,
                     self.load_job_and_run_build(
                         job_id,
-                        reply_to,
                         toolchain.clone(),
                         command.clone(),
                         outputs.clone(),
@@ -630,7 +624,6 @@ pub struct Server {
     state: ServerState,
     tasks: Arc<dyn dist::tasks::ServerTasks>,
     jobs: AsyncMulticast<RunJobArgs, RunJobResponse>,
-    schedulers: Arc<futures::lock::Mutex<HashMap<String, Instant>>>,
 }
 
 impl Server {
@@ -652,7 +645,6 @@ impl Server {
                 state,
                 toolchains: AsyncMulticast::new(LoadToolchainFn { toolchains }),
             }),
-            schedulers: Default::default(),
         });
 
         this.tasks.set_service(this.clone())?;
@@ -678,11 +670,7 @@ impl Server {
 
         // Start celery
         let celery = async {
-            let res = self
-                .tasks
-                .app()
-                .consume_from(&self.tasks.queues_to_consume())
-                .await;
+            let res = self.tasks.app().consume().await;
             tracing::info!("Celery shutdown");
             res.context("Celery error")
         };
@@ -710,7 +698,7 @@ impl Server {
             let this = self.clone();
             async move {
                 loop {
-                    let _ = this.send_heartbeat().await;
+                    let _ = this.send_status_update().await;
                     tokio::time::sleep(heartbeat_interval).await;
                 }
             }
@@ -766,19 +754,11 @@ impl Server {
             // Write "Server terminated" job responses and send the `job_finished` tasks
             // back to each interested scheduler.
             let replies = async {
-                let replies =
-                    jobs.into_iter()
-                        .map(|(job_id, JobInfo { reply_to, .. })| async move {
-                            tracing::info!(
-                                "Sending server terminated response for job {job_id} to {reply_to}"
-                            );
-                            self.job_finished(
-                                &job_id,
-                                &reply_to,
-                                &RunJobResponse::server_terminated(&self.state.id),
-                            )
-                            .await
-                        });
+                let replies = jobs.into_iter().map(|(job_id, _)| async move {
+                    tracing::info!("Sending server terminated response for job {job_id}");
+                    self.job_finished(&job_id, &RunJobResponse::server_terminated(&self.state.id))
+                        .await
+                });
                 futures::future::try_join_all(replies)
                     .await
                     .inspect(|_res| {
@@ -801,27 +781,12 @@ impl Server {
             .map(|_| tracing::info!("Server shutdown gracefully"))
     }
 
-    async fn send_heartbeat(&self) -> Result<()> {
-        // Prune schedulers we haven't seen in 90s
-        let now = Instant::now();
-        let timeout = Duration::from_secs(90);
-        let schedulers = {
-            let mut schedulers = self.schedulers.lock().await;
-            schedulers.retain(|_, last_seen| now.duration_since(*last_seen) <= timeout);
-            schedulers.keys().cloned().collect::<Vec<_>>()
-        };
-        let status: StatusUpdate = (&self.state).into();
-
-        futures::future::try_join_all(
-            std::iter::once(self.tasks.update_status(status.clone(), None)).chain(
-                schedulers
-                    .iter()
-                    .map(|send_to| self.tasks.update_status(status.clone(), Some(send_to))),
-            ),
-        )
-        .await
-        .map_err(anyhow::Error::new)
-        .map(|_| ())
+    async fn send_status_update(&self) -> Result<()> {
+        self.tasks
+            .update_status((&self.state).into())
+            .await
+            .map_err(anyhow::Error::new)
+            .map(|_| ())
     }
 
     async fn put_job_result(&self, job_id: &str, result: &RunJobResponse) -> Result<()> {
@@ -845,14 +810,14 @@ impl Server {
             })
     }
 
-    async fn job_finished(&self, job_id: &str, reply_to: &str, res: &RunJobResponse) -> Result<()> {
+    async fn job_finished(&self, job_id: &str, res: &RunJobResponse) -> Result<()> {
         self.state.metrics.inc_job_finished_count();
 
         // Store the job result for retrieval by a scheduler
         let _ = self.put_job_result(job_id, res).await;
 
         self.tasks
-            .job_finished(job_id, reply_to, From::from(&self.state))
+            .job_finished(job_id, From::from(&self.state))
             .await
             .map_err(anyhow::Error::new)
             .map(|_| ())
@@ -864,34 +829,17 @@ impl ServerService for Server {
     async fn run_job(
         &self,
         job_id: &str,
-        reply_to: &str,
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
         labels: HashMap<String, String>,
     ) -> Result<RunJobResponse> {
-        let reply_to = reply_to.to_owned();
-
-        self.schedulers
-            .lock()
-            .await
-            .entry(reply_to.clone())
-            .and_modify(|last_seen| {
-                *last_seen = Instant::now();
-            })
-            .or_insert_with(Instant::now);
-
         // Broadcast status after accepting the job
-        self.tasks
-            .update_status((&self.state).into(), Some(&reply_to))
-            .await
-            .map_err(anyhow::Error::new)
-            .map(|_| ())?;
+        self.send_status_update().await?;
 
         self.jobs
             .call(RunJobArgs {
                 job_id: job_id.to_owned(),
-                reply_to,
                 toolchain,
                 command,
                 outputs,
@@ -901,7 +849,7 @@ impl ServerService for Server {
             .map(|(_, res)| res)
     }
 
-    async fn on_failure(&self, job_id: &str, reply_to: &str, job_err: RunJobError) -> Result<()> {
+    async fn on_failure(&self, job_id: &str, job_err: RunJobError) -> Result<()> {
         // Remove job and increment the job_finished counter
         if self.state.jobs.lock().unwrap().remove(job_id).is_some() {
             let server_id = self.state.id.clone();
@@ -925,7 +873,7 @@ impl ServerService for Server {
             tracing::warn!("[on_failure({job_id})]: {job_res:?}");
 
             // Store the job result and notify the interested scheduler
-            let res = self.job_finished(job_id, reply_to, &job_res).await;
+            let res = self.job_finished(job_id, &job_res).await;
             // Clean up the build resources
             self.builder.finish_build(job_id).await;
             res
@@ -934,33 +882,16 @@ impl ServerService for Server {
         }
     }
 
-    async fn on_success(
-        &self,
-        job_id: &str,
-        reply_to: &str,
-        job_res: &RunJobResponse,
-    ) -> Result<()> {
+    async fn on_success(&self, job_id: &str, job_res: &RunJobResponse) -> Result<()> {
         // Remove job and increment the job_finished counter
         if self.state.jobs.lock().unwrap().remove(job_id).is_some() {
             // Store the job result and notify the interested scheduler
-            let res = self.job_finished(job_id, reply_to, job_res).await;
+            let res = self.job_finished(job_id, job_res).await;
             // Clean up the build resources
             self.builder.finish_build(job_id).await;
             res
         } else {
             Ok(())
         }
-    }
-
-    async fn update_scheduler_status(&self, status: StatusUpdate) -> Result<()> {
-        self.schedulers
-            .lock()
-            .await
-            .entry(status.queue.clone())
-            .and_modify(|last_seen| {
-                *last_seen = Instant::now();
-            })
-            .or_insert_with(Instant::now);
-        Ok(())
     }
 }

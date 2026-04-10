@@ -2495,8 +2495,6 @@ pub mod scheduler {
     #[serde(deny_unknown_fields)]
     pub struct FileConfig {
         pub client_auth: Option<Vec<ClientAuth>>,
-        #[serde(default = "Config::default_heartbeat_interval_ms")]
-        pub heartbeat_interval_ms: u64,
         #[serde(default = "Config::default_job_time_limit")]
         pub job_time_limit: u32,
         #[serde(default = "CacheConfigs::default")]
@@ -2521,7 +2519,6 @@ pub mod scheduler {
         fn default() -> Self {
             Self {
                 client_auth: Some(vec![ClientAuth::Insecure]),
-                heartbeat_interval_ms: Config::default_heartbeat_interval_ms(),
                 job_time_limit: Config::default_job_time_limit(),
                 jobs: CacheConfigs::default(),
                 keepalive: Default::default(),
@@ -2540,7 +2537,6 @@ pub mod scheduler {
     #[derive(Debug)]
     pub struct Config {
         pub client_auth: Vec<ClientAuth>,
-        pub heartbeat_interval_ms: u64,
         pub job_time_limit: u32,
         pub jobs: Vec<CacheType>,
         pub keepalive: DistNetworkingKeepalive,
@@ -2561,10 +2557,6 @@ pub mod scheduler {
     }
 
     impl Config {
-        // Default to 15s
-        fn default_heartbeat_interval_ms() -> u64 {
-            15000
-        }
         pub fn default_job_time_limit() -> u32 {
             600
         }
@@ -2584,7 +2576,6 @@ pub mod scheduler {
         pub fn load(conf_path: Option<PathBuf>) -> Result<Self> {
             let FileConfig {
                 client_auth,
-                heartbeat_interval_ms,
                 job_time_limit,
                 jobs,
                 keepalive,
@@ -2650,11 +2641,6 @@ pub mod scheduler {
                 .merge(toolchains)
                 .merge(config_from_env("SCCACHE_DIST_TOOLCHAINS_")?.cache);
 
-            let heartbeat_interval_ms =
-                number_from_env_var("SCCACHE_DIST_SCHEDULER_HEARTBEAT_INTERVAL")
-                    .transpose()?
-                    .unwrap_or(heartbeat_interval_ms);
-
             let job_time_limit = number_from_env_var("SCCACHE_DIST_JOB_TIME_LIMIT_SECS")
                 .transpose()?
                 .unwrap_or(job_time_limit);
@@ -2686,7 +2672,6 @@ pub mod scheduler {
 
             Ok(Self {
                 client_auth,
-                heartbeat_interval_ms,
                 job_time_limit,
                 jobs: jobs.into(),
                 keepalive: keepalive.with_env_or_config(),
@@ -2710,7 +2695,6 @@ pub mod scheduler {
         fn from(scheduler_config: Config) -> Self {
             Self {
                 client_auth: Some(scheduler_config.client_auth),
-                heartbeat_interval_ms: scheduler_config.heartbeat_interval_ms,
                 job_time_limit: scheduler_config.job_time_limit,
                 jobs: scheduler_config.jobs.into(),
                 keepalive: scheduler_config.keepalive,
@@ -2732,7 +2716,6 @@ pub mod scheduler {
                 client_auth: scheduler_config
                     .client_auth
                     .unwrap_or_else(|| vec![ClientAuth::Insecure]),
-                heartbeat_interval_ms: scheduler_config.heartbeat_interval_ms,
                 job_time_limit: scheduler_config.job_time_limit,
                 jobs: scheduler_config.jobs.into(),
                 keepalive: scheduler_config.keepalive,

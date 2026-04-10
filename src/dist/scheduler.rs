@@ -217,7 +217,6 @@ struct ServerInfo {
 #[derive(Clone)]
 struct RunJobArgs {
     job_id: String,
-    reply_to: String,
     toolchain: Toolchain,
     command: CompileCommand,
     outputs: Vec<String>,
@@ -241,7 +240,6 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFn {
     async fn call(&self, args: &RunJobArgs) -> Result<RunJobResponse> {
         let RunJobArgs {
             job_id,
-            reply_to,
             toolchain,
             command,
             outputs,
@@ -253,7 +251,7 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFn {
 
         let res = self
             .tasks
-            .run_job(job_id, reply_to, toolchain, command, outputs, labels)
+            .run_job(job_id, toolchain, command, outputs, labels)
             .await
             .map_err(anyhow::Error::new);
 
@@ -310,15 +308,10 @@ impl Scheduler {
         &self,
         handle: axum_server::Handle<SocketAddr>,
         server: impl futures::Future<Output = Result<()>>,
-        heartbeat_interval: Duration,
         shutdown_timeout: Duration,
     ) -> Result<()> {
         let celery = async {
-            let res = self
-                .tasks
-                .app()
-                .consume_from(&self.tasks.queues_to_consume())
-                .await;
+            let res = self.tasks.app().consume().await;
             tracing::info!("Celery shutdown");
             res.context("Celery error")
         };
@@ -339,16 +332,6 @@ impl Scheduler {
             Ok(())
         };
 
-        let status = tokio::spawn({
-            let this = self.clone();
-            async move {
-                loop {
-                    let _ = this.send_heartbeat().await;
-                    tokio::time::sleep(heartbeat_interval).await;
-                }
-            }
-        });
-
         // Wait for Celery or sigint, then shutdown Axum and Celery
         let shutdown_celery = async move {
             // tokio::select! deterministically polls its futures in order, so
@@ -362,11 +345,6 @@ impl Scheduler {
                 biased;
                 res = celery => res,
                 res = sigint => res,
-                // This should never resolve before either celery or sigint unless
-                // a catastrophic error occurs (tokio dies somehow?). Just polling
-                // it here so the task is cancelled once either of the above two
-                // futures complete first.
-                _ = status => Ok(()),
             };
 
             tracing::info!(
@@ -399,69 +377,6 @@ impl Scheduler {
         shutdown_server
             .and(shutdown_broker)
             .map(|_| tracing::info!("Scheduler shutdown gracefully"))
-    }
-
-    async fn send_heartbeat(&self) -> Result<()> {
-        let (cpu_usage, mem_avail, mem_total) = self.metrics.system_metrics();
-        let status = self.get_status().await?;
-        let status = StatusUpdate {
-            id: self.scheduler_id.clone(),
-            queue: self.tasks.app().default_queue.clone(),
-            info: dist::SysStats {
-                cpu_usage,
-                mem_avail,
-                mem_total,
-                num_cpus: status.info.num_cpus,
-                occupancy: status.info.occupancy,
-                pre_fetch: status.info.pre_fetch,
-            },
-            jobs: status.jobs,
-            max_job_age: {
-                let max_job_age = status
-                    .servers
-                    .iter()
-                    .map(|s| s.max_job_age)
-                    .max()
-                    .unwrap_or(0);
-                (
-                    // microseconds as seconds
-                    max_job_age.saturating_div(1_000_000) as u64,
-                    // remainder microseconds as nanoseconds
-                    (max_job_age % 1_000_000).saturating_mul(1_000) as u32,
-                )
-            },
-            timestamp: {
-                let timestamp = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or(Duration::from_secs(0))
-                    .as_micros();
-                (
-                    // microseconds as seconds
-                    timestamp.saturating_div(1_000_000) as u64,
-                    // remainder microseconds as nanoseconds
-                    (timestamp % 1_000_000).saturating_mul(1_000) as u32,
-                )
-            },
-        };
-
-        let servers = self
-            .servers
-            .lock()
-            .await
-            .values()
-            .map(|s| s.queue.clone())
-            .collect::<Vec<_>>();
-
-        futures::future::try_join_all(
-            std::iter::once(self.tasks.update_status(status.clone(), None)).chain(
-                servers
-                    .iter()
-                    .map(|send_to| self.tasks.update_status(status.clone(), Some(send_to))),
-            ),
-        )
-        .await
-        .map_err(anyhow::Error::new)
-        .map(|_| ())
     }
 
     fn prune_servers(servers: &mut HashMap<String, ServerInfo>) {
@@ -677,7 +592,7 @@ impl SchedulerService for Scheduler {
             has_inputs: has_inputs.is_ok(),
             has_toolchain: has_toolchain.unwrap_or_default(),
             job_id,
-            timeout: self.tasks.get_job_time_limit(),
+            timeout: self.tasks.job_time_limit(),
         })
     }
 
@@ -730,7 +645,6 @@ impl SchedulerService for Scheduler {
         self.run_job
             .call(RunJobArgs {
                 job_id: job_id.to_owned(),
-                reply_to: self.tasks.app().default_queue.clone(),
                 toolchain,
                 command,
                 outputs,
@@ -755,7 +669,7 @@ impl SchedulerService for Scheduler {
     }
 
     async fn job_finished(&self, job_id: &str, status: StatusUpdate) -> Result<()> {
-        if let Some(sndr) = self.jobs.lock().await.remove(job_id) {
+        let job_status = if let Some(sndr) = self.jobs.lock().await.remove(job_id) {
             let job_result = self.get_job_result(job_id).await.unwrap_or_else(|_| {
                 RunJobResponse::MissingJobResult {
                     server_id: status.id.clone(),
@@ -765,13 +679,15 @@ impl SchedulerService for Scheduler {
             let job_success = sndr
                 .send(job_result)
                 .map_or_else(|_| false, |_| job_success);
-            self.update_server_status(status, Some(job_success)).await
+            Some(job_success)
         } else {
-            Err(anyhow!("Unknown job {job_id:?}"))
-        }
+            None
+        };
+
+        self.recv_server_status(status, job_status).await
     }
 
-    async fn update_server_status(
+    async fn recv_server_status(
         &self,
         status: StatusUpdate,
         job_status: Option<bool>,
