@@ -345,11 +345,11 @@ impl CCompilerImpl for Nvcc {
             .cloned()
             .collect::<Vec<_>>();
 
-        // Only return dependencies if requested, and only for compilations that produce object files
+        // Only return dependencies if requested, and only for compilations that don't produce executables
         let dependencies = if (generate_dependencies || !parsed_args.dependency_args.is_empty())
-            && matches!(
+            && !matches!(
                 parsed_args.compilation_flag.as_os_str().into(),
-                NvccCompileFlag::Device
+                NvccCompileFlag::Executable
             ) {
             self.generate_dependencies(creator, executable, parsed_args, cwd, &env_vars)
                 .await?
