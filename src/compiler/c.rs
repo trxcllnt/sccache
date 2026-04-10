@@ -1355,10 +1355,19 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
             executable,
             compiler,
             env_vars,
-            parsed_args,
+            mut parsed_args,
             rewrite_includes_only,
             ..
         } = *self;
+
+        // Workaround for nvc++ 26.3:
+        // Remove `--nvcchost` from the preprocessor call that creates
+        // the dist input because `--nvcchost` defines `va_list` twice
+        let mut orig_common_args = None;
+        if matches!(compiler.kind(), CCompilerKind::Nvhpc) {
+            orig_common_args.replace(parsed_args.common_args.clone());
+            parsed_args.common_args.retain(|arg| arg != "--nvcchost");
+        }
 
         let preprocessor = Preprocess::new(&creator, &service, &compiler, &parsed_args)
             .with_cwd(&cwd)
@@ -1384,6 +1393,11 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
             })
             .or_else(|err| preprocessor.clean_up(err))
             .await?;
+
+        // Restore common_args if we applied a workaround for nvc++ 26.3
+        if let Some(common_args) = orig_common_args {
+            parsed_args.common_args = common_args;
+        }
 
         let mut symlinks = BTreeMap::new();
         let mut builder = tar::Builder::new(compressor);
