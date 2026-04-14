@@ -1,11 +1,14 @@
-use std::cmp::Ordering;
-use std::error::Error;
-use std::ffi::OsString;
-use std::fmt::{self, Debug, Display};
-use std::marker::PhantomData;
-use std::path::{Path, PathBuf};
-use std::result::Result as StdResult;
-use std::str;
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+    error::Error,
+    ffi::OsString,
+    fmt::{self, Debug, Display},
+    marker::PhantomData,
+    path::{Path, PathBuf},
+    result::Result as StdResult,
+    str,
+};
 
 pub type ArgParseResult<T> = StdResult<T, ArgParseError>;
 pub type ArgToStringResult = StdResult<String, ArgToStringError>;
@@ -679,14 +682,14 @@ macro_rules! take_arg {
     };
 }
 
-pub fn parse_input_output<I, T, S, F>(
+pub fn parse_input_outputs<I, T, S, F>(
     args: I,
     info: S,
     get_output: F,
 ) -> (
-    Option<OsString>, // input
-    Option<OsString>, // output
-    Vec<OsString>,    // args
+    Option<OsString>,               // input
+    HashMap<&'static str, PathBuf>, // outputs
+    Vec<OsString>,                  // args
 )
 where
     I: Iterator<Item = OsString>,
@@ -694,16 +697,18 @@ where
     S: SearchableArgInfo<T>,
     F: Fn(&T) -> Option<&PathBuf>,
 {
-    let (input, output, args) = ArgsIter::new(args.into_iter(), info)
+    let (input, outputs, args) = ArgsIter::new(args.into_iter(), info)
         .filter_map(|arg| arg.ok())
         .fold(
-            (None, None, vec![]),
-            |(mut input, mut output, mut args), arg| {
+            (None, HashMap::new(), vec![]),
+            |(mut input, mut outputs, mut args), arg| {
                 args.extend(
                     arg.get_data()
                         .map(|data| {
                             if let Some(p) = get_output(data) {
-                                output = Some(p.as_os_str().to_owned());
+                                if let Some(flag) = arg.flag_str() {
+                                    outputs.insert(flag, p.clone());
+                                }
                                 let disposition = match arg.flag_str() {
                                     Some("-Fi") | Some("-Fo") => {
                                         NormalizedDisposition::Concatenated
@@ -727,11 +732,11 @@ where
                         .iter_os_strings(),
                 );
 
-                (input, output, args)
+                (input, outputs, args)
             },
         );
 
-    (input, output, args)
+    (input, outputs, args)
 }
 
 #[cfg(test)]

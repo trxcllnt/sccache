@@ -123,7 +123,7 @@ where
     S: Clone + SearchableArgInfo<ArgData>,
 {
     // Initial parse just to get the input and output
-    let (input, output, mut args) = parse_input_output(
+    let (input, mut outputs, mut args) = parse_input_outputs(
         arguments.iter().cloned(),
         arg_info.clone(),
         |data| match data {
@@ -138,10 +138,11 @@ where
         }
     }
 
-    if let Some(output) = output.as_ref().and_then(|s| s.to_str()) {
+    for output in outputs.values().map(|p| p.as_os_str()) {
         if let Some((idx, arg)) = args.iter().find_position(|arg| arg.ends_with(output)) {
             if arg.starts_with(output) {
                 // -o <output>
+                // --tile_bc_file_name <output>
                 // --module_id_file_name <module_id>
                 args.splice(idx - 1..idx + 1, []);
             } else {
@@ -152,16 +153,25 @@ where
         }
     }
 
-    let mut outputs = HashMap::new();
-    if let Some(path) = output.map(|p| cwd.join(p)) {
-        outputs.insert(
-            "obj",
-            ArtifactDescriptor {
-                path,
-                optional: false,
-            },
-        );
+    if outputs.len() == 1 {
+        let (_, p) = outputs.drain().next().unwrap();
+        outputs.insert("obj", cwd.join(&p));
+    } else if let Some(p) = outputs.remove("-o") {
+        outputs.insert("obj", cwd.join(&p));
     }
+
+    let mut outputs = outputs
+        .drain()
+        .fold(HashMap::new(), |mut map, (key, path)| {
+            map.insert(
+                key,
+                ArtifactDescriptor {
+                    path,
+                    optional: false,
+                },
+            );
+            map
+        });
 
     let (common_args, unhashed_args, gen_module_id_file, module_id_file_name) =
         ArgsIter::new(args.into_iter(), arg_info)
@@ -223,9 +233,13 @@ where
     let mut extra_dist_files = vec![];
 
     let gen_module_id_file = gen_module_id_file
-        && ["--gen_c_file_name", "--stub_file_name"]
-            .iter()
-            .any(|k| outputs.contains_key(k));
+        && [
+            "--gen_c_file_name",
+            "--stub_file_name",
+            "--tile_bc_file_name",
+        ]
+        .iter()
+        .any(|k| outputs.contains_key(k));
 
     match (gen_module_id_file, module_id_file_name) {
         (true, Some(path)) => {
@@ -356,14 +370,33 @@ ArgData! { pub
 use self::ArgData::*;
 
 counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
+    flag!("--allow_managed", PassThroughFlag),
+    take_arg!("--c++", OsString, Concatenated, PassThrough),
+    flag!("--device-hidden-visibility", PassThroughFlag),
+    flag!("--display_error_number", PassThroughFlag),
     flag!("--emit-optix-ir", PassThroughFlag),
+    flag!("--enable-tile", PassThroughFlag),
     take_arg!("--gen_c_file_name", PathBuf, Separated, ExtraOutput),
     take_arg!("--gen_device_file_name", PathBuf, Separated, ExtraOutput),
     flag!("--gen_module_id_file", GenModuleIdFileFlag),
+    take_arg!("--gnu_version", OsString, Concatenated(b'='), PassThrough),
+    take_arg!("--include_alt_file_name", OsString, Separated, PassThrough),
     take_arg!("--include_file_name", OsString, Separated, PassThrough),
     take_arg!("--module_id_file_name", PathBuf, Separated, ModuleIdFileName),
+    flag!("--no-version-ident", PassThroughFlag),
+    take_arg!("--orig_src_file_name", OsString, Separated, PassThrough),
+    take_arg!("--orig_src_path_name", OsString, Separated, PassThrough),
+    flag!("--static-host-stub", PassThroughFlag),
     take_arg!("--stub_file_name", PathBuf, Separated, ExtraOutput),
+    take_arg!("--tile_bc_file_name", PathBuf, Separated, ExtraOutput),
+    take_arg!("-arch", OsString, Separated, PassThrough),
+    take_arg!("-fmad", OsString, Concatenated(b'='), PassThrough),
+    take_arg!("-ftz", OsString, Concatenated(b'='), PassThrough),
     flag!("-lto", PassThroughFlag),
+    take_arg!("-m", OsString, Concatenated, PassThrough),
     take_arg!("-o", PathBuf, Separated, Output),
     take_arg!("-olto", PathBuf, Separated, ExtraOutput),
+    take_arg!("-prec_div", OsString, Concatenated(b'='), PassThrough),
+    take_arg!("-prec_sqrt", OsString, Concatenated(b'='), PassThrough),
+    take_arg!("-t", OsString, Concatenated, PassThrough),
 ]);

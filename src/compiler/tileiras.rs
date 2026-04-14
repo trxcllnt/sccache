@@ -31,14 +31,14 @@ use crate::errors::*;
 
 /// A unit struct on which to implement `CCompilerImpl`.
 #[derive(Clone, Debug)]
-pub struct CudaFE {
+pub struct Tileiras {
     pub version: Option<String>,
 }
 
 #[async_trait]
-impl CCompilerImpl for CudaFE {
+impl CCompilerImpl for Tileiras {
     fn kind(&self) -> CCompilerKind {
-        CCompilerKind::CudaFE
+        CCompilerKind::Tileiras
     }
     fn plusplus(&self) -> bool {
         true
@@ -52,7 +52,7 @@ impl CCompilerImpl for CudaFE {
         cwd: &Path,
         _env_vars: &[(OsString, OsString)],
     ) -> CompilerArguments<ParsedArguments> {
-        cicc::parse_arguments(arguments, cwd, Language::CudaFE, &ARGS[..])
+        cicc::parse_arguments(arguments, cwd, Language::Cubin, &ARGS[..])
     }
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
@@ -105,7 +105,7 @@ impl CCompilerImpl for CudaFE {
             parsed_args,
             cwd,
             env_vars,
-            "--module_id_file_name",
+            "-o",
         )
     }
 }
@@ -113,19 +113,11 @@ impl CCompilerImpl for CudaFE {
 use cicc::ArgData::*;
 
 counted_array!(pub static ARGS: [ArgInfo<cicc::ArgData>; _] = [
-    flag!("--allow_managed", PassThroughFlag),
-    take_arg!("--c++", OsString, Concatenated, PassThrough),
-    flag!("--device-hidden-visibility", PassThroughFlag),
-    flag!("--display_error_number", PassThroughFlag),
-    flag!("--enable-tile", PassThroughFlag),
-    take_arg!("--gen_c_file_name", PathBuf, Separated, ExtraOutput),
-    flag!("--gen_module_id_file", GenModuleIdFileFlag),
-    take_arg!("--gnu_version", OsString, Concatenated(b'='), PassThrough),
-    take_arg!("--m", OsString, Concatenated, PassThrough),
-    take_arg!("--module_id_file_name", PathBuf, Separated, Output),
-    take_arg!("--orig_src_file_name", OsString, Separated, PassThrough),
-    take_arg!("--orig_src_path_name", OsString, Separated, PassThrough),
-    flag!("--parse_templates", PassThroughFlag),
-    flag!("--static-host-stub", PassThroughFlag),
-    take_arg!("--stub_file_name", OsString, Separated, PassThrough),
+    flag!("--device-debug", PassThroughFlag),
+    take_arg!("--host-arch", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("--host-os", OsString, CanBeSeparated(b'='), PassThrough),
+    flag!("--lineinfo", PassThroughFlag),
+    take_arg!("--opt-level", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("-arch", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("-o", PathBuf, Separated, Output),
 ]);

@@ -34,6 +34,7 @@ use crate::{
         ptxas::Ptxas,
         rust::{Rust, RustupProxy},
         tasking_vx::TaskingVX,
+        tileiras::Tileiras,
     },
     counted_array, dist,
     errors::*,
@@ -530,6 +531,7 @@ impl CompilerKind {
             CompilerKind::C(CCompilerKind::Ptxas) => textual_lang + " [ptxas]",
             CompilerKind::C(CCompilerKind::Nvhpc) => textual_lang + " [nvhpc]",
             CompilerKind::C(CCompilerKind::TaskingVX) => textual_lang + " [taskingvx]",
+            CompilerKind::C(CCompilerKind::Tileiras) => textual_lang + " [tileiras]",
             CompilerKind::Rust => textual_lang,
         }
     }
@@ -2005,6 +2007,17 @@ fn is_nvidia_ptxas<P: AsRef<Path>>(p: P) -> bool {
     )
 }
 
+/// Returns true if the given path looks like tileiras
+fn is_nvidia_tileiras<P: AsRef<Path>>(p: P) -> bool {
+    matches!(
+        p.as_ref()
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .as_deref(),
+        Some("tileiras")
+    )
+}
+
 /// Returns true if the given path looks like a c compiler program
 ///
 /// This does not check c compilers, it only report programs that are definitely not rustc
@@ -2093,6 +2106,18 @@ where
         trace!("Found ptxas");
         return CCompiler::new(
             Ptxas {
+                // TODO: Use nvcc --version
+                version: Some(String::new()),
+            },
+            executable.to_owned(),
+            vec![],
+        )
+        .await
+        .map(|c| (Box::new(c) as Box<dyn Compiler<T>>, None));
+    } else if is_nvidia_tileiras(executable) {
+        trace!("Found tileiras");
+        return CCompiler::new(
+            Tileiras {
                 // TODO: Use nvcc --version
                 version: Some(String::new()),
             },

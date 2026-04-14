@@ -35,10 +35,12 @@ use fs_err as fs;
 use futures::{FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
 use itertools::Itertools;
 use regex::Regex;
-use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::{
+    collections::HashMap,
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
+    sync::LazyLock,
+};
 use tempfile::TempPath;
 use which::which_in;
 
@@ -1120,6 +1122,12 @@ impl std::fmt::Display for NvccGeneratedSubcommand {
         )
     }
 }
+fn is_nvcc_exe(exe: &str, _: &[String]) -> bool {
+    matches!(
+        exe,
+        "cicc" | "ptxas" | "tileiras" | "cudafe++" | "nvlink" | "fatbinary"
+    )
+}
 
 #[allow(clippy::too_many_arguments)]
 async fn group_nvcc_subcommands_by_compilation_stage<T>(
@@ -1165,11 +1173,7 @@ where
     let mut env_vars_1 = env_vars.to_vec();
     let mut env_vars_2 = env_vars.to_vec();
 
-    let is_nvcc_exe = |exe: &str, _: &[String]| {
-        matches!(exe, "cicc" | "ptxas" | "cudafe++" | "nvlink" | "fatbinary")
-    };
-
-    let (mut nvcc_commands, mut host_commands) = futures::future::try_join(
+    let (nvcc_commands, host_commands) = futures::future::try_join(
         // Get the nvcc compile command lines with paths relative to `out`
         select_nvcc_subcommands(
             creator,
@@ -1198,6 +1202,37 @@ where
     drop(env_vars_2);
     let env_vars = env_vars_1;
 
+    // Merge the nvcc and host compiler commands into one list
+    let (cudafe_has_gen_module_id_file_flag, nvcc_internal_files, all_commands) =
+        merge_nvcc_and_host_compiler_commands(cwd, out, compile_flag, nvcc_commands, host_commands);
+
+    // Create groups of commands that should be run sequential relative to each other,
+    // but can optionally be run in parallel to other groups if the user requested via
+    // `nvcc --threads`.
+    let command_groups = create_nvcc_commands_graph(
+        compile_flag,
+        keep_dir,
+        env_vars,
+        host_compiler,
+        cudafe_has_gen_module_id_file_flag,
+        all_commands,
+        output_path,
+    );
+
+    Ok((nvcc_internal_files, command_groups))
+}
+
+fn merge_nvcc_and_host_compiler_commands(
+    cwd: &Path,
+    out: &Path,
+    compile_flag: &NvccCompileFlag,
+    mut nvcc_commands: Vec<(usize, PathBuf, Vec<String>)>,
+    mut host_commands: Vec<(usize, PathBuf, Vec<String>)>,
+) -> (
+    bool,
+    HashMap<String, String>,
+    Vec<(PathBuf, PathBuf, Vec<String>)>,
+) {
     //
     // Remap nvcc's generated file names to deterministic names.
     // nvcc generates different file names depending on whether it's compiling one vs. many archs.
@@ -1256,7 +1291,7 @@ where
     // Transform to tuples that include the dir in which each command should run.
     let mut all_commands = nvcc_commands
         .iter()
-        // Run cudafe++, nvlink, cicc, ptxas, and fatbinary in `out`
+        // Run cudafe++, nvlink, cicc, ptxas, tileiras, and fatbinary in `out`
         .map(|(idx, exe, args)| (idx, out, exe, args))
         .chain(
             host_commands
@@ -1284,6 +1319,22 @@ where
         }
     }
 
+    (
+        cudafe_has_gen_module_id_file_flag,
+        nvcc_internal_files,
+        all_commands,
+    )
+}
+
+fn create_nvcc_commands_graph(
+    compile_flag: &NvccCompileFlag,
+    keep_dir: Option<PathBuf>,
+    env_vars: Vec<(OsString, OsString)>,
+    host_compiler: &NvccHostCompiler,
+    cudafe_has_gen_module_id_file_flag: bool,
+    mut all_commands: Vec<(PathBuf, PathBuf, Vec<String>)>,
+    output_path: &Path,
+) -> Vec<Vec<NvccGeneratedSubcommand>> {
     // Create groups of commands that should be run sequential relative to each other,
     // but can optionally be run in parallel to other groups if the user requested via
     // `nvcc --threads`.
@@ -1296,137 +1347,143 @@ where
         HashMap::<PathBuf, Vec<(ParsedArguments, NvccGeneratedSubcommand)>>::new();
 
     for (dir, exe, args) in all_commands.iter_mut() {
-        if let Some((cacheable, group, parsed_args, env_vars)) =
-            match exe.file_stem().and_then(|s| s.to_str()) {
-                // cudafe++ _must be_ cached, because the `.module_id` file is unique to each invocation (new in CTK 12.8)
-                Some("cudafe++") => Some((
-                    Cacheable::Yes,
-                    &mut cuda_front_end_group,
-                    parse_args_simple(args, dir),
-                    env_vars.clone(),
-                )),
-                // fatbinary and nvlink are not cacheable
-                Some("fatbinary") | Some("nvlink") => Some((
-                    Cacheable::No,
-                    &mut final_assembly_group,
-                    parse_args_simple(args, dir),
-                    env_vars.clone(),
-                )),
-                // cicc and ptxas are cacheable
-                Some("cicc") => Some(parse_args_simple(args, dir))
-                    .map(|parsed_args| {
-                        fixup_cicc_args(
-                            parsed_args,
-                            keep_dir.as_deref(),
-                            compile_flag,
-                            cudafe_has_gen_module_id_file_flag,
-                        )
-                    })
-                    .map(|parsed_args| {
-                        (
-                            Cacheable::Yes,
-                            device_compile_groups
-                                .entry(parsed_args.input.clone())
-                                .or_default(),
-                            parsed_args,
-                            env_vars.clone(),
-                        )
-                    }),
-                Some("ptxas") => {
-                    // ptxas ... <input>
-                    // ptxas ... <input> -o <output>
-                    Some(parse_args_simple(args, dir))
-                        // Ignore ptxas invocations without an output or input
-                        .filter(|parsed_args| parsed_args.outputs.contains_key("obj"))
-                        .filter(|parsed_args| !parsed_args.input.as_os_str().is_empty())
-                        .and_then(|parsed_args| {
-                            // Search for the prior corresponding cicc call
-                            device_compile_groups
-                                .values()
-                                .find_map(|cmds| {
-                                    cmds.iter().rev().find_map(|(cicc, _)| {
-                                        cicc.outputs
-                                            .get("obj")
-                                            .filter(|o| o.path == parsed_args.input)
-                                            .map(|_| cicc.input.clone())
-                                    })
+        let cmd = exe.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        if let Some((cacheable, group, parsed_args, env_vars)) = match cmd {
+            "" => continue,
+            // cudafe++ _must be_ cached, because the `.module_id` file is unique to each invocation (new in CTK 12.8)
+            "cudafe++" => Some((
+                Cacheable::Yes,
+                &mut cuda_front_end_group,
+                parse_args_simple(args, dir),
+                env_vars.clone(),
+            )),
+            // fatbinary and nvlink are not cacheable
+            "fatbinary" | "nvlink" => Some((
+                Cacheable::No,
+                &mut final_assembly_group,
+                parse_args_simple(args, dir),
+                env_vars.clone(),
+            )),
+            // cicc, ptxas, and tileiras are cacheable
+            "cicc" => Some(parse_args_simple(args, dir))
+                .map(|parsed_args| {
+                    fixup_cicc_args(
+                        parsed_args,
+                        keep_dir.as_deref(),
+                        compile_flag,
+                        cudafe_has_gen_module_id_file_flag,
+                    )
+                })
+                .map(|parsed_args| {
+                    (
+                        Cacheable::Yes,
+                        device_compile_groups
+                            .entry(parsed_args.input.clone())
+                            .or_default(),
+                        parsed_args,
+                        env_vars.clone(),
+                    )
+                }),
+            // Group these with their prior corresponding cicc commands
+            "ptxas" | "tileiras" => {
+                let cicc_output_flag = match cmd {
+                    "ptxas" => "obj",
+                    "tileiras" => "--tile_bc_file_name",
+                    _ => unreachable!(),
+                };
+                // (ptxas | tileiras) ... <input>
+                // (ptxas | tileiras) ... <input> -o <output>
+                Some(parse_args_simple(args, dir))
+                    // Ignore invocations without an output or input
+                    .filter(|parsed_args| parsed_args.outputs.contains_key("obj"))
+                    .filter(|parsed_args| !parsed_args.input.as_os_str().is_empty())
+                    .and_then(|parsed_args| {
+                        // Search for the prior corresponding cicc call
+                        device_compile_groups
+                            .values()
+                            .find_map(|cmds| {
+                                cmds.iter().rev().find_map(|(cicc, _)| {
+                                    cicc.outputs
+                                        .get(cicc_output_flag)
+                                        .filter(|o| o.path == parsed_args.input)
+                                        .map(|_| cicc.input.clone())
                                 })
-                                // Otherwise create a new device compile group
-                                .or_else(|| Some(parsed_args.input.clone()))
-                                .map(|input| {
-                                    (parsed_args, device_compile_groups.entry(input).or_default())
-                                })
-                        })
-                        .map(|(parsed_args, group)| {
-                            (Cacheable::Yes, group, parsed_args, env_vars.clone())
-                        })
-                }
-                _ => {
-                    Some(parse_args_simple(args, dir))
-                        // All generated host compiler commands include one of these defines.
-                        // If one of these isn't present, this command is either a new binary
-                        // in the CTK that we don't know about, or a line like `rm x_dlink.reg.c`
-                        // that nvcc generates in certain cases.
-                        .filter(|parsed_args| {
-                            parsed_args.common_args.iter().any(|arg| {
-                                arg.starts_with("-D__CUDA_ARCH__")
-                                    || arg.starts_with("-D__CUDA_ARCH_LIST__")
-                                    || arg.starts_with("-D__CUDACC__")
-                                    || arg.starts_with("-D__CUDACC_VER")
-                                    || arg.starts_with("-D__CUDACC_RDC__")
-                                    || arg.starts_with("-D__NVCC__")
-                                    || arg.starts_with("-lcudart")
-                                    || arg.starts_with("-lcudadevrt")
                             })
-                        })
-                        .and_then(|parsed_args| {
-                            parsed_args
-                                .outputs
-                                .get("obj")
-                                .map(|o| o.path.clone())
-                                .map(|o| (parsed_args, o))
-                        })
-                        .map(|(parsed_args, output)| {
-                            // Each host preprocessor step represents the start of a new command group
-                            if parsed_args.common_args.contains(&preprocessor_flag) {
-                                // If the output file ends with...
-                                // * .cpp4.ii - cudafe++ input
-                                // * .cpp1.ii - cicc/ptxas input
-                                let group = if output
-                                    .file_name()
-                                    .expect("output is a named file")
-                                    .ends_with(".cpp4.ii")
-                                {
-                                    &mut cuda_front_end_group
-                                } else {
-                                    device_compile_groups.entry(output).or_default()
-                                };
-                                (Cacheable::No, group, parsed_args, env_vars.clone())
-                            } else if compile_flag == &NvccCompileFlag::Executable {
-                                // If building an executable, cache the host compiler objects.
-                                (
-                                    Cacheable::Yes,
-                                    &mut final_assembly_group,
-                                    parsed_args,
-                                    env_vars.clone(),
-                                )
-                            } else {
-                                (
-                                    Cacheable::Yes,
-                                    &mut final_assembly_group,
-                                    parsed_args,
-                                    // Don't cache this object because it will be cached using the outer nvcc object's hash_key
-                                    env_vars
-                                        .iter()
-                                        .chain(&[("SCCACHE_NO_CACHE".into(), "1".into())])
-                                        .cloned()
-                                        .collect::<Vec<_>>(),
-                                )
-                            }
-                        })
-                }
+                            // Otherwise create a new device compile group
+                            .or_else(|| Some(parsed_args.input.clone()))
+                            .map(|input| {
+                                (parsed_args, device_compile_groups.entry(input).or_default())
+                            })
+                    })
+                    .map(|(parsed_args, group)| {
+                        (Cacheable::Yes, group, parsed_args, env_vars.clone())
+                    })
             }
-        {
+            _ => {
+                Some(parse_args_simple(args, dir))
+                    // All generated host compiler commands include one of these defines.
+                    // If one of these isn't present, this command is either a new binary
+                    // in the CTK that we don't know about, or a line like `rm x_dlink.reg.c`
+                    // that nvcc generates in certain cases.
+                    .filter(|parsed_args| {
+                        parsed_args.common_args.iter().any(|arg| {
+                            arg.starts_with("-D__CUDA_ARCH__")
+                                || arg.starts_with("-D__CUDA_ARCH_LIST__")
+                                || arg.starts_with("-D__CUDACC__")
+                                || arg.starts_with("-D__CUDACC_VER")
+                                || arg.starts_with("-D__CUDACC_RDC__")
+                                || arg.starts_with("-D__NVCC__")
+                                || arg.starts_with("-lcudart")
+                                || arg.starts_with("-lcudadevrt")
+                        })
+                    })
+                    .and_then(|parsed_args| {
+                        parsed_args
+                            .outputs
+                            .get("obj")
+                            .map(|o| o.path.clone())
+                            .map(|o| (parsed_args, o))
+                    })
+                    .map(|(parsed_args, output)| {
+                        // Each host preprocessor step represents the start of a new command group
+                        if parsed_args.common_args.contains(&preprocessor_flag) {
+                            // If the output file ends with...
+                            // * .cpp4.ii - cudafe++ input
+                            // * .cpp1.ii - cicc/ptxas input
+                            let group = if output
+                                .file_name()
+                                .expect("output is a named file")
+                                .ends_with(".cpp4.ii")
+                            {
+                                &mut cuda_front_end_group
+                            } else {
+                                device_compile_groups.entry(output).or_default()
+                            };
+                            (Cacheable::No, group, parsed_args, env_vars.clone())
+                        } else if compile_flag == &NvccCompileFlag::Executable {
+                            // If building an executable, cache the host compiler objects.
+                            (
+                                Cacheable::Yes,
+                                &mut final_assembly_group,
+                                parsed_args,
+                                env_vars.clone(),
+                            )
+                        } else {
+                            (
+                                Cacheable::Yes,
+                                &mut final_assembly_group,
+                                parsed_args,
+                                // Don't cache this object because it will be cached using the outer nvcc object's hash_key
+                                env_vars
+                                    .iter()
+                                    .chain(&[("SCCACHE_NO_CACHE".into(), "1".into())])
+                                    .cloned()
+                                    .collect::<Vec<_>>(),
+                            )
+                        }
+                    })
+            }
+        } {
             let args = dist::osstrings_to_strings(&parsed_args.common_args).unwrap_or_default();
             let cmd = NvccGeneratedSubcommand {
                 // Resolve compiler avoiding ccache wrappers to prevent double-caching.
@@ -1446,17 +1503,16 @@ where
         }
     }
 
-    let command_groups = std::iter::empty()
-        .chain([cuda_front_end_group].into_iter())
+    std::iter::empty()
+        .chain([cuda_front_end_group])
         .chain(device_compile_groups.into_values())
-        .chain([final_assembly_group].into_iter())
+        .chain([final_assembly_group])
         .map(|xs| xs.into_iter().map(|(_, c)| c).collect::<Vec<_>>())
-        .collect::<Vec<_>>();
-
-    Ok((nvcc_internal_files, command_groups))
+        .collect::<Vec<_>>()
 }
 
 counted_array!(static SIMPLE_ARGS: [ArgInfo<gcc::ArgData>; _] = [
+    take_arg!("--tile_bc_file_name", PathBuf, Separated, Output),
     take_arg!("-Fi", PathBuf, Concatenated, Output),
     take_arg!("-Fo", PathBuf, Concatenated, Output),
     take_arg!("-o", PathBuf, Separated, Output),
@@ -1464,7 +1520,7 @@ counted_array!(static SIMPLE_ARGS: [ArgInfo<gcc::ArgData>; _] = [
 ]);
 
 fn parse_args_simple(args: &[String], cwd: &Path) -> ParsedArguments {
-    let (input, output, args) = parse_input_output(
+    let (input, mut outputs, args) = parse_input_outputs(
         dist::strings_to_osstrings(args).into_iter(),
         &SIMPLE_ARGS[..],
         |data| match data {
@@ -1474,16 +1530,38 @@ fn parse_args_simple(args: &[String], cwd: &Path) -> ParsedArguments {
     );
 
     let input = input.map(|p| cwd.join(p)).unwrap_or_default();
-    let mut outputs = HashMap::new();
-    if let Some(path) = output.map(|p| cwd.join(p)) {
-        outputs.insert(
-            "obj",
-            ArtifactDescriptor {
-                path,
-                optional: false,
-            },
-        );
+
+    for (_, p) in outputs.iter_mut() {
+        *p = cwd.join(&p);
     }
+
+    if let Some(p) = None
+        .or_else(|| outputs.remove("-o"))
+        .or_else(|| outputs.remove("-Fo"))
+        .or_else(|| outputs.remove("-Fi"))
+        .or_else(|| {
+            if outputs.len() == 1 {
+                outputs.drain().next().map(|(_, v)| v)
+            } else {
+                None
+            }
+        })
+    {
+        outputs.insert("obj", p);
+    }
+
+    let outputs = outputs
+        .drain()
+        .fold(HashMap::new(), |mut map, (key, path)| {
+            map.insert(
+                key,
+                ArtifactDescriptor {
+                    path,
+                    optional: false,
+                },
+            );
+            map
+        });
 
     ParsedArguments {
         input,
@@ -1614,8 +1692,6 @@ where
     F: Fn(&str, &[String]) -> bool,
     T: CommandCreatorSync,
 {
-    use std::io::BufRead;
-
     let mut nvcc_dryrun_cmd = creator.clone().new_command_sync(executable);
 
     nvcc_dryrun_cmd
@@ -1654,11 +1730,25 @@ where
         }
     };
 
-    let lines = std::io::BufReader::new(&lines[..]).lines();
+    parse_nvcc_subcommands(cwd, env_vars, select_subcommand, host_compiler, &lines).await
+}
+
+async fn parse_nvcc_subcommands<F>(
+    cwd: &Path,
+    env_vars: &mut Vec<(OsString, OsString)>,
+    select_subcommand: F,
+    host_compiler: &NvccHostCompiler,
+    lines: &[u8],
+) -> Result<Vec<(usize, PathBuf, Vec<String>)>>
+where
+    F: Fn(&str, &[String]) -> bool,
+{
+    use std::io::{BufRead, BufReader};
+
     let mut dryrun_env_vars = Vec::<(OsString, OsString)>::new();
     let mut dryrun_env_vars_re_map = HashMap::<String, regex::Regex>::new();
 
-    let lines = futures::stream::iter(lines)
+    let lines = futures::stream::iter(BufReader::new(lines).lines())
         .map_err(anyhow::Error::new)
         .try_filter_map(|line| {
             // Select lines that match the `#$ ` prefix from nvcc --dryrun
@@ -1773,25 +1863,57 @@ fn fold_env_vars_or_split_into_exe_and_args(
         }
     }
 
-    let args = match split_quoted_shell_str(&line) {
+    let mut exe_and_args = match split_quoted_shell_str(&line) {
         Some(args) => args,
         None => return Err(anyhow!("Could not parse shell line")),
     };
 
-    let (exe, args) = match args.split_first() {
-        Some(exe_and_args) => exe_and_args,
-        None => return Err(anyhow!("Could not split shell line")),
-    };
+    let args = exe_and_args.split_off(1);
+    let exe = exe_and_args.drain(..).next().unwrap();
+    let exe = which_in(
+        &exe,
+        env_vars
+            .iter()
+            .find_map(|(k, v)| if k == "PATH" { Some(v) } else { None }),
+        cwd,
+    )
+    .unwrap_or_else(|_| PathBuf::from(exe));
 
-    let env_path = env_vars
-        .iter()
-        .find(|(k, _)| k == "PATH")
-        .map(|(_, p)| p.to_owned())
-        .unwrap();
+    // Remove any shell stdio redirect arguments
+    let (_, args) = args
+        .into_iter()
+        .fold((None::<String>, vec![]), |(prev, mut args), curr| {
+            // If the previous arg was <, >, <0, 1>, or 2>, then it
+            // redirected stdin/stdout/stderr to the current arg.
+            // Discard both previous and current args.
+            if let Some(prev) = prev
+                && matches!(prev.as_str(), "<" | ">" | "<0" | "1>" | "2>")
+            {
+                return (None, args);
+            }
 
-    let exe = which_in(exe, env_path.into(), cwd)?;
+            // If the arg is <, >, <0, 1>, or 2>, discard both the current and next args.
+            if matches!(curr.as_str(), "<" | ">" | "<0" | "1>" | "2>") {
+                return (Some(curr), args);
+            }
 
-    Ok(Some((exe.clone(), args.to_vec())))
+            // Discard if the current arg starts with < or >.
+            if !curr.is_empty() && matches!(&curr[0..1], "<" | ">") {
+                return (None, args);
+            }
+
+            // Discard if the current arg starts with <0, 1> or 2>.
+            if curr.len() > 1 && matches!(&curr[0..2], "<0" | "1>" | "2>") {
+                return (None, args);
+            }
+
+            // Otherwise keep this arg
+            args.push(curr);
+
+            (None, args)
+        });
+
+    Ok(Some((exe.clone(), args)))
 }
 
 fn find_last_compute_arch(lines: &[(usize, PathBuf, Vec<String>)]) -> Option<String> {
@@ -1831,6 +1953,7 @@ fn remap_generated_filenames(
         ".ltoir",
         ".optixir",
         ".ptx",
+        ".tilebc",
     ];
 
     let mut extensions_to_rename = vec![
@@ -2977,5 +3100,205 @@ mod test {
             a.dependency_args
         );
         assert_eq!(ovec!["--device-debug", "-c"], a.common_args);
+    }
+
+    #[tokio::test]
+    async fn test_parse_nvcc_lines_with_stdio_redirects() -> Result<()> {
+        let lines = r#"
+#$ NVCC_APPEND_FLAGS="-t=100"
+#$ _NVVM_BRANCH_=nvvm
+#$ _SPACE_=
+#$ _CUDART_=cudart
+#$ CUDA_ROOT=/usr/local/cuda
+#$ _HERE_=/usr/local/cuda/bin
+#$ _THERE_=/usr/local/cuda/bin
+#$ _TARGET_SIZE_=
+#$ _TARGET_DIR_=
+#$ _TARGET_DIR_=targets/x86_64-linux
+#$ TOP=/usr/local/cuda/bin/..
+#$ CICC_PATH=/usr/local/cuda/bin/../nvvm/bin
+#$ NVVMIR_LIBRARY_DIR=/usr/local/cuda/bin/../nvvm/libdevice
+#$ LD_LIBRARY_PATH=/usr/local/cuda/bin/../lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+#$ PATH=/usr/local/cuda/bin/../nvvm/bin:/usr/local/cuda/bin:/vscode/vscode-server/bin/linux-x64/c9d77990917f3102ada88be140d28b038d1dd7c7/bin/remote-cli:/home/coder/.local/bin:/home/coder/.local/share/venvs/cccl/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/python/current/bin:/usr/local/py-utils/bin:/usr/local/jupyter:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/cuda-latest/bin:/opt/evo/sampler/bin:/opt/evo/worker/bin:/opt/evo/manager/bin
+#$ INCLUDES="-I/usr/local/cuda/bin/../targets/x86_64-linux/include"
+#$ SYSTEM_INCLUDES="-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"
+#$ LIBRARIES=  "-L/usr/local/cuda/bin/../targets/x86_64-linux/lib/stubs" "-L/usr/local/cuda/bin/../targets/x86_64-linux/lib"
+#$ CUDAFE_FLAGS=
+#$ PTXAS_FLAGS=
+#$ fatbinary --create="/tmp/x/x.tile.fatbin" -64 --embedded-fatbin="/tmp/x/x.tile.fatbin.c" --id-suffix="Alt"  > /tmp/tmpxft_0000c738_00000000-3_9f9df6c0_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9df6c0_stderr
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "/tmp/x.cu" -o "/tmp/x/x.cpp1.ii"  > /tmp/tmpxft_0000c738_00000000-3_9f9dfef0_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9dfef0_stderr
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH_LIST__=750 -E -x c++ -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "/tmp/x.cu" -o "/tmp/x/x.cpp4.ii"  > /tmp/tmpxft_0000c738_00000000-3_9f9dda40_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9dda40_stderr
+#$ cudafe++ --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "/tmp/x.cu" --orig_src_path_name "/tmp/x.cu" --allow_managed  --m64 --parse_templates --gen_c_file_name "/tmp/x/x.cudafe1.cpp" --stub_file_name "x.cudafe1.stub.c" --gen_module_id_file --module_id_file_name "/tmp/x/x.module_id" --enable-tile "/tmp/x/x.cpp4.ii"  > /tmp/tmpxft_0000c738_00000000-3_9f9df5a0_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9df5a0_stderr
+#$ "$CICC_PATH/cicc" --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "/tmp/x.cu" --orig_src_path_name "/tmp/x.cu" --allow_managed   -arch compute_75 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c" --include_alt_file_name "x.tile.fatbin.c" -tused --module_id_file_name "/tmp/x/x.module_id" --gen_c_file_name "/tmp/x/x.cudafe1.c" --stub_file_name "/tmp/x/x.cudafe1.stub.c" --gen_device_file_name "/tmp/x/x.cudafe1.gpu"  "/tmp/x/x.cpp1.ii" --enable-tile --tile_bc_file_name "/tmp/x/x.tilebc" -o "/tmp/x/x.ptx" > /tmp/tmpxft_0000c738_00000000-3_9f9e03e0_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9e03e0_stderr
+#$ ptxas -arch=sm_75 -m64  "/tmp/x/x.ptx"  -o "/tmp/x/x.sm_75.cubin"  > /tmp/tmpxft_0000c738_00000000-3_9f9e0540_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9e0540_stderr
+#$ fatbinary --create="/tmp/x/x.fatbin" -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=elf,sm=75,file=/tmp/x/x.sm_75.cubin" "--image3=kind=ptx,sm=75,file=/tmp/x/x.ptx" --embedded-fatbin="/tmp/x/x.fatbin.c"  > /tmp/tmpxft_0000c738_00000000-3_9f9e0a80_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9e0a80_stderr
+#$ gcc -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -c -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -Wno-psabi "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"   -m64 "/tmp/x/x.cudafe1.cpp" -o "/tmp/x/x.cu.o"  > /tmp/tmpxft_0000c738_00000000-3_9f9e1220_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9e1220_stderr
+        "#;
+
+        let commands = parse_nvcc_subcommands(
+            Path::new("."),
+            &mut vec![],
+            |_, _| true,
+            &NvccHostCompiler::Gcc,
+            lines.as_bytes(),
+        )
+        .await?;
+
+        assert!(
+            commands
+                .iter()
+                .all(|(_, _, command)| command.iter().all(|arg| arg != ">"))
+        );
+        assert!(
+            commands
+                .iter()
+                .all(|(_, _, command)| command.iter().all(|arg| !arg.starts_with("2>")))
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_group_cuda_tile_commands() -> Result<()> {
+        let keep_dir = None;
+        let mut env_vars = vec![];
+        let cwd = Path::new("/tmp/cwd").to_owned();
+        let out = Path::new("/tmp/out").to_owned();
+
+        let compile_flag = &NvccCompileFlag::Device;
+        let host_compiler = &NvccHostCompiler::Gcc;
+
+        // Get the nvcc compile command lines with paths relative to `out`
+        let nvcc_commands = parse_nvcc_subcommands(
+            &out,
+            &mut env_vars,
+            is_nvcc_exe,
+            host_compiler,
+            r#"
+#$ NVCC_APPEND_FLAGS="-t=100"
+#$ _NVVM_BRANCH_=nvvm
+#$ _SPACE_=
+#$ _CUDART_=cudart
+#$ CUDA_ROOT=/usr/local/cuda
+#$ _HERE_=/usr/local/cuda/bin
+#$ _THERE_=/usr/local/cuda/bin
+#$ _TARGET_SIZE_=
+#$ _TARGET_DIR_=
+#$ _TARGET_DIR_=targets/x86_64-linux
+#$ TOP=/usr/local/cuda/bin/..
+#$ CICC_PATH=/usr/local/cuda/bin/../nvvm/bin
+#$ NVVMIR_LIBRARY_DIR=/usr/local/cuda/bin/../nvvm/libdevice
+#$ LD_LIBRARY_PATH=/usr/local/cuda/bin/../lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+#$ PATH=/usr/local/cuda/bin/../nvvm/bin:/usr/local/cuda/bin:/vscode/vscode-server/bin/linux-x64/c9d77990917f3102ada88be140d28b038d1dd7c7/bin/remote-cli:/home/coder/.local/bin:/home/coder/.local/share/venvs/cccl/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/python/current/bin:/usr/local/py-utils/bin:/usr/local/jupyter:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/cuda-latest/bin:/opt/evo/sampler/bin:/opt/evo/worker/bin:/opt/evo/manager/bin
+#$ INCLUDES="-I/usr/local/cuda/bin/../targets/x86_64-linux/include"
+#$ SYSTEM_INCLUDES="-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"
+#$ LIBRARIES=  "-L/usr/local/cuda/bin/../targets/x86_64-linux/lib/stubs" "-L/usr/local/cuda/bin/../targets/x86_64-linux/lib"
+#$ CUDAFE_FLAGS=
+#$ PTXAS_FLAGS=
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH_LIST__=800,860 -E -x c++ -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "x.cpp4.ii"  > /tmp/tmpxft_000118c8_00000000-3_b0726150_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b0726150_stderr
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH__=800 -D__CUDA_ARCH_LIST__=800,860 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "x.compute_80.cpp1.ii"  > /tmp/tmpxft_000118c8_00000000-3_b0729930_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b0729930_stderr
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH__=860 -D__CUDA_ARCH_LIST__=800,860 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "x.compute_86.cpp1.ii"  > /tmp/tmpxft_000118c8_00000000-3_b072a910_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072a910_stderr
+#$ cudafe++ --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "/tmp/cwd/x.cu" --allow_managed  --m64 --parse_templates --gen_c_file_name "x.compute_86.cudafe1.cpp" --stub_file_name "x.compute_86.cudafe1.stub.c" --gen_module_id_file --module_id_file_name "x.module_id" --enable-tile "x.cpp4.ii"  > /tmp/tmpxft_000118c8_00000000-3_b0729150_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b0729150_stderr
+#$ "$CICC_PATH/cicc" --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "/tmp/cwd/x.cu" --allow_managed   -arch compute_80 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c" --include_alt_file_name "x.tile.fatbin.c" -tused --module_id_file_name "x.module_id" --gen_c_file_name "x.compute_80.cudafe1.c" --stub_file_name "x.compute_80.cudafe1.stub.c" --gen_device_file_name "x.compute_80.cudafe1.gpu"  "x.compute_80.cpp1.ii" --enable-tile --tile_bc_file_name "x.compute_80.tilebc" -o "x.compute_80.ptx" > /tmp/tmpxft_000118c8_00000000-3_b0729dd0_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b0729dd0_stderr
+#$ "$CICC_PATH/cicc" --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "/tmp/cwd/x.cu" --allow_managed   -arch compute_86 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c" --include_alt_file_name "x.tile.fatbin.c" -tused --module_id_file_name "x.module_id" --gen_c_file_name "x.compute_86.cudafe1.c" --stub_file_name "x.compute_86.cudafe1.stub.c" --gen_device_file_name "x.compute_86.cudafe1.gpu"  "x.compute_86.cpp1.ii" --enable-tile --tile_bc_file_name "x.compute_86.tilebc" -o "x.compute_86.ptx" > /tmp/tmpxft_000118c8_00000000-3_b072adb0_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072adb0_stderr
+#$ tileiras --host-arch=x86_64 --host-os=linux -arch=sm_80  "x.compute_80.tilebc"  -o "x.compute_80.tile.cubin"  > /tmp/tmpxft_000118c8_00000000-3_b072a040_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072a040_stderr
+#$ ptxas -arch=sm_80 -m64  "x.compute_80.ptx"  -o "x.compute_80.sm_80.cubin"  > /tmp/tmpxft_000118c8_00000000-3_b072b8d0_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072b8d0_stderr
+#$ tileiras --host-arch=x86_64 --host-os=linux -arch=sm_86  "x.compute_86.tilebc"  -o "x.compute_86.tile.cubin"  > /tmp/tmpxft_000118c8_00000000-3_b072b020_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072b020_stderr
+#$ ptxas -arch=sm_86 -m64  "x.compute_86.ptx"  -o "x.compute_86.sm_86.cubin"  > /tmp/tmpxft_000118c8_00000000-3_b072bc60_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072bc60_stderr
+#$ fatbinary --create="x.fatbin" -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=ptx,sm=80,file=x.compute_80.ptx" "--image3=kind=elf,sm=80,file=x.compute_80.sm_80.cubin" "--image3=kind=ptx,sm=86,file=x.compute_86.ptx" "--image3=kind=elf,sm=86,file=x.compute_86.sm_86.cubin" --embedded-fatbin="x.fatbin.c"  > /tmp/tmpxft_000118c8_00000000-3_b072c150_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072c150_stderr
+#$ fatbinary --create="x.tile.fatbin" -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=tileir,sm=80,file=x.compute_80.tilebc" "--image3=kind=elf,sm=80,file=x.compute_80.tile.cubin" "--image3=kind=tileir,sm=86,file=x.compute_86.tilebc" "--image3=kind=elf,sm=86,file=x.compute_86.tile.cubin" --embedded-fatbin="x.tile.fatbin.c" --id-suffix="Alt"  > /tmp/tmpxft_000118c8_00000000-3_b072b5f0_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072b5f0_stderr
+#$ gcc -D__CUDA_ARCH__=860 -D__CUDA_ARCH_LIST__=800,860 -c -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -Wno-psabi "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"   -m64 "x.compute_86.cudafe1.cpp" -o "x.cu.o"  > /tmp/tmpxft_000118c8_00000000-3_b072c840_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072c840_stderr
+        "#.as_bytes(),
+        )
+        .await?;
+
+        // Get the host compile command lines with paths relative to `cwd` and absolute paths to `out`
+        let host_commands = parse_nvcc_subcommands(
+            &cwd,
+            &mut env_vars,
+            |exe, args| !is_nvcc_exe(exe, args),
+            host_compiler,
+            r#"
+#$ NVCC_APPEND_FLAGS="-t=100"
+#$ _NVVM_BRANCH_=nvvm
+#$ _SPACE_=
+#$ _CUDART_=cudart
+#$ CUDA_ROOT=/usr/local/cuda
+#$ _HERE_=/usr/local/cuda/bin
+#$ _THERE_=/usr/local/cuda/bin
+#$ _TARGET_SIZE_=
+#$ _TARGET_DIR_=
+#$ _TARGET_DIR_=targets/x86_64-linux
+#$ TOP=/usr/local/cuda/bin/..
+#$ CICC_PATH=/usr/local/cuda/bin/../nvvm/bin
+#$ NVVMIR_LIBRARY_DIR=/usr/local/cuda/bin/../nvvm/libdevice
+#$ LD_LIBRARY_PATH=/usr/local/cuda/bin/../lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+#$ PATH=/usr/local/cuda/bin/../nvvm/bin:/usr/local/cuda/bin:/vscode/vscode-server/bin/linux-x64/c9d77990917f3102ada88be140d28b038d1dd7c7/bin/remote-cli:/home/coder/.local/bin:/home/coder/.local/share/venvs/cccl/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/python/current/bin:/usr/local/py-utils/bin:/usr/local/jupyter:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/cuda-latest/bin:/opt/evo/sampler/bin:/opt/evo/worker/bin:/opt/evo/manager/bin
+#$ INCLUDES="-I/usr/local/cuda/bin/../targets/x86_64-linux/include"
+#$ SYSTEM_INCLUDES="-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"
+#$ LIBRARIES=  "-L/usr/local/cuda/bin/../targets/x86_64-linux/lib/stubs" "-L/usr/local/cuda/bin/../targets/x86_64-linux/lib"
+#$ CUDAFE_FLAGS=
+#$ PTXAS_FLAGS=
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH_LIST__=800,860 -E -x c++ -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "/tmp/out/x.cpp4.ii"  > /tmp/tmpxft_00011a53_00000000-3_6198c1a0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_6198c1a0_stderr
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH__=800 -D__CUDA_ARCH_LIST__=800,860 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "/tmp/out/x.compute_80.cpp1.ii"  > /tmp/tmpxft_00011a53_00000000-3_6198fac0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_6198fac0_stderr
+#$ cudafe++ --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "/tmp/cwd/x.cu" --allow_managed  --m64 --parse_templates --gen_c_file_name "/tmp/out/x.compute_86.cudafe1.cpp" --stub_file_name "x.compute_86.cudafe1.stub.c" --gen_module_id_file --module_id_file_name "/tmp/out/x.module_id" --enable-tile "/tmp/out/x.cpp4.ii"  > /tmp/tmpxft_00011a53_00000000-3_6198f230_stdout 2>/tmp/tmpxft_00011a53_00000000-3_6198f230_stderr
+#$ "$CICC_PATH/cicc" --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "/tmp/cwd/x.cu" --allow_managed   -arch compute_80 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c" --include_alt_file_name "x.tile.fatbin.c" -tused --module_id_file_name "/tmp/out/x.module_id" --gen_c_file_name "/tmp/out/x.compute_80.cudafe1.c" --stub_file_name "/tmp/out/x.compute_80.cudafe1.stub.c" --gen_device_file_name "/tmp/out/x.compute_80.cudafe1.gpu"  "/tmp/out/x.compute_80.cpp1.ii" --enable-tile --tile_bc_file_name "/tmp/out/x.compute_80.tilebc" -o "/tmp/out/x.compute_80.ptx" > /tmp/tmpxft_00011a53_00000000-3_619900a0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_619900a0_stderr
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH__=860 -D__CUDA_ARCH_LIST__=800,860 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "/tmp/out/x.compute_86.cpp1.ii"  > /tmp/tmpxft_00011a53_00000000-3_61990bc0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_61990bc0_stderr
+#$ tileiras --host-arch=x86_64 --host-os=linux -arch=sm_80  "/tmp/out/x.compute_80.tilebc"  -o "/tmp/out/x.compute_80.tile.cubin"  > /tmp/tmpxft_00011a53_00000000-3_619902f0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_619902f0_stderr
+#$ ptxas -arch=sm_80 -m64  "/tmp/out/x.compute_80.ptx"  -o "/tmp/out/x.compute_80.sm_80.cubin"  > /tmp/tmpxft_00011a53_00000000-3_61991db0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_61991db0_stderr
+#$ "$CICC_PATH/cicc" --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "/tmp/cwd/x.cu" --allow_managed   -arch compute_86 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c" --include_alt_file_name "x.tile.fatbin.c" -tused --module_id_file_name "/tmp/out/x.module_id" --gen_c_file_name "/tmp/out/x.compute_86.cudafe1.c" --stub_file_name "/tmp/out/x.compute_86.cudafe1.stub.c" --gen_device_file_name "/tmp/out/x.compute_86.cudafe1.gpu"  "/tmp/out/x.compute_86.cpp1.ii" --enable-tile --tile_bc_file_name "/tmp/out/x.compute_86.tilebc" -o "/tmp/out/x.compute_86.ptx" > /tmp/tmpxft_00011a53_00000000-3_619911a0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_619911a0_stderr
+#$ ptxas -arch=sm_86 -m64  "/tmp/out/x.compute_86.ptx"  -o "/tmp/out/x.compute_86.sm_86.cubin"  > /tmp/tmpxft_00011a53_00000000-3_61992160_stdout 2>/tmp/tmpxft_00011a53_00000000-3_61992160_stderr
+#$ tileiras --host-arch=x86_64 --host-os=linux -arch=sm_86  "/tmp/out/x.compute_86.tilebc"  -o "/tmp/out/x.compute_86.tile.cubin"  > /tmp/tmpxft_00011a53_00000000-3_619913f0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_619913f0_stderr
+#$ fatbinary --create="/tmp/out/x.tile.fatbin" -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=tileir,sm=80,file=/tmp/out/x.compute_80.tilebc" "--image3=kind=elf,sm=80,file=/tmp/out/x.compute_80.tile.cubin" "--image3=kind=tileir,sm=86,file=/tmp/out/x.compute_86.tilebc" "--image3=kind=elf,sm=86,file=/tmp/out/x.compute_86.tile.cubin" --embedded-fatbin="/tmp/out/x.tile.fatbin.c" --id-suffix="Alt"  > /tmp/tmpxft_00011a53_00000000-3_61991b00_stdout 2>/tmp/tmpxft_00011a53_00000000-3_61991b00_stderr
+#$ fatbinary --create="/tmp/out/x.fatbin" -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=ptx,sm=80,file=/tmp/out/x.compute_80.ptx" "--image3=kind=elf,sm=80,file=/tmp/out/x.compute_80.sm_80.cubin" "--image3=kind=ptx,sm=86,file=/tmp/out/x.compute_86.ptx" "--image3=kind=elf,sm=86,file=/tmp/out/x.compute_86.sm_86.cubin" --embedded-fatbin="/tmp/out/x.fatbin.c"  > /tmp/tmpxft_00011a53_00000000-3_61992630_stdout 2>/tmp/tmpxft_00011a53_00000000-3_61992630_stderr
+#$ gcc -D__CUDA_ARCH__=860 -D__CUDA_ARCH_LIST__=800,860 -c -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -Wno-psabi "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"   -m64 "/tmp/out/x.compute_86.cudafe1.cpp" -o "x.cu.o"  > /tmp/tmpxft_00011a53_00000000-3_61992d20_stdout 2>/tmp/tmpxft_00011a53_00000000-3_61992d20_stderr
+        "#.as_bytes(),
+        )
+        .await?;
+
+        // Merge the nvcc and host compiler commands into one list
+        let (cudafe_has_gen_module_id_file_flag, _nvcc_internal_files, all_commands) =
+            merge_nvcc_and_host_compiler_commands(
+                &cwd,
+                &out,
+                compile_flag,
+                nvcc_commands,
+                host_commands,
+            );
+
+        let command_groups = create_nvcc_commands_graph(
+            compile_flag,
+            keep_dir,
+            env_vars,
+            host_compiler,
+            cudafe_has_gen_module_id_file_flag,
+            all_commands,
+            Path::new("x.cu.o"),
+        );
+
+        // for (i, group) in command_groups.iter().enumerate() {
+        //     for (j, command) in group.iter().enumerate() {
+        //         println!("group {i}, command {j}: {command:?}");
+        //     }
+        // }
+
+        assert!(command_groups[0][0].exe.as_os_str().contains("gcc"));
+        assert!(command_groups[0][1].exe.as_os_str().contains("cudafe++"));
+
+        assert!(command_groups[1][0].exe.as_os_str().contains("gcc"));
+        assert!(command_groups[1][1].exe.as_os_str().contains("cicc"));
+        assert!(command_groups[1][2].exe.as_os_str().contains("tileiras"));
+        assert!(command_groups[1][3].exe.as_os_str().contains("ptxas"));
+
+        assert!(command_groups[2][0].exe.as_os_str().contains("gcc"));
+        assert!(command_groups[2][1].exe.as_os_str().contains("cicc"));
+        assert!(command_groups[2][2].exe.as_os_str().contains("tileiras"));
+        assert!(command_groups[2][3].exe.as_os_str().contains("ptxas"));
+
+        assert!(command_groups[3][0].exe.as_os_str().contains("fatbinary"));
+        assert!(command_groups[3][1].exe.as_os_str().contains("fatbinary"));
+        assert!(command_groups[3][2].exe.as_os_str().contains("gcc"));
+
+        Ok(())
     }
 }

@@ -185,6 +185,8 @@ pub enum CCompilerKind {
     Nvhpc,
     /// Tasking VX
     TaskingVX,
+    /// NVIDIA CUDA Tile IR assembler
+    Tileiras,
 }
 
 impl From<&str> for CCompilerKind {
