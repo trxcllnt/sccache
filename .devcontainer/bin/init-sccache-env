@@ -2,7 +2,7 @@
 
 # Ensure we're in the repo root
 cd "$( cd "$( dirname "$(realpath -m "${BASH_SOURCE[0]}")" )" && pwd )/../.."
-cd "${SCCACHE_REPO:-$(pwd)}"
+cd "$(realpath -m "${SCCACHE_REPO:-$(pwd)}")"
 
 case "$1" in
     debug|release)
