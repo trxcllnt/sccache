@@ -874,9 +874,10 @@ pub struct SccacheGauge {
 
 impl SccacheGauge {
     pub fn increment(&self) -> SccacheGaugeIncrement {
-        let value = self.value.clone();
-        value.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        SccacheGaugeIncrement { value }
+        self.increment_if(|_| true)
+            .unwrap_or_else(|_| SccacheGaugeIncrement {
+                value: self.value.clone(),
+            })
     }
 
     pub fn increment_if<F>(&self, mut f: F) -> std::result::Result<SccacheGaugeIncrement, u64>
@@ -888,9 +889,9 @@ impl SccacheGauge {
             .fetch_update(
                 std::sync::atomic::Ordering::SeqCst,
                 std::sync::atomic::Ordering::SeqCst,
-                |pending_compilations| {
-                    if f(pending_compilations) {
-                        Some(pending_compilations + 1)
+                |value| {
+                    if f(value) {
+                        Some(value.saturating_add(1))
                     } else {
                         None
                     }
@@ -911,7 +912,11 @@ pub struct SccacheGaugeIncrement {
 
 impl Drop for SccacheGaugeIncrement {
     fn drop(&mut self) {
-        self.value.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.value.fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |value| Some(value.saturating_sub(1)),
+        );
     }
 }
 
@@ -1474,7 +1479,7 @@ where
                 let body = self
                     .clone()
                     .start_compile_task(compiler, hasher, cmd, cwd, env_vars, pending)
-                    .and_then(|res| async { Ok(Response::CompileFinished(res)) })
+                    .and_then(|res| async move { Ok(Response::CompileFinished(res)) })
                     .boxed();
 
                 return Message::WithBody(Response::Compile(CompileResponse::CompileStarted), body);
@@ -1590,18 +1595,18 @@ where
 
                     match compiled {
                         CompileResult::Error(duration) => {
-                            trace!("[{}]: compile result: request error", out_pretty);
+                            trace!("[{out_pretty}]: compile result: request error");
                             stats.compiler_write_duration += duration;
                             stats.compile_request_errors.increment(&kind, &lang);
                         }
                         CompileResult::CacheHit(duration) => {
-                            trace!("[{}]: compile result: cache hit", out_pretty);
+                            trace!("[{out_pretty}]: compile result: cache hit");
 
                             stats.cache_hits.increment(&kind, &lang);
                             stats.cache_read_hit_duration += duration;
                         }
                         CompileResult::CacheMiss(miss_type, dt, duration, future) => {
-                            trace!("[{}]: compile result: cache miss", out_pretty);
+                            trace!("[{out_pretty}]: compile result: cache miss");
                             dist_type = dt;
 
                             match miss_type {
@@ -1620,24 +1625,24 @@ where
                             stats.compilations += 1;
                             stats.cache_misses.increment(&kind, &lang);
                             stats.compiler_write_duration += duration;
-                            trace!("[{}]: stats after compile result: {stats:?}", out_pretty);
+                            trace!("[{out_pretty}]: stats after compile result: {stats:?}");
                             cache_write = Some(future);
                         }
                         CompileResult::NotCached(dt, duration) => {
-                            trace!("[{}]: compile result: not cached", out_pretty);
+                            trace!("[{out_pretty}]: compile result: not cached");
                             dist_type = dt;
                             stats.compilations += 1;
                             stats.compiler_write_duration += duration;
                         }
                         CompileResult::NotCacheable(dt, duration) => {
-                            trace!("[{}]: compile result: not cacheable", out_pretty);
+                            trace!("[{out_pretty}]: compile result: not cacheable");
                             dist_type = dt;
                             stats.non_cacheable_compilations += 1;
                             stats.compiler_write_duration += duration;
                         }
                         CompileResult::CompileFailed(dt, duration) => {
-                            trace!("[{}]: compile result: compile failed", out_pretty);
-                            debug!("[{}]: Compilation failed: {:?}", out_pretty, output);
+                            trace!("[{out_pretty}]: compile result: compile failed");
+                            debug!("[{out_pretty}]: Compilation failed: {output:?}");
                             dist_type = dt;
                             stats.compile_fails += 1;
                             stats.compiler_write_duration += duration;

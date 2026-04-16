@@ -28,10 +28,12 @@ use async_trait::async_trait;
 use fs::File;
 use fs_err as fs;
 use futures::FutureExt;
-use std::collections::{HashMap, HashSet};
-use std::ffi::{OsStr, OsString};
-use std::io::{self, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::{OsStr, OsString},
+    io::{self, BufWriter, Read, Write},
+    path::{Path, PathBuf},
+};
 use tempfile::TempPath;
 
 use crate::errors::*;
@@ -108,7 +110,6 @@ impl CCompilerImpl for Msvc {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        // MSVC can't be dist-compiled
         rewrite_includes_only: bool,
         generate_dependencies: bool,
         include_line_numbers: bool,
@@ -169,7 +170,12 @@ impl CCompilerImpl for Msvc {
         Option<dist::CompileCommand>,
         Cacheable,
     )> {
-        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
+        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars).map(
+            |(cmd, _dist_cmd, cacheable)| {
+                // MSVC can't be dist-compiled
+                (cmd, None, cacheable)
+            },
+        )
     }
 }
 

@@ -40,7 +40,7 @@ use std::{
     path::{Path, PathBuf},
     process::{self, Stdio},
     str,
-    sync::{Arc, LazyLock},
+    sync::Arc,
     time::{self, Duration, SystemTime},
 };
 use tokio_retry2::Retry;
@@ -703,9 +703,9 @@ where
         .and_then(|output| output.into())
 }
 
-/// Run a command and return a Stream of Result<Bytes>.
+/// Run a command and return a Stream of Result<BytesMut>.
 ///
-/// * Each Ok(Bytes) value is a chunk of the child process's stdout.
+/// * Each Ok(BytesMut) value is a chunk of the child process's stdout.
 /// * An Err(anyhow::Error) may wrap an io::Error or a ProcessError.
 /// * An Err(ProcessError) value is the exit status and buffered stderr.
 ///
@@ -773,7 +773,7 @@ pub fn read_line_batches<R>(
 where
     R: tokio::io::AsyncRead + Send,
 {
-    let stream = FramedRead::new(source, LineBatchesCodec::new(batch_size));
+    let stream = FramedRead::with_capacity(source, LineBatchesCodec::new(batch_size), batch_size);
     async_stream::try_stream! {
         for await batch in stream {
             yield batch?;
@@ -805,7 +805,7 @@ impl Decoder for LineBatchesCodec {
     type Item = BytesMut;
     type Error = anyhow::Error;
 
-    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<BytesMut>> {
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>> {
         let start = self.bytes_read;
         let size = self.batch_size.min(buf.len());
 
@@ -826,7 +826,7 @@ impl Decoder for LineBatchesCodec {
         Ok(None)
     }
 
-    fn decode_eof(&mut self, buf: &mut BytesMut) -> Result<Option<BytesMut>> {
+    fn decode_eof(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>> {
         match self.decode(buf)? {
             Some(frame) => Ok(Some(frame)),
             None => {
@@ -1278,37 +1278,6 @@ impl Hasher for HashToDigest<'_> {
     }
 }
 
-fn tempdir_path(global: bool) -> PathBuf {
-    if cfg!(target_os = "windows") && global {
-        // There's no global temp dir for Windows, but nvcc needs an absolute path
-        // that's stable in order to get cache hits for internal device compilations.
-        // So make a dir inside of C:\Users\Public because that's guaranteed to be
-        // publicly accessible by all users, even non-admins.
-        PathBuf::from(
-            std::env::var_os("PUBLIC").unwrap_or_else(|| OsString::from(r"C:\Users\Public")),
-        )
-        .join("AppData")
-        .join("Local")
-        .join("Temp")
-    } else {
-        // Assume non-windows already uses OS-wide /tmp
-        std::env::temp_dir()
-    }
-    .join(".sccache_temp")
-}
-
-pub static SCCACHE_GLOBAL_TMPDIR: LazyLock<std::result::Result<PathBuf, std::io::Error>> =
-    LazyLock::new(|| {
-        let tmpdir = tempdir_path(true);
-        std::fs::create_dir_all(&tmpdir).map(|_| tmpdir)
-    });
-
-pub static SCCACHE_NORMAL_TMPDIR: LazyLock<std::result::Result<PathBuf, std::io::Error>> =
-    LazyLock::new(|| {
-        let tmpdir = tempdir_path(false);
-        std::fs::create_dir_all(&tmpdir).map(|_| tmpdir)
-    });
-
 pub fn tempdir_in<P: AsRef<Path>>(root: P) -> Result<tempfile::TempDir> {
     let mut builder = tempfile::Builder::new();
     builder.rand_bytes(16);
@@ -1362,25 +1331,12 @@ pub fn tempfile_with_prefix_in<P: AsRef<Path>>(
         .map_err(anyhow::Error::new)
 }
 
-pub fn global_tempfile() -> Result<tempfile::NamedTempFile> {
-    SCCACHE_GLOBAL_TMPDIR
-        .as_ref()
-        .map_err(anyhow::Error::new)
-        .and_then(tempfile_in)
-}
-
 pub fn normal_tempdir() -> Result<tempfile::TempDir> {
-    SCCACHE_NORMAL_TMPDIR
-        .as_ref()
-        .map_err(anyhow::Error::new)
-        .and_then(tempdir_in)
+    tempdir_in(std::env::temp_dir())
 }
 
 pub fn normal_tempfile() -> Result<tempfile::NamedTempFile> {
-    SCCACHE_NORMAL_TMPDIR
-        .as_ref()
-        .map_err(anyhow::Error::new)
-        .and_then(tempfile_in)
+    tempfile_in(std::env::temp_dir())
 }
 
 pub fn normal_temp_path() -> Result<tempfile::TempPath> {

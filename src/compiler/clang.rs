@@ -125,7 +125,7 @@ impl CCompilerImpl for Clang {
         let mut extra_preprocessor_flags = if include_line_numbers {
             vec![]
         } else {
-            vec!["-P".to_string()]
+            vec!["-P".into()]
         };
 
         // Clang 14 and later support -fminimize-whitespace, which normalizes
@@ -134,7 +134,7 @@ impl CCompilerImpl for Clang {
         if self.supports_fminimize_whitespace
             && parsed_args.language != Language::AssemblerToPreprocess
         {
-            extra_preprocessor_flags.push("-fminimize-whitespace".to_string());
+            extra_preprocessor_flags.push("-fminimize-whitespace".into());
         }
 
         gcc::preprocess(

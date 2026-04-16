@@ -42,7 +42,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, LazyLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tempfile::TempPath;
 
@@ -96,7 +96,7 @@ pub struct ArtifactDescriptor {
 
 /// The results of parsing a compiler commandline.
 #[allow(dead_code)]
-#[derive(Default, Debug, PartialEq, Eq, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct ParsedArguments {
     /// The input source file.
     pub input: PathBuf,
@@ -136,6 +136,67 @@ pub struct ParsedArguments {
     pub suppress_rewrite_includes_only: bool,
     /// Arguments are incompatible with preprocessor cache mode
     pub too_hard_for_preprocessor_cache_mode: Vec<OsString>,
+    /// Path to a tempdir to use for this compilation
+    pub tmpdir: Option<Arc<tempfile::TempDir>>,
+}
+
+impl std::cmp::Eq for ParsedArguments {}
+
+impl std::cmp::PartialEq for ParsedArguments {
+    fn eq(&self, other: &Self) -> bool {
+        let ParsedArguments {
+            input,
+            double_dash_input,
+            language,
+            compilation_flag,
+            cxx20_modules,
+            depfile,
+            outputs,
+            dependency_args,
+            preprocessor_args,
+            common_args,
+            arch_args,
+            unhashed_args,
+            extra_dist_files,
+            extra_hash_files,
+            msvc_show_includes,
+            profile_generate,
+            color_mode,
+            suppress_rewrite_includes_only,
+            too_hard_for_preprocessor_cache_mode,
+            tmpdir,
+        } = self;
+        input == &other.input
+            && double_dash_input == &other.double_dash_input
+            && language == &other.language
+            && compilation_flag == &other.compilation_flag
+            && cxx20_modules == &other.cxx20_modules
+            && depfile == &other.depfile
+            && outputs == &other.outputs
+            && dependency_args == &other.dependency_args
+            && preprocessor_args == &other.preprocessor_args
+            && common_args == &other.common_args
+            && arch_args == &other.arch_args
+            && unhashed_args == &other.unhashed_args
+            && extra_dist_files == &other.extra_dist_files
+            && extra_hash_files == &other.extra_hash_files
+            && msvc_show_includes == &other.msvc_show_includes
+            && profile_generate == &other.profile_generate
+            && color_mode == &other.color_mode
+            && suppress_rewrite_includes_only == &other.suppress_rewrite_includes_only
+            && too_hard_for_preprocessor_cache_mode == &other.too_hard_for_preprocessor_cache_mode
+            && tmpdir
+                .as_ref()
+                .as_ref()
+                .and_then(|lhs| {
+                    other
+                        .tmpdir
+                        .as_ref()
+                        .as_ref()
+                        .map(|rhs| lhs.path() == rhs.path())
+                })
+                .unwrap_or_default()
+    }
 }
 
 impl ParsedArguments {
@@ -997,7 +1058,7 @@ where
         } = *self;
 
         let needs_c_preprocessing = parsed_args.language.needs_c_preprocessing();
-        let preprocessor_start = Instant::now();
+        let mut preprocessor_start = Instant::now();
 
         let preprocessor_output = if !needs_c_preprocessing {
             PreprocessorOutput::File(cwd.join(&parsed_args.input), None)
@@ -1017,7 +1078,7 @@ where
                 .await?
         };
 
-        let (preprocessor_output, dependencies) = match preprocessor_output {
+        let (mut preprocessor_output, dependencies) = match preprocessor_output {
             PreprocessorOutput::File(path, dependencies) => {
                 let src = tokio::fs::File::open(path).await?;
                 let src = read_line_batches(src, HASH_BUFFER_SIZE);
@@ -1037,9 +1098,18 @@ where
             let (dependencies_tx, dependencies_rx) = tokio::sync::oneshot::channel();
 
             let preprocessor_output = Box::pin(async_stream::try_stream! {
-                for await lines in preprocessor_output {
+                let mut preprocessor_time = Duration::default();
+
+                while let Some(lines) = preprocessor_output.next().await {
+                    preprocessor_time += preprocessor_start.elapsed();
+                    preprocessor_start = Instant::now();
                     yield lines?;
                 }
+
+                // Track how long the preprocessor took
+                let mut stats = service.stats.lock().await;
+                stats.preprocessed += 1;
+                stats.preprocessor_duration += preprocessor_time;
 
                 if let Some(dependencies) = dependencies {
                     // Canonicalize the dependency paths in a background thread
@@ -1059,12 +1129,6 @@ where
 
                     let _ = dependencies_tx.send(dependencies);
                 }
-
-                // Track how long the preprocessor took
-                let preprocessor_time = preprocessor_start.elapsed();
-                let mut stats = service.stats.lock().await;
-                stats.preprocessed += 1;
-                stats.preprocessor_duration += preprocessor_time;
             }) as Pin<Box<ProcessOutputStream>>;
 
             let dependencies = if has_dependencies {
@@ -1380,9 +1444,9 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
         let (preprocessor_output, dependencies) = preprocessor
             .preprocess()
             .and_then(|(preprocessor_output, dependencies)| async {
-                // Unfortunate that we have to buffer all the preprocessor output here,
-                // but tar::Builder::append_writer requires the underlying writer
-                // implements io::Seek and the flate2 compressors don't.
+                // Unfortunate that we have to buffer all the preprocessor output.
+                // The flate2 compressors don't implement io::Seek, but that's a
+                // requirement to use tar::Builder::append_writer.
                 let preprocessor_output = preprocessor_output.try_concat().await?;
                 let dependencies = if let Some(dependencies) = dependencies {
                     dependencies.await?
@@ -2050,8 +2114,8 @@ impl<'a> HashKeyParams<'a> {
             }
         }
 
-        // Hash the preprocessor output and track how long we spent
-        let m = self
+        // Hash the preprocessor output
+        let (m, _) = self
             .preprocessor_output
             .try_fold(
                 (m, self.basedirs.to_vec()),
@@ -2064,8 +2128,7 @@ impl<'a> HashKeyParams<'a> {
                     .await?
                 },
             )
-            .await?
-            .0;
+            .await?;
 
         Ok(m.finish())
     }
