@@ -23,7 +23,8 @@ use crate::{
         gcc::{self, ArgData::*},
         msvc::from_local_codepage,
     },
-    counted_array, debug_if_trace, dist,
+    counted_array, dist,
+    errors::*,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     server::SccacheService,
     util::{
@@ -36,14 +37,12 @@ use fs_err as fs;
 use futures::{FutureExt, Stream, StreamExt, TryFutureExt};
 use itertools::Itertools;
 use regex::Regex;
-
 use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
 };
-
 use tempfile::{TempDir, TempPath};
 use which::which_in;
 
@@ -1609,7 +1608,7 @@ fn create_nvcc_commands_graph(
                 output: parsed_args.outputs.get("obj").map(|o| dir.join(&o.path)),
             };
 
-            debug_if_trace!(
+            trace!(
                 "[{}]: transformed nvcc command: {cmd}",
                 output_path.display(),
             );
@@ -1792,7 +1791,7 @@ where
         .current_dir(cwd)
         .envs(env_vars.clone());
 
-    debug_if_trace!(
+    trace!(
         "[{}]: nvcc dryrun command: {nvcc_dryrun_cmd}",
         output_path.display()
     );
@@ -2313,7 +2312,7 @@ where
 
     cmd.args(&args).current_dir(cwd).env_clear().envs(env_vars);
 
-    debug_if_trace!("[{}]: run_nvcc_subcommand: {cmd}", output_path.display());
+    trace!("[{}]: run_nvcc_subcommand: {cmd}", output_path.display());
 
     run_input_output(cmd, None).await
 }

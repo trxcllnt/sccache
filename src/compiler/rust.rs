@@ -12,54 +12,57 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cache::{FileObjectSource, Storage};
-use crate::compiler::args::*;
-use crate::compiler::{
-    Cacheable, ColorMode, Compilation, CompileCommand, Compiler, CompilerArguments,
-    CompilerCommand, CompilerHasher, CompilerKind, CompilerProxy, HashResult, Language,
-    SingleCompileCommand, c::ArtifactDescriptor,
+#[cfg(feature = "dist-client")]
+use {
+    crate::{
+        compiler::{DistPackagers, OutputsRewriter},
+        dist::pkg::{self, InputsWriter},
+        lru_disk_cache::{LruCache, Meter},
+    },
+    semver::Version,
+    std::{
+        borrow::Borrow,
+        collections::hash_map::RandomState,
+        env::consts::{DLL_PREFIX, EXE_EXTENSION},
+        io,
+        sync::Mutex,
+    },
 };
-#[cfg(feature = "dist-client")]
-use crate::compiler::{DistPackagers, OutputsRewriter};
-#[cfg(feature = "dist-client")]
-use crate::dist::pkg::{self, InputsWriter};
-#[cfg(feature = "dist-client")]
-use crate::lru_disk_cache::{LruCache, Meter};
-use crate::mock_command::{CommandCreatorSync, RunCommand};
-use crate::util::{Digest, fmt_duration_as_secs, hash_all, hash_all_archives, run_input_output};
-use crate::util::{HashToDigest, OsStrExt};
-use crate::{counted_array, debug_if_trace, dist, server::SccacheService};
+
+use crate::{
+    cache::{FileObjectSource, Storage},
+    compiler::args::*,
+    compiler::{
+        Cacheable, ColorMode, Compilation, CompileCommand, Compiler, CompilerArguments,
+        CompilerCommand, CompilerHasher, CompilerKind, CompilerProxy, HashResult, Language,
+        SingleCompileCommand, c::ArtifactDescriptor,
+    },
+    counted_array, dist,
+    errors::*,
+    mock_command::{CommandCreatorSync, RunCommand},
+    server::SccacheService,
+    util::{Digest, fmt_duration_as_secs, hash_all, hash_all_archives, run_input_output},
+    util::{HashToDigest, OsStrExt},
+};
 use async_trait::async_trait;
 use filetime::FileTime;
 use fs_err as fs;
-#[cfg(feature = "dist-client")]
-use semver::Version;
-#[cfg(feature = "dist-client")]
-use std::borrow::Borrow;
-use std::borrow::Cow;
-#[cfg(feature = "dist-client")]
-use std::collections::hash_map::RandomState;
-use std::collections::{HashMap, HashSet};
-use std::env::consts::DLL_EXTENSION;
-#[cfg(feature = "dist-client")]
-use std::env::consts::{DLL_PREFIX, EXE_EXTENSION};
-use std::ffi::OsString;
-use std::fmt;
-use std::future::Future;
-use std::hash::Hash;
-#[cfg(feature = "dist-client")]
-use std::io;
-use std::io::Read;
-use std::iter;
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::process;
-#[cfg(feature = "dist-client")]
-use std::sync::Mutex;
-use std::sync::{Arc, LazyLock};
-use std::time;
-
-use crate::errors::*;
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    env::consts::DLL_EXTENSION,
+    ffi::OsString,
+    fmt,
+    future::Future,
+    hash::Hash,
+    io::Read,
+    iter,
+    path::{Path, PathBuf},
+    pin::Pin,
+    process,
+    sync::{Arc, LazyLock},
+    time,
+};
 
 #[cfg(feature = "dist-client")]
 const RLIB_PREFIX: &str = "lib";
@@ -383,11 +386,11 @@ where
         .env_clear()
         .envs(env_vars.to_vec())
         .current_dir(cwd);
-    debug_if_trace!("get_compiler_outputs: {:?}", cmd);
+    trace!("get_compiler_outputs: {:?}", cmd);
     let outputs = run_input_output(cmd, None).await?;
 
     let outstr = String::from_utf8(outputs.stdout).context("Error parsing rustc output")?;
-    debug_if_trace!("get_compiler_outputs: {:?}", outstr);
+    trace!("get_compiler_outputs: {:?}", outstr);
     Ok(outstr.lines().map(|l| l.to_owned()).collect())
 }
 
@@ -1860,7 +1863,7 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
                 executable: path_transformer.as_dist(&sysroot_executable)?,
             };
 
-            debug_if_trace!("[{crate_name}]: dist command: {command}");
+            trace!("[{crate_name}]: dist command: {command}");
 
             Some(command)
         })();

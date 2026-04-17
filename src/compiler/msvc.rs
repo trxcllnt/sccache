@@ -12,18 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compiler::c::{
-    ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
+use crate::{
+    compiler::c::{
+        ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
+    },
+    compiler::{
+        Cacheable, ColorMode, CompilerArguments, Language, SingleCompileCommand, clang, gcc,
+        preprocessor_cache::{StandardFsAbstraction, process_preprocessed_file},
+        write_temp_file,
+    },
+    compiler::{CompileCommandImpl, args::*},
+    counted_array, dist,
+    errors::*,
+    mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
+    server::SccacheService,
+    util::{OsStrExt, normal_temp_path, path_to_bytes, run_input_output},
 };
-use crate::compiler::{
-    Cacheable, ColorMode, CompilerArguments, Language, SingleCompileCommand, clang, gcc,
-    preprocessor_cache::{StandardFsAbstraction, process_preprocessed_file},
-    write_temp_file,
-};
-use crate::compiler::{CompileCommandImpl, args::*};
-use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
-use crate::util::{OsStrExt, normal_temp_path, path_to_bytes, run_input_output};
-use crate::{counted_array, debug_if_trace, dist, server::SccacheService};
 use async_trait::async_trait;
 use fs::File;
 use fs_err as fs;
@@ -35,8 +39,6 @@ use std::{
     path::{Path, PathBuf},
 };
 use tempfile::TempPath;
-
-use crate::errors::*;
 
 /// A struct on which to implement `CCompilerImpl`.
 ///
@@ -237,7 +239,7 @@ where
     for (k, v) in env {
         cmd.env(k, v);
     }
-    debug_if_trace!("detect_showincludes_prefix: {:?}", cmd);
+    trace!("detect_showincludes_prefix: {:?}", cmd);
 
     let output = run_input_output(cmd, None).await?;
 
@@ -1064,7 +1066,7 @@ where
         is_clang,
     );
 
-    debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
+    trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
 
     let mut output = run_input_output(cmd, None).await?;
 
@@ -1151,7 +1153,7 @@ where
     let (cmd, dependencies) =
         generate_dependencies_cmd(creator, executable, parsed_args, cwd, env_vars, is_clang)?;
 
-    debug_if_trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
+    trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
     run_input_output(cmd, None).await?;
 
@@ -1289,7 +1291,7 @@ fn generate_compile_commands(
         out_pretty: out_pretty.to_string(),
     };
 
-    debug_if_trace!("[{out_pretty}]: command: {command}");
+    trace!("[{out_pretty}]: command: {command}");
 
     #[cfg(not(feature = "dist-client"))]
     let dist_command = None;
@@ -1321,7 +1323,7 @@ fn generate_compile_commands(
             },
         };
 
-        debug_if_trace!("[{out_pretty}]: dist_command: {command}");
+        trace!("[{out_pretty}]: dist_command: {command}");
 
         Some(command)
     })();

@@ -1601,23 +1601,6 @@ pub fn num_cpus() -> usize {
     }
 }
 
-#[macro_export]
-macro_rules! debug_if_trace {
-    // debug_if_trace!(target: "my_target", key1 = 42, key2 = true; "a {} event", "log")
-    // debug_if_trace!(target: "my_target", "a {} event", "log")
-    (target: $target:expr, $($arg:tt)+) => {{
-        if log_enabled!(log::Level::Trace) {
-            log::log!(target: $target, log::Level::Debug, $($arg)+);
-        }
-    }};
-    // debug_if_trace!("a {} event", "log")
-    ($($arg:tt)+) => {{
-        if log_enabled!(log::Level::Trace) {
-            log::log!(log::Level::Debug, $($arg)+);
-        }
-    }};
-}
-
 pub async fn retry_with_jitter<F>(limit: usize, func: F) -> std::result::Result<F::Item, F::Error>
 where
     F: tokio_retry2::Action,

@@ -24,7 +24,7 @@ use crate::{
         msvc::from_local_codepage,
         preprocessor_cache::normalize_path,
     },
-    counted_array, debug_if_trace, dist,
+    counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
     server::SccacheService,
@@ -533,7 +533,7 @@ where
             }
             Some(Output(p)) => output_arg = Some(p.clone()),
             Some(ClangModuleOutput(p)) => {
-                if let Some(p) = p.split_prefix("=") {
+                if let Some(p) = p.strip_prefix("=") {
                     module_output_path = Some(Some(PathBuf::from(p)));
                 } else if p.is_empty() {
                     module_output_path = Some(None);
@@ -1018,8 +1018,8 @@ where
                         // don't use rewritten arch args if there is only one arch
                         parsed_args.arch_args.clone()
                     } else {
-                        debug_if_trace!("-arch args before rewrite: {:?}", parsed_args.arch_args);
-                        debug_if_trace!("-arch args after rewrite:  {:?}", rewritten_arch_args);
+                        trace!("-arch args before rewrite: {:?}", parsed_args.arch_args);
+                        trace!("-arch args after rewrite:  {:?}", rewritten_arch_args);
                         rewritten_arch_args
                     }
                 } else {
@@ -1083,8 +1083,8 @@ where
         (cmd, None)
     };
 
-    debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
-    debug_if_trace!("[{}]: depfile: {depfile:?}", parsed_args.output_pretty());
+    trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
+    trace!("[{}]: depfile: {depfile:?}", parsed_args.output_pretty());
 
     let output = run_input_stream_output(cmd, 8 * 1024, None).await?.boxed();
 
@@ -1208,7 +1208,7 @@ where
         )
         .await;
 
-        debug_if_trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
+        trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
         (cmd, (path, temp))
     };
@@ -1250,7 +1250,7 @@ where
         &[],
     );
 
-    debug_if_trace!(
+    trace!(
         "[{}]: generate all dependencies cmd: {}",
         parsed_args.output_pretty(),
         cmd
@@ -1506,7 +1506,7 @@ pub fn generate_compile_commands(
                 },
             };
 
-            debug_if_trace!("[{out_pretty}]: dist command: {command}");
+            trace!("[{out_pretty}]: dist command: {command}");
 
             Some(command)
         })()

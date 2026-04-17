@@ -13,28 +13,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compiler::args::{
-    ArgDisposition, ArgInfo, ArgToStringResult, ArgsIter, Argument, FromArg, IntoArg,
-    NormalizedDisposition, PathTransformerFn, SearchableArgInfo,
+use crate::{
+    compiler::args::{
+        ArgDisposition, ArgInfo, ArgToStringResult, ArgsIter, Argument, FromArg, IntoArg,
+        NormalizedDisposition, PathTransformerFn, SearchableArgInfo,
+    },
+    compiler::c::{
+        ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
+    },
+    compiler::{
+        Cacheable, ColorMode, CompileCommandImpl, CompilerArguments, Language,
+        SingleCompileCommand, gcc,
+    },
+    counted_array, dist,
+    errors::*,
+    mock_command::{CommandCreatorSync, RunCommand},
+    server::SccacheService,
+    util::{OsStrExt, normal_temp_path, run_input_output},
 };
-use crate::compiler::c::{
-    ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
-};
-use crate::compiler::{
-    Cacheable, ColorMode, CompileCommandImpl, CompilerArguments, Language, SingleCompileCommand,
-    gcc,
-};
-use crate::mock_command::{CommandCreatorSync, RunCommand};
-use crate::util::{OsStrExt, normal_temp_path, run_input_output};
-use crate::{counted_array, dist, server::SccacheService};
-use crate::{debug_if_trace, errors::*};
 use async_trait::async_trait;
 use fs_err as fs;
 use futures::FutureExt;
-use std::collections::HashMap;
-use std::ffi::OsString;
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    ffi::OsString,
+    io::Read,
+    path::{Path, PathBuf},
+};
 use tempfile::TempPath;
 
 #[derive(Clone, Debug)]
@@ -393,7 +398,7 @@ where
         (cmd, None)
     };
 
-    debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
+    trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
 
     let output = run_input_output(cmd, None).await?;
 
@@ -482,7 +487,7 @@ where
             generate_all_dependencies_cmd(creator, executable, parsed_args, cwd, env_vars, &path)
                 .await;
 
-        debug_if_trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
+        trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
         (cmd, (path, temp))
     };
@@ -516,7 +521,7 @@ where
         env_vars,
     );
 
-    debug_if_trace!(
+    trace!(
         "[{}]: generate all dependencies cmd: {}",
         parsed_args.output_pretty(),
         cmd
@@ -559,7 +564,7 @@ pub fn generate_compile_commands(
         out_pretty: out_pretty.to_string(),
     };
 
-    debug_if_trace!("[{out_pretty}]: command: {command}");
+    trace!("[{out_pretty}]: command: {command}");
 
     Ok((command, None, Cacheable::Yes))
 }

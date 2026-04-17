@@ -13,24 +13,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compiler::c::{
-    ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
+use crate::{
+    compiler::c::{
+        ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
+    },
+    compiler::{Cacheable, CompilerArguments, Language, SingleCompileCommand},
+    compiler::{CompileCommandImpl, args::*},
+    counted_array, dist,
+    errors::*,
+    mock_command::CommandCreatorSync,
+    server::SccacheService,
+    util::OsStrExt,
 };
-use crate::compiler::{Cacheable, CompilerArguments, Language, SingleCompileCommand};
-use crate::compiler::{CompileCommandImpl, args::*};
-use crate::{counted_array, dist, server::SccacheService, util::OsStrExt};
-
-use crate::mock_command::CommandCreatorSync;
-
 use async_trait::async_trait;
 use itertools::Itertools;
+use std::{
+    collections::HashMap,
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 use tempfile::TempPath;
-
-use std::collections::HashMap;
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
-
-use crate::{debug_if_trace, errors::*};
 
 /// A unit struct on which to implement `CCompilerImpl`.
 #[derive(Clone, Debug)]
@@ -305,7 +307,7 @@ pub fn generate_compile_commands(
         out_pretty: out_pretty.to_string(),
     };
 
-    debug_if_trace!("[{out_pretty}]: {language} command: {command}");
+    trace!("[{out_pretty}]: {language} command: {command}");
 
     #[cfg(not(feature = "dist-client"))]
     {
@@ -334,7 +336,7 @@ pub fn generate_compile_commands(
                         .as_dist(dunce::canonicalize(executable).ok()?.as_path())?,
                 };
 
-                debug_if_trace!("[{out_pretty}]: {language} dist_command: {command}");
+                trace!("[{out_pretty}]: {language} dist_command: {command}");
 
                 Some(command)
             })(),
