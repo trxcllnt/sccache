@@ -232,7 +232,7 @@ impl CCompilerImpl for Nvcc {
         for flag in ["-arch=", "--gpu-architecture="] {
             if let Some(idx) = arguments.iter().position(|x| x.starts_with(flag)) {
                 let meta_arch = arguments[idx]
-                    .split_prefix(flag)
+                    .strip_prefix(flag)
                     .and_then(|s| s.to_str())
                     .unwrap_or_default();
                 let real_archs = match meta_arch {

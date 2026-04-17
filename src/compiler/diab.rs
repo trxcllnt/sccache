@@ -590,7 +590,7 @@ impl Iterator for ExpandAtArgs<'_> {
                 return Some(arg);
             }
 
-            let value = match arg.split_prefix("-@") {
+            let value = match arg.strip_prefix("-@") {
                 Some(arg) => arg,
                 None => return Some(arg),
             };

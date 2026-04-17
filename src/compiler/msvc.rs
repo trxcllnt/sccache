@@ -1406,7 +1406,7 @@ impl Iterator for ExpandIncludeFile<'_> {
 
             // Visit the next argument provided by the original command iterator.
             let arg = self.args.pop()?;
-            let file_arg = match arg.split_prefix("@") {
+            let file_arg = match arg.strip_prefix("@") {
                 Some(file_arg) => file_arg,
                 None => return Some(arg),
             };

@@ -1535,7 +1535,7 @@ impl Iterator for ExpandIncludeFile<'_> {
     fn next(&mut self) -> Option<OsString> {
         loop {
             let arg = self.stack.pop()?;
-            let file = match arg.split_prefix("@") {
+            let file = match arg.strip_prefix("@") {
                 Some(arg) => self.cwd.join(arg),
                 None => return Some(arg),
             };

@@ -890,7 +890,7 @@ pub trait OsStrExt {
     fn starts_with<P: AsRef<OsStr>>(&self, pat: P) -> bool;
     fn split<P: AsRef<OsStr>>(&self, pat: P) -> impl Iterator<Item = &'_ OsStr>;
     fn split_once<P: AsRef<OsStr>>(&self, pat: P) -> Option<(&'_ OsStr, &'_ OsStr)>;
-    fn split_prefix<P: AsRef<OsStr>>(&self, pat: P) -> Option<&'_ OsStr>;
+    fn strip_prefix<P: AsRef<OsStr>>(&self, pat: P) -> Option<&'_ OsStr>;
     fn trim(&self) -> &OsStr;
     fn trim_start_matches<P: AsRef<OsStr>>(&self, pat: P) -> &OsStr;
     fn trim_end_matches<P: AsRef<OsStr>>(&self, pat: P) -> &OsStr;
@@ -968,7 +968,7 @@ impl OsStrExt for OsStr {
         })
     }
 
-    fn split_prefix<P: AsRef<OsStr>>(&self, pat: P) -> Option<&'_ OsStr> {
+    fn strip_prefix<P: AsRef<OsStr>>(&self, pat: P) -> Option<&'_ OsStr> {
         self.starts_with(pat.as_ref()).then(|| {
             let p = pat.as_ref().as_encoded_bytes();
             let s = self.as_encoded_bytes();
@@ -2075,12 +2075,12 @@ mod tests {
     fn simple_strip_prefix() {
         let a: &OsStr = "foo".as_ref();
 
-        assert_eq!(a.split_prefix(""), Some(OsStr::new("foo")));
-        assert_eq!(a.split_prefix("f"), Some(OsStr::new("oo")));
-        assert_eq!(a.split_prefix("fo"), Some(OsStr::new("o")));
-        assert_eq!(a.split_prefix("foo"), Some(OsStr::new("")));
-        assert_eq!(a.split_prefix("foo2"), None);
-        assert_eq!(a.split_prefix("b"), None);
+        assert_eq!(a.strip_prefix(""), Some(OsStr::new("foo")));
+        assert_eq!(a.strip_prefix("f"), Some(OsStr::new("oo")));
+        assert_eq!(a.strip_prefix("fo"), Some(OsStr::new("o")));
+        assert_eq!(a.strip_prefix("foo"), Some(OsStr::new("")));
+        assert_eq!(a.strip_prefix("foo2"), None);
+        assert_eq!(a.strip_prefix("b"), None);
     }
 
     #[test]
