@@ -650,8 +650,8 @@ where
     T: CommandCreatorSync,
     I: CCompilerImpl,
 {
-    fn get_executable(&self) -> PathBuf {
-        self.executable.clone()
+    fn get_executable(&self) -> &Path {
+        self.executable.as_path()
     }
 
     async fn generate_hash_key(

@@ -186,17 +186,15 @@ pub struct SingleCompileCommand {
 
 impl fmt::Display for SingleCompileCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "cd {:?} && {}",
-            self.cwd,
-            shlex::try_join(
-                std::iter::once(&self.executable.clone().into_os_string())
-                    .chain(self.arguments.iter())
-                    .map(|s| s.to_str().unwrap())
-            )
-            .unwrap_or_else(|e| format!("{e}"))
-        )
+        write!(f, r#"cd "{}"; "#, self.cwd.display())?;
+        if cfg!(target_os = "windows") {
+            write!(f, "& ")?;
+        }
+        write!(f, r#""{}""#, self.executable.display())?;
+        for arg in self.arguments.iter() {
+            write!(f, " {arg:?}")?;
+        }
+        fmt::Result::Ok(())
     }
 }
 
@@ -646,18 +644,16 @@ where
         pending: crate::server::SccacheGaugeIncrement,
     ) -> Result<(CompileResult, ProcessOutput)> {
         let out_pretty = self.output_pretty().into_owned();
+
         // [<file>] get_cached_or_compile: "/path/to/exe <args...>"
-        if log_enabled!(log::Level::Debug) {
-            debug!(
-                "[{out_pretty}]: get_cached_or_compile: {:?}",
-                shlex::try_join(
-                    std::iter::empty()
-                        .chain(&[format!("{}", self.get_executable().as_path().display())])
-                        .chain(&dist::osstrings_to_strings(&arguments).unwrap_or_default()[..])
-                        .map(|s| s.as_str())
-                )?
-            );
-        }
+        debug!(
+            "[{out_pretty}]: get_cached_or_compile: {}",
+            creator
+                .clone()
+                .new_command_sync(self.get_executable())
+                .args(&arguments)
+                .current_dir(&cwd)
+        );
 
         let start = Instant::now();
 
@@ -826,7 +822,7 @@ where
 
     fn language(&self) -> Language;
 
-    fn get_executable(&self) -> PathBuf;
+    fn get_executable(&self) -> &Path;
 }
 
 struct CacheLookupOrCompile<'a, T: CommandCreatorSync> {

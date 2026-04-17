@@ -297,16 +297,15 @@ impl fmt::Display for AsyncCommand {
                 .map(|p| p.to_owned())
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| Path::new("").to_owned());
-            write!(
-                f,
-                "cd {cwd:?} && {}",
-                shlex::try_join(
-                    std::iter::once(cmd.get_program())
-                        .chain(cmd.get_args())
-                        .map(|s| s.to_str().unwrap())
-                )
-                .unwrap_or_else(|e| format!("{e}"))
-            )
+            write!(f, r#"cd "{}"; "#, cwd.display())?;
+            if cfg!(target_os = "windows") {
+                write!(f, "& ")?;
+            }
+            write!(f, r#"{:?}"#, cmd.get_program())?;
+            for arg in cmd.get_args() {
+                write!(f, " {arg:?}")?;
+            }
+            fmt::Result::Ok(())
         } else {
             fmt::Result::Ok(())
         }
@@ -538,12 +537,13 @@ impl RunCommand for MockCommand {
 
 impl fmt::Display for MockCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            shlex::try_join(self.args.iter().map(|s| s.to_str().unwrap()))
-                .unwrap_or_else(|e| format!("{e}"))
-        )
+        if cfg!(target_os = "windows") {
+            write!(f, "& ")?;
+        }
+        for arg in self.args.iter() {
+            write!(f, " {arg:?}")?;
+        }
+        fmt::Result::Ok(())
     }
 }
 

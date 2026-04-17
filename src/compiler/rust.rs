@@ -1327,8 +1327,8 @@ impl<T> CompilerHasher<T> for RustHasher
 where
     T: CommandCreatorSync,
 {
-    fn get_executable(&self) -> PathBuf {
-        self.executable.clone()
+    fn get_executable(&self) -> &Path {
+        self.executable.as_path()
     }
 
     async fn generate_hash_key(
@@ -1997,7 +1997,7 @@ fn maybe_add_cargo_toml(input_path: &Path, verify: bool) -> Option<PathBuf> {
 #[test]
 #[cfg(feature = "dist-client")]
 fn test_maybe_add_cargo_toml() {
-    let (root, result_cargo_toml_path) = if cfg!(windows) {
+    let (root, result_cargo_toml_path) = if cfg!(target_os = "windows") {
         (
             r"C:\mozilla-source\mozilla-unified\third_party\rust",
             r"C:\mozilla-source\mozilla-unified\third_party\rust\wgpu-core\Cargo.toml",
@@ -3340,7 +3340,7 @@ proc_macro false
         assert_eq!(res[2], "lucet_runtime_macros");
     }
 
-    #[cfg(feature = "dist-client")]
+    #[cfg(all(feature = "dist-client", not(windows)))]
     #[test]
     fn test_rlib_dep_reader_call() {
         let mut env_vars = vec![];

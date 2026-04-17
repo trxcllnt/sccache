@@ -1274,16 +1274,15 @@ struct NvccGeneratedSubcommand {
 
 impl std::fmt::Display for NvccGeneratedSubcommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "cd {:?} && {}",
-            self.cwd,
-            shlex::try_join(
-                std::iter::once(self.exe.as_os_str().to_str().unwrap_or_default())
-                    .chain(self.args.iter().map(|s| s.to_str().unwrap_or_default()))
-            )
-            .unwrap_or_else(|e| format!("{e}"))
-        )
+        write!(f, r#"cd "{}"; "#, self.cwd.display())?;
+        if cfg!(target_os = "windows") {
+            write!(f, "& ")?;
+        }
+        write!(f, r#""{}""#, self.exe.display())?;
+        for arg in self.args.iter() {
+            write!(f, " {arg:?}")?;
+        }
+        std::fmt::Result::Ok(())
     }
 }
 

@@ -584,16 +584,15 @@ pub struct CompileCommand {
 
 impl fmt::Display for CompileCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            shlex::try_join(
-                std::iter::once(&self.executable)
-                    .chain(self.arguments.iter())
-                    .map(|s| s.as_str())
-            )
-            .unwrap_or_else(|e| format!("{e}"))
-        )
+        write!(f, r#"cd "{}"; "#, self.cwd)?;
+        if cfg!(target_os = "windows") {
+            write!(f, "& ")?;
+        }
+        write!(f, r#""{}""#, self.executable)?;
+        for arg in self.arguments.iter() {
+            write!(f, r#" "{arg}""#)?;
+        }
+        fmt::Result::Ok(())
     }
 }
 
