@@ -2262,6 +2262,7 @@ use self::ArgData::PassThrough as Detect_PassThrough;
 counted_array!(static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("--compiler-bindir", OsString, CanBeSeparated(b'='), Detect_PassThrough),
     take_arg!("-ccbin", OsString, CanBeSeparated(b'='), Detect_PassThrough),
+    take_arg!("-x", OsString, Separated, Detect_PassThrough)
 ]);
 
 pub fn compiler_info_args(arguments: &[OsString]) -> Vec<OsString> {
@@ -2305,9 +2306,12 @@ where
 compiler_id=nvcc-nvhpc
 compiler_version=__CUDACC_VER_MAJOR__.__CUDACC_VER_MINOR__.__CUDACC_VER_BUILD__
 compiler_version=__NVCOMPILER_MAJOR__.__NVCOMPILER_MINOR__.__NVCOMPILER_PATCHLEVEL__
-#elif defined(__NVCC__) && defined(_MSC_VER)
+#elif defined(__NVCC__) && defined(_MSC_VER) && !defined(__clang__)
 compiler_id=nvcc-msvc
 compiler_version=__CUDACC_VER_MAJOR__.__CUDACC_VER_MINOR__.__CUDACC_VER_BUILD__
+#if !defined(__VERSION__)
+compiler_version=_MSC_VER
+#endif
 #elif defined(__NVCC__) && defined(__clang__)
 compiler_id=nvcc-clang
 compiler_version=__CUDACC_VER_MAJOR__.__CUDACC_VER_MINOR__.__CUDACC_VER_BUILD__
@@ -2316,8 +2320,14 @@ compiler_id=nvcc
 compiler_version=__CUDACC_VER_MAJOR__.__CUDACC_VER_MINOR__.__CUDACC_VER_BUILD__
 #elif defined(_MSC_VER) && !defined(__clang__)
 compiler_id=msvc
+#if !defined(__VERSION__)
+compiler_version=_MSC_VER
+#endif
 #elif defined(_MSC_VER) && defined(_MT)
 compiler_id=msvc-clang
+#if !defined(__VERSION__)
+compiler_version=_MSC_VER
+#endif
 #elif defined(__NVCOMPILER)
 compiler_id=nvhpc
 compiler_version=__NVCOMPILER_MAJOR__.__NVCOMPILER_MINOR__.__NVCOMPILER_PATCHLEVEL__
@@ -2459,14 +2469,16 @@ compiler_version=__VERSION__
             }
             "nvcc" | "nvcc-clang" | "nvcc-msvc" | "nvcc-nvhpc" => {
                 let version = version.map(|s| s.replace(' ', ""));
-                let host_compiler = match kind {
-                    "nvcc-clang" => NvccHostCompiler::Clang,
-                    "nvcc-nvhpc" => NvccHostCompiler::Nvhpc,
-                    "nvcc-msvc" => NvccHostCompiler::Msvc,
-                    "nvcc" => NvccHostCompiler::Gcc,
-                    &_ => NvccHostCompiler::Gcc,
+                let (host_compiler, host_compiler_version) = match kind {
+                    "nvcc-clang" => (NvccHostCompiler::Clang, next_version()),
+                    "nvcc-nvhpc" => (
+                        NvccHostCompiler::Nvhpc,
+                        next_version().map(|s| s.replace(' ', "")),
+                    ),
+                    "nvcc-msvc" => (NvccHostCompiler::Msvc, next_version()),
+                    "nvcc" => (NvccHostCompiler::Gcc, next_version()),
+                    &_ => (NvccHostCompiler::Gcc, next_version()),
                 };
-                let host_compiler_version = next_version();
 
                 trace!(
                     "Found {kind} (version: {}/{})",
