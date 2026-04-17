@@ -21,6 +21,7 @@ use crate::{
             ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
         },
         gcc::{self, ArgData::*},
+        msvc::from_local_codepage,
     },
     counted_array, debug_if_trace, dist,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
@@ -32,7 +33,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use fs_err as fs;
-use futures::{FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
+use futures::{FutureExt, Stream, StreamExt, TryFutureExt};
 use itertools::Itertools;
 use regex::Regex;
 
@@ -46,11 +47,6 @@ use std::{
 use tempfile::{TempDir, TempPath};
 use which::which_in;
 
-use crate::errors::*;
-
-static IS_VALID_LINE_RE: LazyLock<Regex> = LazyLock::new(|| regex_static::regex!(r"^#\$ (.*)$"));
-static IS_ENVVAR_LINE_RE: LazyLock<Regex> =
-    LazyLock::new(|| regex_static::regex!(r"^([_A-Z]+)=(.*)$"));
 static HAS_SM_IN_NAME_RE: LazyLock<Regex> =
     LazyLock::new(|| regex_static::regex!(r"^(.*)\.sm_([0-9A-Za-z]+)\.(.*)$"));
 static HAS_COMPUTE_IN_NAME_RE: LazyLock<Regex> =
@@ -145,6 +141,7 @@ impl Nvcc {
             &[
                 "-x".into(),
                 "cu".into(),
+                "-c".into(),
                 "x.cu".into(),
                 "-o".into(),
                 "x.cu.o".into(),
@@ -1724,9 +1721,8 @@ fn fixup_cicc_args(
         ),
         // Only generate `.cudafe1.{c,gpu}` files when `-keep` is on.
         //
-        // nvcc's cicc commands to output them by default,
-        // but as far as I can tell, they aren't by any other part
-        // of the compilation pipeline.
+        // nvcc's cicc commands  output them by default, but as far as
+        // I can tell, they aren't used in the compilation pipeline.
         //
         // These files can be large (`.gpu` can be hundreds of MiB),
         // making them really expensive to cache and/or ship around
@@ -1788,8 +1784,6 @@ where
     F: Fn(&str, &[String]) -> bool,
     T: CommandCreatorSync,
 {
-    use std::io::BufRead;
-
     let mut nvcc_dryrun_cmd = creator.clone().new_command_sync(executable);
 
     nvcc_dryrun_cmd
@@ -1809,13 +1803,14 @@ where
             let lines = output.stderr;
             #[cfg(windows)]
             let lines = output.stdout;
-            lines
+            // Avoid dropping Windows wide chars in paths
+            from_local_codepage(lines)?
         }
         Err(err) => {
             match err.downcast::<ProcessError>() {
                 Ok(ProcessError(mut output)) => {
                     // nvcc on windows outputs errors on stdout
-                    if cfg!(windows) {
+                    if cfg!(target_os = "windows") {
                         output.stderr = output.stdout;
                     }
                     output.stdout = vec![];
@@ -1828,40 +1823,71 @@ where
         }
     };
 
-    let lines = std::io::BufReader::new(&lines[..]).lines();
-    let mut dryrun_env_vars = Vec::<(OsString, OsString)>::new();
-    let mut dryrun_env_vars_re_map = HashMap::<String, regex::Regex>::new();
+    let mut new_vars = HashMap::<String, (String, String)>::new();
 
-    let lines = futures::stream::iter(lines)
-        .map_err(anyhow::Error::new)
-        .try_filter_map(|line| {
-            // Select lines that match the `#$ ` prefix from nvcc --dryrun
-            futures::future::ok(select_valid_dryrun_lines(&IS_VALID_LINE_RE, &line))
-        })
-        .try_filter_map(|line| {
-            futures::future::ready(fold_env_vars_or_split_into_exe_and_args(
-                &IS_ENVVAR_LINE_RE,
-                &mut dryrun_env_vars,
-                &mut dryrun_env_vars_re_map,
+    let lines = lines
+        .split("\n")
+        // Trim extra spaces/carriage returns
+        .filter_map(|line| Some(line.trim()).filter(|&line| !line.is_empty()))
+        // Select lines that match the `#$ ` prefix from nvcc --dryrun
+        .filter_map(|line| line.strip_prefix("#$ ").filter(|&line| !line.is_empty()))
+        // Parse the nvcc envvar and command lines
+        .filter_map(|line| {
+            fold_env_vars_or_split_into_exe_and_args(
                 cwd,
-                &line,
+                line,
+                env_vars,
+                &mut new_vars,
                 host_compiler,
-            ))
+            )
         })
-        .try_collect::<Vec<_>>()
-        .await?;
+        .try_collect::<_, Vec<_>, _>()?;
 
-    for pair in dryrun_env_vars {
+    // Update the input env_vars with the ones from nvcc --dryrun
+    for (var, (val, _)) in new_vars.iter() {
         env_vars.splice(
-            if let Some(idx) = env_vars.iter().position(|(k, _)| *k == pair.0) {
+            if let Some(idx) = env_vars.iter().position(|(k, _)| k == var.as_str()) {
                 idx..idx + 1
             } else {
                 env_vars.len()..env_vars.len()
             },
-            [pair],
+            [(var.into(), val.into())],
         );
     }
 
+    //
+    // Remap nvcc's generated file names to deterministic names.
+    // nvcc generates different file names depending on whether it's compiling one vs. many archs.
+    //
+    // For example, both of these commands generate PTX for sm60, so we should get a cicc cache hit:
+    // 1. `nvcc -x cu -c x.cu -o x.cu.o -gencode=arch=compute_60,code=[compute_60,sm_60]`
+    // 2. `nvcc -x cu -c x.cu -o x.cu.o -gencode=arch=compute_60,code=[sm_60] -gencode=arch=compute_70,code=[compute_70,sm_70]`
+    //
+    // The first command generates:
+    // ```
+    // cicc --gen_c_file_name x.cudafe1.c \
+    //      --stub_file_name x.cudafe1.stub.c \
+    //      --gen_device_file_name x.cudafe1.gpu \
+    //      -o x.ptx
+    // ```
+    //
+    // The second command generates:
+    // ```
+    // cicc --gen_c_file_name x.compute_60.cudafe1.c \
+    //      --stub_file_name x.compute_60.cudafe1.stub.c \
+    //      --gen_device_file_name x.compute_60.cudafe1.gpu \
+    //      -o x.compute_60.ptx
+    // ```
+    //
+    // The second command yields a false-positive cache miss because the names are different.
+    //
+    // This matters because CI jobs will often compile .cu files in "many-arch" mode, but devs
+    // who have just one GPU locally prefer to only compile for their specific GPU arch. It is
+    // preferrable if they can reuse the PTX populated by "many-arch" CI jobs.
+    //
+    // So to avoid this, we detect these "single-arch" compilations and rewrite the names to
+    // match what nvcc generates for "many-arch" compilations.
+    //
     let nvcc_command_args = lines.iter().filter_map(|(exe, args)| {
         if let Some(exe_name) = exe.file_stem().and_then(|s| s.to_str()) {
             if is_nvcc_exe(exe_name, args) {
@@ -1872,39 +1898,6 @@ where
     });
 
     let lines = if let Some(arch) = find_last_compute_arch(nvcc_command_args) {
-        //
-        // Remap nvcc's generated file names to deterministic names.
-        // nvcc generates different file names depending on whether it's compiling one vs. many archs.
-        //
-        // For example, both of these commands generate PTX for sm60, so we should get a cicc cache hit:
-        // 1. `nvcc -x cu -c x.cu -o x.cu.o -gencode=arch=compute_60,code=[compute_60,sm_60]`
-        // 2. `nvcc -x cu -c x.cu -o x.cu.o -gencode=arch=compute_60,code=[sm_60] -gencode=arch=compute_70,code=[compute_70,sm_70]`
-        //
-        // The first command generates:
-        // ```
-        // cicc --gen_c_file_name x.cudafe1.c \
-        //      --stub_file_name x.cudafe1.stub.c \
-        //      --gen_device_file_name x.cudafe1.gpu \
-        //      -o x.ptx
-        // ```
-        //
-        // The second command generates:
-        // ```
-        // cicc --gen_c_file_name x.compute_60.cudafe1.c \
-        //      --stub_file_name x.compute_60.cudafe1.stub.c \
-        //      --gen_device_file_name x.compute_60.cudafe1.gpu \
-        //      -o x.compute_60.ptx
-        // ```
-        //
-        // The second command yields a false-positive cache miss because the names are different.
-        //
-        // This matters because CI jobs will often compile .cu files in "many-arch" mode, but devs
-        // who have just one GPU locally prefer to only compile for their specific GPU arch. It is
-        // preferrable if they can reuse the PTX populated by "many-arch" CI jobs.
-        //
-        // So to avoid this, we detect these "single-arch" compilations and rewrite the names to
-        // match what nvcc generates for "many-arch" compilations.
-        //
         remap_generated_filenames(&arch, compile_flag, &lines, nvcc_internal_files)
     } else {
         lines
@@ -1924,93 +1917,81 @@ where
         .collect::<Vec<_>>())
 }
 
-fn select_valid_dryrun_lines(re: &Regex, line: &str) -> Option<String> {
-    // Ignore lines that don't start with `#$ `. For some reason, nvcc
-    // on Windows prints the name of the input file without the prefix
-    re.captures(line).map(|caps| {
-        let (_, [rest]) = caps.extract();
-        rest.to_string()
-    })
-}
-
 fn fold_env_vars_or_split_into_exe_and_args(
-    re: &Regex,
-    env_vars: &mut Vec<(OsString, OsString)>,
-    env_var_re_map: &mut HashMap<String, regex::Regex>,
     cwd: &Path,
     line: &str,
+    env_vars: &[(OsString, OsString)],
+    env_vars_nvcc: &mut HashMap<String, (String, String)>,
     host_compiler: &NvccHostCompiler,
-) -> Result<Option<(PathBuf, Vec<String>)>> {
-    fn envvar_in_shell_format(var: &str) -> String {
-        if cfg!(target_os = "windows") {
-            format!("%{var}%") // %CICC_PATH%
-        } else {
-            format!("${var}") // $CICC_PATH
+) -> Option<Result<(PathBuf, Vec<String>)>> {
+    // Intercept the environment variable lines and add them to env_vars_nvcc
+    if let Some((var, val)) = line.split_once("=") {
+        if var.chars().all(|b| b.is_ascii_alphabetic() || b == '_') {
+            env_vars_nvcc.entry(var.into()).or_insert_with(|| {
+                (
+                    val.into(),
+                    if cfg!(target_os = "windows") {
+                        // %CICC_PATH%
+                        format!(r#"%{var}%"#)
+                    } else {
+                        // $CICC_PATH
+                        format!(r#"${var}"#)
+                    },
+                )
+            });
+
+            return None;
         }
     }
 
-    fn envvar_in_shell_format_re(var: &str) -> Regex {
-        Regex::new(
-            &(if cfg!(target_os = "windows") {
-                regex::escape(&envvar_in_shell_format(var))
-            } else {
-                regex::escape(&envvar_in_shell_format(var)) + r"[^\w]"
-            }),
-        )
-        .unwrap()
-    }
+    // The rest of the lines are subcommands, so parse into a vec of [exe, args..]
 
-    // Intercept the environment variable lines and add them to the env_vars list
-    if let Some(var) = re.captures(line) {
-        let (_, [var, val]) = var.extract();
-
-        env_var_re_map
-            .entry(var.to_owned())
-            .or_insert_with_key(|var| envvar_in_shell_format_re(var));
-
-        env_vars.push((var.into(), val.into()));
-
-        return Ok(None);
-    }
-
-    // The rest of the lines are subcommands, so parse into a vec of [cmd, args..]
-
-    let mut line = if cfg!(target_os = "windows") {
-        let line = line.replace("\"\"", "\"");
-        match host_compiler {
-            NvccHostCompiler::Msvc => line.replace(" -E ", " -P ").replace(" > ", " -Fi"),
-            _ => line,
+    let line = if matches!(host_compiler, NvccHostCompiler::Msvc) {
+        // Rewrite stdout to go to a file instead
+        let line = line.replace(" > ", " -Fi");
+        // Preprocess to a file instead of stdout
+        let line = line.replace(" -E ", " -P ");
+        // Unwrap double quoted commands that contain envvars
+        if line.starts_with(r#""""#) {
+            Some(line.as_str())
+                .and_then(|line| line.strip_prefix(r#"""#))
+                .and_then(|line| line.strip_suffix(r#"""#))
+                .map(|line| line.to_owned())
+                .unwrap_or(line)
+        } else {
+            line
         }
     } else {
         line.to_owned()
     };
 
     // Expand envvars in nvcc subcommands, i.e. "$CICC_PATH/cicc ..." or "%CICC_PATH%/cicc"
-    if let Some(env_vars) = dist::osstring_tuples_to_strings(env_vars) {
-        for (var, val) in env_vars {
-            if let Some(re) = env_var_re_map.get(&var) {
-                if re.is_match(&line) {
-                    line = line.replace(&envvar_in_shell_format(&var), &val);
-                }
-            }
-        }
-    }
+    let line = env_vars_nvcc
+        .values()
+        .fold(line, |line, (val, pat)| line.replace(pat, val));
 
-    let mut exe_and_args = match split_quoted_shell_str(&line) {
-        Some(args) => args,
-        None => return Err(anyhow!("Could not parse shell line")),
+    // Split line into exe and arguments, respecting platform quoting rules
+    let (exe, args) = match split_quoted_shell_str(&line) {
+        None => return Some(Err(anyhow!("Could not parse shell line"))),
+        Some(mut exe_and_args) => {
+            let args = exe_and_args.split_off(1);
+            let exe = exe_and_args.drain(..).next().unwrap();
+            (exe, args)
+        }
     };
 
-    let args = exe_and_args.split_off(1);
-    let exe = exe_and_args.drain(..).next().unwrap();
-    let exe = which_in(
-        &exe,
-        env_vars
-            .iter()
-            .find_map(|(k, v)| if k == "PATH" { Some(v) } else { None }),
-        cwd,
-    )
-    .unwrap_or_else(|_| PathBuf::from(exe));
+    // Find the full binary path
+    let env_path = env_vars_nvcc
+        .get("PATH")
+        .map(|(v, _)| OsStr::new(v))
+        .or_else(|| {
+            env_vars
+                .iter()
+                .find(|(k, _)| k == "PATH")
+                .map(|(_, v)| v.as_os_str())
+        });
+
+    let exe = which_in(&exe, env_path, cwd).unwrap_or_else(|_| PathBuf::from(exe));
 
     // Remove any shell stdio redirect arguments
     let (_, args) = args
@@ -2046,7 +2027,7 @@ fn fold_env_vars_or_split_into_exe_and_args(
             (None, args)
         });
 
-    Ok(Some((exe, args)))
+    Some(Ok((exe, args)))
 }
 
 fn find_last_compute_arch<'a, A: AsRef<[String]> + 'a, I: DoubleEndedIterator<Item = A>>(
@@ -2368,7 +2349,7 @@ where
                     .unwrap_or_else(error_to_output)
             }
             NvccSubcommandKind::Compile => {
-                debug_if_trace!(
+                trace!(
                     "[{}]: run_commands_sequential: {cmd}",
                     output_path.display()
                 );
