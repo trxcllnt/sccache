@@ -79,7 +79,7 @@ mod common {
         let res = match req.send().await {
             Ok(res) => res,
             Err(err) => {
-                crate::debug_if_trace!(
+                trace!(
                     "Request error: {}",
                     [
                         err.url().map(|u| format!("url={u:?}")).unwrap_or_default(),

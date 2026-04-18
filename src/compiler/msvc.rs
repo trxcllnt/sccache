@@ -12,29 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compiler::c::{
-    ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
+use crate::{
+    compiler::c::{
+        ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
+    },
+    compiler::{
+        Cacheable, ColorMode, CompilerArguments, Language, SingleCompileCommand, clang, gcc,
+        preprocessor_cache::{StandardFsAbstraction, process_preprocessed_file},
+        write_temp_file,
+    },
+    compiler::{CompileCommandImpl, args::*},
+    counted_array, dist,
+    errors::*,
+    mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
+    server::SccacheService,
+    util::{OsStrExt, normal_temp_path, path_to_bytes, run_input_output},
 };
-use crate::compiler::{
-    Cacheable, ColorMode, CompilerArguments, Language, SingleCompileCommand, clang, gcc,
-    preprocessor_cache::{StandardFsAbstraction, process_preprocessed_file},
-    write_temp_file,
-};
-use crate::compiler::{CompileCommandImpl, args::*};
-use crate::mock_command::{CommandCreatorSync, ProcessOutput, RunCommand};
-use crate::util::{OsStrExt, normal_temp_path, path_to_bytes, run_input_output};
-use crate::{counted_array, debug_if_trace, dist, server::SccacheService};
 use async_trait::async_trait;
 use fs::File;
 use fs_err as fs;
 use futures::FutureExt;
-use std::collections::{HashMap, HashSet};
-use std::ffi::{OsStr, OsString};
-use std::io::{self, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::{OsStr, OsString},
+    io::{self, BufWriter, Read, Write},
+    path::{Path, PathBuf},
+};
 use tempfile::TempPath;
-
-use crate::errors::*;
 
 /// A struct on which to implement `CCompilerImpl`.
 ///
@@ -108,7 +112,6 @@ impl CCompilerImpl for Msvc {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        // MSVC can't be dist-compiled
         rewrite_includes_only: bool,
         generate_dependencies: bool,
         include_line_numbers: bool,
@@ -169,7 +172,12 @@ impl CCompilerImpl for Msvc {
         Option<dist::CompileCommand>,
         Cacheable,
     )> {
-        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
+        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars).map(
+            |(cmd, _dist_cmd, cacheable)| {
+                // MSVC can't be dist-compiled
+                (cmd, None, cacheable)
+            },
+        )
     }
 }
 
@@ -231,7 +239,7 @@ where
     for (k, v) in env {
         cmd.env(k, v);
     }
-    debug_if_trace!("detect_showincludes_prefix: {:?}", cmd);
+    trace!("detect_showincludes_prefix: {:?}", cmd);
 
     let output = run_input_output(cmd, None).await?;
 
@@ -417,6 +425,9 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_take_arg!("Wv:", OsString, Concatenated, PassThroughWithSuffix),
     msvc_flag!("X", PassThrough),
     msvc_take_arg!("Xclang", OsString, Separated, XClang),
+    msvc_flag!("Y-", PassThrough), // Disable another PCH options
+    msvc_take_arg!("YI", OsString, Concatenated, PassThroughWithSuffix), // Has no effect without /Yc
+    msvc_flag!("YI-", PassThrough), // Has no effect without /Yc
     msvc_take_arg!("Yc", PathBuf, Concatenated, TooHardPath), // Compile PCH - not yet supported.
     msvc_flag!("Yd", PassThrough),
     msvc_flag!("Z7", PassThrough), // Add debug info to .obj files.
@@ -426,6 +437,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("Za", PassThrough),
     msvc_take_arg!("Zc:", OsString, Concatenated, PassThroughWithSuffix),
     msvc_flag!("Ze", PassThrough),
+    msvc_flag!("Zf", PassThrough),
     msvc_flag!("Zi", DebugInfo),
     msvc_take_arg!("Zm", OsString, Concatenated, PassThroughWithSuffix),
     msvc_flag!("Zo", PassThrough),
@@ -528,7 +540,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("@", PathBuf, Concatenated, TooHardPath),
 ]);
 
-// TODO: what to do with precompiled header flags? eg: /Y-, /Yc, /YI, /Yu, /Zf, /Zm
+// TODO: what to do with precompiled header flags? eg: /Yc, /YI, /Yu
 
 pub fn parse_arguments(
     arguments: &[OsString],
@@ -1054,7 +1066,7 @@ where
         is_clang,
     );
 
-    debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
+    trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
 
     let mut output = run_input_output(cmd, None).await?;
 
@@ -1141,7 +1153,7 @@ where
     let (cmd, dependencies) =
         generate_dependencies_cmd(creator, executable, parsed_args, cwd, env_vars, is_clang)?;
 
-    debug_if_trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
+    trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
     run_input_output(cmd, None).await?;
 
@@ -1279,7 +1291,7 @@ fn generate_compile_commands(
         out_pretty: out_pretty.to_string(),
     };
 
-    debug_if_trace!("[{out_pretty}]: command: {command}");
+    trace!("[{out_pretty}]: command: {command}");
 
     #[cfg(not(feature = "dist-client"))]
     let dist_command = None;
@@ -1311,7 +1323,7 @@ fn generate_compile_commands(
             },
         };
 
-        debug_if_trace!("[{out_pretty}]: dist_command: {command}");
+        trace!("[{out_pretty}]: dist_command: {command}");
 
         Some(command)
     })();
@@ -1396,7 +1408,7 @@ impl Iterator for ExpandIncludeFile<'_> {
 
             // Visit the next argument provided by the original command iterator.
             let arg = self.args.pop()?;
-            let file_arg = match arg.split_prefix("@") {
+            let file_arg = match arg.strip_prefix("@") {
                 Some(file_arg) => file_arg,
                 None => return Some(arg),
             };
@@ -2442,6 +2454,10 @@ mod test {
             "/d1nodatetime",
             "-EHa",
             "-await:strict",
+            "/YI",
+            "-Y-",
+            "/YI-",
+            "-Zf",
             "-Fmdictionary-map",
             "-c",
             "-Fohost_dictionary.obj",
@@ -2471,6 +2487,10 @@ mod test {
                 "/d1nodatetime",
                 "-EHa",
                 "-await:strict",
+                "/YI",
+                "-Y-",
+                "/YI-",
+                "-Zf",
                 "-Fmdictionary-map"
             )
         );

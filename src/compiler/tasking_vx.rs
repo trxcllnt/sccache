@@ -25,7 +25,7 @@ use crate::{
         },
         gcc,
     },
-    counted_array, debug_if_trace, dist,
+    counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     server::SccacheService,
@@ -345,7 +345,7 @@ where
         .envs(env_vars.to_vec())
         .current_dir(cwd);
 
-    debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
+    trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
 
     run_input_output(cmd, None).await
 }
@@ -394,7 +394,7 @@ where
         .arg("-o")
         .arg(&path);
 
-    debug_if_trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
+    trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
     Ok((cmd, (path, temp)))
 }

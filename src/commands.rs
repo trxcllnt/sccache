@@ -12,33 +12,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cache::StorageKind;
-use crate::client::{ServerConnection, connect_to_server, connect_with_retry};
-use crate::cmdline::{Command, StatsFormat};
-use crate::compiler::ColorMode;
-use crate::config::Config;
-use crate::jobserver::Client;
-use crate::mock_command::{CommandChild, CommandCreatorSync, ProcessCommandCreator, RunCommand};
-use crate::protocol::{Compile, CompileFinished, CompileResponse, Request, Response};
-use crate::server::{self, DistInfo, ServerInfo, ServerStartup, ServerStats};
-use crate::util::daemonize;
+use crate::{
+    cache::StorageKind,
+    client::{ServerConnection, connect_to_server, connect_with_retry},
+    cmdline::{Command, StatsFormat},
+    compiler::ColorMode,
+    config::Config,
+    errors::*,
+    jobserver::Client,
+    mock_command::{CommandChild, CommandCreatorSync, ProcessCommandCreator, RunCommand},
+    protocol::{Compile, CompileFinished, CompileResponse, Request, Response},
+    server::{self, DistInfo, ServerInfo, ServerStartup, ServerStats},
+    util::daemonize,
+};
 use byteorder::{BigEndian, ByteOrder};
 use fs::{File, OpenOptions};
 use fs_err as fs;
-use std::env;
-use std::ffi::{OsStr, OsString};
-use std::io::{self, IsTerminal, Write};
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
-use std::process;
-use std::time::Duration;
+use std::{
+    env,
+    ffi::{OsStr, OsString},
+    io::{self, IsTerminal, Write},
+    path::Path,
+    process,
+    time::Duration,
+};
 use strip_ansi_escapes::Writer;
-use tokio::io::AsyncReadExt;
-use tokio::runtime::Runtime;
+use tokio::{io::AsyncReadExt, runtime::Runtime};
 use which::which_in;
-
-use crate::{debug_if_trace, errors::*};
 
 /// The default sccache server port.
 pub const DEFAULT_PORT: u16 = 4226;
@@ -589,7 +591,7 @@ where
     let mut cmd = creator.new_command_sync(exe);
     cmd.args(&cmdline).current_dir(cwd);
 
-    debug_if_trace!("running command: {cmd}");
+    trace!("running command: {cmd}");
 
     let status = runtime.block_on(async move {
         let child = cmd.spawn().await?;

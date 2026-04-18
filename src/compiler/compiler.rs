@@ -26,10 +26,8 @@ use crate::{
         cudafe::CudaFE,
         diab::Diab,
         gcc::Gcc,
-        msvc,
-        msvc::Msvc,
-        nvcc::Nvcc,
-        nvcc::NvccHostCompiler,
+        msvc::{self, Msvc},
+        nvcc::{Nvcc, NvccHostCompiler},
         nvhpc::Nvhpc,
         ptxas::Ptxas,
         rust::{Rust, RustupProxy},
@@ -187,17 +185,15 @@ pub struct SingleCompileCommand {
 
 impl fmt::Display for SingleCompileCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "cd {:?} && {}",
-            self.cwd,
-            shlex::try_join(
-                std::iter::once(&self.executable.clone().into_os_string())
-                    .chain(self.arguments.iter())
-                    .map(|s| s.to_str().unwrap())
-            )
-            .unwrap_or_else(|e| format!("{e}"))
-        )
+        write!(f, r#"cd "{}"; "#, self.cwd.display())?;
+        if cfg!(target_os = "windows") {
+            write!(f, "& ")?;
+        }
+        write!(f, r#""{}""#, self.executable.display())?;
+        for arg in self.arguments.iter() {
+            write!(f, " {arg:?}")?;
+        }
+        fmt::Result::Ok(())
     }
 }
 
@@ -648,18 +644,16 @@ where
         pending: crate::server::SccacheGaugeIncrement,
     ) -> Result<(CompileResult, ProcessOutput)> {
         let out_pretty = self.output_pretty().into_owned();
+
         // [<file>] get_cached_or_compile: "/path/to/exe <args...>"
-        if log_enabled!(log::Level::Debug) {
-            debug!(
-                "[{out_pretty}]: get_cached_or_compile: {:?}",
-                shlex::try_join(
-                    std::iter::empty()
-                        .chain(&[format!("{}", self.get_executable().as_path().display())])
-                        .chain(&dist::osstrings_to_strings(&arguments).unwrap_or_default()[..])
-                        .map(|s| s.as_str())
-                )?
-            );
-        }
+        debug!(
+            "[{out_pretty}]: get_cached_or_compile: {}",
+            creator
+                .clone()
+                .new_command_sync(self.get_executable())
+                .args(&arguments)
+                .current_dir(&cwd)
+        );
 
         let start = Instant::now();
 
@@ -828,7 +822,7 @@ where
 
     fn language(&self) -> Language;
 
-    fn get_executable(&self) -> PathBuf;
+    fn get_executable(&self) -> &Path;
 }
 
 struct CacheLookupOrCompile<'a, T: CommandCreatorSync> {
@@ -2270,9 +2264,10 @@ where
 }
 
 ArgData! {
+    PassThroughFlag,
     PassThrough(OsString),
+
 }
-use self::ArgData::PassThrough as Detect_PassThrough;
 
 // Establish a set of compiler flags that are required for
 // valid execution of the compiler even in preprocessor mode.
@@ -2285,22 +2280,30 @@ use self::ArgData::PassThrough as Detect_PassThrough;
 //  gcc is expected to exist on the PATH. So if gcc doesn't exist
 //  compiler detection fails if we don't pass along the ccbin arg
 counted_array!(static ARGS: [ArgInfo<ArgData>; _] = [
-    take_arg!("--compiler-bindir", OsString, CanBeSeparated(b'='), Detect_PassThrough),
-    take_arg!("-ccbin", OsString, CanBeSeparated(b'='), Detect_PassThrough),
+    take_arg!("--compiler-bindir", OsString, CanBeConcatenated(b'='), ArgData::PassThrough),
+    take_arg!("--cuda-gpu-arch", OsString, CanBeConcatenated(b'='), ArgData::PassThrough),
+    take_arg!("--cuda-path", OsString, CanBeConcatenated(b'='), ArgData::PassThrough),
+    flag!("--cuda-path-ignore-env", ArgData::PassThroughFlag),
+    flag!("--no-cuda-version-check", ArgData::PassThroughFlag),
+    take_arg!("-ccbin", OsString, CanBeConcatenated(b'='), ArgData::PassThrough),
+    take_arg!("-x", OsString, CanBeSeparated, ArgData::PassThrough),
 ]);
 
 pub fn compiler_info_args(arguments: &[OsString]) -> Vec<OsString> {
+    trace!("compiler_info_args in: {arguments:?}");
+
     let mut args = vec![];
     // Iterate over all the arguments for compilation and extract
     // any that are required for any valid execution of the compiler.
     // Allowing our compiler vendor detection to always properly execute
-    for arg in ArgsIter::new(arguments.iter().cloned(), &ARGS[..]) {
-        let arg = arg.unwrap_or_else(|_| Argument::Raw(OsString::from("")));
-        if let Some(Detect_PassThrough(_)) = arg.get_data() {
-            let required_arg = arg.normalize(NormalizedDisposition::Concatenated);
-            args.extend(required_arg.iter_os_strings());
+    for arg in ArgsIter::new(arguments.iter().cloned(), &ARGS[..]).flatten() {
+        if arg.get_data().is_some() {
+            args.extend(arg.iter_os_strings());
         }
     }
+
+    trace!("compiler_info_args out: {args:?}");
+
     args
 }
 
@@ -2328,24 +2331,33 @@ where
     let test = b"
 #if defined(__NVCC__) && defined(__NVCOMPILER)
 compiler_id=nvcc-nvhpc
-compiler_version=__CUDACC_VER_MAJOR__.__CUDACC_VER_MINOR__.__CUDACC_VER_BUILD__
-compiler_version=__NVCOMPILER_MAJOR__.__NVCOMPILER_MINOR__.__NVCOMPILER_PATCHLEVEL__
-#elif defined(__NVCC__) && defined(_MSC_VER)
+compiler_version=__CUDACC_VER_MAJOR__ . __CUDACC_VER_MINOR__ . __CUDACC_VER_BUILD__
+compiler_version=__NVCOMPILER_MAJOR__ . __NVCOMPILER_MINOR__ . __NVCOMPILER_PATCHLEVEL__
+#elif defined(__NVCC__) && defined(_MSC_VER) && !defined(__clang__)
 compiler_id=nvcc-msvc
-compiler_version=__CUDACC_VER_MAJOR__.__CUDACC_VER_MINOR__.__CUDACC_VER_BUILD__
+compiler_version=__CUDACC_VER_MAJOR__ . __CUDACC_VER_MINOR__ . __CUDACC_VER_BUILD__
+#if !defined(__VERSION__)
+compiler_version=_MSC_VER
+#endif
 #elif defined(__NVCC__) && defined(__clang__)
 compiler_id=nvcc-clang
-compiler_version=__CUDACC_VER_MAJOR__.__CUDACC_VER_MINOR__.__CUDACC_VER_BUILD__
+compiler_version=__CUDACC_VER_MAJOR__ . __CUDACC_VER_MINOR__ . __CUDACC_VER_BUILD__
 #elif defined(__NVCC__)
 compiler_id=nvcc
-compiler_version=__CUDACC_VER_MAJOR__.__CUDACC_VER_MINOR__.__CUDACC_VER_BUILD__
+compiler_version=__CUDACC_VER_MAJOR__ . __CUDACC_VER_MINOR__ . __CUDACC_VER_BUILD__
 #elif defined(_MSC_VER) && !defined(__clang__)
 compiler_id=msvc
+#if !defined(__VERSION__)
+compiler_version=_MSC_VER
+#endif
 #elif defined(_MSC_VER) && defined(_MT)
 compiler_id=msvc-clang
+#if !defined(__VERSION__)
+compiler_version=_MSC_VER
+#endif
 #elif defined(__NVCOMPILER)
 compiler_id=nvhpc
-compiler_version=__NVCOMPILER_MAJOR__.__NVCOMPILER_MINOR__.__NVCOMPILER_PATCHLEVEL__
+compiler_version=__NVCOMPILER_MAJOR__ . __NVCOMPILER_MINOR__ . __NVCOMPILER_PATCHLEVEL__
 #elif defined(__clang__) && defined(__cplusplus) && defined(__apple_build_version__)
 compiler_id=apple-clang++
 #elif defined(__clang__) && defined(__cplusplus)
@@ -2381,6 +2393,8 @@ compiler_version=__VERSION__
         .arg("-E")
         .arg(&src);
 
+    trace!("detect_c_compiler: {cmd}");
+
     let child = cmd.spawn().await?;
     let output = child
         .wait_with_output()
@@ -2395,10 +2409,10 @@ compiler_version=__VERSION__
     };
     let mut lines = stdout.lines().filter_map(|line| {
         let line = line.trim();
-        if line.starts_with("compiler_id=") {
-            Some(line.strip_prefix("compiler_id=").unwrap())
-        } else if line.starts_with("compiler_version=") {
-            Some(line.strip_prefix("compiler_version=").unwrap())
+        if let Some(compiler_id) = line.strip_prefix("compiler_id=") {
+            Some(compiler_id)
+        } else if let Some(compiler_version) = line.strip_prefix("compiler_version=") {
+            Some(compiler_version)
         } else {
             None
         }
@@ -2484,14 +2498,18 @@ compiler_version=__VERSION__
             }
             "nvcc" | "nvcc-clang" | "nvcc-msvc" | "nvcc-nvhpc" => {
                 let version = version.map(|s| s.replace(' ', ""));
+                let mut host_compiler_version = next_version();
+
                 let host_compiler = match kind {
                     "nvcc-clang" => NvccHostCompiler::Clang,
-                    "nvcc-nvhpc" => NvccHostCompiler::Nvhpc,
+                    "nvcc-nvhpc" => {
+                        host_compiler_version = host_compiler_version.map(|s| s.replace(' ', ""));
+                        NvccHostCompiler::Nvhpc
+                    }
                     "nvcc-msvc" => NvccHostCompiler::Msvc,
                     "nvcc" => NvccHostCompiler::Gcc,
                     &_ => NvccHostCompiler::Gcc,
                 };
-                let host_compiler_version = next_version();
 
                 trace!(
                     "Found {kind} (version: {}/{})",
@@ -2499,18 +2517,15 @@ compiler_version=__VERSION__
                     host_compiler_version.as_ref().unwrap()
                 );
 
-                let specfiles = if matches!(host_compiler, NvccHostCompiler::Gcc) {
-                    Gcc::read_implicit_specfiles(
-                        &mut creator,
-                        &executable,
-                        arguments,
-                        &env,
-                        "-Xcompiler=-v",
-                    )
-                    .await?
-                } else {
-                    vec![]
-                };
+                let specfiles = Nvcc::read_implicit_specfiles(
+                    &host_compiler,
+                    &mut creator,
+                    &executable,
+                    arguments,
+                    &env,
+                    "-Xcompiler=-v",
+                )
+                .await?;
 
                 let archs_all =
                     Nvcc::read_all_archs(&mut creator, &executable, &env, &host_compiler)

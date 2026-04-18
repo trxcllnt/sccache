@@ -24,7 +24,7 @@ use crate::{
         msvc::from_local_codepage,
         preprocessor_cache::normalize_path,
     },
-    counted_array, debug_if_trace, dist,
+    counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
     server::SccacheService,
@@ -199,7 +199,7 @@ impl CCompilerImpl for Gcc {
         let extra_preprocessor_flags = if include_line_numbers {
             vec![]
         } else {
-            vec!["-P".to_string()]
+            vec!["-P".into()]
         };
 
         preprocess(
@@ -533,7 +533,7 @@ where
             }
             Some(Output(p)) => output_arg = Some(p.clone()),
             Some(ClangModuleOutput(p)) => {
-                if let Some(p) = p.split_prefix("=") {
+                if let Some(p) = p.strip_prefix("=") {
                     module_output_path = Some(Some(PathBuf::from(p)));
                 } else if p.is_empty() {
                     module_output_path = Some(None);
@@ -963,7 +963,7 @@ pub fn preprocess_cmd<T>(
     env_vars: &[(OsString, OsString)],
     kind: &CCompilerKind,
     rewrite_includes_only: bool,
-    extra_preprocessor_flags: &[String],
+    extra_preprocessor_flags: &[OsString],
 ) -> T
 where
     T: RunCommand,
@@ -1018,8 +1018,8 @@ where
                         // don't use rewritten arch args if there is only one arch
                         parsed_args.arch_args.clone()
                     } else {
-                        debug_if_trace!("-arch args before rewrite: {:?}", parsed_args.arch_args);
-                        debug_if_trace!("-arch args after rewrite:  {:?}", rewritten_arch_args);
+                        trace!("-arch args before rewrite: {:?}", parsed_args.arch_args);
+                        trace!("-arch args after rewrite:  {:?}", rewritten_arch_args);
                         rewritten_arch_args
                     }
                 } else {
@@ -1052,7 +1052,7 @@ pub async fn preprocess<T>(
     kind: CCompilerKind,
     rewrite_includes_only: bool,
     generate_dependencies: bool,
-    extra_preprocessor_flags: &[String],
+    extra_preprocessor_flags: &[OsString],
 ) -> Result<PreprocessorOutput>
 where
     T: CommandCreatorSync,
@@ -1083,10 +1083,10 @@ where
         (cmd, None)
     };
 
-    debug_if_trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
-    debug_if_trace!("[{}]: depfile: {depfile:?}", parsed_args.output_pretty());
+    trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
+    trace!("[{}]: depfile: {depfile:?}", parsed_args.output_pretty());
 
-    let output = run_input_stream_output(cmd, 4 * 1024, None).await?.boxed();
+    let output = run_input_stream_output(cmd, 8 * 1024, None).await?.boxed();
 
     let dependencies = depfile.map(|depfile| {
         parse_dependencies(cwd.to_owned(), parsed_args.input.clone(), depfile).boxed()
@@ -1158,7 +1158,7 @@ where
             }
             // If `-MMD` (with or without `-MF <file>`)
             (_, None, Some("-MMD")) => {
-                // then generate and write all dependencies a tempfile
+                // then generate and write all dependencies to a tempfile
                 let temp = normal_temp_path()?;
                 run_input_output(
                     generate_all_dependencies_cmd(
@@ -1208,7 +1208,7 @@ where
         )
         .await;
 
-        debug_if_trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
+        trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
         (cmd, (path, temp))
     };
@@ -1250,7 +1250,7 @@ where
         &[],
     );
 
-    debug_if_trace!(
+    trace!(
         "[{}]: generate all dependencies cmd: {}",
         parsed_args.output_pretty(),
         cmd
@@ -1506,7 +1506,7 @@ pub fn generate_compile_commands(
                 },
             };
 
-            debug_if_trace!("[{out_pretty}]: dist command: {command}");
+            trace!("[{out_pretty}]: dist command: {command}");
 
             Some(command)
         })()
@@ -1535,7 +1535,7 @@ impl Iterator for ExpandIncludeFile<'_> {
     fn next(&mut self) -> Option<OsString> {
         loop {
             let arg = self.stack.pop()?;
-            let file = match arg.split_prefix("@") {
+            let file = match arg.strip_prefix("@") {
                 Some(arg) => self.cwd.join(arg),
                 None => return Some(arg),
             };
