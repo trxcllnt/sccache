@@ -2239,8 +2239,8 @@ where
 }
 
 ArgData! {
-    CCBin(OsString),
-    Language(OsString),
+    PassThroughFlag,
+    PassThrough(OsString),
 
 }
 
@@ -2255,9 +2255,13 @@ ArgData! {
 //  gcc is expected to exist on the PATH. So if gcc doesn't exist
 //  compiler detection fails if we don't pass along the ccbin arg
 counted_array!(static ARGS: [ArgInfo<ArgData>; _] = [
-    take_arg!("--compiler-bindir", OsString, CanBeConcatenated(b'='), ArgData::CCBin),
-    take_arg!("-ccbin", OsString, CanBeConcatenated(b'='), ArgData::CCBin),
-    take_arg!("-x", OsString, CanBeSeparated, ArgData::Language),
+    take_arg!("--compiler-bindir", OsString, CanBeConcatenated(b'='), ArgData::PassThrough),
+    take_arg!("--cuda-gpu-arch", OsString, CanBeConcatenated(b'='), ArgData::PassThrough),
+    take_arg!("--cuda-path", OsString, CanBeConcatenated(b'='), ArgData::PassThrough),
+    flag!("--cuda-path-ignore-env", ArgData::PassThroughFlag),
+    flag!("--no-cuda-version-check", ArgData::PassThroughFlag),
+    take_arg!("-ccbin", OsString, CanBeConcatenated(b'='), ArgData::PassThrough),
+    take_arg!("-x", OsString, CanBeSeparated, ArgData::PassThrough),
 ]);
 
 pub fn compiler_info_args(arguments: &[OsString]) -> Vec<OsString> {
@@ -2267,21 +2271,9 @@ pub fn compiler_info_args(arguments: &[OsString]) -> Vec<OsString> {
     // Iterate over all the arguments for compilation and extract
     // any that are required for any valid execution of the compiler.
     // Allowing our compiler vendor detection to always properly execute
-    for arg in ArgsIter::new(arguments.iter().cloned(), &ARGS[..]) {
-        let arg = if let Ok(arg) = arg {
-            arg
-        } else {
-            continue;
-        };
-
-        match arg.get_data() {
-            Some(ArgData::CCBin(_)) => {
-                args.extend(arg.iter_os_strings());
-            }
-            Some(ArgData::Language(_)) => {
-                args.extend(arg.iter_os_strings());
-            }
-            _ => {}
+    for arg in ArgsIter::new(arguments.iter().cloned(), &ARGS[..]).flatten() {
+        if arg.get_data().is_some() {
+            args.extend(arg.iter_os_strings());
         }
     }
 
