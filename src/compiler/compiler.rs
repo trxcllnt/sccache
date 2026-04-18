@@ -26,10 +26,8 @@ use crate::{
         cudafe::CudaFE,
         diab::Diab,
         gcc::Gcc,
-        msvc,
-        msvc::Msvc,
-        nvcc::Nvcc,
-        nvcc::NvccHostCompiler,
+        msvc::{self, Msvc},
+        nvcc::{Nvcc, NvccHostCompiler},
         nvhpc::Nvhpc,
         ptxas::Ptxas,
         rust::{Rust, RustupProxy},
@@ -2241,9 +2239,10 @@ where
 }
 
 ArgData! {
-    PassThrough(OsString),
+    CCBin(OsString),
+    Language(OsString),
+
 }
-use self::ArgData::PassThrough as Detect_PassThrough;
 
 // Establish a set of compiler flags that are required for
 // valid execution of the compiler even in preprocessor mode.
@@ -2256,23 +2255,38 @@ use self::ArgData::PassThrough as Detect_PassThrough;
 //  gcc is expected to exist on the PATH. So if gcc doesn't exist
 //  compiler detection fails if we don't pass along the ccbin arg
 counted_array!(static ARGS: [ArgInfo<ArgData>; _] = [
-    take_arg!("--compiler-bindir", OsString, CanBeSeparated(b'='), Detect_PassThrough),
-    take_arg!("-ccbin", OsString, CanBeSeparated(b'='), Detect_PassThrough),
-    take_arg!("-x", OsString, Separated, Detect_PassThrough)
+    take_arg!("--compiler-bindir", OsString, CanBeConcatenated(b'='), ArgData::CCBin),
+    take_arg!("-ccbin", OsString, CanBeConcatenated(b'='), ArgData::CCBin),
+    take_arg!("-x", OsString, CanBeSeparated, ArgData::Language),
 ]);
 
 pub fn compiler_info_args(arguments: &[OsString]) -> Vec<OsString> {
+    trace!("compiler_info_args in: {arguments:?}");
+
     let mut args = vec![];
     // Iterate over all the arguments for compilation and extract
     // any that are required for any valid execution of the compiler.
     // Allowing our compiler vendor detection to always properly execute
     for arg in ArgsIter::new(arguments.iter().cloned(), &ARGS[..]) {
-        let arg = arg.unwrap_or_else(|_| Argument::Raw(OsString::from("")));
-        if let Some(Detect_PassThrough(_)) = arg.get_data() {
-            let required_arg = arg.normalize(NormalizedDisposition::Concatenated);
-            args.extend(required_arg.iter_os_strings());
+        let arg = if let Ok(arg) = arg {
+            arg
+        } else {
+            continue;
+        };
+
+        match arg.get_data() {
+            Some(ArgData::CCBin(_)) => {
+                args.extend(arg.iter_os_strings());
+            }
+            Some(ArgData::Language(_)) => {
+                args.extend(arg.iter_os_strings());
+            }
+            _ => {}
         }
     }
+
+    trace!("compiler_info_args out: {args:?}");
+
     args
 }
 
@@ -2361,6 +2375,8 @@ compiler_version=__VERSION__
         .args(arguments)
         .arg("-E")
         .arg(&src);
+
+    trace!("detect_c_compiler: {cmd}");
 
     let child = cmd.spawn().await?;
     let output = child

@@ -89,6 +89,8 @@ fn compile_cuda_cmdline<T: AsRef<OsStr>>(
             OsString,
             exe.as_ref(),
             "-allow-unsupported-compiler",
+            "-x",
+            "cu",
             compile_flag,
             input,
             "-o",
@@ -98,6 +100,8 @@ fn compile_cuda_cmdline<T: AsRef<OsStr>>(
             vec_from!(
                 OsString,
                 exe,
+                "-x",
+                "cuda",
                 compile_flag,
                 input,
                 "--cuda-gpu-arch=sm_75",

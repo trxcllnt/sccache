@@ -354,12 +354,12 @@ impl CCompilerImpl for Nvcc {
             .cloned()
             .collect::<Vec<_>>();
 
+        let compile_flag = parsed_args.compilation_flag.as_os_str().into();
+
         // Only return dependencies if requested, and only for compilations that don't produce executables
         let dependencies = if (generate_dependencies || !parsed_args.dependency_args.is_empty())
-            && !matches!(
-                parsed_args.compilation_flag.as_os_str().into(),
-                NvccCompileFlag::Executable
-            ) {
+            && !matches!(compile_flag, NvccCompileFlag::Executable)
+        {
             self.generate_dependencies(creator, executable, parsed_args, cwd, &env_vars)
                 .await?
                 .map(|depfile| {
@@ -410,7 +410,6 @@ impl CCompilerImpl for Nvcc {
 
             let mut nvcc_internal_files = HashMap::<String, String>::new();
             let preprocessor_flag = self.host_compiler.preprocessor_flag();
-            let compile_flag = parsed_args.compilation_flag.as_os_str().into();
 
             // Gather the nvcc preprocessor subcommands
             // * one preprocessor call for the host (CPU) code
@@ -981,10 +980,6 @@ fn parsed_to_nvcc_args(
         .context("Missing object file output")
         .unwrap()
         .path;
-
-    if !parsed_args.compilation_flag.is_empty() {
-        args.push(parsed_args.compilation_flag.clone());
-    }
 
     args.extend_from_slice(&[
         "-o".into(),
