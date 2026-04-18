@@ -84,6 +84,24 @@ pub struct Nvcc {
 }
 
 impl Nvcc {
+    pub async fn read_implicit_specfiles<T>(
+        host_compiler: &NvccHostCompiler,
+        creator: &mut T,
+        exe: &Path,
+        arguments: &[OsString],
+        env_vars: &[(OsString, OsString)],
+        v_flag: &str,
+    ) -> Result<Vec<PathBuf>>
+    where
+        T: CommandCreatorSync,
+    {
+        if matches!(host_compiler, NvccHostCompiler::Gcc) {
+            gcc::Gcc::read_implicit_specfiles(creator, exe, arguments, env_vars, v_flag).await
+        } else {
+            Ok(vec![])
+        }
+    }
+
     pub async fn read_all_archs<T>(
         creator: &mut T,
         exe: &Path,

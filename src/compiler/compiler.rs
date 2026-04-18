@@ -2384,10 +2384,10 @@ compiler_version=__VERSION__
     };
     let mut lines = stdout.lines().filter_map(|line| {
         let line = line.trim();
-        if line.starts_with("compiler_id=") {
-            Some(line.strip_prefix("compiler_id=").unwrap())
-        } else if line.starts_with("compiler_version=") {
-            Some(line.strip_prefix("compiler_version=").unwrap())
+        if let Some(compiler_id) = line.strip_prefix("compiler_id=") {
+            Some(compiler_id)
+        } else if let Some(compiler_version) = line.strip_prefix("compiler_version=") {
+            Some(compiler_version)
         } else {
             None
         }
@@ -2473,15 +2473,17 @@ compiler_version=__VERSION__
             }
             "nvcc" | "nvcc-clang" | "nvcc-msvc" | "nvcc-nvhpc" => {
                 let version = version.map(|s| s.replace(' ', ""));
-                let (host_compiler, host_compiler_version) = match kind {
-                    "nvcc-clang" => (NvccHostCompiler::Clang, next_version()),
-                    "nvcc-nvhpc" => (
-                        NvccHostCompiler::Nvhpc,
-                        next_version().map(|s| s.replace(' ', "")),
-                    ),
-                    "nvcc-msvc" => (NvccHostCompiler::Msvc, next_version()),
-                    "nvcc" => (NvccHostCompiler::Gcc, next_version()),
-                    &_ => (NvccHostCompiler::Gcc, next_version()),
+                let mut host_compiler_version = next_version();
+
+                let host_compiler = match kind {
+                    "nvcc-clang" => NvccHostCompiler::Clang,
+                    "nvcc-nvhpc" => {
+                        host_compiler_version = host_compiler_version.map(|s| s.replace(' ', ""));
+                        NvccHostCompiler::Nvhpc
+                    }
+                    "nvcc-msvc" => NvccHostCompiler::Msvc,
+                    "nvcc" => NvccHostCompiler::Gcc,
+                    &_ => NvccHostCompiler::Gcc,
                 };
 
                 trace!(
@@ -2490,18 +2492,15 @@ compiler_version=__VERSION__
                     host_compiler_version.as_ref().unwrap()
                 );
 
-                let specfiles = if matches!(host_compiler, NvccHostCompiler::Gcc) {
-                    Gcc::read_implicit_specfiles(
-                        &mut creator,
-                        &executable,
-                        arguments,
-                        &env,
-                        "-Xcompiler=-v",
-                    )
-                    .await?
-                } else {
-                    vec![]
-                };
+                let specfiles = Nvcc::read_implicit_specfiles(
+                    &host_compiler,
+                    &mut creator,
+                    &executable,
+                    arguments,
+                    &env,
+                    "-Xcompiler=-v",
+                )
+                .await?;
 
                 let archs_all =
                     Nvcc::read_all_archs(&mut creator, &executable, &env, &host_compiler)
