@@ -1058,7 +1058,6 @@ where
         } = *self;
 
         let needs_c_preprocessing = parsed_args.language.needs_c_preprocessing();
-        let mut preprocessor_start = Instant::now();
 
         let preprocessor_output = if !needs_c_preprocessing {
             PreprocessorOutput::File(cwd.join(&parsed_args.input), None)
@@ -1100,10 +1099,15 @@ where
             let preprocessor_output = Box::pin(async_stream::try_stream! {
                 let mut preprocessor_time = Duration::default();
 
-                while let Some(lines) = preprocessor_output.next().await {
+                loop {
+                    let preprocessor_start = Instant::now();
+                    let lines = preprocessor_output.next().await;
                     preprocessor_time += preprocessor_start.elapsed();
-                    preprocessor_start = Instant::now();
-                    yield lines?;
+                    if let Some(lines) = lines {
+                        yield lines?;
+                    } else {
+                        break;
+                    }
                 }
 
                 // Track how long the preprocessor took

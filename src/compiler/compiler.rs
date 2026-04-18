@@ -2265,8 +2265,6 @@ counted_array!(static ARGS: [ArgInfo<ArgData>; _] = [
 ]);
 
 pub fn compiler_info_args(arguments: &[OsString]) -> Vec<OsString> {
-    trace!("compiler_info_args in: {arguments:?}");
-
     let mut args = vec![];
     // Iterate over all the arguments for compilation and extract
     // any that are required for any valid execution of the compiler.
@@ -2276,9 +2274,6 @@ pub fn compiler_info_args(arguments: &[OsString]) -> Vec<OsString> {
             args.extend(arg.iter_os_strings());
         }
     }
-
-    trace!("compiler_info_args out: {args:?}");
-
     args
 }
 
@@ -2367,8 +2362,6 @@ compiler_version=__VERSION__
         .args(arguments)
         .arg("-E")
         .arg(&src);
-
-    trace!("detect_c_compiler: {cmd}");
 
     let child = cmd.spawn().await?;
     let output = child
