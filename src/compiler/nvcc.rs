@@ -604,78 +604,47 @@ where
     // Fix the args so they look like a compilation to `compiler.parse_args`
     let mut has_compile_flag = false;
 
-    match host_compiler {
-        NvccHostCompiler::Msvc => {
-            for arg in args.iter_mut() {
-                let bs = arg.as_encoded_bytes();
+    if matches!(host_compiler, NvccHostCompiler::Msvc) {
+        for arg in args.iter_mut() {
+            let bs = arg.as_encoded_bytes();
 
-                match bs.len() {
-                    0 | 1 => {}
-                    2 if matches!(&bs[0..1], b"-" | b"/") => {
-                        match &bs[1..2] {
-                            b"P" => {
-                                has_compile_flag = true;
-                                // Replace /P -> /c
-                                let mut bs = bs.to_vec();
-                                bs[1] = b'c';
-                                *arg = unsafe { OsString::from_encoded_bytes_unchecked(bs) };
-                                continue;
-                            }
-                            b"c" => {
-                                has_compile_flag = true;
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ if matches!(&bs[0..1], b"-" | b"/") => {
-                        if matches!(&bs[1..3], b"Fi") {
-                            // Rename /Fi to /Fo
+            match bs.len() {
+                0 | 1 => {}
+                2 if matches!(&bs[0..1], b"-" | b"/") => {
+                    match &bs[1..2] {
+                        b"P" => {
+                            has_compile_flag = true;
+                            // Replace /P -> /c
                             let mut bs = bs.to_vec();
-                            bs[2] = b'o';
+                            bs[1] = b'c';
                             *arg = unsafe { OsString::from_encoded_bytes_unchecked(bs) };
                             continue;
                         }
+                        b"c" => {
+                            has_compile_flag = true;
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
-
-                // if arg == "/Fi" {
-                //     // Rename /Fi to /Fo
-                //     *arg = "/Fo".into();
-                // } else if arg == "-Fi" {
-                //     // Rename -Fi to -Fo
-                //     *arg = "-Fo".into();
-                // } else if arg.starts_with("/Fi") {
-                //     // Rename /Fi<output> to /Fo<output>
-                //     let mut out = OsString::from("/Fo");
-                //     out.push(arg.trim_start_matches("/Fi"));
-                //     *arg = out;
-                // } else if arg.starts_with("-Fi") {
-                //     // Rename -Fi<output> to -Fo<output>
-                //     let mut out = OsString::from("-Fo");
-                //     out.push(arg.trim_start_matches("-Fi"));
-                //     *arg = out;
-                // } else if arg == "/P" {
-                //     // Replace /P -> /c
-                //     *arg = "/c".into();
-                //     has_compile_flag = true;
-                // } else if arg == "-P" {
-                //     // Replace -P -> -c
-                //     *arg = "-c".into();
-                //     has_compile_flag = true;
-                // } else if arg == "-c" || arg == "/c" {
-                //     has_compile_flag = true;
-                // }
+                _ if matches!(&bs[0..1], b"-" | b"/") => {
+                    if matches!(&bs[1..3], b"Fi") {
+                        // Rename /Fi to /Fo
+                        let mut bs = bs.to_vec();
+                        bs[2] = b'o';
+                        *arg = unsafe { OsString::from_encoded_bytes_unchecked(bs) };
+                        continue;
+                    }
+                }
+                _ => {}
             }
         }
-        _ => {
-            for arg in args.iter_mut() {
-                if arg == "-E" {
-                    // Replace -E -> -c (GCC/Clang/NVHPC)
-                    *arg = "-c".into();
-                } else if arg == "-c" {
-                    has_compile_flag = true;
-                }
+    } else {
+        for arg in args.iter_mut() {
+            if arg == "-E" {
+                // Replace -E -> -c (GCC/Clang/NVHPC)
+                *arg = "-c".into();
+            } else if arg == "-c" {
+                has_compile_flag = true;
             }
         }
     }
