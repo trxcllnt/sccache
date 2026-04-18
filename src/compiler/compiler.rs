@@ -2314,20 +2314,20 @@ where
     let test = b"
 #if defined(__NVCC__) && defined(__NVCOMPILER)
 compiler_id=nvcc-nvhpc
-compiler_version=__CUDACC_VER_MAJOR__.__CUDACC_VER_MINOR__.__CUDACC_VER_BUILD__
-compiler_version=__NVCOMPILER_MAJOR__.__NVCOMPILER_MINOR__.__NVCOMPILER_PATCHLEVEL__
+compiler_version=__CUDACC_VER_MAJOR__ . __CUDACC_VER_MINOR__ . __CUDACC_VER_BUILD__
+compiler_version=__NVCOMPILER_MAJOR__ . __NVCOMPILER_MINOR__ . __NVCOMPILER_PATCHLEVEL__
 #elif defined(__NVCC__) && defined(_MSC_VER) && !defined(__clang__)
 compiler_id=nvcc-msvc
-compiler_version=__CUDACC_VER_MAJOR__.__CUDACC_VER_MINOR__.__CUDACC_VER_BUILD__
+compiler_version=__CUDACC_VER_MAJOR__ . __CUDACC_VER_MINOR__ . __CUDACC_VER_BUILD__
 #if !defined(__VERSION__)
 compiler_version=_MSC_VER
 #endif
 #elif defined(__NVCC__) && defined(__clang__)
 compiler_id=nvcc-clang
-compiler_version=__CUDACC_VER_MAJOR__.__CUDACC_VER_MINOR__.__CUDACC_VER_BUILD__
+compiler_version=__CUDACC_VER_MAJOR__ . __CUDACC_VER_MINOR__ . __CUDACC_VER_BUILD__
 #elif defined(__NVCC__)
 compiler_id=nvcc
-compiler_version=__CUDACC_VER_MAJOR__.__CUDACC_VER_MINOR__.__CUDACC_VER_BUILD__
+compiler_version=__CUDACC_VER_MAJOR__ . __CUDACC_VER_MINOR__ . __CUDACC_VER_BUILD__
 #elif defined(_MSC_VER) && !defined(__clang__)
 compiler_id=msvc
 #if !defined(__VERSION__)
@@ -2340,7 +2340,7 @@ compiler_version=_MSC_VER
 #endif
 #elif defined(__NVCOMPILER)
 compiler_id=nvhpc
-compiler_version=__NVCOMPILER_MAJOR__.__NVCOMPILER_MINOR__.__NVCOMPILER_PATCHLEVEL__
+compiler_version=__NVCOMPILER_MAJOR__ . __NVCOMPILER_MINOR__ . __NVCOMPILER_PATCHLEVEL__
 #elif defined(__clang__) && defined(__cplusplus) && defined(__apple_build_version__)
 compiler_id=apple-clang++
 #elif defined(__clang__) && defined(__cplusplus)
