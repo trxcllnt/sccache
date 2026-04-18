@@ -370,7 +370,7 @@ mod client {
 
         #[tokio::test]
         async fn test_client_toolchains_custom() {
-            let td = crate::util::normal_tempdir().unwrap();
+            let td = crate::util::temp_dir().unwrap();
 
             let ct1 =
                 create_file(td.path(), "ct1", |mut f| f.write_all(b"toolchain_contents")).unwrap();
@@ -399,7 +399,7 @@ mod client {
 
         #[tokio::test]
         async fn test_client_toolchains_custom_multiuse_archive() {
-            let td = crate::util::normal_tempdir().unwrap();
+            let td = crate::util::temp_dir().unwrap();
 
             let ct1 =
                 create_file(td.path(), "ct1", |mut f| f.write_all(b"toolchain_contents")).unwrap();
@@ -460,7 +460,7 @@ mod client {
 
         #[tokio::test]
         async fn test_client_toolchains_nodist() {
-            let td = crate::util::normal_tempdir().unwrap();
+            let td = crate::util::temp_dir().unwrap();
 
             let client_toolchains = ClientToolchains::new(
                 &td.path().join("cache"),
@@ -493,7 +493,7 @@ mod client {
 
         #[test]
         fn test_client_toolchains_custom_nodist_conflict() {
-            let td = crate::util::normal_tempdir().unwrap();
+            let td = crate::util::temp_dir().unwrap();
 
             let ct1 =
                 create_file(td.path(), "ct1", |mut f| f.write_all(b"toolchain_contents")).unwrap();

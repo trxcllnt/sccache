@@ -668,7 +668,7 @@ mod scheduler {
                                 .map_err(|_| AppError(anyhow!("")).into_response())?;
 
                             // First read the toolchain into a tempfile
-                            let mut toolchain = crate::util::normal_tempfile()
+                            let mut toolchain = crate::util::tempfile()
                                 .map_err(|_| AppError(anyhow!("")).into_response())?;
 
                             futures::io::copy(

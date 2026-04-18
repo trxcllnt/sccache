@@ -28,8 +28,8 @@ use crate::{
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     server::SccacheService,
     util::{
-        HASH_BUFFER_SIZE, OsStrExt, read_line_batches, resolve_compiler_avoiding_ccache,
-        run_input_output, split_quoted_shell_str,
+        HASH_BUFFER_SIZE, OsStrExt, SCCACHE_TMPDIR, read_line_batches,
+        resolve_compiler_avoiding_ccache, run_input_output, split_quoted_shell_str, tempdir_in,
     },
 };
 use async_trait::async_trait;
@@ -52,6 +52,17 @@ static HAS_COMPUTE_IN_NAME_RE: LazyLock<Regex> =
     LazyLock::new(|| regex_static::regex!(r"^(.*)\.compute_([0-9A-Za-z]+)\.(.*)$"));
 static ARG_HAS_FILE_WITH_EXTENSION_RE: LazyLock<Regex> =
     LazyLock::new(|| regex_static::regex!(r"-.*=(.*)"));
+
+static NVCC_TMPDIR: LazyLock<std::result::Result<PathBuf, std::io::Error>> = LazyLock::new(|| {
+    SCCACHE_TMPDIR
+        .as_ref()
+        .map(|p| p.join("nvcc"))
+        .map_err(|e| e.kind().into())
+        .and_then(|tmpdir| {
+            std::fs::create_dir_all(&tmpdir)?;
+            Ok(tmpdir)
+        })
+});
 
 /// A unit struct on which to implement `CCompilerImpl`.
 #[derive(Clone, Debug)]
@@ -338,11 +349,17 @@ impl CCompilerImpl for Nvcc {
                     .extra_hash_files
                     .extend(self.specfiles.iter().cloned());
 
-                parsed_args.tmpdir = Some(Arc::new(
-                    crate::util::normal_tempdir()
-                        .context("Failed to create tempdir")
-                        .unwrap(),
-                ));
+                // Don't make the tempdir if just running unit tests for parse_arguments
+                if !cfg!(test) {
+                    parsed_args.tmpdir = Some(Arc::new(
+                        NVCC_TMPDIR
+                            .as_ref()
+                            .map_err(anyhow::Error::new)
+                            .and_then(tempdir_in)
+                            .context("Failed to create tempdir")
+                            .unwrap(),
+                    ));
+                }
 
                 CompilerArguments::Ok(parsed_args)
             }
@@ -1106,15 +1123,35 @@ impl CompileCommandImpl for NvccCompileCommand {
             // `-keep` and `-keep-dir` in our `nvcc --dryrun` call.
             //
             // Renames the files back to the original names nvcc gave them.
-            let temps_kept = {
-                if let Some(keep_dir) = keep_dir.as_ref() {
-                    // Ensure `--keep-dir` exists
-                    tokio::fs::create_dir_all(keep_dir).await?;
+            if let Some(keep_dir) = keep_dir.as_ref() {
+                // Ensure `--keep-dir` exists
+                tokio::fs::create_dir_all(keep_dir).await?;
 
-                    // Rename files back to original nvcc names
-                    for (curr, prev) in nvcc_internal_files.drain() {
-                        let src = out_dir.path().join(curr);
-                        let dst = out_dir.path().join(prev);
+                // Rename files back to original nvcc names
+                for (curr, prev) in nvcc_internal_files.drain() {
+                    let src = out_dir.path().join(curr);
+                    let dst = out_dir.path().join(prev);
+                    if dst == src || !src.exists() {
+                        continue;
+                    }
+                    match tokio::fs::rename(&src, &dst).await {
+                        Ok(_) => {}
+                        Err(err) => match err.kind() {
+                            std::io::ErrorKind::CrossesDevices => {
+                                tokio::fs::copy(&src, &dst).await?;
+                                tokio::fs::remove_file(&src).await?;
+                            }
+                            _ => bail!(err),
+                        },
+                    }
+                }
+
+                // Move intermediate files to `--keep-dir`
+                if let Ok(entries) = fs::read_dir(out_dir.path()) {
+                    for entry in entries {
+                        let entry = entry?;
+                        let src = entry.path();
+                        let dst = keep_dir.join(entry.file_name());
                         if dst == src || !src.exists() {
                             continue;
                         }
@@ -1129,36 +1166,9 @@ impl CompileCommandImpl for NvccCompileCommand {
                             },
                         }
                     }
-
-                    // Move intermediate files to `--keep-dir`
-                    if let Ok(entries) = fs::read_dir(out_dir.path()) {
-                        for entry in entries {
-                            let entry = entry?;
-                            let src = entry.path();
-                            let dst = keep_dir.join(entry.file_name());
-                            if dst == src || !src.exists() {
-                                continue;
-                            }
-                            match tokio::fs::rename(&src, &dst).await {
-                                Ok(_) => {}
-                                Err(err) => match err.kind() {
-                                    std::io::ErrorKind::CrossesDevices => {
-                                        tokio::fs::copy(&src, &dst).await?;
-                                        tokio::fs::remove_file(&src).await?;
-                                    }
-                                    _ => bail!(err),
-                                },
-                            }
-                        }
-                    }
                 }
-                Ok(())
-            };
-
-            // Delete sccache internal intermediate files dir
-            let _ = tokio::fs::remove_dir_all(out_dir.path()).await;
-
-            temps_kept
+            }
+            Ok(())
         };
 
         let mut output = ProcessOutput::default();

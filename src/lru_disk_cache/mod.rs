@@ -665,7 +665,7 @@ mod tests {
     impl TestFixture {
         pub fn new() -> TestFixture {
             TestFixture {
-                tempdir: crate::util::normal_tempdir().unwrap(),
+                tempdir: crate::util::temp_dir().unwrap(),
             }
         }
 

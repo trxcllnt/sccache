@@ -90,7 +90,7 @@ async fn read_server_startup_status<R: AsyncReadExt + Unpin>(
 #[cfg(not(windows))]
 fn run_server_process(startup_timeout: Option<Duration>) -> Result<ServerStartup> {
     trace!("run_server_process");
-    let tempdir = crate::util::normal_tempdir()?;
+    let tempdir = crate::util::temp_dir()?;
     let socket_path = tempdir.path().join("sock");
     let runtime = Runtime::new()?;
     let exe_path = env::current_exe()?;

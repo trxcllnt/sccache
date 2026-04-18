@@ -254,7 +254,7 @@ where
 {
     let start = time::Instant::now();
     // Get the full list of source files from rustc's dep-info.
-    let temp_dir = crate::util::normal_tempdir().context("Failed to create temp dir")?;
+    let temp_dir = crate::util::temp_dir().context("Failed to create temp dir")?;
     let dep_file = temp_dir.path().join("deps.d");
     let mut cmd = creator.clone().new_command_sync(executable);
     cmd.args(arguments)
@@ -1958,7 +1958,7 @@ fn can_trim_this(input_path: &Path) -> bool {
 #[cfg(feature = "dist-client")]
 fn test_can_trim_this() {
     use crate::test::utils::create_file;
-    let tempdir = crate::util::normal_tempdir().unwrap();
+    let tempdir = crate::util::temp_dir().unwrap();
     let tempdir = tempdir.path();
 
     // With only one rlib file we should be fine
@@ -2375,7 +2375,7 @@ src/bin/sccache-dist/build.rs:
 src/bin/sccache-dist/token_check.rs:
 ", prefix="c:");
 
-    let tempdir = crate::util::normal_tempdir().unwrap();
+    let tempdir = crate::util::temp_dir().unwrap();
     let tempdir = tempdir.path();
     let depinfo_file = create_file(tempdir, "depinfo.d", |mut f| {
         f.write_all(depinfo_data.as_bytes())
@@ -2440,7 +2440,7 @@ struct RlibDepReader {
 #[cfg(feature = "dist-client")]
 impl RlibDepReader {
     fn new_with_check(executable: PathBuf, env_vars: &[(OsString, OsString)]) -> Result<Self> {
-        let temp_dir = crate::util::normal_tempdir()
+        let temp_dir = crate::util::temp_dir()
             .context("Could not create temporary directory for rlib output")?;
         let temp_rlib = temp_dir.path().join("x.rlib");
 

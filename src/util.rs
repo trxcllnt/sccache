@@ -40,7 +40,7 @@ use std::{
     path::{Path, PathBuf},
     process::{self, Stdio},
     str,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::{self, Duration, SystemTime},
 };
 use tokio_retry2::Retry;
@@ -1331,16 +1331,28 @@ pub fn tempfile_with_prefix_in<P: AsRef<Path>>(
         .map_err(anyhow::Error::new)
 }
 
-pub fn normal_tempdir() -> Result<tempfile::TempDir> {
-    tempdir_in(std::env::temp_dir())
+pub static SCCACHE_TMPDIR: LazyLock<std::result::Result<PathBuf, std::io::Error>> =
+    LazyLock::new(|| {
+        let tmpdir = std::env::temp_dir().join("sccache");
+        std::fs::create_dir_all(&tmpdir).map(|_| tmpdir)
+    });
+
+pub fn temp_dir() -> Result<tempfile::TempDir> {
+    SCCACHE_TMPDIR
+        .as_ref()
+        .map_err(anyhow::Error::new)
+        .and_then(tempdir_in)
 }
 
-pub fn normal_tempfile() -> Result<tempfile::NamedTempFile> {
-    tempfile_in(std::env::temp_dir())
+pub fn tempfile() -> Result<tempfile::NamedTempFile> {
+    SCCACHE_TMPDIR
+        .as_ref()
+        .map_err(anyhow::Error::new)
+        .and_then(tempfile_in)
 }
 
-pub fn normal_temp_path() -> Result<tempfile::TempPath> {
-    normal_tempfile().map(|p| p.into_temp_path())
+pub fn temppath() -> Result<tempfile::TempPath> {
+    tempfile().map(|p| p.into_temp_path())
 }
 
 /// Pipe `cmd`'s stdio to `/dev/null`, unless a specific env var is set.

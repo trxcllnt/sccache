@@ -26,7 +26,7 @@ use crate::{
     errors::*,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     server::SccacheService,
-    util::{OsStrExt, normal_temp_path, path_to_bytes, run_input_output},
+    util::{OsStrExt, path_to_bytes, run_input_output, temppath},
 };
 use async_trait::async_trait;
 use fs::File;
@@ -1174,7 +1174,7 @@ where
     let (path, temp) = if let Some(depfile) = parsed_args.depfile.as_deref() {
         (cwd.join(depfile), None)
     } else {
-        let temp = normal_temp_path()?;
+        let temp = temppath()?;
         (temp.to_path_buf(), Some(temp))
     };
 
@@ -2636,7 +2636,7 @@ mod test {
 
     #[test]
     fn test_responsefile_absolute_path() {
-        let td = crate::util::normal_tempdir().unwrap();
+        let td = crate::util::temp_dir().unwrap();
         let cmd_file_path = td.path().join("foo");
         {
             let mut file = File::create(&cmd_file_path).unwrap();
@@ -2720,7 +2720,7 @@ mod test {
 
     #[test]
     fn test_responsefile_with_quotes() {
-        let td = crate::util::normal_tempdir().unwrap();
+        let td = crate::util::temp_dir().unwrap();
         let cmd_file_path = td.path().join("foo");
         {
             let mut file = File::create(&cmd_file_path).unwrap();
@@ -2759,7 +2759,7 @@ mod test {
 
     #[test]
     fn test_responsefile_multiline() {
-        let td = crate::util::normal_tempdir().unwrap();
+        let td = crate::util::temp_dir().unwrap();
         let cmd_file_path = td.path().join("foo");
         {
             let mut file = File::create(&cmd_file_path).unwrap();
@@ -2798,7 +2798,7 @@ mod test {
 
     #[test]
     fn test_responsefile_multiline_cr() {
-        let td = crate::util::normal_tempdir().unwrap();
+        let td = crate::util::temp_dir().unwrap();
         let cmd_file_path = td.path().join("foo");
         {
             let mut file = File::create(&cmd_file_path).unwrap();
@@ -2837,7 +2837,7 @@ mod test {
 
     #[test]
     fn test_responsefile_encoding_utf16le() {
-        let td = crate::util::normal_tempdir().unwrap();
+        let td = crate::util::temp_dir().unwrap();
         let cmd_file_path = td.path().join("foo");
         {
             let mut file = File::create(&cmd_file_path).unwrap();
@@ -2883,7 +2883,7 @@ mod test {
 
     #[test]
     fn test_responsefile_encoding_win1252() {
-        let td = crate::util::normal_tempdir().unwrap();
+        let td = crate::util::temp_dir().unwrap();
         let cmd_file_path = td.path().join("foo");
         {
             let mut file = File::create(&cmd_file_path).unwrap();
