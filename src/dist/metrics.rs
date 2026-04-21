@@ -314,6 +314,8 @@ impl MetricsInner for DogStatsDMetrics {
 struct PrometheusMetrics {
     inner: PrometheusHandle,
     listen_path: Option<String>,
+    #[allow(unused)]
+    exporter: tokio_util::task::AbortOnDropHandle<()>,
 }
 
 impl PrometheusMetrics {
@@ -373,11 +375,14 @@ impl PrometheusMetrics {
 
         metrics::set_global_recorder(recorder)?;
 
-        tokio::spawn(exporter);
-
         Ok(Self {
             inner: handle,
             listen_path,
+            exporter: crate::util::spawn(async move {
+                if let Err(err) = exporter.await {
+                    tracing::error!("Prometheus exporter terminated with error: {err:?}");
+                }
+            }),
         })
     }
 }
