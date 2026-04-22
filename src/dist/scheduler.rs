@@ -332,6 +332,16 @@ impl Scheduler {
             Ok(())
         };
 
+        let status = tokio::spawn({
+            let this = self.clone();
+            async move {
+                loop {
+                    let _ = this.metrics.system_metrics();
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        });
+
         // Wait for Celery or sigint, then shutdown Axum and Celery
         let shutdown_celery = async move {
             // tokio::select! deterministically polls its futures in order, so
@@ -345,6 +355,11 @@ impl Scheduler {
                 biased;
                 res = celery => res,
                 res = sigint => res,
+                // This should never resolve before either celery or sigint unless
+                // a catastrophic error occurs (tokio dies somehow?). Just polling
+                // it here so the task is cancelled once either of the above two
+                // futures complete first.
+                _ = status => Ok(()),
             };
 
             tracing::info!(
