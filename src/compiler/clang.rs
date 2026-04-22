@@ -122,20 +122,18 @@ impl CCompilerImpl for Clang {
     where
         T: CommandCreatorSync,
     {
-        let mut extra_preprocessor_flags = if include_line_numbers {
+        let extra_preprocessor_flags = if include_line_numbers {
             vec![]
-        } else {
-            vec!["-P".into()]
-        };
-
-        // Clang 14 and later support -fminimize-whitespace, which normalizes
-        // away non-semantic whitespace which in turn increases cache hit rate.
-        // '-fminimize-whitespace' invalid for input of type assembler-with-cpp
-        if self.supports_fminimize_whitespace
-            && parsed_args.language != Language::AssemblerToPreprocess
+        } else if !self.supports_fminimize_whitespace
+            || parsed_args.language == Language::AssemblerToPreprocess
         {
-            extra_preprocessor_flags.push("-fminimize-whitespace".into());
-        }
+            vec!["-P".into()]
+        } else {
+            // Clang 14 and later support -fminimize-whitespace, which normalizes
+            // away non-semantic whitespace which in turn increases cache hit rate.
+            // '-fminimize-whitespace' invalid for input of type assembler-with-cpp
+            vec!["-P".into(), "-fminimize-whitespace".into()]
+        };
 
         gcc::preprocess(
             service,
