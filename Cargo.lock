@@ -718,7 +718,7 @@ dependencies = [
 [[package]]
 name = "celery"
 version = "0.5.5"
-source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=fea%2Fbroadcast-queues#6fa572fc64f23023b722525b1ebf765e7faa8cb4"
+source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=fea%2Fbroadcast-queues#1df304cb731be7a783d438dd501932530747b1e3"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -753,7 +753,7 @@ dependencies = [
 [[package]]
 name = "celery-codegen"
 version = "0.5.5"
-source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=fea%2Fbroadcast-queues#6fa572fc64f23023b722525b1ebf765e7faa8cb4"
+source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=fea%2Fbroadcast-queues#1df304cb731be7a783d438dd501932530747b1e3"
 dependencies = [
  "proc-macro2",
  "quote",
