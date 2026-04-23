@@ -185,12 +185,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69f7f8c3906b62b754cd5326047894316021dcfe5a194c8ea52bdd94934a3457"
 
 [[package]]
-name = "arcstr"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03918c3dbd7701a85c6b9887732e2921175f26c350b4563841d0958c21d57e6d"
-
-[[package]]
 name = "arrayref"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -718,23 +712,22 @@ dependencies = [
 [[package]]
 name = "celery"
 version = "0.5.5"
-source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=fea%2Fbroadcast-queues#c466eb6640a2c089384592042bf74766f5e13cae"
+source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=sccache#c995bc56ddfee2d675a27f0f9bc312ca3afada6e"
 dependencies = [
- "async-stream",
  "async-trait",
  "base64 0.21.7",
  "celery-codegen",
  "chrono",
  "colored",
  "futures",
- "futures-lite 2.5.0",
+ "futures-lite 1.13.0",
  "globset",
  "hostname 0.3.1",
  "lapin",
  "log",
  "once_cell",
  "rand 0.8.5",
- "redis 1.0.2",
+ "redis 0.22.3",
  "rmp-serde",
  "rmpv",
  "serde",
@@ -746,14 +739,13 @@ dependencies = [
  "tokio-executor-trait",
  "tokio-reactor-trait",
  "tokio-stream",
- "tokio-util",
  "uuid",
 ]
 
 [[package]]
 name = "celery-codegen"
 version = "0.5.5"
-source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=fea%2Fbroadcast-queues#c466eb6640a2c089384592042bf74766f5e13cae"
+source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=sccache#c995bc56ddfee2d675a27f0f9bc312ca3afada6e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3667,6 +3659,28 @@ dependencies = [
 
 [[package]]
 name = "redis"
+version = "0.22.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa8455fa3621f6b41c514946de66ea0531f57ca017b2e6c7cc368035ea5b46df"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "bytes",
+ "combine",
+ "futures",
+ "futures-util",
+ "itoa",
+ "percent-encoding",
+ "pin-project-lite",
+ "ryu",
+ "sha1_smol",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
+name = "redis"
 version = "0.32.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "014cc767fefab6a3e798ca45112bccad9c6e0e218fbd49720042716c73cfef44"
@@ -3695,33 +3709,6 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "url",
-]
-
-[[package]]
-name = "redis"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dfe20977fe93830c0e9817a16fbf1ed1cfd8d4bba366087a1841d2c6033c251"
-dependencies = [
- "arc-swap",
- "arcstr",
- "backon",
- "bytes",
- "cfg-if 1.0.0",
- "combine",
- "futures-channel",
- "futures-util",
- "itoa",
- "num-bigint",
- "percent-encoding",
- "pin-project-lite",
- "ryu",
- "sha1_smol",
- "socket2 0.6.0",
- "tokio",
- "tokio-util",
- "url",
- "xxhash-rust",
 ]
 
 [[package]]
@@ -5258,7 +5245,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -6230,12 +6216,6 @@ dependencies = [
  "linux-raw-sys 0.4.12",
  "rustix 0.38.34",
 ]
-
-[[package]]
-name = "xxhash-rust"
-version = "0.8.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
 
 [[package]]
 name = "yoke"

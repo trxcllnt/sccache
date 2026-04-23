@@ -81,6 +81,8 @@ fn sccache_scheduler_cfg(message_broker: &MessageBroker) -> SchedulerConfig {
 
 fn sccache_server_cfg(message_broker: &MessageBroker) -> ServerConfig {
     ServerConfig {
+        max_per_core_load: 0.0,
+        max_per_core_prefetch: 0.0,
         message_broker: Some(message_broker.clone()),
         builder: BuilderType::Overlay {
             build_dir: CONTAINER_EXTERNAL_PATH.into(),
@@ -1158,8 +1160,8 @@ fn name_with_uuid(name: &str) -> String {
 
 fn sccache_dist_docker_run_script<P: AsRef<Path>>(dist_type: &str, config_path: P) -> String {
     format!(
-        // umask 000 so files created in the `CONTAINER_EXTERNAL_PATH`
-        // bind mount by the container's root user are world-writable.
+        // umask 000 so files created under the CONTAINER_EXTERNAL_PATH
+        // bind mount by the root user in the container are writable.
         //
         // This ensures the scheduler and servers can share these dirs,
         // but the tempfile parent dirs (created on the host) are still

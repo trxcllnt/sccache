@@ -96,6 +96,7 @@ fn run(command: Command) -> Result<()> {
             match command {
                 Command::Scheduler(scheduler_config::Config {
                     client_auth,
+                    heartbeat_interval_ms,
                     job_time_limit,
                     jobs,
                     keepalive,
@@ -152,7 +153,7 @@ fn run(command: Command) -> Result<()> {
 
                     let tasks = tasks::Tasks::scheduler(
                         &scheduler_id,
-                        u16::MAX,
+                        100 * num_cpus as u16,
                         job_time_limit,
                         message_broker,
                     )
@@ -176,7 +177,12 @@ fn run(command: Command) -> Result<()> {
                         );
 
                     scheduler
-                        .start(handle, server, Duration::from_secs(shutdown_timeout))
+                        .start(
+                            handle,
+                            server,
+                            Duration::from_millis(heartbeat_interval_ms),
+                            Duration::from_secs(shutdown_timeout),
+                        )
                         .await
                 }
 
