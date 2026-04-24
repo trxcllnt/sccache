@@ -1813,6 +1813,29 @@ where
         }
     };
 
+    parse_nvcc_subcommands(
+        cwd,
+        env_vars,
+        compile_flag,
+        host_compiler,
+        nvcc_internal_files,
+        select_subcommand,
+        &lines,
+    )
+}
+
+fn parse_nvcc_subcommands<F>(
+    cwd: &Path,
+    env_vars: &mut Vec<(OsString, OsString)>,
+    compile_flag: &NvccCompileFlag,
+    host_compiler: &NvccHostCompiler,
+    nvcc_internal_files: &mut HashMap<String, String>,
+    select_subcommand: F,
+    lines: &str,
+) -> Result<Vec<(usize, PathBuf, Vec<String>)>>
+where
+    F: Fn(&str, &[String]) -> bool,
+{
     let mut new_vars = HashMap::<String, (String, String)>::new();
 
     let lines = lines
@@ -2042,7 +2065,7 @@ fn remap_generated_filenames(
     lines: &[(PathBuf, Vec<String>)],
     nvcc_internal_files: &mut HashMap<String, String>,
 ) -> Vec<(PathBuf, Vec<String>)> {
-    let extensions = [
+    let nvcc_internal_file_extensions = [
         "_dlink.fatbin.c",
         "_dlink.fatbin",
         "_dlink.o",
@@ -2105,7 +2128,10 @@ fn remap_generated_filenames(
                         // ends in one of these extensions, rename the file to a
                         // stable name that includes the compute architecture.
                         let maybe_extension = if !arg.starts_with('-') {
-                            extensions.iter().find(|ext| arg.ends_with(*ext)).copied()
+                            nvcc_internal_file_extensions
+                                .iter()
+                                .find(|ext| arg.ends_with(*ext))
+                                .copied()
                         } else {
                             None
                         };
@@ -2246,6 +2272,26 @@ fn remap_generated_filenames(
                                 let mut arg = arg.clone();
                                 for (old, new) in nvcc_internal_files
                                     .iter()
+                                    // Don't replace if old and new are different
+                                    .filter(|&(old, new)| old != new)
+                                    .filter(|&(old, _)| {
+                                        //
+                                        // Replace old -> new if:
+                                        // * The argument ends with the old name
+                                        // * The argument contains - but does not start with - the old name
+                                        //
+                                        // This ensures we don't replace `x.ltoir` -> `x.compute_XX.ltoir`
+                                        // in `x.ltoir.o`, because even though `x.ltoir.o` contains and
+                                        // starts with `x.ltoir`, it does not end with it.
+                                        //
+                                        // This will still replace `x.ltoir` -> `x.compute_XX.ltoir` in
+                                        // the string `--image3=file=x.ltoir,kind=nvvm,sm=75`, because
+                                        // even though it doesn't end with `x.ltoir`, it doesn't start
+                                        // with and does contain and `x.ltoir`.
+                                        //
+                                        arg.ends_with(old)
+                                            || (!arg.starts_with(old) && arg.contains(old))
+                                    })
                                     .sorted_by(|a, b| b.0.len().cmp(&a.0.len()))
                                 {
                                     arg = arg.replace(old, new);
@@ -2270,7 +2316,9 @@ fn remap_generated_filenames(
                         {
                             let (_, [name]) = groups.extract();
                             if !nvcc_internal_files.contains_key(name)
-                                && extensions.iter().any(|ext| name.ends_with(*ext))
+                                && nvcc_internal_file_extensions
+                                    .iter()
+                                    .any(|ext| name.ends_with(*ext))
                             {
                                 nvcc_internal_files.insert(name.to_owned(), name.to_owned());
                             }
@@ -3218,5 +3266,76 @@ mod test {
             a.dependency_args
         );
         assert_eq!(ovec!["--device-debug", "-c"], a.common_args);
+    }
+
+    #[test]
+    fn test_rdc_ltoir_object() {
+        drop(env_logger::try_init());
+
+        let cwd = Path::new("");
+        let out = Path::new("/tmp/out");
+        let compile_flag = &NvccCompileFlag::Device;
+        let host_compiler = &NvccHostCompiler::Gcc;
+        let mut env_vars = vec![];
+        let mut nvcc_internal_files = HashMap::<String, String>::new();
+
+        // Get the nvcc compile command lines with paths relative to `out`
+        let nvcc_commands = parse_nvcc_subcommands(
+            cwd,
+            &mut env_vars,
+            compile_flag,
+            host_compiler,
+            &mut nvcc_internal_files,
+            is_nvcc_exe,
+            // nvcc "-rdc=true" "-gencode=arch=lto_75,code=lto_75" "-dc" "x.cu" "-o" "x.ltoir.o" --dryrun --keep
+            r#"
+#$ gcc -D__CUDA_ARCH_LIST__=750 -E -x c++ -D__CUDACC__ -D__NVCC__ -D__CUDACC_RDC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=2 -D__CUDACC_VER_BUILD__=78 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=2 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "x.cpp4.ii"
+#$ cudafe++ --c++17 --device-hidden-visibility --gnu_version=130300 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "x.cu" --allow_managed  --device-c  --m64 --parse_templates --gen_c_file_name "x.cudafe1.cpp" --stub_file_name "x.cudafe1.stub.c" --gen_module_id_file --module_id_file_name "x.module_id" "x.cpp4.ii"
+#$ gcc -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__ -D__CUDACC_RDC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=2 -D__CUDACC_VER_BUILD__=78 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=2 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "x.cpp1.ii"
+#$ "$CICC_PATH/cicc" --c++17 --device-hidden-visibility --gnu_version=130300 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "x.cu" --allow_managed  --device-c   -arch compute_75 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c"  -tused --module_id_file_name "x.module_id" --gen_c_file_name "x.cudafe1.c" --stub_file_name "x.cudafe1.stub.c" --gen_device_file_name "x.cudafe1.gpu"  "x.cpp1.ii" -lto -o "x.ltoir"
+#$ fatbinary --create="x.fatbin" -64 --cmdline="--compile-only  " --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=nvvm,sm=75,file=x.ltoir" --embedded-fatbin="x.fatbin.c"  --device-c
+#$ gcc -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -c -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -Wno-psabi "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"   -m64 "x.cudafe1.cpp" -o "x.ltoir.o"
+"#,
+        ).unwrap();
+
+        let host_commands = parse_nvcc_subcommands(
+            cwd,
+            &mut env_vars,
+            compile_flag,
+            host_compiler,
+            &mut nvcc_internal_files,
+            |exe, args| !is_nvcc_exe(exe, args),
+            // nvcc "-rdc=true" "-gencode=arch=lto_75,code=lto_75" "-dc" "x.cu" "-o" "x.ltoir.o" --dryrun --keep --keep-dir /tmp/out
+            r#"
+#$ gcc -D__CUDA_ARCH_LIST__=750 -E -x c++ -D__CUDACC__ -D__NVCC__ -D__CUDACC_RDC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=2 -D__CUDACC_VER_BUILD__=78 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=2 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "/tmp/out/x.cpp4.ii"
+#$ cudafe++ --c++17 --device-hidden-visibility --gnu_version=130300 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "x.cu" --allow_managed  --device-c  --m64 --parse_templates --gen_c_file_name "/tmp/out/x.cudafe1.cpp" --stub_file_name "x.cudafe1.stub.c" --gen_module_id_file --module_id_file_name "/tmp/out/x.module_id" "/tmp/out/x.cpp4.ii"
+#$ gcc -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__ -D__CUDACC_RDC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=2 -D__CUDACC_VER_BUILD__=78 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=2 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "/tmp/out/x.cpp1.ii"
+#$ "$CICC_PATH/cicc" --c++17 --device-hidden-visibility --gnu_version=130300 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "x.cu" --allow_managed  --device-c   -arch compute_75 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c"  -tused --module_id_file_name "/tmp/out/x.module_id" --gen_c_file_name "/tmp/out/x.cudafe1.c" --stub_file_name "/tmp/out/x.cudafe1.stub.c" --gen_device_file_name "/tmp/out/x.cudafe1.gpu"  "/tmp/out/x.cpp1.ii" -lto -o "/tmp/out/x.ltoir"
+#$ fatbinary --create="/tmp/out/x.fatbin" -64 --cmdline="--compile-only  " --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=nvvm,sm=75,file=/tmp/out/x.ltoir" --embedded-fatbin="/tmp/out/x.fatbin.c"  --device-c
+#$ gcc -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -c -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -Wno-psabi "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"   -m64 "/tmp/out/x.cudafe1.cpp" -o "x.ltoir.o"
+"#,
+        ).unwrap();
+
+        // Merge the nvcc and host compiler commands into one list
+        let (cudafe_has_gen_module_id_file_flag, all_commands) =
+            merge_nvcc_and_host_compiler_commands(cwd, out, nvcc_commands, host_commands);
+
+        let command_groups = create_nvcc_commands_graph(
+            compile_flag,
+            None,
+            env_vars,
+            host_compiler,
+            cudafe_has_gen_module_id_file_flag,
+            all_commands,
+            Path::new("x.ltoir.o"),
+        );
+
+        let output = command_groups
+            .last()
+            .and_then(|cmds| cmds.last())
+            .and_then(|cmd| cmd.output.as_deref());
+
+        // Ensure `remap_generated_filenames` doesn't rewrite `-o x.ltoir.o` to `-o x.compute_75.ltoir.o`
+        assert_eq!(output, Some(Path::new("x.ltoir.o")));
     }
 }
