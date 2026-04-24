@@ -10,7 +10,7 @@ fi
 
 ulimit -n "$(ulimit -Hn)"
 
-sudo rm -rf /tmp/sccache/* /tmp/.sccache_temp
+sudo rm -rf /tmp/sccache/* /tmp/sccache
 mkdir -p /tmp/sccache/{jobs,toolchains}
 
 if ! test -n "${RUST_BACKTRACE:+x}"; then

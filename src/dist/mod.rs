@@ -72,6 +72,16 @@ pub fn server_to_schedulers_queue() -> String {
 }
 
 #[cfg(feature = "dist-server")]
+pub fn to_scheduler_queue(id: &str) -> String {
+    queue_name_with_env_info(&format!("scheduler-{id}"))
+}
+
+#[cfg(feature = "dist-server")]
+pub fn to_server_queue(id: &str) -> String {
+    queue_name_with_env_info(&format!("server-{id}"))
+}
+
+#[cfg(feature = "dist-server")]
 pub fn queue_name_with_env_info(prefix: &str) -> String {
     format!("{prefix}-{}", env_info())
 }
@@ -827,7 +837,7 @@ pub trait SchedulerService: Send + Sync {
 
     async fn job_finished(&self, job_id: &str, server: StatusUpdate) -> Result<()>;
 
-    async fn recv_server_status(
+    async fn update_server_status(
         &self,
         status: StatusUpdate,
         job_status: Option<bool>,
@@ -840,14 +850,17 @@ pub trait ServerService: Send + Sync {
     async fn run_job(
         &self,
         job_id: &str,
+        reply_to: &str,
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
         labels: HashMap<String, String>,
     ) -> Result<RunJobResponse>;
 
-    async fn on_failure(&self, job_id: &str, err: RunJobError) -> Result<()>;
-    async fn on_success(&self, job_id: &str, res: &RunJobResponse) -> Result<()>;
+    async fn on_failure(&self, job_id: &str, reply_to: &str, err: RunJobError) -> Result<()>;
+    async fn on_success(&self, job_id: &str, reply_to: &str, res: &RunJobResponse) -> Result<()>;
+
+    async fn update_scheduler_status(&self, status: StatusUpdate) -> Result<()>;
 }
 
 #[cfg(feature = "dist-server")]

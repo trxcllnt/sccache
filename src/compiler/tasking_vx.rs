@@ -29,7 +29,7 @@ use crate::{
     errors::*,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     server::SccacheService,
-    util::{normal_temp_path, run_input_output},
+    util::{run_input_output, temppath},
 };
 use async_trait::async_trait;
 use futures::FutureExt;
@@ -379,7 +379,7 @@ where
     let (path, temp) = if let Some(depfile) = parsed_args.depfile.as_deref() {
         (cwd.join(depfile), None)
     } else {
-        let temp = normal_temp_path()?;
+        let temp = temppath()?;
         (temp.to_path_buf(), Some(temp))
     };
 

@@ -28,7 +28,7 @@ use crate::{
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
     server::SccacheService,
-    util::{OsStrExt, normal_temp_path, run_input_output, run_input_stream_output},
+    util::{OsStrExt, run_input_output, run_input_stream_output, temppath},
 };
 
 use async_trait::async_trait;
@@ -1159,7 +1159,7 @@ where
             // If `-MMD` (with or without `-MF <file>`)
             (_, None, Some("-MMD")) => {
                 // then generate and write all dependencies to a tempfile
-                let temp = normal_temp_path()?;
+                let temp = temppath()?;
                 run_input_output(
                     generate_all_dependencies_cmd(
                         creator,
@@ -1182,7 +1182,7 @@ where
                     cmd.arg("-MD");
                 }
                 // then write all dependencies to a tempfile
-                let temp = normal_temp_path()?;
+                let temp = temppath()?;
                 cmd.arg("-MF");
                 cmd.arg(&temp);
                 (temp.to_path_buf(), Some(temp))
@@ -1193,7 +1193,7 @@ where
         let (path, temp) = if let Some(depfile) = parsed_args.depfile.as_deref() {
             (cwd.join(depfile), None)
         } else {
-            let temp = normal_temp_path()?;
+            let temp = temppath()?;
             (temp.to_path_buf(), Some(temp))
         };
 
@@ -2804,7 +2804,7 @@ mod test {
 
     #[test]
     fn at_signs() {
-        let td = crate::util::normal_tempdir().unwrap();
+        let td = crate::util::temp_dir().unwrap();
         File::create(td.path().join("foo"))
             .unwrap()
             .write_all(

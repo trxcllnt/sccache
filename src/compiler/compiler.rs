@@ -1293,7 +1293,7 @@ where
 
             // Write the job inputs to a tempfile because they can be huge
             // and we don't want to OOM the server during parallel builds.
-            let job_inputs = crate::util::normal_tempfile()?;
+            let job_inputs = crate::util::tempfile()?;
 
             inputs_packager
                 .write_inputs(
@@ -1946,7 +1946,7 @@ pub async fn write_temp_file(
 ) -> Result<(TempDir, PathBuf)> {
     let path = path.to_owned();
     pool.spawn_blocking(move || {
-        let dir = crate::util::normal_tempdir().context("Failed to create temp dir")?;
+        let dir = crate::util::temp_dir().context("Failed to create temp dir")?;
         let src = dir.path().join(path);
         let mut file = File::create(&src)?;
         file.write_all(&contents)?;
