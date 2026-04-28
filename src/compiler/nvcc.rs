@@ -1024,6 +1024,7 @@ enum NvccCompileFlag {
     LtoIR,
     OptixIR,
     Ptx,
+    TileBC,
 }
 
 impl From<&OsStr> for NvccCompileFlag {
@@ -1038,11 +1039,16 @@ impl From<&OsStr> for NvccCompileFlag {
             // compile to object with -rdc=false
             | Some("-dw") | Some("--device-w")
             => NvccCompileFlag::Device,
-            Some("-cubin") | Some("--cubin") => NvccCompileFlag::Cubin,
-            Some("-fatbin") | Some("--fatbin") => NvccCompileFlag::Fatbin,
+            Some("-cubin") | Some("--cubin")
+            | Some("-tilecubin") | Some("--tilecubin")
+            => NvccCompileFlag::Cubin,
+            Some("-fatbin") | Some("--fatbin")
+            | Some("-tilefatbin") | Some("--tilefatbin")
+            => NvccCompileFlag::Fatbin,
             Some("-ltoir") | Some("--ltoir") => NvccCompileFlag::LtoIR,
             Some("-optix-ir") | Some("--optix-ir") => NvccCompileFlag::OptixIR,
             Some("-ptx") | Some("--ptx") => NvccCompileFlag::Ptx,
+            Some("-tilebc") | Some("--tilebc") => NvccCompileFlag::TileBC,
             _ => unreachable!()
         }
     }
@@ -2126,16 +2132,17 @@ fn remap_generated_filenames(
     ];
 
     match compile_flag {
-        // Rewrite PTX names if the compile flag is `-cubin` or `-ltoir`
-        NvccCompileFlag::Cubin | NvccCompileFlag::LtoIR => {
+        // Rewrite PTX names if the compile flag is `-cubin`, `-ltoir`, or `-tilebc`
+        NvccCompileFlag::Cubin | NvccCompileFlag::LtoIR | NvccCompileFlag::TileBC => {
             extensions_to_rename.push(".ptx");
         }
-        // Rewrite both PTX and cubin names if the compile flag is `-c` or `-fatbin`
+        // Rewrite PTX, cubin, ltoir, optixir, and tilebc names if the compile flag is `-c`, `-fatbin`, or `-tilefatbin`
         NvccCompileFlag::Device | NvccCompileFlag::Executable | NvccCompileFlag::Fatbin => {
             extensions_to_rename.push(".ptx");
             extensions_to_rename.push(".cubin");
             extensions_to_rename.push(".ltoir");
             extensions_to_rename.push(".optixir");
+            extensions_to_rename.push(".tilebc");
         }
         _ => {}
     }
@@ -2562,6 +2569,9 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("--split-compile=", OsString, Concatenated, Unhashed),
     take_arg!("--system-include", PathBuf, CanBeSeparated(b'='), PreprocessorArgumentPath),
     take_arg!("--threads", OsString, CanBeSeparated(b'='), Unhashed),
+    flag!("--tilebc", DoCompilation),
+    flag!("--tilecubin", DoCompilation),
+    take_arg!("--tileiras-options", OsString, CanBeSeparated(b'='), PassThrough),
     take_arg!("--time", OsString, CanBeSeparated, TooHard),
     take_arg!("--time=", OsString, Concatenated, TooHard),
     take_arg!("--x", OsString, CanBeSeparated(b'='), Language),
@@ -2575,6 +2585,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("-Xlinker", OsString, CanBeSeparated(b'='), PassThrough),
     take_arg!("-Xnvlink", OsString, CanBeSeparated(b'='), PassThrough),
     take_arg!("-Xptxas", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("-Xtileiras", OsString, CanBeSeparated(b'='), PassThrough),
     take_arg!("-arch", OsString, CanBeSeparated(b'='), PassThrough),
     take_arg!("-ccbin", OsString, CanBeSeparated(b'='), PassThrough),
     take_arg!("-code", OsString, CanBeSeparated(b'='), PassThrough),
@@ -2618,6 +2629,8 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("-split-compile=", OsString, Concatenated, Unhashed),
     take_arg!("-t", OsString, CanBeSeparated, Unhashed),
     take_arg!("-t=", OsString, Concatenated, Unhashed),
+    flag!("-tilebc", DoCompilation),
+    flag!("-tilecubin", DoCompilation),
     take_arg!("-time", OsString, CanBeSeparated, TooHard),
     take_arg!("-time=", OsString, Concatenated, TooHard),
     take_arg!("-x", OsString, CanBeSeparated(b'='), Language),
