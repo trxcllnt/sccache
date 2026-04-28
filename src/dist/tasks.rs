@@ -21,7 +21,7 @@ use celery::{
     task::{AsyncResult, Task},
 };
 
-use std::{boxed::Box, collections::HashMap, sync::Arc};
+use std::{boxed::Box, collections::BTreeMap, sync::Arc};
 
 use crate::{
     config::MessageBroker,
@@ -235,7 +235,7 @@ pub trait SchedulerTasks: AppTasks + Send + Sync {
         toolchain: &Toolchain,
         command: &CompileCommand,
         outputs: &[String],
-        labels: &Option<HashMap<String, String>>,
+        labels: &Option<BTreeMap<String, String>>,
     ) -> std::result::Result<AsyncResult, CeleryError>;
 }
 
@@ -256,7 +256,7 @@ impl SchedulerTasks for Tasks {
         toolchain: &Toolchain,
         command: &CompileCommand,
         outputs: &[String],
-        labels: &Option<HashMap<String, String>>,
+        labels: &Option<BTreeMap<String, String>>,
     ) -> std::result::Result<AsyncResult, CeleryError> {
         self.app()
             .send_task(
@@ -315,7 +315,7 @@ mod task_impls {
     use celery::protocol::MessageContentType::MsgPack;
 
     use futures::FutureExt;
-    use std::{boxed::Box, collections::HashMap, sync::Arc};
+    use std::{boxed::Box, collections::BTreeMap, sync::Arc};
 
     use crate::{
         dist::{
@@ -357,7 +357,7 @@ mod task_impls {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        labels: HashMap<String, String>,
+        labels: BTreeMap<String, String>,
     ) -> TaskResult<RunJobResponse> {
         tracing::trace!(
             "[run_job({job_id}, {}, {:?}, {:?}, {outputs:?})]",

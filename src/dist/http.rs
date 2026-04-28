@@ -186,7 +186,7 @@ mod scheduler {
     use serde_json::json;
 
     use std::{
-        collections::HashMap,
+        collections::BTreeMap,
         io::{self, Seek},
         net::SocketAddr,
         str::FromStr,
@@ -213,7 +213,7 @@ mod scheduler {
         errors::*,
     };
 
-    pub type ClientClaims = HashMap<String, String>;
+    pub type ClientClaims = BTreeMap<String, String>;
 
     #[async_trait]
     pub trait ClientAuthCheck: Send + Sync {

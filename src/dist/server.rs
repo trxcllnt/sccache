@@ -12,15 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use async_trait::async_trait;
-
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{Arc, atomic::AtomicU64},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
-
 use crate::{
     cache::{Cache, Storage},
     dist::{
@@ -30,7 +21,16 @@ use crate::{
         metrics::{CountRecorder, GaugeRecorder, Metrics, TimeRecorder},
     },
     errors::*,
-    util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
+    util::{self, AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
+};
+use async_trait::async_trait;
+use futures::future::FutureExt;
+use std::{
+    collections::{BTreeMap, HashMap},
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicU64},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const NUM_CPUS_HISTO: &str = "sccache::server::num_cpus";
@@ -253,9 +253,9 @@ impl ServerMetrics {
 
     pub fn scope_with_labels<F>(
         &self,
-        labels: &HashMap<String, String>,
+        labels: &BTreeMap<String, String>,
         f: F,
-    ) -> tokio::task::futures::TaskLocalFuture<Arc<HashMap<String, String>>, F>
+    ) -> tokio::task::futures::TaskLocalFuture<Arc<BTreeMap<String, String>>, F>
     where
         F: Future,
     {
@@ -426,7 +426,7 @@ struct RunJobArgs {
     toolchain: Toolchain,
     command: CompileCommand,
     outputs: Vec<String>,
-    labels: HashMap<String, String>,
+    labels: BTreeMap<String, String>,
 }
 
 impl AsyncMulticastArgs for RunJobArgs {
@@ -868,7 +868,7 @@ impl ServerService for Server {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        labels: HashMap<String, String>,
+        labels: BTreeMap<String, String>,
     ) -> Result<RunJobResponse> {
         let reply_to = reply_to.to_owned();
 

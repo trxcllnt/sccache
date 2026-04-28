@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     net::SocketAddr,
     str::FromStr,
     sync::{Arc, atomic::AtomicU64},
@@ -33,7 +33,7 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
 pub struct CountRecorder {
     name: SharedString,
-    labels: Option<Arc<HashMap<String, String>>>,
+    labels: Option<Arc<BTreeMap<String, String>>>,
 }
 
 impl Drop for CountRecorder {
@@ -52,13 +52,13 @@ impl Drop for CountRecorder {
 #[derive(Default)]
 pub struct GaugeRecorder {
     name: SharedString,
-    labels: Option<Arc<HashMap<String, String>>>,
+    labels: Option<Arc<BTreeMap<String, String>>>,
     value: AtomicU64,
 }
 
 pub struct GaugeRecorderIncrement<'a> {
     name: SharedString,
-    labels: &'a Option<Arc<HashMap<String, String>>>,
+    labels: &'a Option<Arc<BTreeMap<String, String>>>,
     value: &'a AtomicU64,
 }
 
@@ -103,7 +103,7 @@ impl GaugeRecorder {
 pub struct HistoRecorder {
     name: SharedString,
     value: f64,
-    labels: Option<Arc<HashMap<String, String>>>,
+    labels: Option<Arc<BTreeMap<String, String>>>,
 }
 
 impl Drop for HistoRecorder {
@@ -122,7 +122,7 @@ impl Drop for HistoRecorder {
 pub struct TimeRecorder {
     name: SharedString,
     start: Instant,
-    labels: Option<Arc<HashMap<String, String>>>,
+    labels: Option<Arc<BTreeMap<String, String>>>,
 }
 
 impl Drop for TimeRecorder {
@@ -141,7 +141,7 @@ impl Drop for TimeRecorder {
 
 #[derive(Clone)]
 pub struct Metrics {
-    global_labels: Arc<HashMap<String, String>>,
+    global_labels: Arc<BTreeMap<String, String>>,
     inner: Arc<dyn MetricsInner>,
 }
 
@@ -155,11 +155,11 @@ impl Default for Metrics {
 }
 
 tokio::task_local! {
-    static SCOPED_LABELS: Arc<HashMap<String, String>>;
+    static SCOPED_LABELS: Arc<BTreeMap<String, String>>;
 }
 
 impl Metrics {
-    pub fn new(config: MetricsConfigs, global_labels: HashMap<String, String>) -> Result<Self> {
+    pub fn new(config: MetricsConfigs, global_labels: BTreeMap<String, String>) -> Result<Self> {
         if let Some(config) = config.dogstatsd {
             Ok(Self {
                 global_labels: Arc::new(global_labels),
@@ -178,19 +178,19 @@ impl Metrics {
         }
     }
 
-    pub fn scoped_labels(&self) -> Option<Arc<HashMap<String, String>>> {
+    pub fn scoped_labels(&self) -> Option<Arc<BTreeMap<String, String>>> {
         SCOPED_LABELS.try_get().ok()
     }
 
     pub fn scope_with_labels<F>(
         &self,
-        local_labels: &HashMap<String, String>,
+        local_labels: &BTreeMap<String, String>,
         f: F,
-    ) -> tokio::task::futures::TaskLocalFuture<Arc<HashMap<String, String>>, F>
+    ) -> tokio::task::futures::TaskLocalFuture<Arc<BTreeMap<String, String>>, F>
     where
         F: Future,
     {
-        let mut labels = HashMap::new();
+        let mut labels = BTreeMap::new();
         for (k, v) in self.global_labels.iter() {
             labels.insert(k.clone(), v.clone());
         }
@@ -321,7 +321,7 @@ struct PrometheusMetrics {
 impl PrometheusMetrics {
     pub fn new(
         config: PrometheusMetricsConfig,
-        global_labels: HashMap<String, String>,
+        global_labels: BTreeMap<String, String>,
     ) -> Result<Self> {
         let builder = global_labels
             .iter()

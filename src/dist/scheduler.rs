@@ -30,7 +30,7 @@ use crate::{
 };
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -221,7 +221,7 @@ struct RunJobArgs {
     toolchain: Toolchain,
     command: CompileCommand,
     outputs: Vec<String>,
-    labels: Option<HashMap<String, String>>,
+    labels: Option<BTreeMap<String, String>>,
 }
 
 impl AsyncMulticastArgs for RunJobArgs {
@@ -734,7 +734,7 @@ impl SchedulerService for Scheduler {
                 toolchain,
                 command,
                 outputs,
-                labels,
+                labels: labels.map(|labels| labels.into_iter().collect()),
             })
             .await
             .map(|(_, res)| res)
