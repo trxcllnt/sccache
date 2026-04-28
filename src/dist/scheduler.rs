@@ -30,7 +30,7 @@ use crate::{
 };
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -221,7 +221,6 @@ struct RunJobArgs {
     toolchain: Toolchain,
     command: CompileCommand,
     outputs: Vec<String>,
-    labels: Option<BTreeMap<String, String>>,
 }
 
 impl AsyncMulticastArgs for RunJobArgs {
@@ -245,7 +244,6 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFn {
             toolchain,
             command,
             outputs,
-            labels,
         } = args;
 
         let (tx, rx) = tokio::sync::oneshot::channel::<RunJobResponse>();
@@ -253,7 +251,7 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFn {
 
         let res = self
             .tasks
-            .run_job(job_id, reply_to, toolchain, command, outputs, labels)
+            .run_job(job_id, reply_to, toolchain, command, outputs)
             .await
             .map_err(anyhow::Error::new);
 
@@ -692,7 +690,7 @@ impl SchedulerService for Scheduler {
             toolchain,
             command,
             outputs,
-            labels,
+            ..
         }: RunJobRequestV2,
     ) -> Result<RunJobResponse> {
         if self.has_job_result(job_id).await {
@@ -734,7 +732,6 @@ impl SchedulerService for Scheduler {
                 toolchain,
                 command,
                 outputs,
-                labels: labels.map(|labels| labels.into_iter().collect()),
             })
             .await
             .map(|(_, res)| res)

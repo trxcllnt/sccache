@@ -26,7 +26,7 @@ use crate::{
 use async_trait::async_trait;
 use futures::future::FutureExt;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, atomic::AtomicU64},
@@ -250,17 +250,6 @@ impl ServerMetrics {
     pub fn run_job_timer(&self) -> TimeRecorder {
         self.metrics.timer(RUN_JOB_TIME)
     }
-
-    pub fn scope_with_labels<F>(
-        &self,
-        labels: &BTreeMap<String, String>,
-        f: F,
-    ) -> tokio::task::futures::TaskLocalFuture<Arc<BTreeMap<String, String>>, F>
-    where
-        F: Future,
-    {
-        self.metrics.scope_with_labels(labels, f)
-    }
 }
 
 impl Default for ServerMetrics {
@@ -426,7 +415,6 @@ struct RunJobArgs {
     toolchain: Toolchain,
     command: CompileCommand,
     outputs: Vec<String>,
-    labels: BTreeMap<String, String>,
 }
 
 impl AsyncMulticastArgs for RunJobArgs {
@@ -600,22 +588,16 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFunc {
             toolchain,
             command,
             outputs,
-            labels,
         } = args;
         if self.state.is_alive() {
-            self.state
-                .metrics
-                .scope_with_labels(
-                    labels,
-                    self.load_job_and_run_build(
-                        job_id,
-                        reply_to,
-                        toolchain.clone(),
-                        command.clone(),
-                        outputs.clone(),
-                    ),
-                )
-                .await
+            self.load_job_and_run_build(
+                job_id,
+                reply_to,
+                toolchain.clone(),
+                command.clone(),
+                outputs.clone(),
+            )
+            .await
         } else {
             Err(RunJobError::server_terminated())
         }
@@ -942,7 +924,6 @@ impl ServerService for Server {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        labels: BTreeMap<String, String>,
     ) -> Result<RunJobResponse> {
         let reply_to = reply_to.to_owned();
 
@@ -969,7 +950,6 @@ impl ServerService for Server {
                 toolchain,
                 command,
                 outputs,
-                labels,
             })
             .await
             .map(|(_, res)| res)

@@ -17,9 +17,6 @@ use async_trait::async_trait;
 #[cfg(feature = "dist-server")]
 use itertools::Itertools;
 
-#[cfg(feature = "dist-server")]
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 use std::{
@@ -857,7 +854,6 @@ pub trait ServerService: Send + Sync {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        labels: BTreeMap<String, String>,
     ) -> Result<RunJobResponse>;
 
     async fn on_failure(&self, job_id: &str, reply_to: &str, err: RunJobError) -> Result<()>;

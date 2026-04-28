@@ -21,7 +21,7 @@ use celery::{
     task::{AsyncResult, Task},
 };
 
-use std::{boxed::Box, collections::BTreeMap, sync::Arc};
+use std::{boxed::Box, sync::Arc};
 
 use crate::{
     config::MessageBroker,
@@ -235,7 +235,6 @@ pub trait SchedulerTasks: AppTasks + Send + Sync {
         toolchain: &Toolchain,
         command: &CompileCommand,
         outputs: &[String],
-        labels: &Option<BTreeMap<String, String>>,
     ) -> std::result::Result<AsyncResult, CeleryError>;
 }
 
@@ -256,7 +255,6 @@ impl SchedulerTasks for Tasks {
         toolchain: &Toolchain,
         command: &CompileCommand,
         outputs: &[String],
-        labels: &Option<BTreeMap<String, String>>,
     ) -> std::result::Result<AsyncResult, CeleryError> {
         self.app()
             .send_task(
@@ -266,7 +264,6 @@ impl SchedulerTasks for Tasks {
                     toolchain.to_owned(),
                     command.to_owned(),
                     outputs.to_owned(),
-                    labels.clone().unwrap_or_default(),
                 )
                 .with_time_limit(self.job_time_limit.saturating_sub(30))
                 .with_expires_in(self.job_time_limit.saturating_sub(30)),
@@ -315,7 +312,7 @@ mod task_impls {
     use celery::protocol::MessageContentType::MsgPack;
 
     use futures::FutureExt;
-    use std::{boxed::Box, collections::BTreeMap, sync::Arc};
+    use std::{boxed::Box, sync::Arc};
 
     use crate::{
         dist::{
@@ -357,7 +354,6 @@ mod task_impls {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        labels: BTreeMap<String, String>,
     ) -> TaskResult<RunJobResponse> {
         tracing::trace!(
             "[run_job({job_id}, {}, {:?}, {:?}, {outputs:?})]",
@@ -367,7 +363,7 @@ mod task_impls {
         );
 
         server_service()
-            .map(|svc| svc.run_job(&job_id, &reply_to, toolchain, command, outputs, labels))
+            .map(|svc| svc.run_job(&job_id, &reply_to, toolchain, command, outputs))
             .unwrap_or_else(|err| futures::future::err(err).boxed())
             .await
             .map_err(|err| match err.downcast_ref::<RunJobError>() {
