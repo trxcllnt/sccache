@@ -2096,7 +2096,7 @@ fn remap_generated_filenames(
     lines: &[(PathBuf, Vec<String>)],
     nvcc_internal_files: &mut HashMap<String, String>,
 ) -> Vec<(PathBuf, Vec<String>)> {
-    let extensions = [
+    let nvcc_internal_file_extensions = [
         "_dlink.fatbin.c",
         "_dlink.fatbin",
         "_dlink.o",
@@ -2160,7 +2160,10 @@ fn remap_generated_filenames(
                         // ends in one of these extensions, rename the file to a
                         // stable name that includes the compute architecture.
                         let maybe_extension = if !arg.starts_with('-') {
-                            extensions.iter().find(|ext| arg.ends_with(*ext)).copied()
+                            nvcc_internal_file_extensions
+                                .iter()
+                                .find(|ext| arg.ends_with(*ext))
+                                .copied()
                         } else {
                             None
                         };
@@ -2301,6 +2304,26 @@ fn remap_generated_filenames(
                                 let mut arg = arg.clone();
                                 for (old, new) in nvcc_internal_files
                                     .iter()
+                                    // Don't replace if old and new are different
+                                    .filter(|&(old, new)| old != new)
+                                    .filter(|&(old, _)| {
+                                        //
+                                        // Replace old -> new if:
+                                        // * The argument ends with the old name
+                                        // * The argument contains - but does not start with - the old name
+                                        //
+                                        // This ensures we don't replace `x.ltoir` -> `x.compute_XX.ltoir`
+                                        // in `x.ltoir.o`, because even though `x.ltoir.o` contains and
+                                        // starts with `x.ltoir`, it does not end with it.
+                                        //
+                                        // This will still replace `x.ltoir` -> `x.compute_XX.ltoir` in
+                                        // the string `--image3=file=x.ltoir,kind=nvvm,sm=75`, because
+                                        // even though it doesn't end with `x.ltoir`, it doesn't start
+                                        // with and does contain and `x.ltoir`.
+                                        //
+                                        arg.ends_with(old)
+                                            || (!arg.starts_with(old) && arg.contains(old))
+                                    })
                                     .sorted_by(|a, b| b.0.len().cmp(&a.0.len()))
                                 {
                                     arg = arg.replace(old, new);
@@ -2325,7 +2348,9 @@ fn remap_generated_filenames(
                         {
                             let (_, [name]) = groups.extract();
                             if !nvcc_internal_files.contains_key(name)
-                                && extensions.iter().any(|ext| name.ends_with(*ext))
+                                && nvcc_internal_file_extensions
+                                    .iter()
+                                    .any(|ext| name.ends_with(*ext))
                             {
                                 nvcc_internal_files.insert(name.to_owned(), name.to_owned());
                             }
@@ -3275,49 +3300,101 @@ mod test {
         assert_eq!(ovec!["--device-debug", "-c"], a.common_args);
     }
 
+    #[test]
+    fn test_rdc_ltoir_object() {
+        drop(env_logger::try_init());
+
+        let cwd = Path::new("");
+        let out = Path::new("/tmp/out");
+        let compile_flag = &NvccCompileFlag::Device;
+        let host_compiler = &NvccHostCompiler::Gcc;
+        let mut env_vars = vec![];
+        let mut nvcc_internal_files = HashMap::<String, String>::new();
+
+        // Get the nvcc compile command lines with paths relative to `out`
+        let nvcc_commands = parse_nvcc_subcommands(
+            cwd,
+            &mut env_vars,
+            compile_flag,
+            host_compiler,
+            &mut nvcc_internal_files,
+            is_nvcc_exe,
+            // nvcc -rdc=true -gencode=arch=lto_75,code=lto_75 -dc x.cu -o x.ltoir.o --dryrun --keep
+            r#"
+#$ gcc -D__CUDA_ARCH_LIST__=750 -E -x c++ -D__CUDACC__ -D__NVCC__ -D__CUDACC_RDC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=2 -D__CUDACC_VER_BUILD__=78 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=2 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "x.cpp4.ii"
+#$ cudafe++ --c++17 --device-hidden-visibility --gnu_version=130300 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "x.cu" --allow_managed  --device-c  --m64 --parse_templates --gen_c_file_name "x.cudafe1.cpp" --stub_file_name "x.cudafe1.stub.c" --gen_module_id_file --module_id_file_name "x.module_id" "x.cpp4.ii"
+#$ gcc -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__ -D__CUDACC_RDC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=2 -D__CUDACC_VER_BUILD__=78 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=2 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "x.cpp1.ii"
+#$ "$CICC_PATH/cicc" --c++17 --device-hidden-visibility --gnu_version=130300 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "x.cu" --allow_managed  --device-c   -arch compute_75 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c"  -tused --module_id_file_name "x.module_id" --gen_c_file_name "x.cudafe1.c" --stub_file_name "x.cudafe1.stub.c" --gen_device_file_name "x.cudafe1.gpu"  "x.cpp1.ii" -lto -o "x.ltoir"
+#$ fatbinary --create="x.fatbin" -64 --cmdline="--compile-only  " --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=nvvm,sm=75,file=x.ltoir" --embedded-fatbin="x.fatbin.c"  --device-c
+#$ gcc -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -c -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -Wno-psabi "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"   -m64 "x.cudafe1.cpp" -o "x.ltoir.o"
+"#,
+        ).unwrap();
+
+        let host_commands = parse_nvcc_subcommands(
+            cwd,
+            &mut env_vars,
+            compile_flag,
+            host_compiler,
+            &mut nvcc_internal_files,
+            |exe, args| !is_nvcc_exe(exe, args),
+            // nvcc -rdc=true -gencode=arch=lto_75,code=lto_75 -dc x.cu -o x.ltoir.o --dryrun --keep --keep-dir /tmp/out
+            r#"
+#$ gcc -D__CUDA_ARCH_LIST__=750 -E -x c++ -D__CUDACC__ -D__NVCC__ -D__CUDACC_RDC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=2 -D__CUDACC_VER_BUILD__=78 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=2 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "/tmp/out/x.cpp4.ii"
+#$ cudafe++ --c++17 --device-hidden-visibility --gnu_version=130300 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "x.cu" --allow_managed  --device-c  --m64 --parse_templates --gen_c_file_name "/tmp/out/x.cudafe1.cpp" --stub_file_name "x.cudafe1.stub.c" --gen_module_id_file --module_id_file_name "/tmp/out/x.module_id" "/tmp/out/x.cpp4.ii"
+#$ gcc -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__ -D__CUDACC_RDC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=2 -D__CUDACC_VER_BUILD__=78 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=2 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "/tmp/out/x.cpp1.ii"
+#$ "$CICC_PATH/cicc" --c++17 --device-hidden-visibility --gnu_version=130300 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "x.cu" --allow_managed  --device-c   -arch compute_75 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c"  -tused --module_id_file_name "/tmp/out/x.module_id" --gen_c_file_name "/tmp/out/x.cudafe1.c" --stub_file_name "/tmp/out/x.cudafe1.stub.c" --gen_device_file_name "/tmp/out/x.cudafe1.gpu"  "/tmp/out/x.cpp1.ii" -lto -o "/tmp/out/x.ltoir"
+#$ fatbinary --create="/tmp/out/x.fatbin" -64 --cmdline="--compile-only  " --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=nvvm,sm=75,file=/tmp/out/x.ltoir" --embedded-fatbin="/tmp/out/x.fatbin.c"  --device-c
+#$ gcc -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -c -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -Wno-psabi "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"   -m64 "/tmp/out/x.cudafe1.cpp" -o "x.ltoir.o"
+"#,
+        ).unwrap();
+
+        // Merge the nvcc and host compiler commands into one list
+        let (cudafe_has_gen_module_id_file_flag, all_commands) =
+            merge_nvcc_and_host_compiler_commands(cwd, out, nvcc_commands, host_commands);
+
+        let command_groups = create_nvcc_commands_graph(
+            compile_flag,
+            None,
+            env_vars,
+            host_compiler,
+            cudafe_has_gen_module_id_file_flag,
+            all_commands,
+            Path::new("x.ltoir.o"),
+        );
+
+        let output = command_groups
+            .last()
+            .and_then(|cmds| cmds.last())
+            .and_then(|cmd| cmd.output.as_deref());
+
+        // Ensure `remap_generated_filenames` doesn't rewrite `-o x.ltoir.o` to `-o x.compute_75.ltoir.o`
+        assert_eq!(output, Some(Path::new("x.ltoir.o")));
+    }
+
     #[tokio::test]
     async fn test_parse_nvcc_lines_with_stdio_redirects() -> Result<()> {
-        let lines = r#"
-#$ NVCC_APPEND_FLAGS="-t=100"
-#$ _NVVM_BRANCH_=nvvm
-#$ _SPACE_=
-#$ _CUDART_=cudart
-#$ CUDA_ROOT=/usr/local/cuda
-#$ _HERE_=/usr/local/cuda/bin
-#$ _THERE_=/usr/local/cuda/bin
-#$ _TARGET_SIZE_=
-#$ _TARGET_DIR_=
-#$ _TARGET_DIR_=targets/x86_64-linux
-#$ TOP=/usr/local/cuda/bin/..
-#$ CICC_PATH=/usr/local/cuda/bin/../nvvm/bin
-#$ NVVMIR_LIBRARY_DIR=/usr/local/cuda/bin/../nvvm/libdevice
-#$ LD_LIBRARY_PATH=/usr/local/cuda/bin/../lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
-#$ PATH=/usr/local/cuda/bin/../nvvm/bin:/usr/local/cuda/bin:/vscode/vscode-server/bin/linux-x64/c9d77990917f3102ada88be140d28b038d1dd7c7/bin/remote-cli:/home/coder/.local/bin:/home/coder/.local/share/venvs/cccl/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/python/current/bin:/usr/local/py-utils/bin:/usr/local/jupyter:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/cuda-latest/bin:/opt/evo/sampler/bin:/opt/evo/worker/bin:/opt/evo/manager/bin
-#$ INCLUDES="-I/usr/local/cuda/bin/../targets/x86_64-linux/include"
-#$ SYSTEM_INCLUDES="-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"
-#$ LIBRARIES=  "-L/usr/local/cuda/bin/../targets/x86_64-linux/lib/stubs" "-L/usr/local/cuda/bin/../targets/x86_64-linux/lib"
-#$ CUDAFE_FLAGS=
-#$ PTXAS_FLAGS=
-#$ fatbinary --create="/tmp/x/x.tile.fatbin" -64 --embedded-fatbin="/tmp/x/x.tile.fatbin.c" --id-suffix="Alt"  > /tmp/tmpxft_0000c738_00000000-3_9f9df6c0_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9df6c0_stderr
-#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "/tmp/x.cu" -o "/tmp/x/x.cpp1.ii"  > /tmp/tmpxft_0000c738_00000000-3_9f9dfef0_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9dfef0_stderr
-#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH_LIST__=750 -E -x c++ -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "/tmp/x.cu" -o "/tmp/x/x.cpp4.ii"  > /tmp/tmpxft_0000c738_00000000-3_9f9dda40_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9dda40_stderr
-#$ cudafe++ --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "/tmp/x.cu" --orig_src_path_name "/tmp/x.cu" --allow_managed  --m64 --parse_templates --gen_c_file_name "/tmp/x/x.cudafe1.cpp" --stub_file_name "x.cudafe1.stub.c" --gen_module_id_file --module_id_file_name "/tmp/x/x.module_id" --enable-tile "/tmp/x/x.cpp4.ii"  > /tmp/tmpxft_0000c738_00000000-3_9f9df5a0_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9df5a0_stderr
-#$ "$CICC_PATH/cicc" --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "/tmp/x.cu" --orig_src_path_name "/tmp/x.cu" --allow_managed   -arch compute_75 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c" --include_alt_file_name "x.tile.fatbin.c" -tused --module_id_file_name "/tmp/x/x.module_id" --gen_c_file_name "/tmp/x/x.cudafe1.c" --stub_file_name "/tmp/x/x.cudafe1.stub.c" --gen_device_file_name "/tmp/x/x.cudafe1.gpu"  "/tmp/x/x.cpp1.ii" --enable-tile --tile_bc_file_name "/tmp/x/x.tilebc" -o "/tmp/x/x.ptx" > /tmp/tmpxft_0000c738_00000000-3_9f9e03e0_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9e03e0_stderr
-#$ ptxas -arch=sm_75 -m64  "/tmp/x/x.ptx"  -o "/tmp/x/x.sm_75.cubin"  > /tmp/tmpxft_0000c738_00000000-3_9f9e0540_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9e0540_stderr
-#$ fatbinary --create="/tmp/x/x.fatbin" -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=elf,sm=75,file=/tmp/x/x.sm_75.cubin" "--image3=kind=ptx,sm=75,file=/tmp/x/x.ptx" --embedded-fatbin="/tmp/x/x.fatbin.c"  > /tmp/tmpxft_0000c738_00000000-3_9f9e0a80_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9e0a80_stderr
-#$ gcc -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -c -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -Wno-psabi "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"   -m64 "/tmp/x/x.cudafe1.cpp" -o "/tmp/x/x.cu.o"  > /tmp/tmpxft_0000c738_00000000-3_9f9e1220_stdout 2>/tmp/tmpxft_0000c738_00000000-3_9f9e1220_stderr
-        "#;
+        drop(env_logger::try_init());
 
         let mut nvcc_internal_files = HashMap::<String, String>::new();
 
         let commands = parse_nvcc_subcommands(
-            Path::new("."),
+            Path::new(""),
             &mut vec![],
             &NvccCompileFlag::Device,
             &NvccHostCompiler::Gcc,
             &mut nvcc_internal_files,
             |_, _| true,
-            lines,
+            // echo | nvcc -c -x cu --enable-tile - -o /tmp/x/x.cu.o --dryrun --keep --keep-dir /tmp/out
+            r#"
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH_LIST__=750 -E -x c++ -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "/tmp/tmpxft_00000080_00000000-1_stdin" -o "/tmp/out/tmpxft_00000080_00000000-1_stdin.cpp4.ii"
+#$ cudafe++ --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140300 --display_error_number --orig_src_file_name "/tmp/tmpxft_00000080_00000000-1_stdin" --orig_src_path_name "/tmp/tmpxft_00000080_00000000-1_stdin" --allow_managed  --m64 --parse_templates --gen_c_file_name "/tmp/out/tmpxft_00000080_00000000-1_stdin.cudafe1.cpp" --stub_file_name "tmpxft_00000080_00000000-1_stdin.cudafe1.stub.c" --gen_module_id_file --module_id_file_name "/tmp/out/tmpxft_00000080_00000000-1_stdin.module_id" --enable-tile "/tmp/out/tmpxft_00000080_00000000-1_stdin.cpp4.ii"
+#$ fatbinary --create="/tmp/out/tmpxft_00000080_00000000-1_stdin.tile.fatbin" -64 --embedded-fatbin="/tmp/out/tmpxft_00000080_00000000-1_stdin.tile.fatbin.c" --id-suffix="Alt"
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "/tmp/tmpxft_00000080_00000000-1_stdin" -o "/tmp/out/tmpxft_00000080_00000000-1_stdin.cpp1.ii"
+#$ "$CICC_PATH/cicc" --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140300 --display_error_number --orig_src_file_name "/tmp/tmpxft_00000080_00000000-1_stdin" --orig_src_path_name "/tmp/tmpxft_00000080_00000000-1_stdin" --allow_managed   -arch compute_75 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "tmpxft_00000080_00000000-1_stdin.fatbin.c" --include_alt_file_name "tmpxft_00000080_00000000-1_stdin.tile.fatbin.c" -tused --module_id_file_name "/tmp/out/tmpxft_00000080_00000000-1_stdin.module_id" --gen_c_file_name "/tmp/out/tmpxft_00000080_00000000-1_stdin.cudafe1.c" --stub_file_name "/tmp/out/tmpxft_00000080_00000000-1_stdin.cudafe1.stub.c" --gen_device_file_name "/tmp/out/tmpxft_00000080_00000000-1_stdin.cudafe1.gpu"  "/tmp/out/tmpxft_00000080_00000000-1_stdin.cpp1.ii" --enable-tile --tile_bc_file_name "/tmp/out/tmpxft_00000080_00000000-1_stdin.tilebc" -o "/tmp/out/tmpxft_00000080_00000000-1_stdin.ptx"
+#$ ptxas -arch=sm_75 -m64  "/tmp/out/tmpxft_00000080_00000000-1_stdin.ptx"  -o "/tmp/out/tmpxft_00000080_00000000-1_stdin.sm_75.cubin"
+#$ fatbinary --create="/tmp/out/tmpxft_00000080_00000000-1_stdin.fatbin" -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=elf,sm=75,file=/tmp/out/tmpxft_00000080_00000000-1_stdin.sm_75.cubin" "--image3=kind=ptx,sm=75,file=/tmp/out/tmpxft_00000080_00000000-1_stdin.ptx" --embedded-fatbin="/tmp/out/tmpxft_00000080_00000000-1_stdin.fatbin.c"
+#$ gcc -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -c -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -Wno-psabi "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"   -m64 "/tmp/out/tmpxft_00000080_00000000-1_stdin.cudafe1.cpp" -o "/tmp/x/x.cu.o"
+"#,
         )?;
 
         assert!(
@@ -3336,9 +3413,11 @@ mod test {
 
     #[tokio::test]
     async fn test_group_cuda_tile_commands() -> Result<()> {
+        drop(env_logger::try_init());
+
         let keep_dir = None;
         let mut env_vars = vec![];
-        let cwd = Path::new("/tmp/cwd").to_owned();
+        let cwd = Path::new("").to_owned();
         let out = Path::new("/tmp/out").to_owned();
 
         let compile_flag = &NvccCompileFlag::Device;
@@ -3354,41 +3433,22 @@ mod test {
             host_compiler,
             &mut nvcc_internal_files,
             is_nvcc_exe,
+            // nvcc -x cu --enable-tile  -gencode=arch=compute_80,code=[compute_80,sm_80] -gencode=arch=compute_86,code=[compute_86,sm_86] -c x.cu -o x.cu.o --dryrun --keep
             r#"
-#$ NVCC_APPEND_FLAGS="-t=100"
-#$ _NVVM_BRANCH_=nvvm
-#$ _SPACE_=
-#$ _CUDART_=cudart
-#$ CUDA_ROOT=/usr/local/cuda
-#$ _HERE_=/usr/local/cuda/bin
-#$ _THERE_=/usr/local/cuda/bin
-#$ _TARGET_SIZE_=
-#$ _TARGET_DIR_=
-#$ _TARGET_DIR_=targets/x86_64-linux
-#$ TOP=/usr/local/cuda/bin/..
-#$ CICC_PATH=/usr/local/cuda/bin/../nvvm/bin
-#$ NVVMIR_LIBRARY_DIR=/usr/local/cuda/bin/../nvvm/libdevice
-#$ LD_LIBRARY_PATH=/usr/local/cuda/bin/../lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
-#$ PATH=/usr/local/cuda/bin/../nvvm/bin:/usr/local/cuda/bin:/vscode/vscode-server/bin/linux-x64/c9d77990917f3102ada88be140d28b038d1dd7c7/bin/remote-cli:/home/coder/.local/bin:/home/coder/.local/share/venvs/cccl/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/python/current/bin:/usr/local/py-utils/bin:/usr/local/jupyter:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/cuda-latest/bin:/opt/evo/sampler/bin:/opt/evo/worker/bin:/opt/evo/manager/bin
-#$ INCLUDES="-I/usr/local/cuda/bin/../targets/x86_64-linux/include"
-#$ SYSTEM_INCLUDES="-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"
-#$ LIBRARIES=  "-L/usr/local/cuda/bin/../targets/x86_64-linux/lib/stubs" "-L/usr/local/cuda/bin/../targets/x86_64-linux/lib"
-#$ CUDAFE_FLAGS=
-#$ PTXAS_FLAGS=
-#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH_LIST__=800,860 -E -x c++ -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "x.cpp4.ii"  > /tmp/tmpxft_000118c8_00000000-3_b0726150_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b0726150_stderr
-#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH__=800 -D__CUDA_ARCH_LIST__=800,860 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "x.compute_80.cpp1.ii"  > /tmp/tmpxft_000118c8_00000000-3_b0729930_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b0729930_stderr
-#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH__=860 -D__CUDA_ARCH_LIST__=800,860 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "x.compute_86.cpp1.ii"  > /tmp/tmpxft_000118c8_00000000-3_b072a910_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072a910_stderr
-#$ cudafe++ --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "/tmp/cwd/x.cu" --allow_managed  --m64 --parse_templates --gen_c_file_name "x.compute_86.cudafe1.cpp" --stub_file_name "x.compute_86.cudafe1.stub.c" --gen_module_id_file --module_id_file_name "x.module_id" --enable-tile "x.cpp4.ii"  > /tmp/tmpxft_000118c8_00000000-3_b0729150_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b0729150_stderr
-#$ "$CICC_PATH/cicc" --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "/tmp/cwd/x.cu" --allow_managed   -arch compute_80 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c" --include_alt_file_name "x.tile.fatbin.c" -tused --module_id_file_name "x.module_id" --gen_c_file_name "x.compute_80.cudafe1.c" --stub_file_name "x.compute_80.cudafe1.stub.c" --gen_device_file_name "x.compute_80.cudafe1.gpu"  "x.compute_80.cpp1.ii" --enable-tile --tile_bc_file_name "x.compute_80.tilebc" -o "x.compute_80.ptx" > /tmp/tmpxft_000118c8_00000000-3_b0729dd0_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b0729dd0_stderr
-#$ "$CICC_PATH/cicc" --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "/tmp/cwd/x.cu" --allow_managed   -arch compute_86 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c" --include_alt_file_name "x.tile.fatbin.c" -tused --module_id_file_name "x.module_id" --gen_c_file_name "x.compute_86.cudafe1.c" --stub_file_name "x.compute_86.cudafe1.stub.c" --gen_device_file_name "x.compute_86.cudafe1.gpu"  "x.compute_86.cpp1.ii" --enable-tile --tile_bc_file_name "x.compute_86.tilebc" -o "x.compute_86.ptx" > /tmp/tmpxft_000118c8_00000000-3_b072adb0_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072adb0_stderr
-#$ tileiras --host-arch=x86_64 --host-os=linux -arch=sm_80  "x.compute_80.tilebc"  -o "x.compute_80.tile.cubin"  > /tmp/tmpxft_000118c8_00000000-3_b072a040_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072a040_stderr
-#$ ptxas -arch=sm_80 -m64  "x.compute_80.ptx"  -o "x.compute_80.sm_80.cubin"  > /tmp/tmpxft_000118c8_00000000-3_b072b8d0_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072b8d0_stderr
-#$ tileiras --host-arch=x86_64 --host-os=linux -arch=sm_86  "x.compute_86.tilebc"  -o "x.compute_86.tile.cubin"  > /tmp/tmpxft_000118c8_00000000-3_b072b020_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072b020_stderr
-#$ ptxas -arch=sm_86 -m64  "x.compute_86.ptx"  -o "x.compute_86.sm_86.cubin"  > /tmp/tmpxft_000118c8_00000000-3_b072bc60_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072bc60_stderr
-#$ fatbinary --create="x.fatbin" -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=ptx,sm=80,file=x.compute_80.ptx" "--image3=kind=elf,sm=80,file=x.compute_80.sm_80.cubin" "--image3=kind=ptx,sm=86,file=x.compute_86.ptx" "--image3=kind=elf,sm=86,file=x.compute_86.sm_86.cubin" --embedded-fatbin="x.fatbin.c"  > /tmp/tmpxft_000118c8_00000000-3_b072c150_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072c150_stderr
-#$ fatbinary --create="x.tile.fatbin" -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=tileir,sm=80,file=x.compute_80.tilebc" "--image3=kind=elf,sm=80,file=x.compute_80.tile.cubin" "--image3=kind=tileir,sm=86,file=x.compute_86.tilebc" "--image3=kind=elf,sm=86,file=x.compute_86.tile.cubin" --embedded-fatbin="x.tile.fatbin.c" --id-suffix="Alt"  > /tmp/tmpxft_000118c8_00000000-3_b072b5f0_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072b5f0_stderr
-#$ gcc -D__CUDA_ARCH__=860 -D__CUDA_ARCH_LIST__=800,860 -c -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -Wno-psabi "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"   -m64 "x.compute_86.cudafe1.cpp" -o "x.cu.o"  > /tmp/tmpxft_000118c8_00000000-3_b072c840_stdout 2>/tmp/tmpxft_000118c8_00000000-3_b072c840_stderr
-        "#,
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH_LIST__=800,860 -E -x c++ -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "x.cpp4.ii"
+#$ cudafe++ --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140300 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "x.cu" --allow_managed  --m64 --parse_templates --gen_c_file_name "x.compute_86.cudafe1.cpp" --stub_file_name "x.compute_86.cudafe1.stub.c" --gen_module_id_file --module_id_file_name "x.module_id" --enable-tile "x.cpp4.ii"
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH__=800 -D__CUDA_ARCH_LIST__=800,860 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "x.compute_80.cpp1.ii"
+#$ "$CICC_PATH/cicc" --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140300 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "x.cu" --allow_managed   -arch compute_80 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c" --include_alt_file_name "x.tile.fatbin.c" -tused --module_id_file_name "x.module_id" --gen_c_file_name "x.compute_80.cudafe1.c" --stub_file_name "x.compute_80.cudafe1.stub.c" --gen_device_file_name "x.compute_80.cudafe1.gpu"  "x.compute_80.cpp1.ii" --enable-tile --tile_bc_file_name "x.compute_80.tilebc" -o "x.compute_80.ptx"
+#$ tileiras --host-arch=x86_64 --host-os=linux -arch=sm_80  "x.compute_80.tilebc"  -o "x.compute_80.tile.cubin"
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH__=860 -D__CUDA_ARCH_LIST__=800,860 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "x.compute_86.cpp1.ii"
+#$ "$CICC_PATH/cicc" --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140300 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "x.cu" --allow_managed   -arch compute_86 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c" --include_alt_file_name "x.tile.fatbin.c" -tused --module_id_file_name "x.module_id" --gen_c_file_name "x.compute_86.cudafe1.c" --stub_file_name "x.compute_86.cudafe1.stub.c" --gen_device_file_name "x.compute_86.cudafe1.gpu"  "x.compute_86.cpp1.ii" --enable-tile --tile_bc_file_name "x.compute_86.tilebc" -o "x.compute_86.ptx"
+#$ tileiras --host-arch=x86_64 --host-os=linux -arch=sm_86  "x.compute_86.tilebc"  -o "x.compute_86.tile.cubin"
+#$ fatbinary --create="x.tile.fatbin" -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=tileir,sm=80,file=x.compute_80.tilebc" "--image3=kind=elf,sm=80,file=x.compute_80.tile.cubin" "--image3=kind=tileir,sm=86,file=x.compute_86.tilebc" "--image3=kind=elf,sm=86,file=x.compute_86.tile.cubin" --embedded-fatbin="x.tile.fatbin.c" --id-suffix="Alt"
+#$ ptxas -arch=sm_80 -m64  "x.compute_80.ptx"  -o "x.compute_80.sm_80.cubin"
+#$ ptxas -arch=sm_86 -m64  "x.compute_86.ptx"  -o "x.compute_86.sm_86.cubin"
+#$ fatbinary --create="x.fatbin" -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=ptx,sm=80,file=x.compute_80.ptx" "--image3=kind=elf,sm=80,file=x.compute_80.sm_80.cubin" "--image3=kind=ptx,sm=86,file=x.compute_86.ptx" "--image3=kind=elf,sm=86,file=x.compute_86.sm_86.cubin" --embedded-fatbin="x.fatbin.c"
+#$ gcc -D__CUDA_ARCH__=860 -D__CUDA_ARCH_LIST__=800,860 -c -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -Wno-psabi "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"   -m64 "x.compute_86.cudafe1.cpp" -o "x.cu.o"
+"#,
         )?;
 
         // Get the host compile command lines with paths relative to `cwd` and absolute paths to `out`
@@ -3399,41 +3459,22 @@ mod test {
             host_compiler,
             &mut nvcc_internal_files,
             |exe, args| !is_nvcc_exe(exe, args),
+            // nvcc -x cu --enable-tile  -gencode=arch=compute_80,code=[compute_80,sm_80] -gencode=arch=compute_86,code=[compute_86,sm_86] -c x.cu -o x.cu.o --dryrun --keep --keep-dir /tmp/out
             r#"
-#$ NVCC_APPEND_FLAGS="-t=100"
-#$ _NVVM_BRANCH_=nvvm
-#$ _SPACE_=
-#$ _CUDART_=cudart
-#$ CUDA_ROOT=/usr/local/cuda
-#$ _HERE_=/usr/local/cuda/bin
-#$ _THERE_=/usr/local/cuda/bin
-#$ _TARGET_SIZE_=
-#$ _TARGET_DIR_=
-#$ _TARGET_DIR_=targets/x86_64-linux
-#$ TOP=/usr/local/cuda/bin/..
-#$ CICC_PATH=/usr/local/cuda/bin/../nvvm/bin
-#$ NVVMIR_LIBRARY_DIR=/usr/local/cuda/bin/../nvvm/libdevice
-#$ LD_LIBRARY_PATH=/usr/local/cuda/bin/../lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
-#$ PATH=/usr/local/cuda/bin/../nvvm/bin:/usr/local/cuda/bin:/vscode/vscode-server/bin/linux-x64/c9d77990917f3102ada88be140d28b038d1dd7c7/bin/remote-cli:/home/coder/.local/bin:/home/coder/.local/share/venvs/cccl/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/python/current/bin:/usr/local/py-utils/bin:/usr/local/jupyter:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/cuda-latest/bin:/opt/evo/sampler/bin:/opt/evo/worker/bin:/opt/evo/manager/bin
-#$ INCLUDES="-I/usr/local/cuda/bin/../targets/x86_64-linux/include"
-#$ SYSTEM_INCLUDES="-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"
-#$ LIBRARIES=  "-L/usr/local/cuda/bin/../targets/x86_64-linux/lib/stubs" "-L/usr/local/cuda/bin/../targets/x86_64-linux/lib"
-#$ CUDAFE_FLAGS=
-#$ PTXAS_FLAGS=
-#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH_LIST__=800,860 -E -x c++ -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "/tmp/out/x.cpp4.ii"  > /tmp/tmpxft_00011a53_00000000-3_6198c1a0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_6198c1a0_stderr
-#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH__=800 -D__CUDA_ARCH_LIST__=800,860 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "/tmp/out/x.compute_80.cpp1.ii"  > /tmp/tmpxft_00011a53_00000000-3_6198fac0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_6198fac0_stderr
-#$ cudafe++ --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "/tmp/cwd/x.cu" --allow_managed  --m64 --parse_templates --gen_c_file_name "/tmp/out/x.compute_86.cudafe1.cpp" --stub_file_name "x.compute_86.cudafe1.stub.c" --gen_module_id_file --module_id_file_name "/tmp/out/x.module_id" --enable-tile "/tmp/out/x.cpp4.ii"  > /tmp/tmpxft_00011a53_00000000-3_6198f230_stdout 2>/tmp/tmpxft_00011a53_00000000-3_6198f230_stderr
-#$ "$CICC_PATH/cicc" --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "/tmp/cwd/x.cu" --allow_managed   -arch compute_80 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c" --include_alt_file_name "x.tile.fatbin.c" -tused --module_id_file_name "/tmp/out/x.module_id" --gen_c_file_name "/tmp/out/x.compute_80.cudafe1.c" --stub_file_name "/tmp/out/x.compute_80.cudafe1.stub.c" --gen_device_file_name "/tmp/out/x.compute_80.cudafe1.gpu"  "/tmp/out/x.compute_80.cpp1.ii" --enable-tile --tile_bc_file_name "/tmp/out/x.compute_80.tilebc" -o "/tmp/out/x.compute_80.ptx" > /tmp/tmpxft_00011a53_00000000-3_619900a0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_619900a0_stderr
-#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH__=860 -D__CUDA_ARCH_LIST__=800,860 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "/tmp/out/x.compute_86.cpp1.ii"  > /tmp/tmpxft_00011a53_00000000-3_61990bc0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_61990bc0_stderr
-#$ tileiras --host-arch=x86_64 --host-os=linux -arch=sm_80  "/tmp/out/x.compute_80.tilebc"  -o "/tmp/out/x.compute_80.tile.cubin"  > /tmp/tmpxft_00011a53_00000000-3_619902f0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_619902f0_stderr
-#$ ptxas -arch=sm_80 -m64  "/tmp/out/x.compute_80.ptx"  -o "/tmp/out/x.compute_80.sm_80.cubin"  > /tmp/tmpxft_00011a53_00000000-3_61991db0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_61991db0_stderr
-#$ "$CICC_PATH/cicc" --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140200 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "/tmp/cwd/x.cu" --allow_managed   -arch compute_86 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c" --include_alt_file_name "x.tile.fatbin.c" -tused --module_id_file_name "/tmp/out/x.module_id" --gen_c_file_name "/tmp/out/x.compute_86.cudafe1.c" --stub_file_name "/tmp/out/x.compute_86.cudafe1.stub.c" --gen_device_file_name "/tmp/out/x.compute_86.cudafe1.gpu"  "/tmp/out/x.compute_86.cpp1.ii" --enable-tile --tile_bc_file_name "/tmp/out/x.compute_86.tilebc" -o "/tmp/out/x.compute_86.ptx" > /tmp/tmpxft_00011a53_00000000-3_619911a0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_619911a0_stderr
-#$ ptxas -arch=sm_86 -m64  "/tmp/out/x.compute_86.ptx"  -o "/tmp/out/x.compute_86.sm_86.cubin"  > /tmp/tmpxft_00011a53_00000000-3_61992160_stdout 2>/tmp/tmpxft_00011a53_00000000-3_61992160_stderr
-#$ tileiras --host-arch=x86_64 --host-os=linux -arch=sm_86  "/tmp/out/x.compute_86.tilebc"  -o "/tmp/out/x.compute_86.tile.cubin"  > /tmp/tmpxft_00011a53_00000000-3_619913f0_stdout 2>/tmp/tmpxft_00011a53_00000000-3_619913f0_stderr
-#$ fatbinary --create="/tmp/out/x.tile.fatbin" -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=tileir,sm=80,file=/tmp/out/x.compute_80.tilebc" "--image3=kind=elf,sm=80,file=/tmp/out/x.compute_80.tile.cubin" "--image3=kind=tileir,sm=86,file=/tmp/out/x.compute_86.tilebc" "--image3=kind=elf,sm=86,file=/tmp/out/x.compute_86.tile.cubin" --embedded-fatbin="/tmp/out/x.tile.fatbin.c" --id-suffix="Alt"  > /tmp/tmpxft_00011a53_00000000-3_61991b00_stdout 2>/tmp/tmpxft_00011a53_00000000-3_61991b00_stderr
-#$ fatbinary --create="/tmp/out/x.fatbin" -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=ptx,sm=80,file=/tmp/out/x.compute_80.ptx" "--image3=kind=elf,sm=80,file=/tmp/out/x.compute_80.sm_80.cubin" "--image3=kind=ptx,sm=86,file=/tmp/out/x.compute_86.ptx" "--image3=kind=elf,sm=86,file=/tmp/out/x.compute_86.sm_86.cubin" --embedded-fatbin="/tmp/out/x.fatbin.c"  > /tmp/tmpxft_00011a53_00000000-3_61992630_stdout 2>/tmp/tmpxft_00011a53_00000000-3_61992630_stderr
-#$ gcc -D__CUDA_ARCH__=860 -D__CUDA_ARCH_LIST__=800,860 -c -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -Wno-psabi "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"   -m64 "/tmp/out/x.compute_86.cudafe1.cpp" -o "x.cu.o"  > /tmp/tmpxft_00011a53_00000000-3_61992d20_stdout 2>/tmp/tmpxft_00011a53_00000000-3_61992d20_stderr
-        "#,
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH_LIST__=800,860 -E -x c++ -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "/tmp/out/x.cpp4.ii"
+#$ cudafe++ --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140300 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "x.cu" --allow_managed  --m64 --parse_templates --gen_c_file_name "/tmp/out/x.compute_86.cudafe1.cpp" --stub_file_name "x.compute_86.cudafe1.stub.c" --gen_module_id_file --module_id_file_name "/tmp/out/x.module_id" --enable-tile "/tmp/out/x.cpp4.ii"
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH__=800 -D__CUDA_ARCH_LIST__=800,860 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "/tmp/out/x.compute_80.cpp1.ii"
+#$ "$CICC_PATH/cicc" --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140300 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "x.cu" --allow_managed   -arch compute_80 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c" --include_alt_file_name "x.tile.fatbin.c" -tused --module_id_file_name "/tmp/out/x.module_id" --gen_c_file_name "/tmp/out/x.compute_80.cudafe1.c" --stub_file_name "/tmp/out/x.compute_80.cudafe1.stub.c" --gen_device_file_name "/tmp/out/x.compute_80.cudafe1.gpu"  "/tmp/out/x.compute_80.cpp1.ii" --enable-tile --tile_bc_file_name "/tmp/out/x.compute_80.tilebc" -o "/tmp/out/x.compute_80.ptx"
+#$ tileiras --host-arch=x86_64 --host-os=linux -arch=sm_80  "/tmp/out/x.compute_80.tilebc"  -o "/tmp/out/x.compute_80.tile.cubin"
+#$ gcc -D__NV_TL__=__tile__ -D__NV_TL_BUILTIN__=__tile_builtin__ -D__CUDACC_TILE__=1 -D__CUDA_ARCH__=860 -D__CUDA_ARCH_LIST__=800,860 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__  "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"    -D__CUDACC_VER_MAJOR__=13 -D__CUDACC_VER_MINOR__=4 -D__CUDACC_VER_BUILD__=0 -D__CUDA_API_VER_MAJOR__=13 -D__CUDA_API_VER_MINOR__=4 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1 -include "cuda_runtime.h" -m64 "x.cu" -o "/tmp/out/x.compute_86.cpp1.ii"
+#$ "$CICC_PATH/cicc" --c++17 --static-host-stub --device-hidden-visibility --gnu_version=140300 --display_error_number --orig_src_file_name "x.cu" --orig_src_path_name "x.cu" --allow_managed   -arch compute_86 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "x.fatbin.c" --include_alt_file_name "x.tile.fatbin.c" -tused --module_id_file_name "/tmp/out/x.module_id" --gen_c_file_name "/tmp/out/x.compute_86.cudafe1.c" --stub_file_name "/tmp/out/x.compute_86.cudafe1.stub.c" --gen_device_file_name "/tmp/out/x.compute_86.cudafe1.gpu"  "/tmp/out/x.compute_86.cpp1.ii" --enable-tile --tile_bc_file_name "/tmp/out/x.compute_86.tilebc" -o "/tmp/out/x.compute_86.ptx"
+#$ tileiras --host-arch=x86_64 --host-os=linux -arch=sm_86  "/tmp/out/x.compute_86.tilebc"  -o "/tmp/out/x.compute_86.tile.cubin"
+#$ fatbinary --create="/tmp/out/x.tile.fatbin" -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=tileir,sm=80,file=/tmp/out/x.compute_80.tilebc" "--image3=kind=elf,sm=80,file=/tmp/out/x.compute_80.tile.cubin" "--image3=kind=tileir,sm=86,file=/tmp/out/x.compute_86.tilebc" "--image3=kind=elf,sm=86,file=/tmp/out/x.compute_86.tile.cubin" --embedded-fatbin="/tmp/out/x.tile.fatbin.c" --id-suffix="Alt"
+#$ ptxas -arch=sm_80 -m64  "/tmp/out/x.compute_80.ptx"  -o "/tmp/out/x.compute_80.sm_80.cubin"
+#$ ptxas -arch=sm_86 -m64  "/tmp/out/x.compute_86.ptx"  -o "/tmp/out/x.compute_86.sm_86.cubin"
+#$ fatbinary --create="/tmp/out/x.fatbin" -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=ptx,sm=80,file=/tmp/out/x.compute_80.ptx" "--image3=kind=elf,sm=80,file=/tmp/out/x.compute_80.sm_80.cubin" "--image3=kind=ptx,sm=86,file=/tmp/out/x.compute_86.ptx" "--image3=kind=elf,sm=86,file=/tmp/out/x.compute_86.sm_86.cubin" --embedded-fatbin="/tmp/out/x.fatbin.c"
+#$ gcc -D__CUDA_ARCH__=860 -D__CUDA_ARCH_LIST__=800,860 -c -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -Wno-psabi "-I/usr/local/cuda/bin/../targets/x86_64-linux/include"   "-isystem" "/usr/local/cuda/bin/../targets/x86_64-linux/include/cccl"   -m64 "/tmp/out/x.compute_86.cudafe1.cpp" -o "x.cu.o"
+"#,
         )?;
 
         // Merge the nvcc and host compiler commands into one list
@@ -3449,12 +3490,6 @@ mod test {
             all_commands,
             Path::new("x.cu.o"),
         );
-
-        // for (i, group) in command_groups.iter().enumerate() {
-        //     for (j, command) in group.iter().enumerate() {
-        //         println!("group {i}, command {j}: {command:?}");
-        //     }
-        // }
 
         assert!(command_groups[0][0].exe.as_os_str().contains("gcc"));
         assert!(command_groups[0][1].exe.as_os_str().contains("cudafe++"));

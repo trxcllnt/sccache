@@ -14,7 +14,7 @@ use itertools::Itertools;
 use jwt::jwk::JwkSet;
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     net::{IpAddr, SocketAddr},
     time::{Duration, Instant},
 };
@@ -28,7 +28,7 @@ pub struct EqCheck {
 impl ClientAuthCheck for EqCheck {
     async fn check(&self, _: &SocketAddr, token: &str) -> Result<ClientClaims> {
         if self.s == token {
-            Ok(HashMap::with_capacity(0))
+            Ok(BTreeMap::new())
         } else {
             Err(anyhow!("Fixed token mismatch"))
         }
@@ -50,7 +50,7 @@ impl ProxyTokenDecoder {
     async fn decode(&self, response: &str) -> Result<ClientClaims> {
         match self {
             Self::Jwt(jwt) => jwt.check_jwt_validity(response).await,
-            _ => Ok(HashMap::with_capacity(0)),
+            _ => Ok(BTreeMap::new()),
         }
     }
 }
@@ -221,7 +221,7 @@ impl ProxyTokenCheck {
             .decoder
             .decode(&auth)
             .await
-            .or_else(|_| Result::Ok(HashMap::with_capacity(0)))?;
+            .or_else(|_| Result::Ok(BTreeMap::new()))?;
 
         // Cache the token
         if self.token_ttl.is_some() {
@@ -334,7 +334,7 @@ impl ValidJWTCheck {
             let jwt::TokenData { claims, .. } =
                 jwt::decode::<serde_json::Value>(token, key, &validation)?;
 
-            let mut valid_claims = HashMap::new();
+            let mut valid_claims = BTreeMap::new();
 
             if let Some(claims) = claims.as_object() {
                 let mut passed = self.claims_to_check.is_empty();

@@ -1819,6 +1819,34 @@ int main(int argc, char** argv) {
                 ..Default::default()
             },
         );
+
+        // Test compiling a multiarch object and embedding PTX where the LtoIR for one of the archs is cached
+        trace!("compile A arch=lto_80,code=lto_80");
+        run_cuda_test(
+            "-dc",
+            Path::new(INPUT_FOR_CUDA_A), // relative path for input
+            Path::new("test.ltoir.o"),   // relative path for output
+            &[
+                extra_args.as_slice(),
+                &["-gencode=arch=lto_80,code=lto_80".into()],
+            ]
+            .concat(),
+            AdditionalStats {
+                preprocessed: Some(1),
+                cache_writes: Some(1),
+                compilations: Some(2),
+                compile_requests: Some(1),
+                requests_executed: Some(4),
+                cache_hits: Some(vec![
+                    (CCompilerKind::CudaFE, Language::CudaFE, 1),
+                    (CCompilerKind::Cicc, Language::Ptx, 1),
+                ]),
+                cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)]),
+                preprocessor_cache_misses: Some(vec![(CCompilerKind::Nvcc, Language::Cuda, 1)])
+                    .filter(|_| preprocessor_cache_mode),
+                ..Default::default()
+            },
+        );
     }
 }
 

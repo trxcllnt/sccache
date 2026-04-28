@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
+    io,
     net::SocketAddr,
     str::FromStr,
     sync::{Arc, atomic::AtomicU64},
@@ -33,7 +34,7 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
 pub struct CountRecorder {
     name: SharedString,
-    labels: Option<Arc<HashMap<String, String>>>,
+    labels: Option<Arc<BTreeMap<String, String>>>,
 }
 
 impl Drop for CountRecorder {
@@ -52,13 +53,13 @@ impl Drop for CountRecorder {
 #[derive(Default)]
 pub struct GaugeRecorder {
     name: SharedString,
-    labels: Option<Arc<HashMap<String, String>>>,
+    labels: Option<Arc<BTreeMap<String, String>>>,
     value: AtomicU64,
 }
 
 pub struct GaugeRecorderIncrement<'a> {
     name: SharedString,
-    labels: &'a Option<Arc<HashMap<String, String>>>,
+    labels: &'a Option<Arc<BTreeMap<String, String>>>,
     value: &'a AtomicU64,
 }
 
@@ -103,7 +104,7 @@ impl GaugeRecorder {
 pub struct HistoRecorder {
     name: SharedString,
     value: f64,
-    labels: Option<Arc<HashMap<String, String>>>,
+    labels: Option<Arc<BTreeMap<String, String>>>,
 }
 
 impl Drop for HistoRecorder {
@@ -122,7 +123,7 @@ impl Drop for HistoRecorder {
 pub struct TimeRecorder {
     name: SharedString,
     start: Instant,
-    labels: Option<Arc<HashMap<String, String>>>,
+    labels: Option<Arc<BTreeMap<String, String>>>,
 }
 
 impl Drop for TimeRecorder {
@@ -141,7 +142,7 @@ impl Drop for TimeRecorder {
 
 #[derive(Clone)]
 pub struct Metrics {
-    global_labels: Arc<HashMap<String, String>>,
+    global_labels: Arc<BTreeMap<String, String>>,
     inner: Arc<dyn MetricsInner>,
 }
 
@@ -155,11 +156,11 @@ impl Default for Metrics {
 }
 
 tokio::task_local! {
-    static SCOPED_LABELS: Arc<HashMap<String, String>>;
+    static SCOPED_LABELS: Arc<BTreeMap<String, String>>;
 }
 
 impl Metrics {
-    pub fn new(config: MetricsConfigs, global_labels: HashMap<String, String>) -> Result<Self> {
+    pub fn new(config: MetricsConfigs, global_labels: BTreeMap<String, String>) -> Result<Self> {
         if let Some(config) = config.dogstatsd {
             Ok(Self {
                 global_labels: Arc::new(global_labels),
@@ -178,19 +179,19 @@ impl Metrics {
         }
     }
 
-    pub fn scoped_labels(&self) -> Option<Arc<HashMap<String, String>>> {
+    pub fn scoped_labels(&self) -> Option<Arc<BTreeMap<String, String>>> {
         SCOPED_LABELS.try_get().ok()
     }
 
     pub fn scope_with_labels<F>(
         &self,
-        local_labels: &HashMap<String, String>,
+        local_labels: &BTreeMap<String, String>,
         f: F,
-    ) -> tokio::task::futures::TaskLocalFuture<Arc<HashMap<String, String>>, F>
+    ) -> tokio::task::futures::TaskLocalFuture<Arc<BTreeMap<String, String>>, F>
     where
         F: Future,
     {
-        let mut labels = HashMap::new();
+        let mut labels = BTreeMap::new();
         for (k, v) in self.global_labels.iter() {
             labels.insert(k.clone(), v.clone());
         }
@@ -202,6 +203,10 @@ impl Metrics {
 
     pub fn render(&self) -> String {
         self.inner.render()
+    }
+
+    pub fn render_to_write(&self, writer: Box<dyn io::Write>) -> io::Result<()> {
+        self.inner.render_to_write(writer)
     }
 
     pub fn listen_path(&self) -> Option<String> {
@@ -246,6 +251,7 @@ impl Metrics {
 
 trait MetricsInner: Send + Sync {
     fn render(&self) -> String;
+    fn render_to_write(&self, writer: Box<dyn io::Write>) -> io::Result<()>;
     fn listen_path(&self) -> Option<String>;
 }
 
@@ -254,6 +260,9 @@ struct NoopMetrics {}
 impl MetricsInner for NoopMetrics {
     fn render(&self) -> String {
         String::new()
+    }
+    fn render_to_write(&self, _: Box<dyn io::Write>) -> io::Result<()> {
+        Ok(())
     }
     fn listen_path(&self) -> Option<String> {
         None
@@ -306,6 +315,9 @@ impl MetricsInner for DogStatsDMetrics {
     fn render(&self) -> String {
         String::new()
     }
+    fn render_to_write(&self, _: Box<dyn io::Write>) -> io::Result<()> {
+        Ok(())
+    }
     fn listen_path(&self) -> Option<String> {
         None
     }
@@ -321,7 +333,7 @@ struct PrometheusMetrics {
 impl PrometheusMetrics {
     pub fn new(
         config: PrometheusMetricsConfig,
-        global_labels: HashMap<String, String>,
+        global_labels: BTreeMap<String, String>,
     ) -> Result<Self> {
         let builder = global_labels
             .iter()
@@ -330,16 +342,33 @@ impl PrometheusMetrics {
             });
 
         let (recorder, exporter, listen_path) = match config {
-            PrometheusMetricsConfig::ListenAddr { ref addr } => {
+            PrometheusMetricsConfig::ListenAddr {
+                ref addr,
+                ref idle_timeout_secs,
+            } => {
                 let addr = addr.unwrap_or(SocketAddr::from_str("0.0.0.0:9000")?);
+                let (recorder, exporter) = builder
+                    .idle_timeout(
+                        metrics_util::MetricKindMask::ALL,
+                        idle_timeout_secs.map(Duration::from_secs),
+                    )
+                    .with_http_listener(addr)
+                    .build()?;
                 tracing::info!("Listening for metrics at {addr}");
-                let (recorder, exporter) = builder.with_http_listener(addr).build()?;
                 (recorder, exporter, None)
             }
-            PrometheusMetricsConfig::ListenPath { ref path } => {
+            PrometheusMetricsConfig::ListenPath {
+                ref path,
+                ref idle_timeout_secs,
+            } => {
                 let path = path.clone().unwrap_or("/metrics".to_owned());
+                let (recorder, exporter) = builder
+                    .idle_timeout(
+                        metrics_util::MetricKindMask::ALL,
+                        idle_timeout_secs.map(Duration::from_secs),
+                    )
+                    .build()?;
                 tracing::info!("Listening for metrics at {path}");
-                let (recorder, exporter) = builder.build()?;
                 (recorder, exporter, Some(path))
             }
             PrometheusMetricsConfig::PushGateway {
@@ -348,14 +377,15 @@ impl PrometheusMetrics {
                 ref username,
                 ref password,
                 ref http_method,
+                ref idle_timeout_secs,
             } => {
                 let interval = Duration::from_millis(interval.unwrap_or(10_000));
-                tracing::info!(
-                    "Pushing metrics to {endpoint} every {}s",
-                    interval.as_secs_f64()
-                );
                 let (recorder, exporter) = builder
-                    .set_bucket_count(std::num::NonZeroU32::new(3).unwrap())
+                    .set_bucket_duration(interval)?
+                    .idle_timeout(
+                        metrics_util::MetricKindMask::ALL,
+                        idle_timeout_secs.map(Duration::from_secs),
+                    )
                     .with_push_gateway(
                         endpoint,
                         interval,
@@ -367,6 +397,10 @@ impl PrometheusMetrics {
                             .unwrap_or_default(),
                     )?
                     .build()?;
+                tracing::info!(
+                    "Pushing metrics to {endpoint} every {}s",
+                    interval.as_secs_f64()
+                );
                 (recorder, exporter, None)
             }
         };
@@ -390,6 +424,11 @@ impl PrometheusMetrics {
 impl MetricsInner for PrometheusMetrics {
     fn render(&self) -> String {
         self.inner.render()
+    }
+    fn render_to_write(&self, mut writer: Box<dyn io::Write>) -> io::Result<()> {
+        self.inner.render_to_write(&mut writer)?;
+        writer.flush()?;
+        Ok(())
     }
     fn listen_path(&self) -> Option<String> {
         self.listen_path.clone()

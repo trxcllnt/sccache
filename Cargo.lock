@@ -4258,7 +4258,7 @@ dependencies = [
 
 [[package]]
 name = "sccache"
-version = "0.14.0-rapids.8"
+version = "0.14.0-rapids.10"
 dependencies = [
  "anyhow",
  "ar",
@@ -4308,6 +4308,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-dogstatsd",
  "metrics-exporter-prometheus",
+ "metrics-util",
  "mime",
  "nix 0.30.1",
  "notify-debouncer-full",
@@ -4340,6 +4341,7 @@ dependencies = [
  "tokio",
  "tokio-retry2",
  "tokio-serde",
+ "tokio-stream",
  "tokio-util",
  "toml",
  "tower 0.4.13",

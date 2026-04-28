@@ -1987,9 +1987,15 @@ impl DogStatsDMetricsConfig {
 #[serde(deny_unknown_fields)]
 pub enum PrometheusMetricsConfig {
     #[serde(rename = "bind")]
-    ListenAddr { addr: Option<std::net::SocketAddr> },
+    ListenAddr {
+        addr: Option<std::net::SocketAddr>,
+        idle_timeout_secs: Option<u64>,
+    },
     #[serde(rename = "path")]
-    ListenPath { path: Option<String> },
+    ListenPath {
+        path: Option<String>,
+        idle_timeout_secs: Option<u64>,
+    },
     #[serde(rename = "push")]
     PushGateway {
         endpoint: String,
@@ -1998,6 +2004,7 @@ pub enum PrometheusMetricsConfig {
         username: Option<String>,
         password: Option<String>,
         http_method: Option<String>,
+        idle_timeout_secs: Option<u64>,
     },
 }
 
@@ -2009,9 +2016,15 @@ impl PrometheusMetricsConfig {
                 addr: env::var("SCCACHE_DIST_PROMETHEUS_LISTEN_ADDR")
                     .ok()
                     .and_then(|addr| std::net::SocketAddr::from_str(&addr).ok()),
+                idle_timeout_secs: number_from_env_var("SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS")
+                    .transpose()
+                    .unwrap_or(None),
             }),
             Ok("path") => Some(Self::ListenPath {
                 path: env::var("SCCACHE_DIST_PROMETHEUS_LISTEN_PATH").ok(),
+                idle_timeout_secs: number_from_env_var("SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS")
+                    .transpose()
+                    .unwrap_or(None),
             }),
             Ok("push") => env::var("SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT")
                 .ok()
@@ -2023,6 +2036,11 @@ impl PrometheusMetricsConfig {
                     username: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_USERNAME").ok(),
                     password: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_PASSWORD").ok(),
                     http_method: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_HTTP_METHOD").ok(),
+                    idle_timeout_secs: number_from_env_var(
+                        "SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS",
+                    )
+                    .transpose()
+                    .unwrap_or(None),
                 }),
             _ => None,
         }
@@ -2030,16 +2048,28 @@ impl PrometheusMetricsConfig {
 
     pub fn with_env_or_config(self) -> Self {
         match self {
-            Self::ListenAddr { addr } => Self::ListenAddr {
+            Self::ListenAddr {
+                addr,
+                idle_timeout_secs,
+            } => Self::ListenAddr {
                 addr: env::var("SCCACHE_DIST_PROMETHEUS_LISTEN_ADDR")
                     .ok()
                     .and_then(|addr| std::net::SocketAddr::from_str(&addr).ok())
                     .or(addr),
+                idle_timeout_secs: number_from_env_var("SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS")
+                    .transpose()
+                    .unwrap_or(idle_timeout_secs),
             },
-            Self::ListenPath { path } => Self::ListenPath {
+            Self::ListenPath {
+                path,
+                idle_timeout_secs,
+            } => Self::ListenPath {
                 path: env::var("SCCACHE_DIST_PROMETHEUS_LISTEN_PATH")
                     .ok()
                     .or(path),
+                idle_timeout_secs: number_from_env_var("SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS")
+                    .transpose()
+                    .unwrap_or(idle_timeout_secs),
             },
             Self::PushGateway {
                 endpoint,
@@ -2047,6 +2077,7 @@ impl PrometheusMetricsConfig {
                 username,
                 password,
                 http_method,
+                idle_timeout_secs,
             } => Self::PushGateway {
                 endpoint: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT")
                     .ok()
@@ -2064,6 +2095,9 @@ impl PrometheusMetricsConfig {
                 http_method: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_HTTP_METHOD")
                     .ok()
                     .or(http_method),
+                idle_timeout_secs: number_from_env_var("SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS")
+                    .transpose()
+                    .unwrap_or(idle_timeout_secs),
             },
         }
     }
@@ -2756,8 +2790,7 @@ pub mod server {
         config_from_env, default_disk_cache_dir, number_from_env_var, try_read_config_file,
     };
     use serde::{Deserialize, Serialize};
-    use std::env;
-    use std::path::PathBuf;
+    use std::{env, net::SocketAddr, path::PathBuf, str::FromStr};
 
     use crate::errors::*;
 
@@ -2894,6 +2927,7 @@ pub mod server {
         pub builder: BuilderType,
         #[serde(default = "Config::default_cache_dir")]
         pub cache_dir: PathBuf,
+        pub health_check_bind_addr: Option<SocketAddr>,
         #[serde(default = "Config::default_heartbeat_interval_ms")]
         pub heartbeat_interval_ms: u64,
         #[serde(default = "CacheConfigs::default")]
@@ -2919,6 +2953,7 @@ pub mod server {
             Self {
                 builder: BuilderType::Docker,
                 cache_dir: Config::default_cache_dir(),
+                health_check_bind_addr: None,
                 heartbeat_interval_ms: Config::default_heartbeat_interval_ms(),
                 jobs: CacheConfigs::default(),
                 max_per_core_load: Config::default_max_per_core_load(),
@@ -2937,6 +2972,7 @@ pub mod server {
     pub struct Config {
         pub builder: BuilderType,
         pub cache_dir: PathBuf,
+        pub health_check_bind_addr: Option<SocketAddr>,
         pub heartbeat_interval_ms: u64,
         pub jobs: Vec<CacheType>,
         pub max_per_core_load: f64,
@@ -2985,6 +3021,7 @@ pub mod server {
                 message_broker,
                 builder,
                 cache_dir,
+                health_check_bind_addr,
                 heartbeat_interval_ms,
                 jobs,
                 max_per_core_load,
@@ -3030,6 +3067,11 @@ pub mod server {
                 .merge(toolchains)
                 .merge(config_from_env("SCCACHE_DIST_TOOLCHAINS_")?.cache);
 
+            let health_check_bind_addr = env::var("SCCACHE_DIST_HEALTH_CHECK_BIND_ADDR")
+                .ok()
+                .and_then(|addr| std::net::SocketAddr::from_str(&addr).ok())
+                .or(health_check_bind_addr);
+
             let heartbeat_interval_ms =
                 number_from_env_var("SCCACHE_DIST_SERVER_HEARTBEAT_INTERVAL")
                     .transpose()?
@@ -3058,6 +3100,7 @@ pub mod server {
             Ok(Self {
                 builder,
                 cache_dir,
+                health_check_bind_addr,
                 heartbeat_interval_ms,
                 jobs: jobs.into(),
                 max_per_core_load,
@@ -3081,6 +3124,7 @@ pub mod server {
             Self {
                 builder: server_config.builder,
                 cache_dir: server_config.cache_dir,
+                health_check_bind_addr: server_config.health_check_bind_addr,
                 heartbeat_interval_ms: server_config.heartbeat_interval_ms,
                 jobs: server_config.jobs.into(),
                 max_per_core_load: server_config.max_per_core_load,
@@ -3100,6 +3144,7 @@ pub mod server {
             Self {
                 builder: server_config.builder,
                 cache_dir: server_config.cache_dir,
+                health_check_bind_addr: server_config.health_check_bind_addr,
                 heartbeat_interval_ms: server_config.heartbeat_interval_ms,
                 jobs: server_config.jobs.into(),
                 max_per_core_load: server_config.max_per_core_load,
@@ -4041,6 +4086,7 @@ key_prefix = "sccache-dist-toolchains"
                     username: Some("sccache".into()),
                     password: Some("sccache".into()),
                     http_method: None,
+                    idle_timeout_secs: None,
                 }),
                 ..Default::default()
             },
@@ -4137,6 +4183,7 @@ key_prefix = "sccache-dist-toolchains"
                     username: Some("sccache".into()),
                     password: Some("sccache".into()),
                     http_method: None,
+                    idle_timeout_secs: None,
                 }),
                 ..Default::default()
             },

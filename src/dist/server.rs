@@ -12,15 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use async_trait::async_trait;
-
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{Arc, atomic::AtomicU64},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
-
 use crate::{
     cache::{Cache, Storage},
     dist::{
@@ -30,7 +21,16 @@ use crate::{
         metrics::{CountRecorder, GaugeRecorder, Metrics, TimeRecorder},
     },
     errors::*,
-    util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
+    util::{self, AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
+};
+use async_trait::async_trait;
+use futures::future::FutureExt;
+use std::{
+    collections::{BTreeMap, HashMap},
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicU64},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const NUM_CPUS_HISTO: &str = "sccache::server::num_cpus";
@@ -253,9 +253,9 @@ impl ServerMetrics {
 
     pub fn scope_with_labels<F>(
         &self,
-        labels: &HashMap<String, String>,
+        labels: &BTreeMap<String, String>,
         f: F,
-    ) -> tokio::task::futures::TaskLocalFuture<Arc<HashMap<String, String>>, F>
+    ) -> tokio::task::futures::TaskLocalFuture<Arc<BTreeMap<String, String>>, F>
     where
         F: Future,
     {
@@ -426,7 +426,7 @@ struct RunJobArgs {
     toolchain: Toolchain,
     command: CompileCommand,
     outputs: Vec<String>,
-    labels: HashMap<String, String>,
+    labels: BTreeMap<String, String>,
 }
 
 impl AsyncMulticastArgs for RunJobArgs {
@@ -664,6 +664,7 @@ impl Server {
         &self,
         heartbeat_interval: Duration,
         shutdown_timeout: Duration,
+        health_check_bind_addr: Option<SocketAddr>,
     ) -> Result<()> {
         self.tasks.app().display_pretty().await;
 
@@ -706,7 +707,14 @@ impl Server {
             Ok(())
         };
 
-        let status = tokio::spawn({
+        // Install a health check listener for load balancers
+        let health = if let Some(health_check_bind_addr) = health_check_bind_addr {
+            self.health_check_listener(health_check_bind_addr).boxed()
+        } else {
+            futures::future::pending::<()>().boxed()
+        };
+
+        let status = util::spawn({
             let this = self.clone();
             async move {
                 loop {
@@ -727,10 +735,11 @@ impl Server {
             biased;
             res = celery => res,
             res = sigint => res,
-            // This should never resolve before either celery or sigint unless
+            // These should never resolve before either celery or sigint unless
             // a catastrophic error occurs (tokio dies somehow?). Just polling
-            // it here so the task is cancelled once either of the above two
+            // it here so the tasks are cancelled once either of the above two
             // futures complete first.
+            _ = health => Ok(()),
             _ = status => Ok(()),
         };
 
@@ -824,6 +833,71 @@ impl Server {
         .map(|_| ())
     }
 
+    async fn health_check_listener(&self, health_check_bind_addr: SocketAddr) -> () {
+        use futures::stream::StreamExt;
+        use hyper::{
+            Response, StatusCode, server::conn::http1::Builder as HyperHttpBuilder,
+            service::service_fn,
+        };
+        use hyper_util::rt::TokioIo;
+        use tokio::sync::mpsc::{error::SendError, unbounded_channel};
+
+        // Track all outstanding TCP response futures
+        let (futures_tx, futures_rx) = unbounded_channel();
+
+        let outer = util::spawn({
+            let ok_service = service_fn(move |_| async move {
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(http_body_util::Full::<bytes::Bytes>::default())
+            });
+
+            async move {
+                let listener = match tokio::net::TcpListener::bind(health_check_bind_addr).await {
+                    Ok(listener) => listener,
+                    Err(err) => {
+                        tracing::warn!("Failed to create TCP listener: {err}");
+                        return;
+                    }
+                };
+
+                loop {
+                    let stream = match listener.accept().await {
+                        Ok((stream, _)) => TokioIo::new(stream),
+                        Err(err) => {
+                            tracing::warn!("Error accepting connection, ignoring request: {err}");
+                            continue;
+                        }
+                    };
+
+                    let inner = util::spawn(async move {
+                        if let Err(err) = HyperHttpBuilder::new()
+                            .serve_connection(stream, ok_service)
+                            .await
+                        {
+                            tracing::warn!("Error serving healthcheck connection: {err}");
+                        }
+                    });
+
+                    if let Err(SendError(handle)) = futures_tx.send(inner) {
+                        // If we can't push the handle to the receiver,
+                        // just detach and allow task to run untracked.
+                        handle.detach();
+                    }
+                }
+            }
+        });
+
+        let inners = tokio_stream::wrappers::UnboundedReceiverStream::new(futures_rx)
+            .for_each_concurrent(None, |fut| async move {
+                if let Err(err) = fut.await {
+                    tracing::warn!("Healthcheck response future error: {err}");
+                }
+            });
+
+        let _ = tokio::join!(outer, inners);
+    }
+
     async fn put_job_result(&self, job_id: &str, result: &RunJobResponse) -> Result<()> {
         // Record put_job_result load time after retrying
         let _timer = self.state.metrics.put_job_result_timer();
@@ -868,7 +942,7 @@ impl ServerService for Server {
         toolchain: Toolchain,
         command: CompileCommand,
         outputs: Vec<String>,
-        labels: HashMap<String, String>,
+        labels: BTreeMap<String, String>,
     ) -> Result<RunJobResponse> {
         let reply_to = reply_to.to_owned();
 
