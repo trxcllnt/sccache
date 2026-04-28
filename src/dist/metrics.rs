@@ -14,6 +14,7 @@
 
 use std::{
     collections::BTreeMap,
+    io,
     net::SocketAddr,
     str::FromStr,
     sync::{Arc, atomic::AtomicU64},
@@ -204,6 +205,10 @@ impl Metrics {
         self.inner.render()
     }
 
+    pub fn render_to_write(&self, writer: Box<dyn io::Write>) -> io::Result<()> {
+        self.inner.render_to_write(writer)
+    }
+
     pub fn listen_path(&self) -> Option<String> {
         self.inner.listen_path()
     }
@@ -246,6 +251,7 @@ impl Metrics {
 
 trait MetricsInner: Send + Sync {
     fn render(&self) -> String;
+    fn render_to_write(&self, writer: Box<dyn io::Write>) -> io::Result<()>;
     fn listen_path(&self) -> Option<String>;
 }
 
@@ -254,6 +260,9 @@ struct NoopMetrics {}
 impl MetricsInner for NoopMetrics {
     fn render(&self) -> String {
         String::new()
+    }
+    fn render_to_write(&self, _: Box<dyn io::Write>) -> io::Result<()> {
+        Ok(())
     }
     fn listen_path(&self) -> Option<String> {
         None
@@ -305,6 +314,9 @@ impl DogStatsDMetrics {
 impl MetricsInner for DogStatsDMetrics {
     fn render(&self) -> String {
         String::new()
+    }
+    fn render_to_write(&self, _: Box<dyn io::Write>) -> io::Result<()> {
+        Ok(())
     }
     fn listen_path(&self) -> Option<String> {
         None
@@ -412,6 +424,11 @@ impl PrometheusMetrics {
 impl MetricsInner for PrometheusMetrics {
     fn render(&self) -> String {
         self.inner.render()
+    }
+    fn render_to_write(&self, mut writer: Box<dyn io::Write>) -> io::Result<()> {
+        self.inner.render_to_write(&mut writer)?;
+        writer.flush()?;
+        Ok(())
     }
     fn listen_path(&self) -> Option<String> {
         self.listen_path.clone()

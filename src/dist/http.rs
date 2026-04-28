@@ -167,7 +167,7 @@ mod scheduler {
 
     use axum::{
         RequestExt, RequestPartsExt, Router,
-        body::Bytes,
+        body::{Body, Bytes},
         extract::{
             ConnectInfo, Extension, FromRequest, FromRequestParts, MatchedPath, Path, Request,
         },
@@ -195,7 +195,10 @@ mod scheduler {
     };
 
     use tokio::{io::AsyncReadExt, task_local};
-    use tokio_util::{compat::TokioAsyncReadCompatExt, io::StreamReader};
+    use tokio_util::{
+        compat::TokioAsyncReadCompatExt,
+        io::{ReaderStream, StreamReader, SyncIoBridge},
+    };
     use tower::ServiceBuilder;
     use tower_http::{
         request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -565,8 +568,16 @@ mod scheduler {
             let app = if let Some(path) = metrics.listen_path() {
                 app.route(
                     &path,
-                    routing::get(|Extension::<Arc<Metrics>>(metrics)| {
-                        std::future::ready(metrics.render())
+                    routing::get(|Extension::<Arc<Metrics>>(metrics)| async move {
+                        let (reader, writer) = tokio::io::duplex(4096);
+                        let writer = Box::new(SyncIoBridge::new(writer));
+                        tokio::spawn(async move {
+                            let _ = tokio::task::spawn_blocking(move || {
+                                let _ = metrics.render_to_write(writer);
+                            })
+                            .await;
+                        });
+                        Body::from_stream(ReaderStream::new(reader))
                     }),
                 )
             } else {
