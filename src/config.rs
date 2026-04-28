@@ -1987,9 +1987,15 @@ impl DogStatsDMetricsConfig {
 #[serde(deny_unknown_fields)]
 pub enum PrometheusMetricsConfig {
     #[serde(rename = "bind")]
-    ListenAddr { addr: Option<std::net::SocketAddr> },
+    ListenAddr {
+        addr: Option<std::net::SocketAddr>,
+        idle_timeout_secs: Option<u64>,
+    },
     #[serde(rename = "path")]
-    ListenPath { path: Option<String> },
+    ListenPath {
+        path: Option<String>,
+        idle_timeout_secs: Option<u64>,
+    },
     #[serde(rename = "push")]
     PushGateway {
         endpoint: String,
@@ -1998,6 +2004,7 @@ pub enum PrometheusMetricsConfig {
         username: Option<String>,
         password: Option<String>,
         http_method: Option<String>,
+        idle_timeout_secs: Option<u64>,
     },
 }
 
@@ -2009,9 +2016,15 @@ impl PrometheusMetricsConfig {
                 addr: env::var("SCCACHE_DIST_PROMETHEUS_LISTEN_ADDR")
                     .ok()
                     .and_then(|addr| std::net::SocketAddr::from_str(&addr).ok()),
+                idle_timeout_secs: number_from_env_var("SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS")
+                    .transpose()
+                    .unwrap_or(None),
             }),
             Ok("path") => Some(Self::ListenPath {
                 path: env::var("SCCACHE_DIST_PROMETHEUS_LISTEN_PATH").ok(),
+                idle_timeout_secs: number_from_env_var("SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS")
+                    .transpose()
+                    .unwrap_or(None),
             }),
             Ok("push") => env::var("SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT")
                 .ok()
@@ -2023,6 +2036,11 @@ impl PrometheusMetricsConfig {
                     username: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_USERNAME").ok(),
                     password: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_PASSWORD").ok(),
                     http_method: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_HTTP_METHOD").ok(),
+                    idle_timeout_secs: number_from_env_var(
+                        "SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS",
+                    )
+                    .transpose()
+                    .unwrap_or(None),
                 }),
             _ => None,
         }
@@ -2030,16 +2048,28 @@ impl PrometheusMetricsConfig {
 
     pub fn with_env_or_config(self) -> Self {
         match self {
-            Self::ListenAddr { addr } => Self::ListenAddr {
+            Self::ListenAddr {
+                addr,
+                idle_timeout_secs,
+            } => Self::ListenAddr {
                 addr: env::var("SCCACHE_DIST_PROMETHEUS_LISTEN_ADDR")
                     .ok()
                     .and_then(|addr| std::net::SocketAddr::from_str(&addr).ok())
                     .or(addr),
+                idle_timeout_secs: number_from_env_var("SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS")
+                    .transpose()
+                    .unwrap_or(idle_timeout_secs),
             },
-            Self::ListenPath { path } => Self::ListenPath {
+            Self::ListenPath {
+                path,
+                idle_timeout_secs,
+            } => Self::ListenPath {
                 path: env::var("SCCACHE_DIST_PROMETHEUS_LISTEN_PATH")
                     .ok()
                     .or(path),
+                idle_timeout_secs: number_from_env_var("SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS")
+                    .transpose()
+                    .unwrap_or(idle_timeout_secs),
             },
             Self::PushGateway {
                 endpoint,
@@ -2047,6 +2077,7 @@ impl PrometheusMetricsConfig {
                 username,
                 password,
                 http_method,
+                idle_timeout_secs,
             } => Self::PushGateway {
                 endpoint: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT")
                     .ok()
@@ -2064,6 +2095,9 @@ impl PrometheusMetricsConfig {
                 http_method: env::var("SCCACHE_DIST_PROMETHEUS_PUSH_HTTP_METHOD")
                     .ok()
                     .or(http_method),
+                idle_timeout_secs: number_from_env_var("SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS")
+                    .transpose()
+                    .unwrap_or(idle_timeout_secs),
             },
         }
     }
@@ -4052,6 +4086,7 @@ key_prefix = "sccache-dist-toolchains"
                     username: Some("sccache".into()),
                     password: Some("sccache".into()),
                     http_method: None,
+                    idle_timeout_secs: None,
                 }),
                 ..Default::default()
             },
@@ -4148,6 +4183,7 @@ key_prefix = "sccache-dist-toolchains"
                     username: Some("sccache".into()),
                     password: Some("sccache".into()),
                     http_method: None,
+                    idle_timeout_secs: None,
                 }),
                 ..Default::default()
             },

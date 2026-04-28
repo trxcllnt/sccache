@@ -89,6 +89,7 @@ log = "0.4"
 memchr = "2"
 memmap2 = "0.9.4"
 metrics = { version = "0.24", default-features = false, optional = true }
+metrics-util = { version = "0.20", default-features = false, optional = true }
 metrics-exporter-dogstatsd = { version = "0.9", default-features = false, optional = true }
 metrics-exporter-prometheus = { version = "0.18", default-features = false, optional = true, features = [
   "http-listener",
@@ -268,6 +269,7 @@ dist-server = [
   "metrics-exporter-dogstatsd",
   "metrics-exporter-prometheus",
   "metrics",
+  "metrics-util",
   "nix",
   "openssl",
   "reqwest",

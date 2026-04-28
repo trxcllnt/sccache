@@ -330,16 +330,33 @@ impl PrometheusMetrics {
             });
 
         let (recorder, exporter, listen_path) = match config {
-            PrometheusMetricsConfig::ListenAddr { ref addr } => {
+            PrometheusMetricsConfig::ListenAddr {
+                ref addr,
+                ref idle_timeout_secs,
+            } => {
                 let addr = addr.unwrap_or(SocketAddr::from_str("0.0.0.0:9000")?);
+                let (recorder, exporter) = builder
+                    .idle_timeout(
+                        metrics_util::MetricKindMask::ALL,
+                        idle_timeout_secs.map(Duration::from_secs),
+                    )
+                    .with_http_listener(addr)
+                    .build()?;
                 tracing::info!("Listening for metrics at {addr}");
-                let (recorder, exporter) = builder.with_http_listener(addr).build()?;
                 (recorder, exporter, None)
             }
-            PrometheusMetricsConfig::ListenPath { ref path } => {
+            PrometheusMetricsConfig::ListenPath {
+                ref path,
+                ref idle_timeout_secs,
+            } => {
                 let path = path.clone().unwrap_or("/metrics".to_owned());
+                let (recorder, exporter) = builder
+                    .idle_timeout(
+                        metrics_util::MetricKindMask::ALL,
+                        idle_timeout_secs.map(Duration::from_secs),
+                    )
+                    .build()?;
                 tracing::info!("Listening for metrics at {path}");
-                let (recorder, exporter) = builder.build()?;
                 (recorder, exporter, Some(path))
             }
             PrometheusMetricsConfig::PushGateway {
@@ -348,14 +365,15 @@ impl PrometheusMetrics {
                 ref username,
                 ref password,
                 ref http_method,
+                ref idle_timeout_secs,
             } => {
                 let interval = Duration::from_millis(interval.unwrap_or(10_000));
-                tracing::info!(
-                    "Pushing metrics to {endpoint} every {}s",
-                    interval.as_secs_f64()
-                );
                 let (recorder, exporter) = builder
                     .set_bucket_count(std::num::NonZeroU32::new(3).unwrap())
+                    .idle_timeout(
+                        metrics_util::MetricKindMask::ALL,
+                        idle_timeout_secs.map(Duration::from_secs),
+                    )
                     .with_push_gateway(
                         endpoint,
                         interval,
@@ -367,6 +385,10 @@ impl PrometheusMetrics {
                             .unwrap_or_default(),
                     )?
                     .build()?;
+                tracing::info!(
+                    "Pushing metrics to {endpoint} every {}s",
+                    interval.as_secs_f64()
+                );
                 (recorder, exporter, None)
             }
         };

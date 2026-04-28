@@ -4308,6 +4308,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-dogstatsd",
  "metrics-exporter-prometheus",
+ "metrics-util",
  "mime",
  "nix 0.30.1",
  "notify-debouncer-full",
