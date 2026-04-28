@@ -134,7 +134,8 @@ tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-retry2 = { version = "0.5", features = ["jitter"] }
 tokio-serde = "0.9"
-tokio-util = { version = "0.7", features = ["codec", "compat", "io", "rt"] }
+tokio-stream = { version = "0.1" }
+tokio-util = { version = "0.7", features = ["codec", "compat", "io", "io-util", "rt"] }
 toml = "0.9"
 tower = { version = "0.4", features = ["util"] }
 typed-path = "0.12.0"

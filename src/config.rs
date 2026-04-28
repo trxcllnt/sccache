@@ -2756,8 +2756,7 @@ pub mod server {
         config_from_env, default_disk_cache_dir, number_from_env_var, try_read_config_file,
     };
     use serde::{Deserialize, Serialize};
-    use std::env;
-    use std::path::PathBuf;
+    use std::{env, net::SocketAddr, path::PathBuf, str::FromStr};
 
     use crate::errors::*;
 
@@ -2894,6 +2893,7 @@ pub mod server {
         pub builder: BuilderType,
         #[serde(default = "Config::default_cache_dir")]
         pub cache_dir: PathBuf,
+        pub health_check_bind_addr: Option<SocketAddr>,
         #[serde(default = "Config::default_heartbeat_interval_ms")]
         pub heartbeat_interval_ms: u64,
         #[serde(default = "CacheConfigs::default")]
@@ -2919,6 +2919,7 @@ pub mod server {
             Self {
                 builder: BuilderType::Docker,
                 cache_dir: Config::default_cache_dir(),
+                health_check_bind_addr: None,
                 heartbeat_interval_ms: Config::default_heartbeat_interval_ms(),
                 jobs: CacheConfigs::default(),
                 max_per_core_load: Config::default_max_per_core_load(),
@@ -2937,6 +2938,7 @@ pub mod server {
     pub struct Config {
         pub builder: BuilderType,
         pub cache_dir: PathBuf,
+        pub health_check_bind_addr: Option<SocketAddr>,
         pub heartbeat_interval_ms: u64,
         pub jobs: Vec<CacheType>,
         pub max_per_core_load: f64,
@@ -2985,6 +2987,7 @@ pub mod server {
                 message_broker,
                 builder,
                 cache_dir,
+                health_check_bind_addr,
                 heartbeat_interval_ms,
                 jobs,
                 max_per_core_load,
@@ -3030,6 +3033,11 @@ pub mod server {
                 .merge(toolchains)
                 .merge(config_from_env("SCCACHE_DIST_TOOLCHAINS_")?.cache);
 
+            let health_check_bind_addr = env::var("SCCACHE_DIST_HEALTH_CHECK_BIND_ADDR")
+                .ok()
+                .and_then(|addr| std::net::SocketAddr::from_str(&addr).ok())
+                .or(health_check_bind_addr);
+
             let heartbeat_interval_ms =
                 number_from_env_var("SCCACHE_DIST_SERVER_HEARTBEAT_INTERVAL")
                     .transpose()?
@@ -3058,6 +3066,7 @@ pub mod server {
             Ok(Self {
                 builder,
                 cache_dir,
+                health_check_bind_addr,
                 heartbeat_interval_ms,
                 jobs: jobs.into(),
                 max_per_core_load,
@@ -3081,6 +3090,7 @@ pub mod server {
             Self {
                 builder: server_config.builder,
                 cache_dir: server_config.cache_dir,
+                health_check_bind_addr: server_config.health_check_bind_addr,
                 heartbeat_interval_ms: server_config.heartbeat_interval_ms,
                 jobs: server_config.jobs.into(),
                 max_per_core_load: server_config.max_per_core_load,
@@ -3100,6 +3110,7 @@ pub mod server {
             Self {
                 builder: server_config.builder,
                 cache_dir: server_config.cache_dir,
+                health_check_bind_addr: server_config.health_check_bind_addr,
                 heartbeat_interval_ms: server_config.heartbeat_interval_ms,
                 jobs: server_config.jobs.into(),
                 max_per_core_load: server_config.max_per_core_load,

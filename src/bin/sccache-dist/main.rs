@@ -190,6 +190,7 @@ fn run(command: Command) -> Result<()> {
                     message_broker,
                     builder,
                     cache_dir,
+                    health_check_bind_addr,
                     heartbeat_interval_ms,
                     jobs,
                     max_per_core_load,
@@ -282,6 +283,7 @@ fn run(command: Command) -> Result<()> {
                         .start(
                             Duration::from_millis(heartbeat_interval_ms),
                             Duration::from_secs(shutdown_timeout),
+                            health_check_bind_addr,
                         )
                         .await
                 }

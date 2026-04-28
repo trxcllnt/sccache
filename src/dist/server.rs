@@ -664,6 +664,7 @@ impl Server {
         &self,
         heartbeat_interval: Duration,
         shutdown_timeout: Duration,
+        health_check_bind_addr: Option<SocketAddr>,
     ) -> Result<()> {
         self.tasks.app().display_pretty().await;
 
@@ -706,7 +707,14 @@ impl Server {
             Ok(())
         };
 
-        let status = tokio::spawn({
+        // Install a health check listener for load balancers
+        let health = if let Some(health_check_bind_addr) = health_check_bind_addr {
+            self.health_check_listener(health_check_bind_addr).boxed()
+        } else {
+            futures::future::pending::<()>().boxed()
+        };
+
+        let status = util::spawn({
             let this = self.clone();
             async move {
                 loop {
@@ -727,10 +735,11 @@ impl Server {
             biased;
             res = celery => res,
             res = sigint => res,
-            // This should never resolve before either celery or sigint unless
+            // These should never resolve before either celery or sigint unless
             // a catastrophic error occurs (tokio dies somehow?). Just polling
-            // it here so the task is cancelled once either of the above two
+            // it here so the tasks are cancelled once either of the above two
             // futures complete first.
+            _ = health => Ok(()),
             _ = status => Ok(()),
         };
 
@@ -822,6 +831,71 @@ impl Server {
         .await
         .map_err(anyhow::Error::new)
         .map(|_| ())
+    }
+
+    async fn health_check_listener(&self, health_check_bind_addr: SocketAddr) -> () {
+        use futures::stream::StreamExt;
+        use hyper::{
+            Response, StatusCode, server::conn::http1::Builder as HyperHttpBuilder,
+            service::service_fn,
+        };
+        use hyper_util::rt::TokioIo;
+        use tokio::sync::mpsc::{error::SendError, unbounded_channel};
+
+        // Track all outstanding TCP response futures
+        let (futures_tx, futures_rx) = unbounded_channel();
+
+        let outer = util::spawn({
+            let ok_service = service_fn(move |_| async move {
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(http_body_util::Full::<bytes::Bytes>::default())
+            });
+
+            async move {
+                let listener = match tokio::net::TcpListener::bind(health_check_bind_addr).await {
+                    Ok(listener) => listener,
+                    Err(err) => {
+                        tracing::warn!("Failed to create TCP listener: {err}");
+                        return;
+                    }
+                };
+
+                loop {
+                    let stream = match listener.accept().await {
+                        Ok((stream, _)) => TokioIo::new(stream),
+                        Err(err) => {
+                            tracing::warn!("Error accepting connection, ignoring request: {err}");
+                            continue;
+                        }
+                    };
+
+                    let inner = util::spawn(async move {
+                        if let Err(err) = HyperHttpBuilder::new()
+                            .serve_connection(stream, ok_service)
+                            .await
+                        {
+                            tracing::warn!("Error serving healthcheck connection: {err}");
+                        }
+                    });
+
+                    if let Err(SendError(handle)) = futures_tx.send(inner) {
+                        // If we can't push the handle to the receiver,
+                        // just detach and allow task to run untracked.
+                        handle.detach();
+                    }
+                }
+            }
+        });
+
+        let inners = tokio_stream::wrappers::UnboundedReceiverStream::new(futures_rx)
+            .for_each_concurrent(None, |fut| async move {
+                if let Err(err) = fut.await {
+                    tracing::warn!("Healthcheck response future error: {err}");
+                }
+            });
+
+        let _ = tokio::join!(outer, inners);
     }
 
     async fn put_job_result(&self, job_id: &str, result: &RunJobResponse) -> Result<()> {
