@@ -11,6 +11,7 @@ services:
       RUST_BACKTRACE: "${RUST_BACKTRACE:-1}"
       SCCACHE_NO_DAEMON: "1"
       SCCACHE_DIST_SCHEDULER_ID: "scheduler"
+      SCCACHE_DIST_SCHEDULER_HEARTBEAT_INTERVAL: "1000"
       SCCACHE_DIST_PUBLIC_ADDR: "0.0.0.0:10500"
       SCCACHE_DIST_AUTH_TYPE: "token"
       SCCACHE_DIST_AUTH_TOKEN: "client_token"
@@ -47,9 +48,11 @@ services:
     depends_on: [sccache-scheduler]
     restart: on-failure
     privileged: true
+    ports: ["9001:9001"]
     environment: &sccache_server_env
       <<: *sccache_scheduler_env
       SCCACHE_DIST_SERVER_ID: "server-1"
+      SCCACHE_DIST_SERVER_HEARTBEAT_INTERVAL: "1000"
       SCCACHE_DIST_BUILDER_TYPE: "overlay"
       SCCACHE_DIST_BUILD_DIR: "/sccache/server-1"
       SCCACHE_DIST_BWRAP_PATH: "/usr/bin/bwrap"
@@ -58,17 +61,25 @@ services:
       SCCACHE_DIST_MAX_PER_CORE_PREFETCH: "1"
       SCCACHE_DIST_SERVER_CACHE_DIR: "/sccache/server-1"
       SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE: "10737418240" # 10 GiBytes
+      SCCACHE_DIST_HEALTH_CHECK_BIND_ADDR: 0.0.0.0:9001
       SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT: "http://vector-ingest:9091/metrics/job/server-1"
-      SCCACHE_LOG: "celery=warn,sccache=${SCCACHE_LOG:-trace}"
+      SCCACHE_LOG: "celery=warn,sccache=${SCCACHE_LOG:-debug}"
     volumes:
       - /tmp/sccache:/sccache:z
       - ../../target/${CARGO_BUILD_TARGET:-x86_64-unknown-linux-musl}/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
+    healthcheck: &sccache_server_healthcheck
+      test: ["CMD", "curl", "0.0.0.0:9091"]
+      interval: "30s"
+      timeout: "10s"
+      retries: "3"
+      start_period: "60s"
+      start_interval: "5s"
     command: >
       bash -c "
       sleep 10;
       set -o errexit;
       umask 000;
-      apt update && apt install -y --no-install-recommends ca-certificates libcap2 bubblewrap;
+      apt update && apt install -y --no-install-recommends ca-certificates libcap2 bubblewrap curl;
       rm -rf '$$SCCACHE_DIST_BUILD_DIR';
       mkdir -p '$$SCCACHE_DIST_BUILD_DIR';
       exec /sccache-dist server;"
@@ -78,21 +89,26 @@ services:
     depends_on: [sccache-scheduler]
     restart: on-failure
     privileged: true
+    ports: ["9002:9002"]
     environment:
       <<: *sccache_server_env
       SCCACHE_DIST_SERVER_ID: "server-2"
       SCCACHE_DIST_BUILD_DIR: "/sccache/server-2"
       SCCACHE_DIST_SERVER_CACHE_DIR: "/sccache/server-2"
+      SCCACHE_DIST_HEALTH_CHECK_BIND_ADDR: 0.0.0.0:9002
       SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT: "http://vector-ingest:9091/metrics/job/server-2"
     volumes:
       - /tmp/sccache:/sccache:z
       - ../../target/${CARGO_BUILD_TARGET:-x86_64-unknown-linux-musl}/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
+    healthcheck:
+      <<: *sccache_server_healthcheck
+      test: ["CMD", "curl", "0.0.0.0:9092"]
     command: >
       bash -c "
       sleep 10;
       set -o errexit;
       umask 000;
-      apt update && apt install -y --no-install-recommends ca-certificates libcap2 bubblewrap;
+      apt update && apt install -y --no-install-recommends ca-certificates libcap2 bubblewrap curl;
       rm -rf '$$SCCACHE_DIST_BUILD_DIR';
       mkdir -p '$$SCCACHE_DIST_BUILD_DIR';
       exec /sccache-dist server;"
