@@ -369,7 +369,7 @@ impl PrometheusMetrics {
             } => {
                 let interval = Duration::from_millis(interval.unwrap_or(10_000));
                 let (recorder, exporter) = builder
-                    .set_bucket_count(std::num::NonZeroU32::new(3).unwrap())
+                    .set_bucket_duration(interval)?
                     .idle_timeout(
                         metrics_util::MetricKindMask::ALL,
                         idle_timeout_secs.map(Duration::from_secs),
