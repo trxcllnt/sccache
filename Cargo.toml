@@ -89,12 +89,12 @@ log = "0.4"
 memchr = "2"
 memmap2 = "0.9.4"
 metrics = { version = "0.24", default-features = false, optional = true }
-metrics-util = { version = "0.20", default-features = false, optional = true }
 metrics-exporter-dogstatsd = { version = "0.9", default-features = false, optional = true }
 metrics-exporter-prometheus = { version = "0.18", default-features = false, optional = true, features = [
   "http-listener",
   "push-gateway-no-tls-provider",
 ] }
+metrics-util = { version = "0.20", default-features = false, optional = true }
 rustix = { version = "1", features = ["fs", "process"] }
 rustls = { version = "0.23", default-features = false, features = [
   "logging",
@@ -136,7 +136,13 @@ tokio = { version = "1", features = ["full"] }
 tokio-retry2 = { version = "0.5", features = ["jitter"] }
 tokio-serde = "0.9"
 tokio-stream = { version = "0.1" }
-tokio-util = { version = "0.7", features = ["codec", "compat", "io", "io-util", "rt"] }
+tokio-util = { version = "0.7", features = [
+  "codec",
+  "compat",
+  "io",
+  "io-util",
+  "rt",
+] }
 toml = "0.9"
 tower = { version = "0.4", features = ["util"] }
 typed-path = "0.12.0"
@@ -261,6 +267,7 @@ dist-server = [
   "axum",
   "celery",
   "cloud-storage",
+  "http-body-util",
   "hyper-rustls",
   "hyper-util",
   "hyper",
