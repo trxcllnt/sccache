@@ -87,8 +87,8 @@ jobs:
           - os: ubuntu-22.04
             # Oldest supported version, keep in sync with README.md
             rustc: "1.85.0"
-            cuda: "13.0"
-            extra_desc: cuda13.0 dist-tests
+            cuda: "13.2"
+            extra_desc: cuda13.2 dist-tests
             extra_args: --no-default-features --features=dist-tests test_dist_cuda_
           - os: ubuntu-22.04
             # Oldest supported version, keep in sync with README.md
