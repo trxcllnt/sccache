@@ -2286,7 +2286,6 @@ counted_array!(static ARGS: [ArgInfo<ArgData>; _] = [
     flag!("--cuda-path-ignore-env", ArgData::PassThroughFlag),
     flag!("--no-cuda-version-check", ArgData::PassThroughFlag),
     take_arg!("-ccbin", OsString, CanBeConcatenated(b'='), ArgData::PassThrough),
-    take_arg!("-x", OsString, CanBeSeparated, ArgData::PassThrough),
 ]);
 
 pub fn compiler_info_args(arguments: &[OsString]) -> Vec<OsString> {
