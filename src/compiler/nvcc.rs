@@ -18,7 +18,8 @@ use crate::{
         Cacheable, CompileCommandImpl, CompilerArguments,
         args::*,
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments,
+            PreprocessorOutput,
         },
         gcc::{self, ArgData::*},
         msvc::from_local_codepage,
@@ -43,7 +44,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
 };
-use tempfile::{TempDir, TempPath};
+use tempfile::TempDir;
 use which::which_in;
 
 static HAS_SM_IN_NAME_RE: LazyLock<Regex> =
@@ -508,7 +509,7 @@ impl CCompilerImpl for Nvcc {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
     {

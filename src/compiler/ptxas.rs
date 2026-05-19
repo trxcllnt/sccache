@@ -13,19 +13,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compiler::c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput};
-use crate::compiler::cicc;
-use crate::compiler::{Cacheable, CompilerArguments, Language};
-use crate::compiler::{CompileCommandImpl, args::*};
-use crate::{counted_array, dist, server::SccacheService};
-
-use crate::mock_command::CommandCreatorSync;
+use crate::{
+    compiler::{
+        c::{CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments, PreprocessorOutput},
+        cicc, {Cacheable, CompilerArguments, Language},
+        {CompileCommandImpl, args::*},
+    },
+    counted_array, dist,
+    mock_command::CommandCreatorSync,
+    server::SccacheService,
+};
 
 use async_trait::async_trait;
-use tempfile::TempPath;
 
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use crate::errors::*;
 
@@ -79,7 +83,7 @@ impl CCompilerImpl for Ptxas {
         _parsed_args: &ParsedArguments,
         _cwd: &Path,
         _env_vars: &[(OsString, OsString)],
-    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
     {

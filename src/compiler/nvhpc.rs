@@ -17,9 +17,10 @@ use crate::{
     compiler::{
         Cacheable, CompileCommandImpl, CompilerArguments,
         args::*,
-        c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput},
+        c::{CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments, PreprocessorOutput},
         gcc::{self, ArgData::*},
     },
+    errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
     server::SccacheService,
     util::run_input_output,
@@ -27,11 +28,10 @@ use crate::{
 use crate::{counted_array, dist};
 use async_trait::async_trait;
 use futures::FutureExt;
-use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
-use tempfile::TempPath;
-
-use crate::errors::*;
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
+};
 
 /// A unit struct on which to implement `CCompilerImpl`.
 #[derive(Clone, Debug)]
@@ -225,7 +225,7 @@ impl CCompilerImpl for Nvhpc {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
     {

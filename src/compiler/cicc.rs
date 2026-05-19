@@ -15,7 +15,8 @@
 
 use crate::{
     compiler::c::{
-        ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
+        ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments,
+        PreprocessorOutput,
     },
     compiler::{Cacheable, CompilerArguments, Language, SingleCompileCommand},
     compiler::{CompileCommandImpl, args::*},
@@ -32,7 +33,6 @@ use std::{
     ffi::OsString,
     path::{Path, PathBuf},
 };
-use tempfile::TempPath;
 
 /// A unit struct on which to implement `CCompilerImpl`.
 #[derive(Clone, Debug)]
@@ -84,7 +84,7 @@ impl CCompilerImpl for Cicc {
         _parsed_args: &ParsedArguments,
         _cwd: &Path,
         _env_vars: &[(OsString, OsString)],
-    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
     {

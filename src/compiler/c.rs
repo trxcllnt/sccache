@@ -309,6 +309,52 @@ impl From<ProcessOutput> for Pin<Box<ProcessOutputStream>> {
     }
 }
 
+pub enum DepfilePath {
+    Path(PathBuf),
+    Temp(TempPath),
+}
+
+impl DepfilePath {
+    pub fn as_path(&self) -> &Path {
+        match self {
+            Self::Path(path) => path.as_path(),
+            Self::Temp(temp) => temp.as_ref(),
+        }
+    }
+}
+
+impl fmt::Debug for DepfilePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.as_path())
+    }
+}
+
+impl fmt::Display for DepfilePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_path().display())
+    }
+}
+
+impl std::ops::Deref for DepfilePath {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        self.as_path()
+    }
+}
+
+impl AsRef<Path> for DepfilePath {
+    fn as_ref(&self) -> &Path {
+        self.as_path()
+    }
+}
+
+impl AsRef<OsStr> for DepfilePath {
+    fn as_ref(&self) -> &OsStr {
+        self.as_path().as_os_str()
+    }
+}
+
 /// An interface to a specific C compiler.
 #[async_trait]
 pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
@@ -350,7 +396,7 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync;
 

@@ -14,16 +14,18 @@
 // limitations under the License.
 
 use crate::{
-    compiler::args::{
-        ArgDisposition, ArgInfo, ArgToStringResult, ArgsIter, Argument, FromArg, IntoArg,
-        NormalizedDisposition, PathTransformerFn, SearchableArgInfo,
-    },
-    compiler::c::{
-        ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
-    },
     compiler::{
         Cacheable, ColorMode, CompileCommandImpl, CompilerArguments, Language,
-        SingleCompileCommand, gcc,
+        SingleCompileCommand,
+        args::{
+            ArgDisposition, ArgInfo, ArgToStringResult, ArgsIter, Argument, FromArg, IntoArg,
+            NormalizedDisposition, PathTransformerFn, SearchableArgInfo,
+        },
+        c::{
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments,
+            PreprocessorOutput,
+        },
+        gcc,
     },
     counted_array, dist,
     errors::*,
@@ -40,7 +42,6 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
 };
-use tempfile::TempPath;
 
 #[derive(Clone, Debug)]
 pub struct Diab {
@@ -104,7 +105,7 @@ impl CCompilerImpl for Diab {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
     {
@@ -416,7 +417,7 @@ async fn generate_dependencies<T>(
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     preprocess_command: Option<T::Cmd>,
-) -> Result<(PathBuf, Option<TempPath>)>
+) -> Result<DepfilePath>
 where
     T: CommandCreatorSync,
 {
@@ -440,7 +441,7 @@ async fn generate_dependencies_cmd<T>(
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     preprocess_command: Option<T::Cmd>,
-) -> Result<(T::Cmd, (PathBuf, Option<TempPath>))>
+) -> Result<(T::Cmd, DepfilePath)>
 where
     T: CommandCreatorSync,
 {
@@ -459,7 +460,7 @@ where
                     cmd.arg("-Xmake-dependency");
                 }
                 // write dependencies to the depfile
-                (cwd.join(depfile), None)
+                DepfilePath::Path(cwd.join(depfile))
             }
             // If only `-Xmake-dependency`
             (None, md) => {
@@ -471,25 +472,30 @@ where
                 let temp = temppath()?;
                 cmd.arg("-Xmake-dependency-savefile");
                 cmd.arg(&temp);
-                (temp.to_path_buf(), Some(temp))
+                DepfilePath::Temp(temp)
             }
         };
         (cmd, depfile)
     } else {
-        let (path, temp) = if let Some(depfile) = parsed_args.depfile.as_deref() {
-            (cwd.join(depfile), None)
+        let depfile = if let Some(depfile) = parsed_args.depfile.as_deref() {
+            DepfilePath::Path(cwd.join(depfile))
         } else {
-            let temp = temppath()?;
-            (temp.to_path_buf(), Some(temp))
+            DepfilePath::Temp(temppath()?)
         };
 
-        let cmd =
-            generate_all_dependencies_cmd(creator, executable, parsed_args, cwd, env_vars, &path)
-                .await;
+        let cmd = generate_all_dependencies_cmd(
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            &depfile,
+        )
+        .await;
 
         trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
-        (cmd, (path, temp))
+        (cmd, depfile)
     };
 
     Ok((cmd, depfile))

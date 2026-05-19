@@ -15,7 +15,7 @@
 use crate::compiler::{
     Cacheable, CompileCommandImpl, CompilerArguments, Language,
     args::*,
-    c::{CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput},
+    c::{CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments, PreprocessorOutput},
     gcc::{self, ArgData::*},
 };
 use crate::mock_command::CommandCreatorSync;
@@ -24,7 +24,6 @@ use async_trait::async_trait;
 use semver::{BuildMetadata, Prerelease, Version};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use tempfile::TempPath;
 
 use crate::errors::*;
 
@@ -157,7 +156,7 @@ impl CCompilerImpl for Clang {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
     {

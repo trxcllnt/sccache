@@ -13,15 +13,18 @@
 // limitations under the License.
 
 use crate::{
-    compiler::c::{
-        ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
-    },
     compiler::{
-        Cacheable, ColorMode, CompilerArguments, Language, SingleCompileCommand, clang, gcc,
+        Cacheable, ColorMode, CompileCommandImpl, CompilerArguments, Language,
+        SingleCompileCommand,
+        args::*,
+        c::{
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments,
+            PreprocessorOutput,
+        },
+        clang, gcc,
         preprocessor_cache::{StandardFsAbstraction, process_preprocessed_file},
         write_temp_file,
     },
-    compiler::{CompileCommandImpl, args::*},
     counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
@@ -38,7 +41,6 @@ use std::{
     io::{self, BufWriter, Read, Write},
     path::{Path, PathBuf},
 };
-use tempfile::TempPath;
 
 /// A struct on which to implement `CCompilerImpl`.
 ///
@@ -142,7 +144,7 @@ impl CCompilerImpl for Msvc {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
     {
@@ -1146,7 +1148,7 @@ async fn generate_dependencies<T>(
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     is_clang: bool,
-) -> Result<(PathBuf, Option<TempPath>)>
+) -> Result<DepfilePath>
 where
     T: CommandCreatorSync,
 {
@@ -1167,22 +1169,21 @@ fn generate_dependencies_cmd<T>(
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     is_clang: bool,
-) -> Result<(T::Cmd, (PathBuf, Option<TempPath>))>
+) -> Result<(T::Cmd, DepfilePath)>
 where
     T: CommandCreatorSync,
 {
-    let (path, temp) = if let Some(depfile) = parsed_args.depfile.as_deref() {
-        (cwd.join(depfile), None)
+    let depfile = if let Some(depfile) = parsed_args.depfile.as_deref() {
+        DepfilePath::Path(cwd.join(depfile))
     } else {
-        let temp = temppath()?;
-        (temp.to_path_buf(), Some(temp))
+        DepfilePath::Temp(temppath()?)
     };
 
     let cmd = preprocess_cmd(
         creator.clone().new_command_sync(executable),
         &ParsedArguments {
             // Replace dependency args with our own
-            dependency_args: vec!["/sourceDependencies".into(), path.as_path().into()],
+            dependency_args: vec!["/sourceDependencies".into(), depfile.as_path().into()],
             ..parsed_args.clone()
         },
         cwd,
@@ -1193,7 +1194,7 @@ where
         is_clang,
     );
 
-    Ok((cmd, (path, temp)))
+    Ok((cmd, depfile))
 }
 
 async fn parse_dependencies<P: AsRef<Path>>(

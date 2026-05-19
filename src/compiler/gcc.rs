@@ -18,7 +18,8 @@ use crate::{
         SingleCompileCommand,
         args::*,
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments,
+            PreprocessorOutput,
         },
         clang,
         msvc::from_local_codepage,
@@ -43,7 +44,6 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
 };
-use tempfile::TempPath;
 
 /// A struct on which to implement `CCompilerImpl`.
 #[derive(Clone, Debug, Default)]
@@ -224,7 +224,7 @@ impl CCompilerImpl for Gcc {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
     {
@@ -1102,7 +1102,7 @@ pub async fn generate_dependencies<T>(
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     kind: CCompilerKind,
-) -> Result<(PathBuf, Option<TempPath>)>
+) -> Result<DepfilePath>
 where
     T: CommandCreatorSync,
 {
@@ -1121,7 +1121,7 @@ pub async fn generate_dependencies_cmd<T>(
     env_vars: &[(OsString, OsString)],
     kind: CCompilerKind,
     preprocess_command: Option<T::Cmd>,
-) -> Result<(T::Cmd, (PathBuf, Option<TempPath>))>
+) -> Result<(T::Cmd, DepfilePath)>
 where
     T: CommandCreatorSync,
 {
@@ -1154,7 +1154,7 @@ where
             // If `-MD -MF <file>`
             (Some(depfile), Some(_), None) => {
                 // write dependencies to the depfile
-                (cwd.join(depfile), None)
+                DepfilePath::Path(cwd.join(depfile))
             }
             // If `-MMD` (with or without `-MF <file>`)
             (_, None, Some("-MMD")) => {
@@ -1174,7 +1174,7 @@ where
                     None,
                 )
                 .await?;
-                (temp.to_path_buf(), Some(temp))
+                DepfilePath::Temp(temp)
             }
             // If only `-MD`, or missing/invalid depflags
             (_, md, _) => {
@@ -1185,16 +1185,15 @@ where
                 let temp = temppath()?;
                 cmd.arg("-MF");
                 cmd.arg(&temp);
-                (temp.to_path_buf(), Some(temp))
+                DepfilePath::Temp(temp)
             }
         };
         (cmd, depfile)
     } else {
-        let (path, temp) = if let Some(depfile) = parsed_args.depfile.as_deref() {
-            (cwd.join(depfile), None)
+        let depfile = if let Some(depfile) = parsed_args.depfile.as_deref() {
+            DepfilePath::Path(cwd.join(depfile))
         } else {
-            let temp = temppath()?;
-            (temp.to_path_buf(), Some(temp))
+            DepfilePath::Temp(temppath()?)
         };
 
         let cmd = generate_all_dependencies_cmd(
@@ -1204,13 +1203,13 @@ where
             cwd,
             env_vars,
             &kind,
-            &path,
+            &depfile,
         )
         .await;
 
         trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
-        (cmd, (path, temp))
+        (cmd, depfile)
     };
 
     Ok((cmd, depfile))
@@ -1262,7 +1261,7 @@ where
 pub async fn parse_dependencies<P: AsRef<Path>>(
     cwd: P,
     input: P,
-    (depfile, _): (PathBuf, Option<TempPath>),
+    depfile: DepfilePath,
 ) -> Result<Vec<PathBuf>> {
     let cwd = cwd.as_ref();
     let input_path = input.as_ref();

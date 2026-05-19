@@ -21,7 +21,8 @@ use crate::{
             NormalizedDisposition, PathTransformerFn, SearchableArgInfo,
         },
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, ParsedArguments, PreprocessorOutput,
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments,
+            PreprocessorOutput,
         },
         gcc,
     },
@@ -38,7 +39,6 @@ use std::{
     ffi::OsString,
     path::{Path, PathBuf},
 };
-use tempfile::TempPath;
 
 #[derive(Clone, Debug)]
 pub struct TaskingVX;
@@ -114,7 +114,7 @@ impl CCompilerImpl for TaskingVX {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-    ) -> Result<Option<(PathBuf, Option<TempPath>)>>
+    ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
     {
@@ -356,7 +356,7 @@ async fn generate_dependencies<T>(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-) -> Result<(PathBuf, Option<TempPath>)>
+) -> Result<DepfilePath>
 where
     T: CommandCreatorSync,
 {
@@ -372,15 +372,14 @@ async fn generate_dependencies_cmd<T>(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-) -> Result<(T::Cmd, (PathBuf, Option<TempPath>))>
+) -> Result<(T::Cmd, DepfilePath)>
 where
     T: CommandCreatorSync,
 {
-    let (path, temp) = if let Some(depfile) = parsed_args.depfile.as_deref() {
-        (cwd.join(depfile), None)
+    let depfile = if let Some(depfile) = parsed_args.depfile.as_deref() {
+        DepfilePath::Path(cwd.join(depfile))
     } else {
-        let temp = temppath()?;
-        (temp.to_path_buf(), Some(temp))
+        DepfilePath::Temp(temppath()?)
     };
 
     let mut cmd = creator.clone().new_command_sync(executable);
@@ -392,11 +391,11 @@ where
         .arg("-Em")
         .arg(&parsed_args.input)
         .arg("-o")
-        .arg(&path);
+        .arg(&depfile);
 
     trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
-    Ok((cmd, (path, temp)))
+    Ok((cmd, depfile))
 }
 
 fn generate_compile_commands(
