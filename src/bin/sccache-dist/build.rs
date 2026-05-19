@@ -462,10 +462,7 @@ impl OverlayBuilder {
                     tracing::trace!("[perform_build({job_id})]: compile success: {output:?}");
                     tracing::trace!("[perform_build({job_id})]: retrieving {output_paths:?}");
 
-                    for (path, abs_path) in output_paths
-                        .into_iter()
-                        .zip(output_paths_absolute.into_iter())
-                    {
+                    for (path, abs_path) in output_paths.into_iter().zip(output_paths_absolute) {
                         let host_path = join_suffix(&target_dir, &abs_path);
                         match fs::File::open(&host_path) {
                             Ok(file) => match OutputData::try_from_reader(file) {
@@ -870,10 +867,7 @@ impl DockerBuilder {
                 tracing::trace!("[perform_build({job_id})]: compile success: {output:?}");
                 tracing::trace!("[perform_build({job_id})]: retrieving {output_paths:?}");
 
-                for (path, abs_path) in output_paths
-                    .into_iter()
-                    .zip(output_paths_absolute.into_iter())
-                {
+                for (path, abs_path) in output_paths.into_iter().zip(output_paths_absolute) {
                     let host_path = join_suffix(host_root, &abs_path); // Resolve in case it's relative since we copy it from the root level
                     match fs::File::open(&host_path) {
                         Ok(file) => match OutputData::try_from_reader(file) {

@@ -516,10 +516,7 @@ impl PotBuilder {
             } else {
                 tracing::trace!("[perform_build({job_id})]: retrieving {output_paths:?}");
 
-                for (path, abs_path) in output_paths
-                    .into_iter()
-                    .zip(output_paths_absolute.into_iter())
-                {
+                for (path, abs_path) in output_paths.into_iter().zip(output_paths_absolute) {
                     // TODO: this isn't great, but cp gives it out as a tar
                     let output = tokio::process::Command::new("jexec")
                         .args([cid, "cat"])
