@@ -40,7 +40,7 @@ use itertools::Itertools;
 use std::{
     collections::HashMap,
     env,
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     io::Read,
     path::{Path, PathBuf},
 };
@@ -323,6 +323,8 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     flag!("--save-temps=obj", TooHardFlag),
     take_arg!("--serialize-diagnostics", PathBuf, Separated, SerializeDiagnostics),
     take_arg!("--sysroot", PathBuf, Separated, PassThroughPath),
+    flag!("--write-dependencies", NeedDepTarget),
+    flag!("--write-user-dependencies", NeedDepTarget),
     take_arg!("-A", OsString, Separated, PassThrough),
     take_arg!("-B", PathBuf, CanBeSeparated, PassThroughPath),
     take_arg!("-D", OsString, CanBeSeparated, PassThrough),
@@ -1068,14 +1070,14 @@ where
     );
 
     let (cmd, depfile) = if generate_dependencies {
-        generate_dependencies_cmd(
+        generate_dependencies_with_preprocess_cmd(
             creator,
             executable,
             parsed_args,
             cwd,
             env_vars,
             kind,
-            Some(cmd),
+            cmd,
         )
         .await
         .map(|(cmd, depfile)| (cmd, Some(depfile)))?
@@ -1106,116 +1108,98 @@ pub async fn generate_dependencies<T>(
 where
     T: CommandCreatorSync,
 {
-    let (cmd, dependencies) =
-        generate_dependencies_cmd(creator, executable, parsed_args, cwd, env_vars, kind, None)
-            .await?;
+    let depfile = if let Some(depfile) = parsed_args.depfile.as_deref() {
+        DepfilePath::Path(cwd.join(depfile))
+    } else {
+        DepfilePath::Temp(temppath()?)
+    };
+
+    let cmd = generate_dependencies_cmd(
+        creator,
+        executable,
+        parsed_args,
+        cwd,
+        env_vars,
+        &kind,
+        &depfile,
+    );
+
+    trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
+
     run_input_output(cmd, None).await?;
-    Ok(dependencies)
+
+    Ok(depfile)
 }
 
-pub async fn generate_dependencies_cmd<T>(
+async fn generate_dependencies_with_preprocess_cmd<T>(
     creator: &T,
     executable: &Path,
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     kind: CCompilerKind,
-    preprocess_command: Option<T::Cmd>,
+    mut preprocess_command: T::Cmd,
 ) -> Result<(T::Cmd, DepfilePath)>
 where
     T: CommandCreatorSync,
 {
-    let (cmd, depfile) = if let Some(mut cmd) = preprocess_command {
-        let depfile = match (
-            parsed_args.depfile.as_deref(),
-            parsed_args
-                .dependency_args
-                .iter()
-                .find_map(|arg| {
-                    if arg == "-MD" {
-                        Some(arg.as_os_str())
-                    } else if arg == "-M" {
-                        if parsed_args.cxx20_modules {
-                            Some(OsStr::new("-MD"))
-                        } else {
-                            Some(arg.as_os_str())
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .and_then(|s| s.to_str()),
-            parsed_args
-                .dependency_args
-                .iter()
-                .find(|&arg| arg == "-MMD")
-                .and_then(|s| s.to_str()),
-        ) {
-            // If `-MD -MF <file>`
-            (Some(depfile), Some(_), None) => {
-                // write dependencies to the depfile
-                DepfilePath::Path(cwd.join(depfile))
-            }
-            // If `-MMD` (with or without `-MF <file>`)
-            (_, None, Some("-MMD")) => {
-                // then generate and write all dependencies to a tempfile
-                let temp = temppath()?;
-                run_input_output(
-                    generate_all_dependencies_cmd(
-                        creator,
-                        executable,
-                        parsed_args,
-                        cwd,
-                        env_vars,
-                        &kind,
-                        &temp,
-                    )
-                    .await,
-                    None,
-                )
-                .await?;
-                DepfilePath::Temp(temp)
-            }
-            // If only `-MD`, or missing/invalid depflags
-            (_, md, _) => {
-                if md.is_none() {
-                    cmd.arg("-MD");
-                }
-                // then write all dependencies to a tempfile
-                let temp = temppath()?;
-                cmd.arg("-MF");
-                cmd.arg(&temp);
-                DepfilePath::Temp(temp)
-            }
-        };
-        (cmd, depfile)
+    let generate_deps_with_system_headers = parsed_args
+        .dependency_args
+        .iter()
+        .any(|arg| arg == "-MD" || arg == "--write-dependencies");
+
+    let generate_deps_without_system_headers = parsed_args
+        .dependency_args
+        .iter()
+        .any(|arg| arg == "-MMD" || arg == "--write-user-dependencies");
+
+    let depfile = if let Some(depfile) = parsed_args
+        .depfile
+        .as_deref()
+        .filter(|_| generate_deps_with_system_headers)
+        .filter(|_| !generate_deps_without_system_headers)
+    {
+        // If `-MD -MF <file>`, write all dependencies to <file> while preprocessing.
+        DepfilePath::Path(cwd.join(depfile))
     } else {
-        let depfile = if let Some(depfile) = parsed_args.depfile.as_deref() {
-            DepfilePath::Path(cwd.join(depfile))
+        let temp = temppath()?;
+
+        if generate_deps_without_system_headers {
+            // If `-MMD` (with or without `-MF <file>`), generate and write all dependencies to a tempfile immediately.
+            // We need dependencies with system includes for preprocessor cache mode, but the user potentially requested
+            // dependencies *without* system includes be written to `parsed_args.depfile`. Those will be generated by the
+            // preprocessor command already, so write deps with system includes to a tempfile so we can read them later.
+            run_input_output(
+                generate_dependencies_cmd(
+                    creator,
+                    executable,
+                    parsed_args,
+                    cwd,
+                    env_vars,
+                    &kind,
+                    &temp,
+                ),
+                None,
+            )
+            .await?;
         } else {
-            DepfilePath::Temp(temppath()?)
-        };
+            // If only `-MD`, or missing/invalid depflags, write all dependencies to a tempfile while preprocessing.
+            if !generate_deps_with_system_headers {
+                // Add missing `-MD` to preprocessor command
+                preprocess_command.arg("-MD");
+            }
+            // Add `-MF <temp>` to preprocessor command
+            preprocess_command.arg("-MF");
+            preprocess_command.arg(&temp);
+        }
 
-        let cmd = generate_all_dependencies_cmd(
-            creator,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            &kind,
-            &depfile,
-        )
-        .await;
-
-        trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
-
-        (cmd, depfile)
+        DepfilePath::Temp(temp)
     };
 
-    Ok((cmd, depfile))
+    Ok((preprocess_command, depfile))
 }
 
-async fn generate_all_dependencies_cmd<T>(
+fn generate_dependencies_cmd<T>(
     creator: &T,
     executable: &Path,
     parsed_args: &ParsedArguments,

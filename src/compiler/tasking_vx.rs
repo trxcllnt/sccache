@@ -360,22 +360,6 @@ async fn generate_dependencies<T>(
 where
     T: CommandCreatorSync,
 {
-    let (cmd, dependencies) =
-        generate_dependencies_cmd(creator, executable, parsed_args, cwd, env_vars).await?;
-    run_input_output(cmd, None).await?;
-    Ok(dependencies)
-}
-
-async fn generate_dependencies_cmd<T>(
-    creator: &T,
-    executable: &Path,
-    parsed_args: &ParsedArguments,
-    cwd: &Path,
-    env_vars: &[(OsString, OsString)],
-) -> Result<(T::Cmd, DepfilePath)>
-where
-    T: CommandCreatorSync,
-{
     let depfile = if let Some(depfile) = parsed_args.depfile.as_deref() {
         DepfilePath::Path(cwd.join(depfile))
     } else {
@@ -395,7 +379,9 @@ where
 
     trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
-    Ok((cmd, depfile))
+    run_input_output(cmd, None).await?;
+
+    Ok(depfile)
 }
 
 fn generate_compile_commands(

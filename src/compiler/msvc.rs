@@ -32,8 +32,7 @@ use crate::{
     util::{OsStrExt, path_to_bytes, run_input_output, temppath},
 };
 use async_trait::async_trait;
-use fs::File;
-use fs_err as fs;
+use fs_err::File;
 use futures::FutureExt;
 use std::{
     collections::{HashMap, HashSet},
@@ -1152,27 +1151,6 @@ async fn generate_dependencies<T>(
 where
     T: CommandCreatorSync,
 {
-    let (cmd, dependencies) =
-        generate_dependencies_cmd(creator, executable, parsed_args, cwd, env_vars, is_clang)?;
-
-    trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
-
-    run_input_output(cmd, None).await?;
-
-    Ok(dependencies)
-}
-
-fn generate_dependencies_cmd<T>(
-    creator: &T,
-    executable: &Path,
-    parsed_args: &ParsedArguments,
-    cwd: &Path,
-    env_vars: &[(OsString, OsString)],
-    is_clang: bool,
-) -> Result<(T::Cmd, DepfilePath)>
-where
-    T: CommandCreatorSync,
-{
     let depfile = if let Some(depfile) = parsed_args.depfile.as_deref() {
         DepfilePath::Path(cwd.join(depfile))
     } else {
@@ -1194,7 +1172,11 @@ where
         is_clang,
     );
 
-    Ok((cmd, depfile))
+    trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
+
+    run_input_output(cmd, None).await?;
+
+    Ok(depfile)
 }
 
 async fn parse_dependencies<P: AsRef<Path>>(

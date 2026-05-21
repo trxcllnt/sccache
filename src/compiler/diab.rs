@@ -109,7 +109,7 @@ impl CCompilerImpl for Diab {
     where
         T: CommandCreatorSync,
     {
-        generate_dependencies(creator, executable, parsed_args, cwd, env_vars, None)
+        generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
             .await
             .map(Some)
     }
@@ -392,8 +392,7 @@ where
     );
 
     let (cmd, depfile) = if generate_dependencies {
-        generate_dependencies_cmd(creator, executable, parsed_args, cwd, env_vars, Some(cmd))
-            .await
+        generate_dependencies_with_preprocess_cmd(parsed_args, cwd, cmd)
             .map(|(cmd, depfile)| (cmd, Some(depfile)))?
     } else {
         (cmd, None)
@@ -410,108 +409,55 @@ where
     Ok(PreprocessorOutput::Output(output.into(), dependencies))
 }
 
+fn generate_dependencies_with_preprocess_cmd<C>(
+    parsed_args: &ParsedArguments,
+    cwd: &Path,
+    mut preprocess_command: C,
+) -> Result<(C, DepfilePath)>
+where
+    C: RunCommand,
+{
+    let generate_deps = parsed_args
+        .dependency_args
+        .iter()
+        .any(|arg| arg == "-Xmake-dependency");
+
+    // Add missing `-Xmake-dependency`
+    if !generate_deps {
+        preprocess_command.arg("-Xmake-dependency");
+    }
+
+    let depfile = if let Some(depfile) = parsed_args.depfile.as_deref() {
+        // If `-Xmake-dependency-savefile <file>`
+        // write dependencies to the depfile
+        DepfilePath::Path(cwd.join(depfile))
+    } else {
+        // then write all dependencies to a tempfile
+        let temp = temppath()?;
+        preprocess_command.arg("-Xmake-dependency-savefile");
+        preprocess_command.arg(&temp);
+        DepfilePath::Temp(temp)
+    };
+
+    Ok((preprocess_command, depfile))
+}
+
 async fn generate_dependencies<T>(
     creator: &T,
     executable: &Path,
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-    preprocess_command: Option<T::Cmd>,
 ) -> Result<DepfilePath>
 where
     T: CommandCreatorSync,
 {
-    let (cmd, dependencies) = generate_dependencies_cmd(
-        creator,
-        executable,
-        parsed_args,
-        cwd,
-        env_vars,
-        preprocess_command,
-    )
-    .await?;
-    run_input_output(cmd, None).await?;
-    Ok(dependencies)
-}
-
-async fn generate_dependencies_cmd<T>(
-    creator: &T,
-    executable: &Path,
-    parsed_args: &ParsedArguments,
-    cwd: &Path,
-    env_vars: &[(OsString, OsString)],
-    preprocess_command: Option<T::Cmd>,
-) -> Result<(T::Cmd, DepfilePath)>
-where
-    T: CommandCreatorSync,
-{
-    let (cmd, depfile) = if let Some(mut cmd) = preprocess_command {
-        let depfile = match (
-            parsed_args.depfile.as_deref(),
-            parsed_args
-                .dependency_args
-                .iter()
-                .find(|&arg| arg == "-Xmake-dependency"),
-        ) {
-            // If `-Xmake-dependency-savefile <file>`
-            (Some(depfile), md) => {
-                // Add missing `-Xmake-dependency`
-                if md.is_none() {
-                    cmd.arg("-Xmake-dependency");
-                }
-                // write dependencies to the depfile
-                DepfilePath::Path(cwd.join(depfile))
-            }
-            // If only `-Xmake-dependency`
-            (None, md) => {
-                // Add missing `-Xmake-dependency`
-                if md.is_none() {
-                    cmd.arg("-Xmake-dependency");
-                }
-                // then write all dependencies to a tempfile
-                let temp = temppath()?;
-                cmd.arg("-Xmake-dependency-savefile");
-                cmd.arg(&temp);
-                DepfilePath::Temp(temp)
-            }
-        };
-        (cmd, depfile)
+    let depfile = if let Some(depfile) = parsed_args.depfile.as_deref() {
+        DepfilePath::Path(cwd.join(depfile))
     } else {
-        let depfile = if let Some(depfile) = parsed_args.depfile.as_deref() {
-            DepfilePath::Path(cwd.join(depfile))
-        } else {
-            DepfilePath::Temp(temppath()?)
-        };
-
-        let cmd = generate_all_dependencies_cmd(
-            creator,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            &depfile,
-        )
-        .await;
-
-        trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
-
-        (cmd, depfile)
+        DepfilePath::Temp(temppath()?)
     };
 
-    Ok((cmd, depfile))
-}
-
-async fn generate_all_dependencies_cmd<T>(
-    creator: &T,
-    executable: &Path,
-    parsed_args: &ParsedArguments,
-    cwd: &Path,
-    env_vars: &[(OsString, OsString)],
-    depfile: &Path,
-) -> T::Cmd
-where
-    T: CommandCreatorSync,
-{
     let cmd = preprocess_cmd(
         creator.clone().new_command_sync(executable),
         &ParsedArguments {
@@ -519,7 +465,7 @@ where
             dependency_args: vec![
                 "-Xmake-dependency".into(),
                 "-Xmake-dependency-savefile".into(),
-                depfile.into(),
+                depfile.as_path().into(),
             ],
             ..parsed_args.clone()
         },
@@ -527,13 +473,11 @@ where
         env_vars,
     );
 
-    trace!(
-        "[{}]: generate all dependencies cmd: {}",
-        parsed_args.output_pretty(),
-        cmd
-    );
+    trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
-    cmd
+    run_input_output(cmd, None).await?;
+
+    Ok(depfile)
 }
 
 pub fn generate_compile_commands(
