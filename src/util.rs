@@ -1371,9 +1371,14 @@ pub fn daemonize() -> Result<()> {
             // set it back
             rustix::process::umask(mask);
             #[cfg(target_os = "linux")]
-            let daemon = Daemonize::new().umask(mask.bits());
+            let mut daemon = Daemonize::new().umask(mask.bits());
             #[cfg(not(target_os = "linux"))]
-            let daemon = Daemonize::new().umask(mask.bits() as u32);
+            let mut daemon = Daemonize::new().umask(mask.bits() as u32);
+
+            if let Some(pidfile) = env::var_os("SCCACHE_PID_FILE") {
+                daemon = daemon.pid_file(pidfile);
+            }
+
             daemon.start().context("failed to daemonize")?;
         }
     }
