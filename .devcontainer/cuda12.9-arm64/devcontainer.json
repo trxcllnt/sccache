@@ -5,7 +5,7 @@
       "BASE": "messense/rust-musl-cross:aarch64-musl",
       "CARGO_BUILD_TARGET": "aarch64-unknown-linux-musl",
       "LOCAL_WORKSPACE_FOLDER": "${localWorkspaceFolder}",
-      "RUST_VERSION": "1.85.0"
+      "RUST_VERSION": "1.88.0"
     },
     "options": [
       "--platform",
