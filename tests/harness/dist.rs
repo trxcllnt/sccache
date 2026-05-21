@@ -1,6 +1,6 @@
 use bytes::Buf;
 use fs_err as fs;
-use futures::{StreamExt, TryStreamExt};
+use futures::{FutureExt, StreamExt, TryStreamExt};
 use itertools::Itertools;
 use std::{
     collections::HashMap,
@@ -109,6 +109,7 @@ struct DistSystemGlobals {
     message_brokers: Mutex<Vec<DistHandle>>,
     teardown_failures: Mutex<HashMap<(u64, String), std::process::Output>>,
     teardown_successes: Mutex<HashMap<(u64, String), std::process::Output>>,
+    started: futures::future::Shared<tokio::time::Sleep>,
 }
 
 impl DistSystemGlobals {
@@ -165,6 +166,7 @@ impl DistSystemGlobals {
             ]),
             teardown_failures: Mutex::new(HashMap::new()),
             teardown_successes: Mutex::new(HashMap::new()),
+            started: tokio::time::sleep(Duration::from_secs(10)).shared(),
         })
     }
 
@@ -733,6 +735,7 @@ impl DistSystemBuilder {
     }
 
     pub async fn build(&mut self) -> Result<DistSystem> {
+        self.globals.started.clone().await;
         let name = &self.dist_system_name;
         let mut system = DistSystem::new(name);
         let message_broker = self.message_broker.as_ref().expect("Message broker exists");
@@ -906,12 +909,13 @@ impl DistSystem {
                     "SCCACHE_LOG={}",
                     (
                         // Prefer sccache=trace if SCCACHE_DEBUG=1
-                        env::var("SCCACHE_DEBUG")
-                            .and(Ok("sccache=trace,tower_http=debug,axum::rejection=trace"))
+                        env::var("SCCACHE_DEBUG").and(Ok(
+                            "celery=warn,sccache=trace,tower_http=debug,axum::rejection=trace"
+                        ))
                     )
                     .or(env::var("SCCACHE_SERVER_LOG").as_deref())
                     .or(env::var("SCCACHE_LOG").as_deref())
-                    .unwrap_or("sccache=debug,tower_http=debug,axum::rejection=trace") // default to debug
+                    .unwrap_or("celery=warn,sccache=debug,tower_http=debug,axum::rejection=trace") // default to debug
                 ),
             ])
             .args([
@@ -1012,11 +1016,11 @@ impl DistSystem {
                     "SCCACHE_LOG={}",
                     (
                         // Prefer sccache=trace if SCCACHE_DEBUG=1
-                        env::var("SCCACHE_DEBUG").and(Ok("sccache=trace"))
+                        env::var("SCCACHE_DEBUG").and(Ok("celery=warn,sccache=trace"))
                     )
                     .or(env::var("SCCACHE_SERVER_LOG").as_deref())
                     .or(env::var("SCCACHE_LOG").as_deref())
-                    .unwrap_or("sccache=debug") // default to debug
+                    .unwrap_or("celery=warn,sccache=debug") // default to debug
                 ),
             ])
             .args([

@@ -169,7 +169,9 @@ impl Tasks {
             .task_content_type(MessageContentType::MsgPack)
             // Prefetch messages
             .prefetch_count(prefetch_count)
-            // Immediately retry failed tasks
+            // Don't retry failed tasks
+            .task_max_retries(0)
+            // Don't delay retrying failed tasks
             .task_min_retry_delay(0)
             .task_max_retry_delay(0)
             // Don't retry tasks that fail with unexpected errors
@@ -308,12 +310,7 @@ impl ServerTasks for Tasks {}
 
 #[allow(non_local_definitions)]
 mod task_impls {
-    use celery::prelude::*;
-    use celery::protocol::MessageContentType::MsgPack;
-
-    use futures::FutureExt;
-    use std::{boxed::Box, sync::Arc};
-
+    use super::{SCHEDULER, SERVER};
     use crate::{
         dist::{
             CompileCommand, RunJobError, RunJobResponse, SchedulerService, ServerService,
@@ -321,8 +318,9 @@ mod task_impls {
         },
         errors::*,
     };
-
-    use super::{SCHEDULER, SERVER};
+    use celery::prelude::*;
+    use futures::FutureExt;
+    use std::{boxed::Box, sync::Arc};
 
     fn scheduler_service<'a>() -> Result<&'a Arc<dyn SchedulerService>> {
         SCHEDULER.get().ok_or_else(|| {
@@ -342,9 +340,6 @@ mod task_impls {
 
     #[celery::task(
         acks_late = true,
-        max_retries = 0,
-        content_type = MsgPack,
-        retry_for_unexpected = false,
         on_failure = on_run_job_failure,
         on_success = on_run_job_success,
     )]
@@ -430,11 +425,7 @@ mod task_impls {
         }
     }
 
-    #[celery::task(
-        max_retries = 0,
-        content_type = MsgPack,
-        retry_for_unexpected = false
-    )]
+    #[celery::task]
     pub async fn job_finished(job_id: String, status: StatusUpdate) -> TaskResult<()> {
         tracing::trace!("[job_finished({job_id}, {status:?})]");
 
@@ -450,11 +441,7 @@ mod task_impls {
             })
     }
 
-    #[celery::task(
-        max_retries = 0,
-        content_type = MsgPack,
-        retry_for_unexpected = false
-    )]
+    #[celery::task]
     pub async fn server_status(status: StatusUpdate) -> TaskResult<()> {
         let id = status.id.clone();
 
@@ -472,11 +459,7 @@ mod task_impls {
             })
     }
 
-    #[celery::task(
-        max_retries = 0,
-        content_type = MsgPack,
-        retry_for_unexpected = false
-    )]
+    #[celery::task]
     pub async fn scheduler_status(status: StatusUpdate) -> TaskResult<()> {
         let id = status.id.clone();
 
