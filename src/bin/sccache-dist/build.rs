@@ -536,13 +536,13 @@ impl OverlayBuilder {
             toolchain_dir: _,
         } = overlay;
 
-        if build_dir.exists() {
-            if let Err(e) = tokio::fs::remove_dir_all(build_dir).await {
-                tracing::warn!(
-                    "[finish_overlay({job_id})]: Failed to remove build directory {:?}: {e:?}",
-                    build_dir.display()
-                );
-            }
+        if build_dir.exists()
+            && let Err(e) = tokio::fs::remove_dir_all(build_dir).await
+        {
+            tracing::warn!(
+                "[finish_overlay({job_id})]: Failed to remove build directory {:?}: {e:?}",
+                build_dir.display()
+            );
         }
     }
 }

@@ -975,19 +975,19 @@ pub fn include_is_too_new(
 ) -> bool {
     // The comparison using >= is intentional, due to a possible race between
     // starting compilation and writing the include file.
-    if let Some(mtime) = meta.modified {
-        if mtime >= time_of_compilation.into() {
-            debug!("Include file {path:?} is too new");
-            return true;
-        }
+    if let Some(mtime) = meta.modified
+        && mtime >= time_of_compilation.into()
+    {
+        debug!("Include file {path:?} is too new");
+        return true;
     }
 
     // The same >= logic as above applies to the change time of the file.
-    if let Some(ctime) = meta.ctime_or_creation {
-        if ctime >= time_of_compilation.into() {
-            debug!("Include file {path:?} is too new");
-            return true;
-        }
+    if let Some(ctime) = meta.ctime_or_creation
+        && ctime >= time_of_compilation.into()
+    {
+        debug!("Include file {path:?} is too new");
+        return true;
     }
 
     false

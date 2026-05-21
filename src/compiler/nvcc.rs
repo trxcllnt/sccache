@@ -957,10 +957,10 @@ fn parsed_to_nvcc_args(
             }
             if let Some(idx) = unhashed_args.iter().position(|x| x == "--threads") {
                 let arg = unhashed_args.get(idx + 1);
-                if let Some(arg) = arg.and_then(|arg| arg.to_str()) {
-                    if let Ok(arg) = arg.parse::<usize>() {
-                        num_parallel = arg;
-                    }
+                if let Some(arg) = arg.and_then(|arg| arg.to_str())
+                    && let Ok(arg) = arg.parse::<usize>()
+                {
+                    num_parallel = arg;
                 }
                 unhashed_args.splice(idx..(idx + 2), []);
                 continue;
@@ -1423,11 +1423,11 @@ fn merge_nvcc_and_host_compiler_commands(
         if let Some("cudafe++") = exe.file_stem().and_then(|s| s.to_str()) {
             // Fix for CTK < 12.0:
             // Add `--gen_module_id_file` if the cudafe++ args include `--module_id_file_name`
-            if let Some(idx) = args.iter().position(|x| x == &module_id_file_name_flag) {
-                if !args.contains(&gen_module_id_file_flag) {
-                    // Insert `--gen_module_id_file` just before `--module_id_file_name` to match nvcc behavior
-                    args.splice(idx..idx, [gen_module_id_file_flag.clone()]);
-                }
+            if let Some(idx) = args.iter().position(|x| x == &module_id_file_name_flag)
+                && !args.contains(&gen_module_id_file_flag)
+            {
+                // Insert `--gen_module_id_file` just before `--module_id_file_name` to match nvcc behavior
+                args.splice(idx..idx, [gen_module_id_file_flag.clone()]);
             }
             cudafe_has_gen_module_id_file_flag = args.contains(&gen_module_id_file_flag);
         }
@@ -1940,10 +1940,10 @@ where
     // match what nvcc generates for "many-arch" compilations.
     //
     let nvcc_command_args = lines.iter().filter_map(|(exe, args)| {
-        if let Some(exe_name) = exe.file_stem().and_then(|s| s.to_str()) {
-            if is_nvcc_exe(exe_name, args) {
-                return Some(args);
-            }
+        if let Some(exe_name) = exe.file_stem().and_then(|s| s.to_str())
+            && is_nvcc_exe(exe_name, args)
+        {
+            return Some(args);
         }
         None
     });
@@ -1958,10 +1958,10 @@ where
         .into_iter()
         .enumerate()
         .filter_map(|(idx, (exe, args))| {
-            if let Some(exe_name) = exe.file_stem().and_then(|s| s.to_str()) {
-                if select_subcommand(exe_name, &args) {
-                    return Some((idx, exe, args));
-                }
+            if let Some(exe_name) = exe.file_stem().and_then(|s| s.to_str())
+                && select_subcommand(exe_name, &args)
+            {
+                return Some((idx, exe, args));
             }
             None
         })
@@ -1976,23 +1976,23 @@ fn fold_env_vars_or_split_into_exe_and_args(
     host_compiler: &NvccHostCompiler,
 ) -> Option<Result<(PathBuf, Vec<String>)>> {
     // Intercept the environment variable lines and add them to env_vars_nvcc
-    if let Some((var, val)) = line.split_once("=") {
-        if var.chars().all(|b| b.is_ascii_alphabetic() || b == '_') {
-            env_vars_nvcc.entry(var.into()).or_insert_with(|| {
-                (
-                    val.into(),
-                    if cfg!(target_os = "windows") {
-                        // %CICC_PATH%
-                        format!(r#"%{var}%"#)
-                    } else {
-                        // $CICC_PATH
-                        format!(r#"${var}"#)
-                    },
-                )
-            });
+    if let Some((var, val)) = line.split_once("=")
+        && var.chars().all(|b| b.is_ascii_alphabetic() || b == '_')
+    {
+        env_vars_nvcc.entry(var.into()).or_insert_with(|| {
+            (
+                val.into(),
+                if cfg!(target_os = "windows") {
+                    // %CICC_PATH%
+                    format!(r#"%{var}%"#)
+                } else {
+                    // $CICC_PATH
+                    format!(r#"${var}"#)
+                },
+            )
+        });
 
-            return None;
-        }
+        return None;
     }
 
     // The rest of the lines are subcommands, so parse into a vec of [exe, args..]
@@ -2051,10 +2051,10 @@ fn fold_env_vars_or_split_into_exe_and_args(
             // If the previous arg was <, >, <0, 1>, or 2>, then it
             // redirected stdin/stdout/stderr to the current arg.
             // Discard both previous and current args.
-            if let Some(prev) = prev {
-                if matches!(prev.as_str(), "<" | ">" | "<0" | "1>" | "2>") {
-                    return (None, args);
-                }
+            if let Some(prev) = prev
+                && matches!(prev.as_str(), "<" | ">" | "<0" | "1>" | "2>")
+            {
+                return (None, args);
             }
 
             // If the arg is <, >, <0, 1>, or 2>, discard both the current and next args.
@@ -2086,12 +2086,11 @@ fn find_last_compute_arch<'a, A: AsRef<[String]> + 'a, I: DoubleEndedIterator<It
 ) -> Option<String> {
     lines.rev().find_map(|args| {
         let args = args.as_ref();
-        if let Some(idx) = args.iter().position(|arg| arg == "-arch") {
-            if let Some(val) = args.get(idx + 1) {
-                if let Some((_, arch)) = val.split_once('_') {
-                    return Some(arch.to_owned());
-                }
-            }
+        if let Some(idx) = args.iter().position(|arg| arg == "-arch")
+            && let Some(val) = args.get(idx + 1)
+            && let Some((_, arch)) = val.split_once('_')
+        {
+            return Some(arch.to_owned());
         }
         None
     })

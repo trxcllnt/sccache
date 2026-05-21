@@ -315,12 +315,11 @@ mod scheduler {
                                     } else {
                                         return None;
                                     }
-                                    if let Some(q) = parts.next() {
-                                        if let Some(q) = q.split("=").last() {
-                                            if let Ok(q) = q.parse() {
-                                                quality = q;
-                                            }
-                                        }
+                                    if let Some(q) = parts.next()
+                                        && let Some(q) = q.split("=").last()
+                                        && let Ok(q) = q.parse()
+                                    {
+                                        quality = q;
                                     }
                                 } else {
                                     mimetype = s.to_owned();

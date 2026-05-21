@@ -849,38 +849,38 @@ pub fn parse_arguments(
         }
     }
 
-    if language == Language::Cxx {
-        if let Some(obj) = outputs.get("obj") {
-            // MSVC can produce "type library headers"[1], with the extensions "tlh" and "tli".
-            // These files can be used in later compilation steps to interact with COM interfaces.
-            //
-            // These files are only created when the `#import` directive is used.
-            // Figuring out if an import directive is used would require parsing C++, which would be a lot of work.
-            // To avoid that problem, we just optionally cache these headers if they happen to be produced.
-            // This isn't perfect, but it is easy!
-            //
-            // [1]: https://learn.microsoft.com/en-us/cpp/preprocessor/hash-import-directive-cpp?view=msvc-170#_predir_the_23import_directive_header_files_created_by_import
-            let tlh = obj.path.with_extension("tlh");
-            let tli = obj.path.with_extension("tli");
+    if language == Language::Cxx
+        && let Some(obj) = outputs.get("obj")
+    {
+        // MSVC can produce "type library headers"[1], with the extensions "tlh" and "tli".
+        // These files can be used in later compilation steps to interact with COM interfaces.
+        //
+        // These files are only created when the `#import` directive is used.
+        // Figuring out if an import directive is used would require parsing C++, which would be a lot of work.
+        // To avoid that problem, we just optionally cache these headers if they happen to be produced.
+        // This isn't perfect, but it is easy!
+        //
+        // [1]: https://learn.microsoft.com/en-us/cpp/preprocessor/hash-import-directive-cpp?view=msvc-170#_predir_the_23import_directive_header_files_created_by_import
+        let tlh = obj.path.with_extension("tlh");
+        let tli = obj.path.with_extension("tli");
 
-            // Primary type library header
-            outputs.insert(
-                "tlh",
-                ArtifactDescriptor {
-                    path: tlh,
-                    optional: true,
-                },
-            );
+        // Primary type library header
+        outputs.insert(
+            "tlh",
+            ArtifactDescriptor {
+                path: tlh,
+                optional: true,
+            },
+        );
 
-            // Secondary type library header
-            outputs.insert(
-                "tli",
-                ArtifactDescriptor {
-                    path: tli,
-                    optional: true,
-                },
-            );
-        }
+        // Secondary type library header
+        outputs.insert(
+            "tli",
+            ArtifactDescriptor {
+                path: tli,
+                optional: true,
+            },
+        );
     }
 
     // -Fd is not taken into account unless -Zi or -ZI are given
@@ -1071,55 +1071,56 @@ where
 
     let mut output = run_input_output(cmd, None).await?;
 
-    if is_clang {
-        if let (Some(obj), Some(depfile)) = (parsed_args.outputs.get("obj"), &parsed_args.depfile) {
-            let objfile = &obj.path;
-            let f = File::create(cwd.join(depfile))?;
-            let mut f = BufWriter::new(f);
+    if is_clang
+        && let (Some(obj), Some(depfile)) = (parsed_args.outputs.get("obj"), &parsed_args.depfile)
+    {
+        let objfile = &obj.path;
+        let f = File::create(cwd.join(depfile))?;
+        let mut f = BufWriter::new(f);
 
-            f.write_all(
-                &path_to_bytes(objfile)
-                    .with_context(|| format!("Couldn't encode objfile filename: '{objfile:?}'"))?,
-            )?;
-            write!(f, ": ")?;
-            f.write_all(
-                &path_to_bytes(&parsed_args.input)
-                    .with_context(|| format!("Couldn't encode input filename: '{objfile:?}'"))?,
-            )?;
-            write!(f, " ")?;
-            let stderr = from_local_codepage(output.stderr)
-                .context("Failed to convert preprocessor stderr")?;
-            let mut deps = HashSet::new();
-            let mut stderr_bytes = vec![];
-            for line in stderr.lines() {
-                if let Some(include_path) = line.strip_prefix(includes_prefix) {
-                    let dep = normpath(include_path.trim());
-                    trace!("included: {}", dep);
-                    if deps.insert(dep.clone()) && !dep.contains(' ') {
-                        write!(f, "{dep} ")?;
-                    }
-                    if !parsed_args.msvc_show_includes {
-                        continue;
-                    }
+        f.write_all(
+            &path_to_bytes(objfile)
+                .with_context(|| format!("Couldn't encode objfile filename: '{objfile:?}'"))?,
+        )?;
+        write!(f, ": ")?;
+        f.write_all(
+            &path_to_bytes(&parsed_args.input)
+                .with_context(|| format!("Couldn't encode input filename: '{objfile:?}'"))?,
+        )?;
+        write!(f, " ")?;
+        let stderr =
+            from_local_codepage(output.stderr).context("Failed to convert preprocessor stderr")?;
+        let mut deps = HashSet::new();
+        let mut stderr_bytes = vec![];
+        for line in stderr.lines() {
+            if let Some(include_path) = line.strip_prefix(includes_prefix) {
+                let dep = normpath(include_path.trim());
+                trace!("included: {}", dep);
+                if deps.insert(dep.clone()) && !dep.contains(' ') {
+                    write!(f, "{dep} ")?;
                 }
-                stderr_bytes.extend_from_slice(line.as_bytes());
-                stderr_bytes.push(b'\n');
-            }
-            writeln!(f)?;
-            // Write extra rules for each dependency to handle removed files.
-            f.write_all(&path_to_bytes(&parsed_args.input).with_context(|| {
-                format!("Couldn't encode filename: '{:?}'", parsed_args.input)
-            })?)?;
-            writeln!(f, ":")?;
-            let mut sorted = deps.into_iter().collect::<Vec<_>>();
-            sorted.sort();
-            for dep in sorted {
-                if !dep.contains(' ') {
-                    writeln!(f, "{dep}:")?;
+                if !parsed_args.msvc_show_includes {
+                    continue;
                 }
             }
-            output.stderr = stderr_bytes;
+            stderr_bytes.extend_from_slice(line.as_bytes());
+            stderr_bytes.push(b'\n');
         }
+        writeln!(f)?;
+        // Write extra rules for each dependency to handle removed files.
+        f.write_all(
+            &path_to_bytes(&parsed_args.input)
+                .with_context(|| format!("Couldn't encode filename: '{:?}'", parsed_args.input))?,
+        )?;
+        writeln!(f, ":")?;
+        let mut sorted = deps.into_iter().collect::<Vec<_>>();
+        sorted.sort();
+        for dep in sorted {
+            if !dep.contains(' ') {
+                writeln!(f, "{dep}:")?;
+            }
+        }
+        output.stderr = stderr_bytes;
     }
 
     let (output, dependencies) = if generate_dependencies {

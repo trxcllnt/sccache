@@ -675,13 +675,9 @@ where
                     }
                 }
 
-                if !update_failed {
-                    if let Some(key) = hit {
-                        debug!(
-                            "[{out_pretty}]: Preprocessor cache hit: {preprocessor_key} -> {key}"
-                        );
-                        return Ok(PreprocessorCacheLookup::Hit(key));
-                    }
+                if !update_failed && let Some(key) = hit {
+                    debug!("[{out_pretty}]: Preprocessor cache hit: {preprocessor_key} -> {key}");
+                    return Ok(PreprocessorCacheLookup::Hit(key));
                 }
             }
             debug!("[{out_pretty}]: Preprocessor cache miss: {preprocessor_key}");
@@ -1399,12 +1395,11 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
             .depfile
             .as_ref()
             .map(|depfile| cwd.join(depfile))
+            && !depfile.exists()
         {
-            if !depfile.exists() {
-                compiler
-                    .generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
-                    .await?;
-            }
+            compiler
+                .generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
+                .await?;
         }
         Ok(())
     }

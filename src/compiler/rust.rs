@@ -1181,14 +1181,13 @@ fn parse_arguments(arguments: &[OsString], cwd: &Path) -> CompilerArguments<Pars
             None => {
                 match arg {
                     Argument::Raw(ref val) => {
-                        if idx == 0 {
-                            if let Some(value) = val.to_str() {
-                                if value == "rustc" {
-                                    // If the first argument is rustc, it's likely called via clippy-driver,
-                                    // so it's not actually an input file, which means we should discount it.
-                                    continue;
-                                }
-                            }
+                        if idx == 0
+                            && let Some(value) = val.to_str()
+                            && value == "rustc"
+                        {
+                            // If the first argument is rustc, it's likely called via clippy-driver,
+                            // so it's not actually an input file, which means we should discount it.
+                            continue;
                         }
                         if input.is_some() {
                             // Can't cache compilations with multiple inputs.
@@ -1828,10 +1827,10 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
             }
             // OUT_DIR was changed during transformation, check if this compilation is relying on anything
             // inside it - if so, disallow distributed compilation (there are sometimes hardcoded paths present)
-            if let Some(out_dir) = changed_out_dir {
-                if self.inputs.iter().any(|input| input.starts_with(&out_dir)) {
-                    return None;
-                }
+            if let Some(out_dir) = changed_out_dir
+                && self.inputs.iter().any(|input| input.starts_with(&out_dir))
+            {
+                return None;
             }
 
             // Add any necessary path transforms - although we haven't packaged up inputs yet, we've
@@ -2068,18 +2067,17 @@ impl pkg::InputsPackager for RustInputsPackager {
                         "Cannot distribute dylib input {} on this platform",
                         input_path.display()
                     )
-                } else if ext == RLIB_EXTENSION || ext == RMETA_EXTENSION {
-                    if let Some((ref rlib_dep_reader, ref mut dep_crate_names)) =
+                } else if (ext == RLIB_EXTENSION || ext == RMETA_EXTENSION)
+                    && let Some((ref rlib_dep_reader, ref mut dep_crate_names)) =
                         rlib_dep_reader_and_names
-                    {
-                        dep_crate_names.extend(
-                            rlib_dep_reader
-                                .discover_rlib_deps(&env_vars, &input_path)
-                                .with_context(|| {
-                                    format!("Failed to read deps of {}", input_path.display())
-                                })?,
-                        );
-                    }
+                {
+                    dep_crate_names.extend(
+                        rlib_dep_reader
+                            .discover_rlib_deps(&env_vars, &input_path)
+                            .with_context(|| {
+                                format!("Failed to read deps of {}", input_path.display())
+                            })?,
+                    );
                 }
             }
 
@@ -2102,10 +2100,10 @@ impl pkg::InputsPackager for RustInputsPackager {
             tar_inputs.push((input_path, dist_input_path));
         }
 
-        if log_enabled!(log::Level::Trace) {
-            if let Some((_, ref dep_crate_names)) = rlib_dep_reader_and_names {
-                trace!("Identified dependency crate names: {:?}", dep_crate_names);
-            }
+        if log_enabled!(log::Level::Trace)
+            && let Some((_, ref dep_crate_names)) = rlib_dep_reader_and_names
+        {
+            trace!("Identified dependency crate names: {:?}", dep_crate_names);
         }
 
         // Given the link paths, find the things we need to send over the wire to the remote machine. If
@@ -2561,10 +2559,10 @@ impl RlibDepReader {
 
         {
             let mut cache = self.cache.lock().unwrap();
-            if let Some(deps_detail) = cache.get(rlib) {
-                if rlib_mtime == deps_detail.mtime {
-                    return Ok(deps_detail.deps.clone());
-                }
+            if let Some(deps_detail) = cache.get(rlib)
+                && rlib_mtime == deps_detail.mtime
+            {
+                return Ok(deps_detail.deps.clone());
             }
         }
 

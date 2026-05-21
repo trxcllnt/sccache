@@ -134,10 +134,10 @@ where
         },
     );
 
-    if let Some(input) = input.as_ref().and_then(|s| s.to_str()) {
-        if let Some(idx) = args.iter().position(|arg| arg.ends_with(input)) {
-            args.splice(idx..idx + 1, []);
-        }
+    if let Some(input) = input.as_ref().and_then(|s| s.to_str())
+        && let Some(idx) = args.iter().position(|arg| arg.ends_with(input))
+    {
+        args.splice(idx..idx + 1, []);
     }
 
     for output in outputs.values().map(|p| p.as_os_str()) {

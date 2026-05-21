@@ -1652,12 +1652,10 @@ where
                 // Do our best to clean up. We may end up deleting a file that we just wrote over
                 // the top of, but it's better to clean up too much than too little
                 for path in output_paths.iter() {
-                    if let Err(e) = tokio::fs::remove_file(path).await {
-                        if e.kind() != io::ErrorKind::NotFound {
-                            debug!(
-                                "[{out_pretty}, {job_id}]: {e} while attempting to remove {path:?}"
-                            );
-                        }
+                    if let Err(e) = tokio::fs::remove_file(path).await
+                        && e.kind() != io::ErrorKind::NotFound
+                    {
+                        debug!("[{out_pretty}, {job_id}]: {e} while attempting to remove {path:?}");
                     }
                 }
 
@@ -2178,10 +2176,10 @@ where
     child.env_clear().envs(env.to_vec()).args(&["-vV"]);
 
     let rustc_vv = run_input_output(child, None).await.map(|output| {
-        if let Ok(stdout) = String::from_utf8(output.stdout.clone()) {
-            if stdout.starts_with("rustc ") {
-                return Ok(stdout);
-            }
+        if let Ok(stdout) = String::from_utf8(output.stdout.clone())
+            && stdout.starts_with("rustc ")
+        {
+            return Ok(stdout);
         }
         Err(ProcessError(output))
     })?;

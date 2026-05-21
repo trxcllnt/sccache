@@ -211,13 +211,11 @@ impl SccacheClient {
     }
 
     pub fn config(&self) -> FileConfig {
-        if let Some(cfg_path_idx) = self.envvars.iter().position(|(k, _)| k == "SCCACHE_CONF") {
-            if let Some((_, cfg_path)) = self.envvars.get(cfg_path_idx) {
-                if let Ok(Some(cfg)) = try_read_config_file::<FileConfig>(&PathBuf::from(cfg_path))
-                {
-                    return cfg;
-                }
-            }
+        if let Some(cfg_path_idx) = self.envvars.iter().position(|(k, _)| k == "SCCACHE_CONF")
+            && let Some((_, cfg_path)) = self.envvars.get(cfg_path_idx)
+            && let Ok(Some(cfg)) = try_read_config_file::<FileConfig>(&PathBuf::from(cfg_path))
+        {
+            return cfg;
         }
         FileConfig::default()
     }
