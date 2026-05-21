@@ -423,7 +423,7 @@ impl Scheduler {
                     .unwrap_or(0);
                 (
                     // microseconds as seconds
-                    max_job_age.saturating_div(1_000_000) as u64,
+                    max_job_age.saturating_div(1_000_000),
                     // remainder microseconds as nanoseconds
                     (max_job_age % 1_000_000).saturating_mul(1_000) as u32,
                 )

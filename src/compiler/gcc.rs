@@ -1021,7 +1021,7 @@ where
                         parsed_args.arch_args.clone()
                     } else {
                         trace!("-arch args before rewrite: {:?}", parsed_args.arch_args);
-                        trace!("-arch args after rewrite:  {:?}", rewritten_arch_args);
+                        trace!("-arch args after rewrite:  {rewritten_arch_args:?}");
                         rewritten_arch_args
                     }
                 } else {
@@ -1698,7 +1698,7 @@ mod test {
             ..
         } = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.h"), input.to_str());
         assert_eq!(Language::ObjectiveCHeader, language);
@@ -1735,7 +1735,7 @@ mod test {
         };
         let mut common_and_arch_args = common_args.clone();
         common_and_arch_args.extend(common_args.clone());
-        debug!("common_and_arch_args: {:?}", common_and_arch_args);
+        debug!("common_and_arch_args: {common_and_arch_args:?}");
         assert_eq!(Some("foo.cpp"), input.to_str());
         assert_eq!(Language::Cxx, language);
         assert_map_contains!(
@@ -2089,7 +2089,7 @@ mod test {
 
             let a = match parse_arguments_(args, false) {
                 CompilerArguments::Ok(args) => args,
-                o => panic!("Got unexpected parse result: {:?} for flag: {:?}", o, flag),
+                o => panic!("Got unexpected parse result: {o:?} for flag: {flag:?}"),
             };
 
             assert_eq!(Language::C, a.language);
@@ -2177,7 +2177,7 @@ mod test {
                     assert_eq!(reason, &flag);
                 }
                 o => {
-                    panic!("Got unexpected parse result: {:?} for flag: {:?}", o, flag);
+                    panic!("Got unexpected parse result: {o:?} for flag: {flag:?}");
                 }
             }
         }

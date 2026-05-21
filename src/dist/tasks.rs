@@ -69,7 +69,7 @@ impl Tasks {
                     CeleryError::BrokerError(err) => err.to_string(),
                     err => err.to_string(),
                 };
-                anyhow!("{}\n\n{}", err_message, MESSAGE_BROKER_ERROR_TEXT)
+                anyhow!("{err_message}\n\n{MESSAGE_BROKER_ERROR_TEXT}")
             })?),
             queues_to_consume,
         })
@@ -177,10 +177,7 @@ impl Tasks {
             // Don't retry tasks that fail with unexpected errors
             .task_retry_for_unexpected(false))
         } else {
-            bail!(
-                "Missing required message broker configuration!\n\n{}",
-                MESSAGE_BROKER_ERROR_TEXT
-            )
+            bail!("Missing required message broker configuration!\n\n{MESSAGE_BROKER_ERROR_TEXT}")
         }
     }
 }

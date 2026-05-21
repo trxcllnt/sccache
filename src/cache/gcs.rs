@@ -91,7 +91,7 @@ impl GCSCache {
 ///
 /// Reference: [gcpCredentials](https://docs.taskcluster.net/docs/reference/platform/auth/api#gcpCredentials)
 async fn fetch_taskcluster_token(url: &str, scope: &str) -> Result<String> {
-    debug!("gcs: start to load token from: {}", url);
+    debug!("gcs: start to load token from: {url}");
 
     let user_agent = format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
     let client = Client::builder().user_agent(user_agent).build()?;
@@ -99,7 +99,7 @@ async fn fetch_taskcluster_token(url: &str, scope: &str) -> Result<String> {
 
     if res.status().is_success() {
         let resp = res.json::<TaskClusterToken>().await?;
-        debug!("gcs: token load succeeded for scope: {}", scope);
+        debug!("gcs: token load succeeded for scope: {scope}");
         Ok(resp.access_token)
     } else {
         let status_code = res.status();

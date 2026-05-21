@@ -1986,8 +1986,7 @@ mod tests {
         let resolved_str = resolved.to_string_lossy();
         assert!(
             !resolved_str.contains("ccache"),
-            "Resolved path should not contain ccache: {}",
-            resolved_str
+            "Resolved path should not contain ccache: {resolved_str}"
         );
     }
 

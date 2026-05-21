@@ -264,7 +264,7 @@ where
         .env_clear()
         .envs(env_vars.to_vec())
         .current_dir(cwd);
-    trace!("[{}]: get dep-info: {:?}", crate_name, cmd);
+    trace!("[{crate_name}]: get dep-info: {cmd:?}");
     // Output of command is in file under dep_file, so we ignore stdout&stderr
     let _dep_info = run_input_output(cmd, None).await?;
     // Parse the dep-info file, then hash the contents of those files.
@@ -386,11 +386,11 @@ where
         .env_clear()
         .envs(env_vars.to_vec())
         .current_dir(cwd);
-    trace!("get_compiler_outputs: {:?}", cmd);
+    trace!("get_compiler_outputs: {cmd:?}");
     let outputs = run_input_output(cmd, None).await?;
 
     let outstr = String::from_utf8(outputs.stdout).context("Error parsing rustc output")?;
-    trace!("get_compiler_outputs: {:?}", outstr);
+    trace!("get_compiler_outputs: {outstr:?}");
     Ok(outstr.lines().map(|l| l.to_owned()).collect())
 }
 
@@ -447,7 +447,7 @@ impl Rust {
                 })
                 .collect::<Vec<_>>();
             if let Some(path) = dist_archive {
-                trace!("Hashing {:?} along with rustc libs.", path);
+                trace!("Hashing {path:?} along with rustc libs.");
                 libs.push(path);
             }
             libs.sort();
@@ -471,8 +471,7 @@ impl Rust {
                 Ok(r) => Some(Arc::new(r)),
                 Err(e) => {
                     warn!(
-                        "Failed to initialise RlibDepDecoder, distributed compiles will be inefficient: {}",
-                        e
+                        "Failed to initialise RlibDepDecoder, distributed compiles will be inefficient: {e}"
                     );
                     None
                 }
@@ -704,7 +703,7 @@ impl RustupProxy {
                         Ok(ProxyPath::Candidate(proxy_candidate))
                     }
                     Err(e) => {
-                        trace!("proxy: rustup is not present: {}", e);
+                        trace!("proxy: rustup is not present: {e}");
                         Ok(ProxyPath::ToBeDiscovered)
                     }
                 }
@@ -1882,10 +1881,7 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
             env_vars,
             ..
         } = *{ self };
-        trace!(
-            "Dist inputs: inputs={:?} crate_link_paths={:?}",
-            inputs, crate_link_paths
-        );
+        trace!("Dist inputs: inputs={inputs:?} crate_link_paths={crate_link_paths:?}");
 
         let inputs_packager = Box::new(RustInputsPackager {
             env_vars,
@@ -1940,7 +1936,7 @@ struct RustInputsPackager {
 
 #[cfg(feature = "dist-client")]
 fn can_trim_this(input_path: &Path) -> bool {
-    trace!("can_trim_this: input_path={:?}", input_path);
+    trace!("can_trim_this: input_path={input_path:?}");
     let mut ar_path = input_path.to_path_buf();
     ar_path.set_extension("a");
     // Check if the input path exists with both a .rlib and a .a, in which case
@@ -2103,7 +2099,7 @@ impl pkg::InputsPackager for RustInputsPackager {
         if log_enabled!(log::Level::Trace)
             && let Some((_, ref dep_crate_names)) = rlib_dep_reader_and_names
         {
-            trace!("Identified dependency crate names: {:?}", dep_crate_names);
+            trace!("Identified dependency crate names: {dep_crate_names:?}");
         }
 
         // Given the link paths, find the things we need to send over the wire to the remote machine. If
@@ -2303,7 +2299,7 @@ impl OutputsRewriter for RustOutputsRewriter {
             for dep_info_local_path in output_paths {
                 trace!("Comparing with {}", dep_info_local_path.display());
                 if dep_info == dep_info_local_path {
-                    info!("Replacing using the transformer {:?}", path_transformer);
+                    info!("Replacing using the transformer {path_transformer:?}");
                     // Found the dep info file, read it in
                     let f =
                         fs::File::open(dep_info).with_context(|| "Failed to open dep info file")?;
@@ -2318,10 +2314,7 @@ impl OutputsRewriter for RustOutputsRewriter {
                                 local_path.display()
                             )
                         })?;
-                        error!(
-                            "RE replacing {} with {} in {}",
-                            re_str, local_path_str, deps
-                        );
+                        error!("RE replacing {re_str} with {local_path_str} in {deps}");
                         let re = regex::Regex::new(&re_str).expect("Invalid regex");
                         deps = re.replace_all(&deps, local_path_str).into_owned();
                     }
@@ -2355,14 +2348,14 @@ fn test_rust_outputs_rewriter() {
     assert!(mappings.len() == 1);
     let linux_prefix = &mappings[0].1;
 
-    let depinfo_data = format!("{prefix}/sccache/target/x86_64-unknown-linux-gnu/debug/deps/sccache_dist-c6f3229b9ef0a5c3.rmeta: src/bin/sccache-dist/main.rs src/bin/sccache-dist/build.rs src/bin/sccache-dist/token_check.rs
+    let depinfo_data = format!("{linux_prefix}/sccache/target/x86_64-unknown-linux-gnu/debug/deps/sccache_dist-c6f3229b9ef0a5c3.rmeta: src/bin/sccache-dist/main.rs src/bin/sccache-dist/build.rs src/bin/sccache-dist/token_check.rs
 
-{prefix}/sccache/target/x86_64-unknown-linux-gnu/debug/deps/sccache_dist-c6f3229b9ef0a5c3.d: src/bin/sccache-dist/main.rs src/bin/sccache-dist/build.rs src/bin/sccache-dist/token_check.rs
+{linux_prefix}/sccache/target/x86_64-unknown-linux-gnu/debug/deps/sccache_dist-c6f3229b9ef0a5c3.d: src/bin/sccache-dist/main.rs src/bin/sccache-dist/build.rs src/bin/sccache-dist/token_check.rs
 
 src/bin/sccache-dist/main.rs:
 src/bin/sccache-dist/build.rs:
 src/bin/sccache-dist/token_check.rs:
-", prefix=linux_prefix);
+");
 
     let depinfo_resulting_data = format!("{prefix}/sccache/target/x86_64-unknown-linux-gnu/debug/deps/sccache_dist-c6f3229b9ef0a5c3.rmeta: src/bin/sccache-dist/main.rs src/bin/sccache-dist/build.rs src/bin/sccache-dist/token_check.rs
 
@@ -2492,7 +2485,7 @@ impl RlibDepReader {
             ls_arg: Self::get_correct_ls_arg(rustc_version),
         };
         if let Err(e) = rlib_dep_reader.discover_rlib_deps(env_vars, &temp_rlib) {
-            bail!("Failed to read deps from minimal rlib: {}", e)
+            bail!("Failed to read deps from minimal rlib: {e}")
         }
 
         Ok(rlib_dep_reader)
@@ -2655,10 +2648,7 @@ fn parse_rustc_z_ls(stdout: &str) -> Result<Vec<&str>> {
             .next()
             .context("No lib string on line from rustc -Z ls")?;
         if num != dep_names.len() + 1 {
-            bail!(
-                "Unexpected numbering of {} in rustc -Z ls output",
-                libstring
-            )
+            bail!("Unexpected numbering of {libstring} in rustc -Z ls output")
         }
         assert!(line_splits.next().is_none());
 

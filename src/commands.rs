@@ -174,7 +174,7 @@ fn create_error_log() -> Result<File> {
 
 /// If `SCCACHE_ERROR_LOG` is set, redirect stderr to it.
 fn redirect_error_log(f: File) -> Result<()> {
-    debug!("redirecting stderr into {:?}", f);
+    debug!("redirecting stderr into {f:?}");
     redirect_stderr(f);
     Ok(())
 }
@@ -335,8 +335,7 @@ fn connect_or_start_server(
                     "Timed out waiting for server startup. Maybe the remote service is unreachable?\nRun with SCCACHE_LOG=debug SCCACHE_NO_DAEMON=1 to get more information"
                 ),
                 ServerStartup::Err { reason } => bail!(
-                    "Server startup failed: {}\nRun with SCCACHE_LOG=debug SCCACHE_NO_DAEMON=1 to get more information",
-                    reason
+                    "Server startup failed: {reason}\nRun with SCCACHE_LOG=debug SCCACHE_NO_DAEMON=1 to get more information"
                 ),
             }
             let server = connect_with_retry(addr)?;
@@ -418,7 +417,7 @@ where
         args: args.iter().map(|a| a.as_ref().to_owned()).collect(),
         env_vars,
     });
-    trace!("request_compile: {:?}", req);
+    trace!("request_compile: {req:?}");
     //TODO: better error mapping?
     let response = conn
         .request(req)
@@ -492,7 +491,7 @@ fn handle_compile_finished(
     )?;
 
     if let Some(code) = response.output.code() {
-        trace!("compiler exited with status {}", code);
+        trace!("compiler exited with status {code}");
         if cfg!(not(windows)) && code == 139 {
             write_output(
                 std::io::stderr(),
@@ -580,8 +579,8 @@ where
             }
         }
         CompileResponse::UnsupportedCompiler(s) => {
-            debug!("Server sent UnsupportedCompiler: {:?}", s);
-            bail!("Compiler not supported: {:?}", s);
+            debug!("Server sent UnsupportedCompiler: {s:?}");
+            bail!("Compiler not supported: {s:?}");
         }
         CompileResponse::UnhandledCompile => {
             debug!("Server sent UnhandledCompile");
@@ -653,7 +652,7 @@ where
 pub fn run_command(cmd: Command) -> Result<i32> {
     match cmd {
         Command::ShowStats(fmt, advanced) => {
-            trace!("Command::ShowStats({:?})", fmt);
+            trace!("Command::ShowStats({fmt:?})");
             let config = Config::load()?;
             let stats = match connect_to_server(&get_addr()) {
                 Ok(srv) => request_stats(srv).context("failed to get stats from server")?,
@@ -742,7 +741,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 }
                 ServerStartup::TimedOut => bail!("Timed out waiting for server startup"),
                 ServerStartup::AddrInUse => bail!("Server startup failed: Address in use"),
-                ServerStartup::Err { reason } => bail!("Server startup failed: {}", reason),
+                ServerStartup::Err { reason } => bail!("Server startup failed: {reason}"),
             }
         }
         Command::StopServer => {
@@ -779,7 +778,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                     let cached_config = config::CachedConfig::load()?;
 
                     let parsed_auth_url = Url::parse(auth_url)
-                        .map_err(|_| anyhow!("Failed to parse URL {}", auth_url))?;
+                        .map_err(|_| anyhow!("Failed to parse URL {auth_url}"))?;
                     let token = dist::client_auth::get_token_oauth2_code_grant_pkce(
                         client_id,
                         parsed_auth_url,
@@ -800,7 +799,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                     let cached_config = config::CachedConfig::load()?;
 
                     let parsed_auth_url = Url::parse(auth_url)
-                        .map_err(|_| anyhow!("Failed to parse URL {}", auth_url))?;
+                        .map_err(|_| anyhow!("Failed to parse URL {auth_url}"))?;
                     let token =
                         dist::client_auth::get_token_oauth2_implicit(client_id, parsed_auth_url)?;
 
@@ -876,7 +875,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             cwd,
             env_vars,
         } => {
-            trace!("Command::Compile {{ {:?}, {:?}, {:?} }}", exe, cmdline, cwd);
+            trace!("Command::Compile {{ {exe:?}, {cmdline:?}, {cwd:?} }}");
             let config = Config::load()?;
             let incr_env_strs = ["CARGO_BUILD_INCREMENTAL", "CARGO_INCREMENTAL"];
             incr_env_strs

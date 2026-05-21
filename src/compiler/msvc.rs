@@ -240,7 +240,7 @@ where
     for (k, v) in env {
         cmd.env(k, v);
     }
-    trace!("detect_showincludes_prefix: {:?}", cmd);
+    trace!("detect_showincludes_prefix: {cmd:?}");
 
     let output = run_input_output(cmd, None).await?;
 
@@ -269,10 +269,7 @@ where
     }
     drop(tempdir);
 
-    debug!(
-        "failed to detect showIncludes prefix with output: {}",
-        stderr
-    );
+    debug!("failed to detect showIncludes prefix with output: {stderr}");
 
     bail!("Failed to detect showIncludes prefix")
 }
@@ -972,7 +969,7 @@ fn normpath(path: &str) -> String {
             let o = OsString::from_wide(&wchars[4..wchars.len() - 1]);
             o.into_string()
                 .map(|s| s.replace('\\', "/"))
-                .map_err(|_| io::Error::new(io::ErrorKind::Other, "Error converting string"))
+                .map_err(|_| io::Error::other("Error converting string"))
         })
         .unwrap_or_else(|_| path.replace('\\', "/"))
 }
@@ -1095,7 +1092,7 @@ where
         for line in stderr.lines() {
             if let Some(include_path) = line.strip_prefix(includes_prefix) {
                 let dep = normpath(include_path.trim());
-                trace!("included: {}", dep);
+                trace!("included: {dep}");
                 if deps.insert(dep.clone()) && !dep.contains(' ') {
                     write!(f, "{dep} ")?;
                 }
@@ -1407,7 +1404,7 @@ impl Iterator for ExpandIncludeFile<'_> {
                 }
             };
 
-            trace!("Expanded response file {:?} to {:?}", file_path, content);
+            trace!("Expanded response file {file_path:?} to {content:?}");
 
             // Parse the response file contents, taking into account quote-wrapped strings and new-line separators.
             // Special implementation to account for MSVC response file format.
@@ -2067,7 +2064,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -2100,7 +2097,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.pb.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -2172,7 +2169,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -2212,7 +2209,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -2252,7 +2249,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
@@ -2292,7 +2289,7 @@ mod test {
             ..
         } = match parse_arguments(args) {
             CompilerArguments::Ok(args) => args,
-            o => panic!("Got unexpected parse result: {:?}", o),
+            o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);

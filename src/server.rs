@@ -108,7 +108,7 @@ fn notify_server_startup(name: Option<&OsString>, status: ServerStartup) -> Resu
         Some(s) => s,
         None => return Ok(()),
     };
-    debug!("notify_server_startup({:?})", status);
+    debug!("notify_server_startup({status:?})");
     let stream = UnixStream::connect(name)?;
     notify_server_startup_internal(stream, status)
 }
@@ -346,7 +346,7 @@ impl DistClientContainer {
         match config.scheduler_url {
             Some(ref addr) => {
                 let url = addr.to_url();
-                info!("Enabling distributed sccache to {}", url);
+                info!("Enabling distributed sccache to {url}");
                 let auth_token = match &config.auth {
                     config::DistAuth::Token { token } => Ok(token.to_owned()),
                     config::DistAuth::Oauth2CodeGrantPKCE { auth_url, .. }
@@ -544,7 +544,7 @@ pub fn start_server(config: Config, addr: &crate::net::SocketAddr) -> Result<()>
             Ok(())
         }
         Err(e) => {
-            error!("failed to start server: {}", e);
+            error!("failed to start server: {e}");
             if io::ErrorKind::AddrInUse == e.kind() {
                 notify_server_startup(notify.as_ref(), ServerStartup::AddrInUse)?;
             } else if cfg!(windows) && Some(10013) == e.raw_os_error() {
@@ -686,7 +686,7 @@ impl<A: crate::net::Acceptor, C: CommandCreatorSync> SccacheServer<A, C> {
             loop {
                 let socket = listener.accept().await?;
                 let conn = service.clone().bind(socket).map_err(|res| {
-                    error!("Failed to bind socket: {}", res);
+                    error!("Failed to bind socket: {res}");
                 });
 
                 // We're not interested if the task panicked; immediately process

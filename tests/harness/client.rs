@@ -259,7 +259,7 @@ impl SccacheClient {
     pub fn clear_toolchains_cache(&self) -> sccache::errors::Result<PathBuf> {
         let dist_config = self.config().dist;
         let tc_dir = dist_config.cache_dir.join("client").join("tc");
-        println!("clear_toolchains_cache: {:?}", tc_dir);
+        println!("clear_toolchains_cache: {tc_dir:?}");
         if tc_dir.exists() {
             for entry in std::fs::read_dir(&tc_dir)? {
                 let path = entry?.path();

@@ -580,10 +580,7 @@ pub fn make_tar_header(src: &Path, dest: &str) -> io::Result<(tar::Header, PathB
         // TODO: if the source file is a symlink, I think this does bad things
         file_header.set_metadata(&metadata);
     } else {
-        warn!(
-            "Couldn't get metadata of file {:?}, falling back to some defaults",
-            src
-        );
+        warn!("Couldn't get metadata of file {src:?}, falling back to some defaults");
         file_header.set_mode(0o644);
         file_header.set_uid(0);
         file_header.set_gid(0);

@@ -45,7 +45,7 @@ impl FromStr for StatsFormat {
         match s {
             "text" => Ok(Self::Text),
             "json" => Ok(Self::Json),
-            _ => bail!("Unrecognized stats format: {:?}", s),
+            _ => bail!("Unrecognized stats format: {s:?}"),
         }
     }
 }

@@ -59,7 +59,7 @@ fn adv_key_kind(lang: &str, compiler: &str) -> String {
             _ => language + " [nvcc]",
         },
         _ => {
-            trace!("Unknown compiler type: {}", compiler);
+            trace!("Unknown compiler type: {compiler}");
             language + "unknown"
         }
     }
@@ -181,7 +181,7 @@ fn copy_to_tempdir(inputs: &[&str], tempdir: &Path) {
     for f in inputs {
         let original_source_file = Path::new(file!()).parent().unwrap().join(f);
         let source_file = tempdir.join(f);
-        trace!("fs::copy({:?}, {:?})", original_source_file, source_file);
+        trace!("fs::copy({original_source_file:?}, {source_file:?})");
         fs::copy(&original_source_file, &source_file).unwrap();
         // Preprocessor cache will not cache files that are too recent.
         // Certain OS/FS combinations have a slow resolution (up to 2s for NFS),
@@ -2798,7 +2798,7 @@ fn test_clang_cache_whitespace_normalization(
         ..
     } = compiler;
     println!("test_clang_cache_whitespace_normalization: {name}");
-    debug!("expecting hit: {}", hit);
+    debug!("expecting hit: {hit}");
     // Compile a source file.
     copy_to_tempdir(&[INPUT_WITH_WHITESPACE, INPUT_WITH_WHITESPACE_ALT], tempdir);
     client.zero_stats();

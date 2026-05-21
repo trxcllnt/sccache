@@ -229,7 +229,7 @@ mod path_transform {
                         // On Windows there is such a thing as a path like C:file.txt
                         // It's not clear to me what the semantics of such a path are,
                         // so give up.
-                        error!("unexpected part in path {:?}", p);
+                        error!("unexpected part in path {p:?}");
                         return None;
                     }
                     Component::Normal(osstr) => osstr.to_str()?,

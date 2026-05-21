@@ -48,16 +48,14 @@ fn test_log_timestamp_format_without_millis() {
     // Check that we have at least one log line with the expected format
     assert!(
         timestamp_regex.is_match(&stderr),
-        "Expected timestamp format without milliseconds not found in stderr:\n{}",
-        stderr
+        "Expected timestamp format without milliseconds not found in stderr:\n{stderr}"
     );
 
     // Ensure NO milliseconds are present (no decimal point after seconds)
     let millis_regex = Regex::new(r"\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z").unwrap();
     assert!(
         !millis_regex.is_match(&stderr),
-        "Unexpected milliseconds found in timestamp when SCCACHE_LOG_MILLIS not set:\n{}",
-        stderr
+        "Unexpected milliseconds found in timestamp when SCCACHE_LOG_MILLIS not set:\n{stderr}"
     );
 }
 
@@ -83,8 +81,7 @@ fn test_log_timestamp_format_with_millis() {
     // Check that we have at least one log line with millisecond precision
     assert!(
         millis_regex.is_match(&stderr),
-        "Expected timestamp format with milliseconds not found in stderr:\n{}",
-        stderr
+        "Expected timestamp format with milliseconds not found in stderr:\n{stderr}"
     );
 }
 
@@ -109,9 +106,7 @@ fn test_log_millis_flag_with_various_values() {
 
         assert!(
             millis_regex.is_match(&stderr),
-            "Expected timestamp with milliseconds for SCCACHE_LOG_MILLIS={}, but not found in:\n{}",
-            value,
-            stderr
+            "Expected timestamp with milliseconds for SCCACHE_LOG_MILLIS={value}, but not found in:\n{stderr}"
         );
     }
 }

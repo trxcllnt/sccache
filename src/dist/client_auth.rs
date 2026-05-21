@@ -185,10 +185,7 @@ mod code_grant_pkce {
     fn handle_token_response(res: TokenResponse) -> Result<(String, Instant)> {
         let token = res.access_token;
         if res.token_type.to_lowercase() != TOKEN_TYPE_RESULT_PARAM_VALUE {
-            bail!(
-                "Token type in response is not {}",
-                TOKEN_TYPE_RESULT_PARAM_VALUE
-            )
+            bail!("Token type in response is not {TOKEN_TYPE_RESULT_PARAM_VALUE}")
         }
         // Calculate ASAP the actual time at which the token will expire
         let expires_at = Instant::now() + Duration::from_secs(res.expires_in);
@@ -263,10 +260,7 @@ mod code_grant_pkce {
                 .context("Failed to parse token response as JSON")?,
         )?;
         if expires_at - Instant::now() < MIN_TOKEN_VALIDITY {
-            warn!(
-                "Token retrieved expires in under {}",
-                MIN_TOKEN_VALIDITY_WARNING
-            );
+            warn!("Token retrieved expires in under {MIN_TOKEN_VALIDITY_WARNING}");
             eprintln!("sccache: Token retrieved expires in under {MIN_TOKEN_VALIDITY_WARNING}");
         }
         Ok(token)
@@ -328,10 +322,7 @@ mod implicit {
             .get(TOKEN_TYPE_RESULT_PARAM)
             .context("No token type found in response")?;
         if bearer.to_lowercase() != TOKEN_TYPE_RESULT_PARAM_VALUE {
-            bail!(
-                "Token type in response is not {}",
-                TOKEN_TYPE_RESULT_PARAM_VALUE
-            )
+            bail!("Token type in response is not {TOKEN_TYPE_RESULT_PARAM_VALUE}")
         }
         let expires_in = params
             .get(EXPIRES_IN_RESULT_PARAM)
@@ -394,10 +385,7 @@ mod implicit {
                     return Err(anyhow!("Mismatched auth states after redirect"));
                 }
                 if expires_at - Instant::now() < MIN_TOKEN_VALIDITY {
-                    warn!(
-                        "Token retrieved expires in under {}",
-                        MIN_TOKEN_VALIDITY_WARNING
-                    );
+                    warn!("Token retrieved expires in under {MIN_TOKEN_VALIDITY_WARNING}");
                     eprintln!(
                         "sccache: Token retrieved expires in under {MIN_TOKEN_VALIDITY_WARNING}"
                     );
@@ -523,7 +511,7 @@ async fn try_bind() -> Result<HyperBuilderWrap> {
             Err(e) => return Err(e).with_context(|| format!("Failed to bind to {addr}")),
         }
     }
-    bail!("Could not bind to any valid port: ({:?})", VALID_PORTS)
+    bail!("Could not bind to any valid port: ({VALID_PORTS:?})")
 }
 
 // https://auth0.com/docs/api-auth/tutorials/authorization-code-grant-pkce
@@ -551,7 +539,7 @@ pub fn get_token_oauth2_code_grant_pkce(
         &challenge,
     );
 
-    info!("Listening on http://localhost:{} with 1 thread.", port);
+    info!("Listening on http://localhost:{port} with 1 thread.");
     println!("sccache: Please visit http://localhost:{port} in your browser");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (code_tx, code_rx) = mpsc::sync_channel(1);
@@ -565,10 +553,7 @@ pub fn get_token_oauth2_code_grant_pkce(
 
     runtime.block_on(async move {
         if let Err(e) = shutdown_rx.await {
-            warn!(
-                "Something went wrong while waiting for auth server shutdown: {}",
-                e
-            );
+            warn!("Something went wrong while waiting for auth server shutdown: {e}");
         }
     });
     handle.abort();
@@ -595,7 +580,7 @@ pub fn get_token_oauth2_implicit(client_id: &str, mut auth_url: Url) -> Result<S
     let auth_state_value = Uuid::new_v4().as_simple().to_string();
     implicit::finish_url(client_id, &mut auth_url, &redirect_uri, &auth_state_value);
 
-    info!("Listening on http://localhost:{} with 1 thread.", port);
+    info!("Listening on http://localhost:{port} with 1 thread.");
     println!("sccache: Please visit http://localhost:{port} in your browser");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (token_tx, token_rx) = mpsc::sync_channel(1);
@@ -609,10 +594,7 @@ pub fn get_token_oauth2_implicit(client_id: &str, mut auth_url: Url) -> Result<S
 
     runtime.block_on(async move {
         if let Err(e) = shutdown_rx.await {
-            warn!(
-                "Something went wrong while waiting for auth server shutdown: {}",
-                e
-            );
+            warn!("Something went wrong while waiting for auth server shutdown: {e}");
         }
     });
     handle.abort();

@@ -87,7 +87,7 @@ impl de::Visitor<'_> for StringOrU64Visitor {
     where
         E: de::Error,
     {
-        parse_size(value).ok_or_else(|| E::custom(format!("Invalid size value: {}", value)))
+        parse_size(value).ok_or_else(|| E::custom(format!("Invalid size value: {value}")))
     }
 
     fn visit_u64<E>(self, value: u64) -> StdResult<Self::Value, E>
@@ -161,7 +161,7 @@ fn parse_http_url<K: AsRef<str>>(str: K) -> Result<reqwest::Url> {
     use std::net::SocketAddr;
     let url = str.as_ref();
     let url = if let Ok(sa) = url.parse::<SocketAddr>() {
-        warn!("Url {} has no scheme, assuming http", url);
+        warn!("Url {url} has no scheme, assuming http");
         reqwest::Url::parse(&format!("http://{sa}"))
     } else {
         reqwest::Url::parse(url)
@@ -1105,11 +1105,11 @@ pub struct FileConfig {
 // If the file doesn't exist or we can't read it, log the issue and proceed. If the
 // config exists but doesn't parse then something is wrong - return an error.
 pub fn try_read_config_file<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
-    debug!("Attempting to read config file at {:?}", path);
+    debug!("Attempting to read config file at {path:?}");
     let mut file = match File::open(path) {
         Ok(f) => f,
         Err(e) => {
-            debug!("Couldn't open config file: {}", e);
+            debug!("Couldn't open config file: {e}");
             return Ok(None);
         }
     };
@@ -1118,7 +1118,7 @@ pub fn try_read_config_file<T: DeserializeOwned>(path: &Path) -> Result<Option<T
     match file.read_to_string(&mut string) {
         Ok(_) => (),
         Err(e) => {
-            warn!("Failed to read config file: {}", e);
+            warn!("Failed to read config file: {e}");
             return Ok(None);
         }
     }
@@ -1167,10 +1167,7 @@ pub fn bool_from_env_var(env_var_name: &str) -> Result<Option<bool>> {
         .map(|value| match value.to_lowercase().as_str() {
             "true" | "on" | "1" => Ok(true),
             "false" | "off" | "0" => Ok(false),
-            _ => bail!(
-                "{} must be 'true', 'on', '1', 'false', 'off' or '0'.",
-                env_var_name
-            ),
+            _ => bail!("{env_var_name} must be 'true', 'on', '1', 'false', 'off' or '0'."),
         })
         .transpose()
 }
@@ -1743,7 +1740,7 @@ impl Config {
         for d in basedirs_raw {
             let p = Utf8TypedPathBuf::from(d);
             if !p.is_absolute() {
-                bail!("Basedir path must be absolute: {:?}", p);
+                bail!("Basedir path must be absolute: {p:?}");
             }
             // Normalize basedir:
             // remove double separators, cur_dirs, parent_dirs, trailing slashes
@@ -1777,7 +1774,7 @@ impl Config {
                 .iter()
                 .map(|b| String::from_utf8_lossy(b).into_owned())
                 .collect();
-            debug!("Using basedirs for path normalization: {:?}", basedirs_str);
+            debug!("Using basedirs for path normalization: {basedirs_str:?}");
         }
 
         Ok(Self {

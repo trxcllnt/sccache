@@ -2451,10 +2451,8 @@ where
                         }
                         CompilerArguments::CannotCache(why, extra_info) => {
                             error_to_output(extra_info.map_or_else(
-                                || anyhow!("Cannot cache({}): {:?} {:?}", why, exe, args),
-                                |desc| {
-                                    anyhow!("Cannot cache({}, {}): {:?} {:?}", why, desc, exe, args)
-                                },
+                                || anyhow!("Cannot cache({why}): {exe:?} {args:?}"),
+                                |desc| anyhow!("Cannot cache({why}, {desc}): {exe:?} {args:?}"),
                             ))
                         }
                         CompilerArguments::Ok(hasher) => service

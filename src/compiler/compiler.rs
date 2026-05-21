@@ -2208,7 +2208,7 @@ where
                                 Ok((Some(proxy), resolved_path))
                             }
                             Err(e) => {
-                                trace!("Could not resolve compiler with rustup proxy: {}", e);
+                                trace!("Could not resolve compiler with rustup proxy: {e}");
                                 Ok((None, rustc_executable))
                             }
                         }
@@ -2218,7 +2218,7 @@ where
                         Ok((None, rustc_executable))
                     }
                     Err(e) => {
-                        trace!("Did not find rustup due to {}, compiling without proxy", e);
+                        trace!("Did not find rustup due to {e}, compiling without proxy");
                         Ok((None, rustc_executable))
                     }
                 }
@@ -2472,7 +2472,7 @@ compiler_version=__VERSION__
                     &pool,
                 )
                 .await?;
-                trace!("showIncludes prefix: '{}'", includes_prefix);
+                trace!("showIncludes prefix: '{includes_prefix}'");
 
                 return CCompiler::new(
                     Msvc {
@@ -2573,9 +2573,9 @@ compiler_version=__VERSION__
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    debug!("nothing useful in detection output {:?}", stdout);
+    debug!("nothing useful in detection output {stdout:?}");
     debug!("compiler status: {}", output.desc());
-    debug!("compiler stderr:\n{}", stderr);
+    debug!("compiler stderr:\n{stderr}");
 
     bail!(stderr.into_owned())
 }
@@ -2654,24 +2654,19 @@ mod test {
             if let Some(processed) = maybe_processed {
                 assert!(
                     !processed.needs_c_preprocessing(),
-                    "{:?} should not need preprocessing - it is a result of {:?} processing",
-                    processed,
-                    lang
+                    "{processed:?} should not need preprocessing - it is a result of {lang:?} processing"
                 );
             }
 
             if !lang.needs_c_preprocessing() {
                 assert!(
                     maybe_processed.is_none(),
-                    "{:?} should not be processed, but it produces the {:?} as a C preprocessing result",
-                    lang,
-                    maybe_processed
+                    "{lang:?} should not be processed, but it produces the {maybe_processed:?} as a C preprocessing result"
                 );
 
                 assert!(
                     !lang.is_c_like_header(),
-                    "{:?} should not be processed, but it is a C-like header and can be used as preprocessor input",
-                    lang
+                    "{lang:?} should not be processed, but it is a C-like header and can be used as preprocessor input"
                 );
             }
         }
@@ -3387,7 +3382,7 @@ LLVM version: 6.0",
                 }
                 let hasher = match c.parse_arguments(&arguments, ".".as_ref(), &[]) {
                     CompilerArguments::Ok(h) => h,
-                    o => panic!("Bad result from parse_arguments: {:?}", o),
+                    o => panic!("Bad result from parse_arguments: {o:?}"),
                 };
                 hasher
                     .generate_hash_key(

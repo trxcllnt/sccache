@@ -138,10 +138,10 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Any(e) => write!(f, "{}", e),
+            Error::Any(e) => write!(f, "{e}"),
             Error::FileTooLarge => write!(f, "File too large"),
             Error::FileNotInCache => write!(f, "File not in cache"),
-            Error::Io(e) => write!(f, "{}", e),
+            Error::Io(e) => write!(f, "{e}"),
         }
     }
 }
@@ -320,8 +320,7 @@ impl LruDiskCache {
                     // https://github.com/mozilla/sccache/issues/2092
                     if e.kind() == std::io::ErrorKind::NotFound {
                         debug!(
-                            "Error removing file from cache as it was not found: `{:?}`",
-                            abs_path
+                            "Error removing file from cache as it was not found: `{abs_path:?}`"
                         );
                     } else {
                         error!("LruDiskCache: Error removing entry {abs_path:?}:\n{e:?}");

@@ -246,7 +246,7 @@ pub extern "C" fn fdopendir(dirfd: c_int) -> *mut DIR {
     let state = STATE.wait();
     let dirp = unsafe { (state.fdopendir)(dirfd) };
 
-    info!("{:p}: opening directory fd {}", dirp, dirfd);
+    info!("{dirp:p}: opening directory fd {dirfd}");
 
     if !dirp.is_null() {
         state.new_opendir(dirp);
@@ -274,7 +274,7 @@ pub extern "C" fn readdir64(dirp: *mut DIR) -> *mut dirent64 {
 /// - The directory stream must not be used after calling this function
 #[no_mangle]
 pub unsafe extern "C" fn closedir(dirp: *mut DIR) -> c_int {
-    info!("{:p}: closing handle", dirp);
+    info!("{dirp:p}: closing handle");
 
     let state = STATE.wait();
 

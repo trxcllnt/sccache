@@ -157,25 +157,19 @@ impl OverlayBuilder {
                 (Some(min), Some(seen)) => {
                     if seen < min {
                         bail!(
-                            "bubblewrap 0.3.0 or later is required, got {:?} for {:?}",
-                            out,
-                            bubblewrap
+                            "bubblewrap 0.3.0 or later is required, got {out:?} for {bubblewrap:?}"
                         );
                     }
                 }
                 (_, _) => {
                     bail!(
-                        "Unexpected version format running {:?}: got {:?}, expected \"bubblewrap x.x.x\"",
-                        bubblewrap,
-                        out
+                        "Unexpected version format running {bubblewrap:?}: got {out:?}, expected \"bubblewrap x.x.x\""
                     );
                 }
             }
         } else {
             bail!(
-                "Unexpected version format running {:?}: got {:?}, expected \"bubblewrap x.x.x\"",
-                bubblewrap,
-                out
+                "Unexpected version format running {bubblewrap:?}: got {out:?}, expected \"bubblewrap x.x.x\""
             );
         }
 

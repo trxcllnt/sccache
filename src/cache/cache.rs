@@ -297,7 +297,7 @@ impl Storage for RemoteStorage {
             Err(err) if err.kind() == ErrorKind::RateLimited => {
                 eprintln!("cache storage read check: {err:?}, but we decide to keep running");
             }
-            Err(err) => bail!("cache storage failed to read: {:?}", err),
+            Err(err) => bail!("cache storage failed to read: {err:?}"),
         }
 
         let can_write = match self.operator.write(path, "Hello, World!").await {

@@ -195,7 +195,7 @@ mod client {
                 )
             }
             if let Some(tc_and_paths) = self.get_custom_toolchain(compiler_path).await {
-                debug!("Using custom toolchain for {:?}", compiler_path);
+                debug!("Using custom toolchain for {compiler_path:?}");
                 let (tc, compiler_path, archive) = tc_and_paths?;
                 return Ok((tc, Some((compiler_path, archive)), None));
             }

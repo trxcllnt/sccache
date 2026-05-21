@@ -109,7 +109,7 @@ impl S3Cache {
 fn endpoint_resolver(endpoint: &str, use_ssl: Option<bool>) -> Result<String> {
     let endpoint_uri: http::Uri = endpoint
         .try_into()
-        .map_err(|err| anyhow!("input endpoint {endpoint} is invalid: {:?}", err))?;
+        .map_err(|err| anyhow!("input endpoint {endpoint} is invalid: {err:?}"))?;
     let mut parts = endpoint_uri.into_parts();
     match use_ssl {
         Some(true) => {

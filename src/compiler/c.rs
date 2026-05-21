@@ -670,7 +670,7 @@ where
                         .put(storage, &preprocessor_key)
                         .await
                     {
-                        debug!("[{out_pretty}]: Failed to update preprocessor cache: {}", e);
+                        debug!("[{out_pretty}]: Failed to update preprocessor cache: {e}");
                         update_failed = true;
                     }
                 }

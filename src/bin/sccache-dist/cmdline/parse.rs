@@ -41,7 +41,7 @@ impl FromStr for LogLevel {
             "info" => Self::Info,
             "debug" => Self::Debug,
             "trace" => Self::Trace,
-            _ => bail!("Unknown log level: {:?}", s),
+            _ => bail!("Unknown log level: {s:?}"),
         };
 
         Ok(variant)

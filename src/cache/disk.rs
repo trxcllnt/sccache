@@ -157,7 +157,7 @@ impl Storage for DiskCache {
     }
 
     async fn put(&self, key: &str, source: opendal::Buffer) -> Result<Duration> {
-        trace!("DiskCache::put({})", key);
+        trace!("DiskCache::put({key})");
 
         if self.rw_mode == CacheMode::ReadOnly {
             return Err(anyhow!("Cannot write to read-only storage"));
