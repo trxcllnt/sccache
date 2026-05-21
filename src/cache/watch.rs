@@ -87,11 +87,11 @@ impl WatchStorage {
     where
         T: Fn() -> Pin<Box<dyn Future<Output = Result<Arc<dyn Storage>>> + Send>> + Send + 'static,
     {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DebounceEventResult>();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<DebounceEventResult>();
 
         let mut debouncer = new_debouncer(
-            Duration::from_secs(4),
-            None,
+            Duration::from_secs(1),
+            Duration::from_secs(1).into(),
             move |res: DebounceEventResult| {
                 let _ = tx.send(res);
             },
@@ -115,14 +115,20 @@ impl WatchStorage {
         debug!("Watching for changes to files: {paths:?}");
 
         tokio::spawn(async move {
+            use itertools::Itertools;
             use notify_debouncer_full::notify::{
                 EventKind,
                 event::{AccessKind, AccessMode, CreateKind, ModifyKind},
             };
+            use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 
-            while let Some(res) = rx.recv().await {
-                let recreate_storage = match res {
-                    Ok(events) => events
+            let changes = UnboundedReceiverStream::new(rx)
+                .filter_map(|res| {
+                    res.inspect_err(|err| error!("[WatchStorage::watch]: Notify error: {err:?}"))
+                        .ok()
+                })
+                .filter_map(|events| {
+                    let events = events
                         .into_iter()
                         .filter(|event| {
                             matches!(
@@ -133,33 +139,60 @@ impl WatchStorage {
                                     | EventKind::Remove(_)
                             )
                         })
-                        .any(|event| {
-                            paths.iter().any(|path| {
-                                if event.paths.contains(path) {
-                                    info!("[WatchStorage::watch]: Recreating storage after changes to {path:?}");
-                                    true
-                                } else {
-                                    false
-                                }
-                            })
-                        }),
-                    Err(err) => {
-                        error!("Notify error: {err:?}");
-                        continue;
-                    }
-                };
+                        .filter_map(|mut event| {
+                            event.paths = paths
+                                .iter()
+                                .filter_map(|path| {
+                                    if event.paths.contains(path) {
+                                        Some(path.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>();
 
-                // Only respond if the changes are to paths we care about
-                if recreate_storage {
-                    let mut guard = storage.lock().await;
-                    match create().await {
-                        Ok(storage) => *guard = storage,
-                        Err(err) => {
-                            error!("Failed to recreate storage: {err:?}");
-                        }
+                            if event.paths.is_empty() {
+                                None
+                            } else {
+                                Some(event)
+                            }
+                        })
+                        .collect::<Vec<_>>();
+
+                    if events.is_empty() {
+                        None
+                    } else {
+                        Some(events)
                     }
-                    drop(guard);
+                })
+                .chunks_timeout(20, Duration::from_secs(5))
+                .map(|events| {
+                    let events = events.into_iter().flatten().collect::<Vec<_>>();
+
+                    trace!("[WatchStorage::watch]: Notify events: {events:?}");
+
+                    let paths = events
+                        .iter()
+                        .flat_map(|event| event.paths.iter().map(|p| p.as_path()))
+                        .unique()
+                        .collect::<Vec<_>>();
+
+                    info!("[WatchStorage::watch]: Recreating storage after changes to {paths:?}");
+
+                    events
+                });
+
+            futures::pin_mut!(changes);
+
+            while changes.next().await.is_some() {
+                let mut guard = storage.lock().await;
+                match create().await {
+                    Ok(storage) => *guard = storage,
+                    Err(err) => {
+                        error!("Failed to recreate storage: {err:?}");
+                    }
                 }
+                drop(guard);
             }
         });
 
