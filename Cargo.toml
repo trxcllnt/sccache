@@ -16,6 +16,9 @@ repository = "https://github.com/mozilla/sccache/"
 name = "sccache"
 
 [[bin]]
+name = "sccache-test"
+
+[[bin]]
 name = "sccache-dist"
 required-features = ["dist-server"]
 
