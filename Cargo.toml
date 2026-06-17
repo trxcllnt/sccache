@@ -163,6 +163,8 @@ axum-server = { version = "0.8", default-features = false, optional = true }
 celery = { git = "https://github.com/trxcllnt/rusty-celery.git", branch = "fea/update-dependencies", optional = true, default-features = false, features = [
   "codegen",
   "extra_content_types",
+  "rustls-native-certs",
+  "hickory-dns",
   "rustls--ring",
 ] }
 nix = { version = "0.30.0", optional = true, features = [
@@ -246,7 +248,6 @@ webdav = ["opendal/services-webdav", "reqwest"]
 # statically linked with it, instead of linking against the system-wide openssl
 # dynamically or statically.
 vendored-openssl = [
-  "celery?/rustls-native-certs",
   "openssl?/vendored",
   "reqwest?/native-tls-alpn",
   "reqwest?/native-tls-vendored",
