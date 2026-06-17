@@ -247,7 +247,6 @@ webdav = ["opendal/services-webdav", "reqwest"]
 # dynamically or statically.
 vendored-openssl = [
   "celery?/rustls-native-certs",
-  "celery?/vendored-openssl",
   "openssl?/vendored",
   "reqwest?/native-tls-alpn",
   "reqwest?/native-tls-vendored",
