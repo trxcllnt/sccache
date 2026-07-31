@@ -22,14 +22,13 @@ use crate::{
             PreprocessorOutput,
         },
         clang,
-        msvc::from_local_codepage,
         preprocessor_cache::normalize_path,
     },
     counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
     server::SccacheService,
-    util::{OsStrExt, run_input_output, run_input_stream_output, temppath},
+    util::{OsStrExt, bytes_to_string, run_input_output, run_input_stream_output, temppath},
 };
 
 use async_trait::async_trait;
@@ -1326,7 +1325,7 @@ pub async fn parse_dependencies<P: AsRef<Path>>(
     let lines = tokio::fs::read(&depfile)
         .await
         // Avoid dropping Windows wide chars in paths
-        .and_then(from_local_codepage)
+        .and_then(bytes_to_string)
         .with_context(|| format!("{depfile:?}"))?;
 
     let lines = lines

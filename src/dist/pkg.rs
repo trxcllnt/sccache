@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dist;
+use crate::{dist, errors::*};
 use async_trait::async_trait;
 use fs_err as fs;
-use std::io::{self, Write};
-use std::path::{Component, Path, PathBuf};
-use std::str;
-use std::sync::Arc;
-
-use crate::errors::*;
+use std::{
+    io::{self, Write},
+    path::{Component, Path, PathBuf},
+    str,
+    sync::Arc,
+};
 
 #[cfg(all(
     feature = "dist-client",
@@ -105,6 +105,10 @@ pub trait InputsPackager: Send {
             target_os = "linux",
             any(target_arch = "x86_64", target_arch = "aarch64")
         ),
+        all(
+            target_os = "windows",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
         target_os = "freebsd"
     )
 )))]
@@ -146,14 +150,14 @@ mod toolchain_imp {
     use is_executable::IsExecutable;
     use std::collections::BTreeMap;
     use std::ffi::OsString;
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::path::{Component, Path, PathBuf};
     use std::process;
     use std::str;
     use walkdir::WalkDir;
 
     use super::{PackagedToolchain, dist::Toolchain, tar_safe_path};
-    use crate::errors::*;
+    use crate::{errors::*, util::bytes_to_string};
 
     pub struct ToolchainPackaged {
         executable: PathBuf,
@@ -432,6 +436,8 @@ mod toolchain_imp {
         env_vars: &[(OsString, OsString)],
         executable: &Path,
     ) -> Result<Vec<PathBuf>> {
+        use std::io::Read;
+
         let process::Output {
             status,
             stdout,
@@ -468,14 +474,11 @@ mod toolchain_imp {
         }
 
         if !stderr.is_empty() {
-            trace!(
-                "ldd stderr non-empty: {:?}",
-                String::from_utf8_lossy(&stderr)
-            );
+            trace!("ldd stderr non-empty: {:?}", bytes_to_string(stderr));
         }
 
-        let stdout = str::from_utf8(&stdout).context("ldd output not utf8")?;
-        Ok(parse_ldd_output(stdout))
+        let stdout = bytes_to_string(stdout).context("ldd output not utf8")?;
+        Ok(parse_ldd_output(&stdout))
     }
 
     // If it's a static PIE the output will be a line like "\tstatically linked", so be forgiving
@@ -566,7 +569,7 @@ mod toolchain_imp {
             .output()?;
 
         if !stderr.is_empty() {
-            trace!("dumpbin stderr: {:?}", String::from_utf8_lossy(&stderr));
+            trace!("dumpbin stderr: {:?}", bytes_to_string(&stderr));
         }
 
         if !status.success() {
@@ -586,30 +589,34 @@ mod toolchain_imp {
         // Skip OS system directories, do not package core Windows files
         paths.retain(|p| {
             let p = p.as_os_str();
-            !(p.contains(r"\Windows")
-                || p.contains(r"/Windows")
-                || p.contains(r"\System32")
-                || p.contains(r"/System32"))
+            !(
+                false
+                    || p.contains(r"\Windows")
+                    || p.contains(r"\windows")
+                    || p.contains(r"\WINDOWS")
+                    || p.contains(r"\System32")
+                    || p.contains(r"\system32")
+                    || p.contains(r"\SYSTEM32")
+                //
+            )
         });
 
-        Ok(
-            parse_ldd_output(&crate::compiler::from_local_codepage(stdout)?)
-                .iter()
-                .filter(|lib| {
-                    // # Skip virtual API sets entirely
-                    !(lib.starts_with("api-ms-win-") || lib.starts_with("ext-ms-win-"))
-                })
-                .filter_map(|lib| {
-                    for dir in paths.iter() {
-                        let lib = dir.join(lib);
-                        if lib.exists() {
-                            return Some(lib);
-                        }
+        Ok(parse_ldd_output(bytes_to_string(&stdout)?)
+            .iter()
+            .filter(|lib| {
+                // # Skip virtual API sets entirely
+                !(lib.starts_with("api-ms-win-") || lib.starts_with("ext-ms-win-"))
+            })
+            .filter_map(|lib| {
+                for dir in paths.iter() {
+                    let lib = dir.join(lib);
+                    if lib.exists() {
+                        return Some(lib);
                     }
-                    None
-                })
-                .collect::<Vec<_>>(),
-        )
+                }
+                None
+            })
+            .collect::<Vec<_>>())
     }
 
     #[cfg(windows)]
@@ -685,10 +692,18 @@ mod toolchain_imp {
 
 /// Strip a leading slash, if any.
 pub fn tar_safe_path<P: AsRef<Path>>(path: P) -> PathBuf {
-    path.as_ref()
-        .strip_prefix(Component::RootDir)
-        .map(ToOwned::to_owned)
-        .unwrap_or(path.as_ref().to_path_buf())
+    let mut final_path = PathBuf::new();
+
+    for component in path.as_ref().components() {
+        match component {
+            Component::RootDir | Component::Prefix(_) => continue,
+            c @ Component::Normal(_) | c @ Component::CurDir | c @ Component::ParentDir => {
+                final_path.push(c);
+            }
+        }
+    }
+
+    final_path
 }
 
 pub fn make_tar_header(src: &Path, dest: &str) -> io::Result<(tar::Header, PathBuf)> {

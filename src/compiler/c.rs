@@ -1657,7 +1657,7 @@ struct CToolchainPackager {
 ))]
 impl pkg::ToolchainPackager for CToolchainPackager {
     async fn package(&self) -> Result<Arc<dyn pkg::PackagedToolchain>> {
-        use std::os::unix::ffi::OsStringExt;
+        use crate::util::bytes_to_path;
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
         debug!(
@@ -1697,7 +1697,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 
             // Create our PathBuf from the raw bytes.  Assume that relative
             // paths can be found via PATH.
-            let path: PathBuf = OsString::from_vec(output.stdout).into();
+            let path = bytes_to_path(&output.stdout).ok()?;
             if path.is_absolute() {
                 Some(path)
             } else {

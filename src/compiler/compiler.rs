@@ -40,7 +40,8 @@ use crate::{
     mock_command::{CommandChild, CommandCreatorSync, ProcessOutput, RunCommand},
     server,
     util::{
-        fmt_duration_as_secs, resolve_compiler_avoiding_wrapper, run_input_output, strip_basedirs,
+        bytes_to_string, fmt_duration_as_secs, resolve_compiler_avoiding_wrapper, run_input_output,
+        strip_basedirs,
     },
 };
 
@@ -2204,10 +2205,7 @@ where
 
         let output = run_input_output(cmd, None).await?;
 
-        let stdout = match str::from_utf8(&output.stdout) {
-            Ok(s) => s,
-            Err(_) => bail!("Failed to parse output"),
-        };
+        let stdout = bytes_to_string(output.stdout).context("Failed to parse output")?;
 
         let version = stdout.lines().next().unwrap_or("unknown").to_string();
 
@@ -2281,7 +2279,7 @@ where
     child.env_clear().envs(env.to_vec()).args(&["-vV"]);
 
     let rustc_vv = run_input_output(child, None).await.map(|output| {
-        if let Ok(stdout) = String::from_utf8(output.stdout.clone())
+        if let Ok(stdout) = bytes_to_string(output.stdout.clone())
             && stdout.starts_with("rustc ")
         {
             return Ok(stdout);
@@ -2497,10 +2495,9 @@ compiler_version=__VERSION__
 
     drop(tempdir);
 
-    let stdout = match str::from_utf8(&output.stdout) {
-        Ok(s) => s,
-        Err(_) => bail!("Failed to parse output"),
-    };
+    let status = output.desc();
+    let stdout = bytes_to_string(output.stdout).context("Failed to parse output")?;
+
     let mut lines = stdout.lines().filter_map(|line| {
         let line = line.trim();
         if let Some(compiler_id) = line.strip_prefix("compiler_id=") {
@@ -2712,12 +2709,12 @@ compiler_version=__VERSION__
         }
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = bytes_to_string(output.stderr).context("Failed to parse output")?;
     debug!("nothing useful in detection output {stdout:?}");
-    debug!("compiler status: {}", output.desc());
+    debug!("compiler status: {status}");
     debug!("compiler stderr:\n{stderr}");
 
-    bail!(stderr.into_owned())
+    bail!(stderr)
 }
 
 /// If `executable` is a known compiler, return a `Box<Compiler>` containing information about it.

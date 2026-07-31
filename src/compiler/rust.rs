@@ -41,8 +41,10 @@ use crate::{
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
     server::SccacheService,
-    util::{Digest, fmt_duration_as_secs, hash_all, hash_all_archives, run_input_output},
-    util::{HashToDigest, OsStrExt},
+    util::{
+        Digest, HashToDigest, OsStrExt, bytes_to_string, fmt_duration_as_secs, hash_all,
+        hash_all_archives, run_input_output,
+    },
 };
 use async_trait::async_trait;
 use filetime::FileTime;
@@ -389,7 +391,7 @@ where
     trace!("get_compiler_outputs: {cmd:?}");
     let outputs = run_input_output(cmd, None).await?;
 
-    let outstr = String::from_utf8(outputs.stdout).context("Error parsing rustc output")?;
+    let outstr = bytes_to_string(outputs.stdout).context("Error parsing rustc output")?;
     trace!("get_compiler_outputs: {outstr:?}");
     Ok(outstr.lines().map(|l| l.to_owned()).collect())
 }
@@ -427,7 +429,7 @@ impl Rust {
         let sysroot_and_libs = async move {
             let output = run_input_output(cmd, None).await?;
             //debug!("output.and_then: {}", output);
-            let outstr = String::from_utf8(output.stdout).context("Error parsing sysroot")?;
+            let outstr = bytes_to_string(output.stdout).context("Error parsing sysroot")?;
             let sysroot = PathBuf::from(outstr.trim_end());
             let libs_path = sysroot.join(LIBS_DIR);
             let mut libs = fs::read_dir(&libs_path)
@@ -583,7 +585,7 @@ where
                 .await
                 .context("Failed to execute rustup which rustc")?;
 
-            let stdout = String::from_utf8(output.stdout)
+            let stdout = bytes_to_string(output.stdout)
                 .context("Failed to parse output of rustup which rustc")?;
 
             let proxied_compiler = PathBuf::from(stdout.trim());
@@ -724,7 +726,7 @@ impl RustupProxy {
                 child.env_clear().envs(env.to_vec()).args(&["--version"]);
                 let rustup_candidate_check = run_input_output(child, None).await?;
 
-                let stdout = String::from_utf8(rustup_candidate_check.stdout)
+                let stdout = bytes_to_string(rustup_candidate_check.stdout)
                     .map_err(|_e| anyhow!("Response of `rustup --version` is not valid UTF-8"))?;
                 Ok(if stdout.trim().starts_with("rustup ") {
                     trace!("PROXY rustup --version produced: {}", &stdout);
@@ -2604,7 +2606,7 @@ impl RlibDepReader {
             )
         }
 
-        let stdout = String::from_utf8(stdout).context("Error parsing rustc -Z ls output")?;
+        let stdout = bytes_to_string(stdout).context("Error parsing rustc -Z ls output")?;
         let deps: Vec<_> = parse_rustc_z_ls(&stdout)
             .map(|deps| deps.into_iter().map(|dep| dep.to_owned()).collect())?;
 

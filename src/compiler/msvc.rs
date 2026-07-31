@@ -29,7 +29,9 @@ use crate::{
     errors::*,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     server::SccacheService,
-    util::{OsStrExt, path_to_bytes, run_input_output, temppath},
+    util::{
+        OsStrExt, bytes_to_string, os_str_to_string, path_to_bytes, run_input_output, temppath,
+    },
 };
 use async_trait::async_trait;
 use fs_err::File;
@@ -76,8 +78,7 @@ impl CCompilerImpl for Msvc {
         if let Some(prepend_flags) = env_vars
             .iter()
             .find(|(k, _)| k == "CL")
-            .and_then(|(_, v)| v.encode_to_bytes().ok())
-            .and_then(|b| from_local_codepage(b).ok())
+            .and_then(|(_, v)| os_str_to_string(v).ok())
         {
             // Parse the `CL` environment variable value as MSVC flags.
             arguments = [
@@ -92,8 +93,7 @@ impl CCompilerImpl for Msvc {
         if let Some(append_flags) = env_vars
             .iter()
             .find(|(k, _)| k == "_CL_")
-            .and_then(|(_, v)| v.encode_to_bytes().ok())
-            .and_then(|b| from_local_codepage(b).ok())
+            .and_then(|(_, v)| os_str_to_string(v).ok())
         {
             // Parse the `_CL_` environment variable value as MSVC flags.
             arguments.extend(
@@ -177,23 +177,6 @@ impl CCompilerImpl for Msvc {
     }
 }
 
-#[cfg(not(windows))]
-pub fn from_local_codepage(multi_byte_str: Vec<u8>) -> io::Result<String> {
-    String::from_utf8(multi_byte_str).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
-}
-
-#[cfg(windows)]
-pub fn from_local_codepage(multi_byte_str: Vec<u8>) -> io::Result<String> {
-    use crate::util::multi_byte_to_wide_char;
-    use windows_sys::Win32::Globalization::{CP_OEMCP, MB_ERR_INVALID_CHARS};
-
-    multi_byte_to_wide_char(CP_OEMCP, MB_ERR_INVALID_CHARS, &multi_byte_str)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
-        .and_then(|buf| {
-            String::from_utf16(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
-        })
-}
-
 /// Detect the prefix included in the output of MSVC's -showIncludes output.
 pub async fn detect_showincludes_prefix<T>(
     creator: &T,
@@ -243,7 +226,7 @@ where
         bail!("Failed to detect showIncludes prefix ({:?})", output.status)
     }
 
-    let stderr = from_local_codepage(output.stderr)
+    let stderr = bytes_to_string(output.stderr)
         .context("Failed to convert compiler stderr while detecting showIncludes prefix")?;
     for line in stderr.lines() {
         if !line.ends_with("test.h") {
@@ -404,6 +387,9 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_take_arg!("RTC", OsString, Concatenated, PassThroughWithSuffix),
     msvc_flag!("TC", PassThrough), // TODO: disable explicit language check, hope for the best for now? Also, handle /Tc & /Tp.
     msvc_flag!("TP", PassThrough), // As above.
+    // Handle /Tc & /Tp
+    msvc_take_arg!("Tc", PathBuf, Concatenated, PassThroughWithPath),
+    msvc_take_arg!("Tp", PathBuf, Concatenated, PassThroughWithPath),
     msvc_take_arg!("U", OsString, Concatenated, PreprocessorArgument),
     msvc_take_arg!("V", OsString, Concatenated, PassThroughWithSuffix),
     msvc_flag!("W0", PassThrough),
@@ -1106,7 +1092,7 @@ where
         )?;
         write!(f, " ")?;
         let stderr =
-            from_local_codepage(output.stderr).context("Failed to convert preprocessor stderr")?;
+            bytes_to_string(output.stderr).context("Failed to convert preprocessor stderr")?;
         let mut deps = HashSet::new();
         let mut stderr_bytes = vec![];
         for line in stderr.lines() {
@@ -3204,39 +3190,5 @@ mod test {
             ovec![std::env::current_dir().unwrap().join("list.txt")],
             extra_hash_files
         );
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn local_oem_codepage_conversions() {
-        use crate::util::wide_char_to_multi_byte;
-        use windows_sys::Win32::Globalization::GetOEMCP;
-
-        let current_oemcp = unsafe { GetOEMCP() };
-        // We don't control the local OEM codepage so test only if it is one of:
-        // United Stats, Latin-1 and Latin-1 + euro symbol
-        if current_oemcp == 437 || current_oemcp == 850 || current_oemcp == 858 {
-            // Non-ASCII characters
-            const INPUT_STRING: &str = "ÇüéâäàåçêëèïîìÄÅ";
-
-            // The characters in INPUT_STRING encoded per the OEM codepage
-            const INPUT_BYTES: [u8; 16] = [
-                128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143,
-            ];
-
-            // Test the conversion from the OEM codepage to UTF-8
-            assert_eq!(
-                from_local_codepage(INPUT_BYTES.to_vec()).unwrap(),
-                INPUT_STRING
-            );
-
-            // The characters in INPUT_STRING encoded in UTF-16
-            const INPUT_WORDS: [u16; 16] = [
-                199, 252, 233, 226, 228, 224, 229, 231, 234, 235, 232, 239, 238, 236, 196, 197,
-            ];
-
-            // Test the conversion from UTF-16 to the OEM codepage
-            assert_eq!(wide_char_to_multi_byte(&INPUT_WORDS).unwrap(), INPUT_BYTES);
-        }
     }
 }
