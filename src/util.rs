@@ -2690,7 +2690,7 @@ mod tests {
             ];
 
             // Test the conversion from the OEM codepage to UTF-8
-            assert_eq!(bytes_to_string(&INPUT_BYTES).unwrap(), INPUT_STRING);
+            assert_eq!(bytes_to_string(INPUT_BYTES.to_vec()).unwrap(), INPUT_STRING);
 
             // The characters in INPUT_STRING encoded in UTF-16
             const INPUT_WORDS: [u16; 16] = [

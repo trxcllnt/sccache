@@ -569,7 +569,7 @@ mod toolchain_imp {
             .output()?;
 
         if !stderr.is_empty() {
-            trace!("dumpbin stderr: {:?}", bytes_to_string(&stderr));
+            trace!("dumpbin stderr: {:?}", bytes_to_string(stderr));
         }
 
         if !status.success() {
@@ -601,7 +601,7 @@ mod toolchain_imp {
             )
         });
 
-        Ok(parse_ldd_output(bytes_to_string(&stdout)?)
+        Ok(parse_ldd_output(&bytes_to_string(stdout)?)
             .iter()
             .filter(|lib| {
                 // # Skip virtual API sets entirely
