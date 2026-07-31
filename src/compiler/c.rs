@@ -389,6 +389,10 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
     fn plusplus(&self) -> bool;
     /// Return the compiler version reported by the compiler executable.
     fn version(&self) -> Option<String>;
+    /// Return paths to extra files that should be included in the dist toolchain.
+    fn extra_dist_files(&self) -> &[PathBuf] {
+        &[]
+    }
     /// Determine whether `arguments` are supported by this compiler.
     fn parse_arguments(
         &self,
@@ -560,6 +564,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
             executable: self.executable.clone(),
             kind: self.compiler.kind(),
             parsed_args: Default::default(),
+            extra_files: self.compiler.extra_dist_files().to_vec(),
         })
     }
     fn parse_arguments(
@@ -1436,6 +1441,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
             env_vars: self.env_vars.clone(),
             executable: self.executable.clone(),
             parsed_args: self.parsed_args.clone(),
+            extra_files: self.compiler.extra_dist_files().to_vec(),
         });
 
         let outputs_rewriter = Box::new(NoopOutputsRewriter);
@@ -1617,6 +1623,7 @@ struct CToolchainPackager {
     executable: PathBuf,
     kind: CCompilerKind,
     parsed_args: ParsedArguments,
+    extra_files: Vec<PathBuf>,
 }
 
 #[cfg(all(
@@ -1624,6 +1631,10 @@ struct CToolchainPackager {
     any(
         all(
             target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
             any(target_arch = "x86_64", target_arch = "aarch64")
         ),
         target_os = "freebsd"
@@ -1635,6 +1646,10 @@ struct CToolchainPackager {
     any(
         all(
             target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
             any(target_arch = "x86_64", target_arch = "aarch64")
         ),
         target_os = "freebsd"
@@ -1651,6 +1666,11 @@ impl pkg::ToolchainPackager for CToolchainPackager {
         );
         let mut package_builder = pkg::ToolchainPackaged::new(self.executable.clone());
         package_builder.add_common()?;
+
+        // Add gcc implicit specfiles
+        for path in self.extra_files.iter() {
+            package_builder.add_file(&self.env_vars, path)?;
+        }
 
         // Helper to use -print-file-name and -print-prog-name to look up
         // files by path.
@@ -1707,12 +1727,13 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 
             // Linker configuration.
             if Path::new("/etc/ld.so.conf").is_file() {
-                package_builder.add_file(&self.env_vars, "/etc/ld.so.conf".into())?;
+                package_builder.add_file(&self.env_vars, "/etc/ld.so.conf")?;
             }
-            let ld_conf_dir = Path::new("/etc/ld.so.conf.d");
-            if ld_conf_dir.is_dir() {
-                package_builder.add_dir_contents(&self.env_vars, ld_conf_dir)?;
+
+            if Path::new("/etc/ld.so.conf.d").is_dir() {
+                package_builder.add_dir_contents(&self.env_vars, "/etc/ld.so.conf.d")?;
             }
+
             Ok(())
         };
 
@@ -1735,20 +1756,6 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                 add_named_prog(&mut package_builder, "cc1")?;
                 add_named_prog(&mut package_builder, "cc1plus")?;
                 add_named_file(&mut package_builder, "liblto_plugin.so")?;
-                // Add gcc implicit specfiles
-                let jobserver = crate::jobserver::Client::new_num(1);
-                let mut creator = crate::mock_command::ProcessCommandCreator::new(&jobserver);
-                for path in crate::compiler::gcc::Gcc::read_implicit_specfiles(
-                    &mut creator,
-                    &self.executable,
-                    &[],
-                    &self.env_vars,
-                    "-v",
-                )
-                .await?
-                {
-                    package_builder.add_file(&self.env_vars, path)?;
-                }
             }
 
             CCompilerKind::Nvhpc => {
@@ -2038,6 +2045,85 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                         let _ = package_builder
                             .add_dir_contents(&self.env_vars, &path)
                             .map_err(|e| trace!("add_dir_contents error {path:?}: {e:?}"));
+                    }
+                }
+            }
+
+            CCompilerKind::Msvc => {
+                use crate::util::OsStrExt;
+                // cl.exe
+                package_builder.add_executable_and_deps(&self.env_vars, &self.executable)?;
+
+                if let Some(dir) = self.executable.parent() {
+                    // mspdbcmf.exe
+                    // mspdbsrv.exe
+                    for exe in [
+                        format!("mspdbcmf{}", std::env::consts::EXE_SUFFIX),
+                        format!("mspdbsrv{}", std::env::consts::EXE_SUFFIX),
+                    ] {
+                        package_builder.add_executable_and_deps(&self.env_vars, dir.join(exe))?;
+                    }
+
+                    // c1xx.dll
+                    // c2.dll
+                    // mspdbcore.dll
+                    // mspdbst.dll
+                    // tbbmalloc.dll
+                    // msobj140.dll
+                    // mspdb140.dll
+                    // msvcp140.dll
+                    // vcruntime140_1.dll
+                    // vcruntime140.dll
+
+                    let dll_prefixes = [
+                        "c1xx",
+                        "c2",
+                        "mspdbcore",
+                        "mspdbst",
+                        "tbbmalloc",
+                        // msobj140.dll
+                        "msobj",
+                        // mspdb140.dll
+                        "mspdb",
+                        // msvcp140.dll
+                        "msvcp",
+                        // vcruntime140.dll
+                        // vcruntime140_1.dll
+                        "vcruntime",
+                        // 1033/clui.dll
+                        "clui",
+                        // 1033/mspdbcmfui.dll
+                        "mspdbcmfui",
+                    ];
+
+                    let paths = walkdir::WalkDir::new(dir)
+                        .min_depth(1)
+                        .max_depth(2)
+                        .into_iter()
+                        .filter_map(|e| e.ok())
+                        .filter_map(|e| {
+                            if e.file_type().is_file()
+                                && let file_name = e.file_name().to_ascii_lowercase()
+                                && file_name.ends_with(std::env::consts::DLL_SUFFIX)
+                            {
+                                Some((file_name, e.path().to_owned()))
+                            } else {
+                                None
+                            }
+                        })
+                        .filter_map(|(file_name, file_path)| {
+                            if dll_prefixes
+                                .iter()
+                                .any(|prefix| file_name.starts_with(prefix))
+                            {
+                                Some(file_path)
+                            } else {
+                                None
+                            }
+                        });
+
+                    for path in paths {
+                        package_builder.add_executable_and_deps(&self.env_vars, &path)?;
                     }
                 }
             }

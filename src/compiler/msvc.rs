@@ -173,12 +173,7 @@ impl CCompilerImpl for Msvc {
         Option<dist::CompileCommand>,
         Cacheable,
     )> {
-        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars).map(
-            |(cmd, _dist_cmd, cacheable)| {
-                // MSVC can't be dist-compiled
-                (cmd, None, cacheable)
-            },
-        )
+        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
     }
 }
 

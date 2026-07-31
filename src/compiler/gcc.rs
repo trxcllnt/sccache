@@ -51,6 +51,7 @@ pub struct Gcc {
     pub gplusplus: bool,
     pub version: Option<String>,
     pub native_archs: Option<(String, String)>,
+    pub specfiles: Vec<PathBuf>,
 }
 
 impl Gcc {
@@ -149,6 +150,9 @@ impl CCompilerImpl for Gcc {
     }
     fn version(&self) -> Option<String> {
         self.version.clone()
+    }
+    fn extra_dist_files(&self) -> &[PathBuf] {
+        &self.specfiles
     }
     fn parse_arguments(
         &self,

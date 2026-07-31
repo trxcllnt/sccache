@@ -72,6 +72,10 @@ use tempfile::TempDir;
             target_os = "linux",
             any(target_arch = "x86_64", target_arch = "aarch64")
         ),
+        all(
+            target_os = "windows",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
         target_os = "freebsd"
     )
 ))]
@@ -81,6 +85,10 @@ pub const CAN_DIST_DYLIBS: bool = true;
     not(any(
         all(
             target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(
+            target_os = "windows",
             any(target_arch = "x86_64", target_arch = "aarch64")
         ),
         target_os = "freebsd"
@@ -2550,6 +2558,7 @@ compiler_version=__VERSION__
                         gplusplus: kind == "g++",
                         version,
                         native_archs,
+                        specfiles: extra_hash_files.clone(),
                     },
                     executable,
                     extra_hash_files,

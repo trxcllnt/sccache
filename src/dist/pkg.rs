@@ -29,6 +29,10 @@ use crate::errors::*;
             target_os = "linux",
             any(target_arch = "x86_64", target_arch = "aarch64")
         ),
+        all(
+            target_os = "windows",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
         target_os = "freebsd"
     )
 ))]
@@ -129,6 +133,10 @@ mod toolchain_imp {
             target_os = "linux",
             any(target_arch = "x86_64", target_arch = "aarch64")
         ),
+        all(
+            target_os = "windows",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
         target_os = "freebsd"
     )
 ))]
@@ -169,14 +177,15 @@ mod toolchain_imp {
         }
 
         pub fn add_common(&mut self) -> Result<()> {
-            self.add_dir(PathBuf::from("/tmp"))
+            self.add_dir(std::env::temp_dir())
         }
 
-        pub fn add_executable_and_deps(
+        pub fn add_executable_and_deps<P: AsRef<Path>>(
             &mut self,
             env_vars: &[(OsString, OsString)],
-            executable: &Path,
+            executable: P,
         ) -> Result<()> {
+            let executable = executable.as_ref();
             let mut remaining = vec![executable.to_owned()];
             while let Some(obj_path) = remaining.pop() {
                 assert!(obj_path.is_absolute());
@@ -203,7 +212,8 @@ mod toolchain_imp {
             Ok(())
         }
 
-        pub fn add_dir(&mut self, dir_path: PathBuf) -> Result<()> {
+        pub fn add_dir<P: AsRef<Path>>(&mut self, dir_path: P) -> Result<()> {
+            let dir_path = dir_path.as_ref();
             assert!(dir_path.is_absolute());
             if !dir_path.is_dir() {
                 bail!(format!(
@@ -219,17 +229,18 @@ mod toolchain_imp {
             {
                 return Ok(());
             }
-            let tar_path = self.tarify_path(&dir_path)?;
+            let tar_path = self.tarify_path(dir_path)?;
             trace!("add_dir {} -> {}", dir_path.display(), tar_path.display());
-            self.dir_set.insert(tar_path, dir_path);
+            self.dir_set.insert(tar_path, dir_path.to_path_buf());
             Ok(())
         }
 
-        pub fn add_file(
+        pub fn add_file<P: AsRef<Path>>(
             &mut self,
             env_vars: &[(OsString, OsString)],
-            file_path: PathBuf,
+            file_path: P,
         ) -> Result<()> {
+            let file_path = file_path.as_ref();
             assert!(file_path.is_absolute());
             if !file_path.is_file() {
                 bail!(format!(
@@ -238,13 +249,13 @@ mod toolchain_imp {
                 ))
             }
             if file_path.is_executable()
-                && self.add_executable_and_deps(env_vars, &file_path).is_ok()
+                && self.add_executable_and_deps(env_vars, file_path).is_ok()
             {
                 return Ok(());
             }
-            let tar_path = self.tarify_path(&file_path)?;
+            let tar_path = self.tarify_path(file_path)?;
             trace!("add_file {} -> {}", file_path.display(), tar_path.display());
-            self.file_set.insert(tar_path, file_path);
+            self.file_set.insert(tar_path, file_path.to_path_buf());
             Ok(())
         }
 
@@ -276,11 +287,12 @@ mod toolchain_imp {
             Ok(())
         }
 
-        pub fn add_dir_contents(
+        pub fn add_dir_contents<P: AsRef<Path>>(
             &mut self,
             env_vars: &[(OsString, OsString)],
-            dir_path: &Path,
+            dir_path: P,
         ) -> Result<()> {
+            let dir_path = dir_path.as_ref();
             // Although by not following symlinks we could break a custom
             // constructed toolchain with links everywhere, this is just a
             // best-effort auto packaging
@@ -305,7 +317,7 @@ mod toolchain_imp {
                 }
                 trace!("walkdir add_file {}", path.display());
                 // It's either a file, or a symlink pointing to a file
-                self.add_file(env_vars, path.to_owned())?;
+                self.add_file(env_vars, path)?;
             }
             Ok(())
         }
@@ -415,6 +427,7 @@ mod toolchain_imp {
     // - static + non-PIE = ET_EXEC, ldd stderrs something like "\tnot a dynamic executable" or
     //   "ldd: a.out: Not a valid dynamic program" and exits with code 1
     //
+    #[cfg(not(windows))]
     fn find_ldd_libraries(
         env_vars: &[(OsString, OsString)],
         executable: &Path,
@@ -467,6 +480,7 @@ mod toolchain_imp {
 
     // If it's a static PIE the output will be a line like "\tstatically linked", so be forgiving
     // in the parsing here and treat parsing oddities as an empty list.
+    #[cfg(not(windows))]
     fn parse_ldd_output(stdout: &str) -> Vec<PathBuf> {
         let mut libs = vec![];
         for line in stdout.lines() {
@@ -516,6 +530,96 @@ mod toolchain_imp {
         }
 
         libs
+    }
+
+    #[cfg(windows)]
+    fn find_ldd_libraries(
+        env_vars: &[(OsString, OsString)],
+        executable: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        use crate::util::OsStrExt;
+
+        let mut paths = vec![];
+
+        let env_path = env_vars
+            .iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.clone())
+            .or_else(|| std::env::var_os("PATH"));
+
+        let dumpbin = if let Some(dir) = executable.parent() {
+            paths.push(dir.to_path_buf());
+            which::which_in("dumpbin", env_path.as_ref(), dir)
+        } else {
+            which::which_in("dumpbin", env_path.as_ref(), ".")
+        }
+        .unwrap_or_else(|_| PathBuf::from("dumpbin"));
+
+        let process::Output {
+            status,
+            stdout,
+            stderr,
+        } = process::Command::new(dumpbin)
+            .envs(env_vars.to_vec())
+            .arg("/dependents")
+            .arg(executable)
+            .output()?;
+
+        if !stderr.is_empty() {
+            trace!("dumpbin stderr: {:?}", String::from_utf8_lossy(&stderr));
+        }
+
+        if !status.success() {
+            return Ok(vec![]);
+        }
+
+        paths.extend(
+            env_path
+                .map(|ps| {
+                    std::env::split_paths(&ps)
+                        .filter(|p| p.is_dir())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        );
+
+        // Skip OS system directories, do not package core Windows files
+        paths.retain(|p| {
+            let p = p.as_os_str();
+            !(p.contains(r"\Windows")
+                || p.contains(r"/Windows")
+                || p.contains(r"\System32")
+                || p.contains(r"/System32"))
+        });
+
+        Ok(
+            parse_ldd_output(&crate::compiler::from_local_codepage(stdout)?)
+                .iter()
+                .filter(|lib| {
+                    // # Skip virtual API sets entirely
+                    !(lib.starts_with("api-ms-win-") || lib.starts_with("ext-ms-win-"))
+                })
+                .filter_map(|lib| {
+                    for dir in paths.iter() {
+                        let lib = dir.join(lib);
+                        if lib.exists() {
+                            return Some(lib);
+                        }
+                    }
+                    None
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[cfg(windows)]
+    fn parse_ldd_output(stdout: &str) -> Vec<PathBuf> {
+        stdout
+            .lines()
+            .map(|line| line.trim())
+            .filter(|line| line.ends_with(std::env::consts::DLL_SUFFIX))
+            .map(PathBuf::from)
+            .collect::<Vec<_>>()
     }
 
     #[test]
