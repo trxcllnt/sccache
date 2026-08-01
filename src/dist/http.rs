@@ -1140,10 +1140,12 @@ mod client {
 
         fn next(&self) -> &reqwest::Client {
             use std::sync::atomic::Ordering::SeqCst;
-            &self.clients[self
+            #[allow(deprecated)]
+            let idx = self
                 .index
                 .fetch_update(SeqCst, SeqCst, |i| Some((i + 1) % self.clients.len()))
-                .unwrap_or(0)]
+                .unwrap_or(0);
+            &self.clients[idx]
         }
 
         fn delete<U>(&self, url: U) -> reqwest::RequestBuilder

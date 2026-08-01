@@ -2674,7 +2674,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn local_oem_codepage_conversions() {
-        use crate::util::wide_char_to_multi_byte;
+        use crate::util::{bytes_to_string, wide_char_to_multi_byte};
         use windows_sys::Win32::Globalization::GetOEMCP;
 
         let current_oemcp = unsafe { GetOEMCP() };

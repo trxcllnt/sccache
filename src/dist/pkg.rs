@@ -590,8 +590,7 @@ mod toolchain_imp {
         paths.retain(|p| {
             let p = p.as_os_str();
             !(
-                false
-                    || p.contains(r"\Windows")
+                p.contains(r"\Windows")
                     || p.contains(r"\windows")
                     || p.contains(r"\WINDOWS")
                     || p.contains(r"\System32")
