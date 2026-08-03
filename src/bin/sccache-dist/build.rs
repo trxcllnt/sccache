@@ -127,6 +127,7 @@ type OverlayChildren = Mutex<
 pub struct OverlayBuilder {
     bubblewrap: PathBuf,
     children: Arc<OverlayChildren>,
+    cmd_launcher: Option<PathBuf>,
     dir: PathBuf,
     job_queue: Arc<tokio::sync::Semaphore>,
 }
@@ -134,10 +135,11 @@ pub struct OverlayBuilder {
 impl OverlayBuilder {
     pub async fn new(
         bubblewrap: PathBuf,
-        dir: PathBuf,
+        build_dir: PathBuf,
+        cmd_launcher: Option<PathBuf>,
         job_queue: Arc<tokio::sync::Semaphore>,
     ) -> Result<Self> {
-        tracing::info!("Creating overlay builder with dir {dir:?}");
+        tracing::info!("Creating overlay builder with dir {build_dir:?}");
 
         if !nix::unistd::getuid().is_root() && !nix::unistd::geteuid().is_root() {
             // Not root, or a setuid binary - haven't put enough thought into supporting this, bail
@@ -173,12 +175,13 @@ impl OverlayBuilder {
             );
         }
 
-        let dir = dir.join("builds");
+        let dir = build_dir.join("builds");
 
         // TODO: pidfile
         let ret = Self {
             bubblewrap,
             children: Default::default(),
+            cmd_launcher,
             dir,
             job_queue,
         };
@@ -224,6 +227,7 @@ impl OverlayBuilder {
     async fn perform_build(
         job_id: &str,
         bubblewrap: PathBuf,
+        cmd_launcher: Option<PathBuf>,
         CompileCommand {
             executable,
             arguments,
@@ -368,6 +372,10 @@ impl OverlayBuilder {
                     cmd.arg("--setenv").arg(k).arg(v);
                 }
                 cmd.arg("--");
+                // Launcher can be /usr/bin/wine
+                if let Some(launcher) = cmd_launcher {
+                    cmd.arg(&launcher);
+                }
                 cmd.arg(&executable);
                 cmd.args(arguments);
                 cmd.stdout(Stdio::piped());
@@ -571,6 +579,7 @@ impl BuilderIncoming for OverlayBuilder {
         let res = Self::perform_build(
             job_id,
             self.bubblewrap.clone(),
+            self.cmd_launcher.clone(),
             command,
             inputs,
             outputs,

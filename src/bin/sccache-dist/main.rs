@@ -310,8 +310,9 @@ async fn init_builder(
         BuilderType::Overlay {
             bwrap_path,
             build_dir,
+            cmd_launcher,
         } => Ok(Arc::new(
-            build::OverlayBuilder::new(bwrap_path, build_dir, job_queue.clone())
+            build::OverlayBuilder::new(bwrap_path, build_dir, cmd_launcher, job_queue.clone())
                 .await
                 .context("Overlay builder failed to start")?,
         ) as Arc<dyn BuilderIncoming>),

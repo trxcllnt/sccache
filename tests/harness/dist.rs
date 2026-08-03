@@ -93,6 +93,7 @@ fn sccache_server_cfg(message_broker: &MessageBroker) -> ServerConfig {
         builder: BuilderType::Overlay {
             build_dir: CONTAINER_EXTERNAL_PATH.into(),
             bwrap_path: DIST_IMAGE_BWRAP_PATH.into(),
+            cmd_launcher: None,
         },
         cache_dir: Path::new(CONTAINER_INTERNAL_PATH).into(),
         jobs: sccache::config::CacheConfigs {

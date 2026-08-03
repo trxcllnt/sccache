@@ -3025,6 +3025,7 @@ pub mod server {
         Overlay {
             build_dir: PathBuf,
             bwrap_path: PathBuf,
+            cmd_launcher: Option<PathBuf>,
         },
         #[serde(rename = "pot")]
         Pot {
@@ -3043,6 +3044,7 @@ pub mod server {
         pub fn with_env_or_config(self) -> Self {
             let mut overlay_build_dir = None;
             let mut overlay_bwrap_path = None;
+            let mut overlay_cmd_launcher = None;
             let mut pot_clone_from = None;
             let mut pot_clone_args = None;
             let mut pot_cmd = None;
@@ -3052,9 +3054,11 @@ pub mod server {
                 BuilderType::Overlay {
                     build_dir,
                     bwrap_path,
+                    cmd_launcher,
                 } => {
                     overlay_build_dir = Some(build_dir);
                     overlay_bwrap_path = Some(bwrap_path);
+                    overlay_cmd_launcher = cmd_launcher;
                 }
                 BuilderType::Pot {
                     pot_fs_root: fs_root,
@@ -3085,6 +3089,9 @@ pub mod server {
                         .map(Into::into)
                         .or(overlay_bwrap_path)
                         .unwrap(),
+                    cmd_launcher: env::var_os("SCCACHE_DIST_CMD_LAUNCHER")
+                        .map(Into::into)
+                        .or(overlay_cmd_launcher),
                 },
                 Some("pot") => BuilderType::Pot {
                     pot_fs_root: env::var_os("SCCACHE_DIST_BUILD_DIR")
@@ -4492,6 +4499,7 @@ key_prefix = "sccache-dist-toolchains"
             builder: BuilderType::Overlay {
                 build_dir: PathBuf::from("/tmp/build"),
                 bwrap_path: PathBuf::from("/usr/bin/bwrap"),
+                cmd_launcher: None
             },
             cache_dir: PathBuf::from("/tmp/toolchains"),
             max_per_core_load: 1.25,

@@ -387,9 +387,6 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_take_arg!("RTC", OsString, Concatenated, PassThroughWithSuffix),
     msvc_flag!("TC", PassThrough), // TODO: disable explicit language check, hope for the best for now? Also, handle /Tc & /Tp.
     msvc_flag!("TP", PassThrough), // As above.
-    // Handle /Tc & /Tp
-    msvc_take_arg!("Tc", PathBuf, Concatenated, PassThroughWithPath),
-    msvc_take_arg!("Tp", PathBuf, Concatenated, PassThroughWithPath),
     msvc_take_arg!("U", OsString, Concatenated, PreprocessorArgument),
     msvc_take_arg!("V", OsString, Concatenated, PassThroughWithSuffix),
     msvc_flag!("W0", PassThrough),
@@ -1285,7 +1282,7 @@ fn generate_compile_commands(
     #[cfg(feature = "dist-client")]
     let dist_command = (|| {
         let command = dist::CompileCommand {
-            cwd: path_transformer.as_dist(cwd)?,
+            cwd: path_transformer.as_dist_abs(cwd)?,
             env_vars: dist::osstring_tuples_to_strings(&env_vars)?,
             executable: path_transformer.as_dist(executable)?,
             arguments: {
