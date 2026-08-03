@@ -672,7 +672,7 @@ dependencies = [
 [[package]]
 name = "celery"
 version = "0.5.5"
-source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=sccache#4a145d4c99aeb873a2275ecdb720bc51af189cfe"
+source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=sccache#7810603f84ef2e430978234d120288564b191f47"
 dependencies = [
  "async-rs",
  "async-trait",
@@ -704,7 +704,7 @@ dependencies = [
 [[package]]
 name = "celery-codegen"
 version = "0.5.5"
-source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=sccache#4a145d4c99aeb873a2275ecdb720bc51af189cfe"
+source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=sccache#7810603f84ef2e430978234d120288564b191f47"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4335,7 +4335,7 @@ dependencies = [
 
 [[package]]
 name = "sccache"
-version = "0.16.0-rapids.3"
+version = "0.16.0-rapids.4"
 dependencies = [
  "anyhow",
  "ar",
