@@ -629,6 +629,7 @@ mod toolchain_imp {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_ldd_parse() {
         let ubuntu_ls_output = "\tlinux-vdso.so.1 =>  (0x00007fffcfffe000)
 \tlibselinux.so.1 => /lib/x86_64-linux-gnu/libselinux.so.1 (0x00007f69caa6b000)
@@ -655,6 +656,7 @@ mod toolchain_imp {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_ldd_parse_static() {
         let static_outputs = &[
             "\tstatically linked",    // glibc ldd output
@@ -666,6 +668,7 @@ mod toolchain_imp {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_ldd_parse_v2_30() {
         let archlinux_ls_output = "\tlinux-vdso.so.1 (0x00007ffddc1f6000)
 \tlibcap.so.2 => /usr/lib/libcap.so.2 (0x00007f4980989000)
