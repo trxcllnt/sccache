@@ -43,7 +43,7 @@ use crate::{
     server::SccacheService,
     util::{
         Digest, HashToDigest, OsStrExt, bytes_to_string, fmt_duration_as_secs, hash_all,
-        hash_all_archives, run_input_output,
+        hash_all_archives, path_to_string, run_input_output,
     },
 };
 use async_trait::async_trait;
@@ -1781,7 +1781,8 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
 
             // flat_map would be nice but the lifetimes don't work out
             for argument in arguments.iter() {
-                let path_transformer_fn = &mut |p: &Path| path_transformer.as_dist(p);
+                // let path_transformer_fn = &mut |p: &Path| path_transformer.as_dist(p);
+                let path_transformer_fn = &mut |p: &Path| path_to_string(p).ok();
                 if let Argument::Raw(input_path) = argument {
                     // Need to explicitly handle the input argument as it's not parsed as a path
                     let input_path = Path::new(input_path).to_owned();
@@ -1806,51 +1807,51 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
 
             // Convert the paths of some important environment variables
             let mut env_vars = dist::osstring_tuples_to_strings(env_vars)?;
-            let mut changed_out_dir: Option<PathBuf> = None;
+            // let mut changed_out_dir: Option<PathBuf> = None;
             for (k, v) in env_vars.iter_mut() {
                 match k.as_str() {
                     // We round-tripped from path to string and back to path, but it should be lossless
                     "OUT_DIR" => {
-                        let dist_out_dir = path_transformer.as_dist(Path::new(v))?;
-                        if dist_out_dir != *v {
-                            changed_out_dir = Some(v.to_owned().into());
-                        }
-                        *v = dist_out_dir;
+                        // let dist_out_dir = path_transformer.as_dist(Path::new(v))?;
+                        // if dist_out_dir != *v {
+                        //     changed_out_dir = Some(v.to_owned().into());
+                        // }
+                        *v = path_to_string(Path::new(v)).ok()?;
                     }
                     "TMPDIR" => {
                         // The server will need to find its own tempdir.
                         *v = String::new();
                     }
                     "CARGO" | "CARGO_MANIFEST_DIR" => {
-                        *v = path_transformer.as_dist(Path::new(v))?;
+                        *v = path_to_string(Path::new(v)).ok()?;
                     }
                     _ => (),
                 }
             }
-            // OUT_DIR was changed during transformation, check if this compilation is relying on anything
-            // inside it - if so, disallow distributed compilation (there are sometimes hardcoded paths present)
-            if let Some(out_dir) = changed_out_dir
-                && self.inputs.iter().any(|input| input.starts_with(&out_dir))
-            {
-                return None;
-            }
+            // // OUT_DIR was changed during transformation, check if this compilation is relying on anything
+            // // inside it - if so, disallow distributed compilation (there are sometimes hardcoded paths present)
+            // if let Some(out_dir) = changed_out_dir
+            //     && self.inputs.iter().any(|input| input.starts_with(&out_dir))
+            // {
+            //     return None;
+            // }
 
-            // Add any necessary path transforms - although we haven't packaged up inputs yet, we've
-            // probably seen all drives (e.g. on Windows), so let's just transform those rather than
-            // trying to do every single path.
-            let mut remapped_disks = HashSet::new();
-            for (local_path, dist_path) in get_path_mappings(path_transformer) {
-                let local_path = local_path.to_str()?;
-                // "The from=to parameter is scanned from right to left, so from may contain '=', but to may not."
-                if local_path.contains('=') {
-                    return None;
-                }
-                if remapped_disks.contains(&dist_path) {
-                    continue;
-                }
-                dist_arguments.push(format!("--remap-path-prefix={}={}", &dist_path, local_path));
-                remapped_disks.insert(dist_path);
-            }
+            // // Add any necessary path transforms - although we haven't packaged up inputs yet, we've
+            // // probably seen all drives (e.g. on Windows), so let's just transform those rather than
+            // // trying to do every single path.
+            // let mut remapped_disks = HashSet::new();
+            // for (local_path, dist_path) in get_path_mappings(path_transformer) {
+            //     let local_path = local_path.to_str()?;
+            //     // "The from=to parameter is scanned from right to left, so from may contain '=', but to may not."
+            //     if local_path.contains('=') {
+            //         return None;
+            //     }
+            //     if remapped_disks.contains(&dist_path) {
+            //         continue;
+            //     }
+            //     dist_arguments.push(format!("--remap-path-prefix={}={}", &dist_path, local_path));
+            //     remapped_disks.insert(dist_path);
+            // }
 
             let sysroot_executable = sysroot
                 .join(BINS_DIR)
@@ -1861,7 +1862,7 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
                 arguments: dist_arguments,
                 cwd: path_transformer.as_dist_abs(cwd)?,
                 env_vars,
-                executable: path_transformer.as_dist(&sysroot_executable)?,
+                executable: path_to_string(&sysroot_executable).ok()?,
             };
 
             trace!("[{crate_name}]: dist command: {command}");

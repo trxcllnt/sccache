@@ -28,8 +28,7 @@ use std::{
     time::Duration,
 };
 
-use crate::errors::*;
-use crate::mock_command::ProcessOutput;
+use crate::{errors::*, mock_command::ProcessOutput};
 
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 mod cache;
@@ -145,6 +144,7 @@ mod pkg {
 
 #[cfg(target_os = "windows")]
 mod path_transform {
+    use crate::util::{os_str_to_string, path_to_string};
     use std::collections::HashMap;
     use std::ffi::OsStr;
     use std::path::{Component, Components, Path, PathBuf, Prefix, PrefixComponent};
@@ -170,9 +170,9 @@ mod path_transform {
             // issue
             Prefix::Disk(diskchar) | Prefix::VerbatimDisk(diskchar) => {
                 assert!(diskchar.is_ascii_alphabetic());
-                let diskchar = diskchar.to_ascii_uppercase();
+                let diskchar = diskchar.to_ascii_lowercase();
                 Some(format!(
-                    "/prefix/disk-{}",
+                    "/prefix/drive_{}",
                     str::from_utf8(&[diskchar]).expect("invalid disk char")
                 ))
             }
@@ -194,14 +194,15 @@ mod path_transform {
                 dist_to_local_path: HashMap::new(),
             }
         }
-        pub fn as_dist_input_path(&mut self, input_path: &Path) -> Option<String> {
-            self.as_dist(
+        pub fn with_dist_extension(&mut self, input_path: &Path) -> Option<String> {
+            path_to_string(
                 &(if let Some(ext) = input_path.extension() {
                     input_path.with_extension([OsStr::new("dist"), ext].join(OsStr::new(".")))
                 } else {
                     input_path.with_extension("dist")
                 }),
             )
+            .ok()
         }
         pub fn as_dist_abs(&mut self, p: &Path) -> Option<String> {
             if !p.is_absolute() {
@@ -232,7 +233,7 @@ mod path_transform {
                         error!("unexpected part in path {p:?}");
                         return None;
                     }
-                    Component::Normal(osstr) => osstr.to_str()?,
+                    Component::Normal(osstr) => os_str_to_string(osstr)?,
                     // TODO: should be forbidden
                     Component::CurDir => ".",
                     Component::ParentDir => "..",
@@ -290,31 +291,31 @@ mod path_transform {
     #[test]
     fn test_basic() {
         let mut pt = PathTransformer::new();
-        assert_eq!(pt.as_dist(Path::new("C:/a")).unwrap(), "/prefix/disk-C/a");
+        assert_eq!(pt.as_dist(Path::new("C:/a")).unwrap(), "/prefix/drive_c/a");
         assert_eq!(
             pt.as_dist(Path::new(r#"C:\a\b.c"#)).unwrap(),
-            "/prefix/disk-C/a/b.c"
+            "/prefix/drive_c/a/b.c"
         );
         assert_eq!(
             pt.as_dist(Path::new("X:/other.c")).unwrap(),
-            "/prefix/disk-X/other.c"
+            "/prefix/drive_x/other.c"
         );
         let mut disk_mappings: Vec<_> = pt.disk_mappings().collect();
         disk_mappings.sort();
         assert_eq!(
             disk_mappings,
             &[
-                (Path::new("C:").into(), "/prefix/disk-C".into()),
-                (Path::new("X:").into(), "/prefix/disk-X".into()),
+                (Path::new("C:").into(), "/prefix/drive_c".into()),
+                (Path::new("X:").into(), "/prefix/drive_x".into()),
             ]
         );
-        assert_eq!(pt.to_local("/prefix/disk-C/a").unwrap(), Path::new("C:/a"));
+        assert_eq!(pt.to_local("/prefix/drive_c/a").unwrap(), Path::new("C:/a"));
         assert_eq!(
-            pt.to_local("/prefix/disk-C/a/b.c").unwrap(),
+            pt.to_local("/prefix/drive_c/a/b.c").unwrap(),
             Path::new("C:/a/b.c")
         );
         assert_eq!(
-            pt.to_local("/prefix/disk-X/other.c").unwrap(),
+            pt.to_local("/prefix/drive_x/other.c").unwrap(),
             Path::new("X:/other.c")
         );
     }
@@ -332,15 +333,15 @@ mod path_transform {
         let mut pt = PathTransformer::new();
         assert_eq!(
             pt.as_dist(Path::new("X:/other.c")).unwrap(),
-            "/prefix/disk-X/other.c"
+            "/prefix/drive_x/other.c"
         );
         pt.as_dist(Path::new(r#"\\?\X:\out\other.o"#));
         assert_eq!(
-            pt.to_local("/prefix/disk-X/other.c").unwrap(),
+            pt.to_local("/prefix/drive_x/other.c").unwrap(),
             Path::new("X:/other.c")
         );
         assert_eq!(
-            pt.to_local("/prefix/disk-X/out/other.o").unwrap(),
+            pt.to_local("/prefix/drive_x/out/other.o").unwrap(),
             Path::new(r#"\\?\X:\out\other.o"#)
         );
         let disk_mappings: Vec<_> = pt.disk_mappings().collect();
@@ -348,8 +349,8 @@ mod path_transform {
         assert_eq!(
             disk_mappings,
             &[
-                (Path::new("X:").into(), "/prefix/disk-X".into()),
-                (Path::new(r#"\\?\X:"#).into(), "/prefix/disk-X".into()),
+                (Path::new("X:").into(), "/prefix/drive_x".into()),
+                (Path::new(r#"\\?\X:"#).into(), "/prefix/drive_x".into()),
             ]
         );
     }
@@ -357,15 +358,16 @@ mod path_transform {
     #[test]
     fn test_slash_directions() {
         let mut pt = PathTransformer::new();
-        assert_eq!(pt.as_dist(Path::new("C:/a")).unwrap(), "/prefix/disk-C/a");
-        assert_eq!(pt.as_dist(Path::new("C:\\a")).unwrap(), "/prefix/disk-C/a");
-        assert_eq!(pt.to_local("/prefix/disk-C/a").unwrap(), Path::new("C:/a"));
+        assert_eq!(pt.as_dist(Path::new("C:/a")).unwrap(), "/prefix/drive_c/a");
+        assert_eq!(pt.as_dist(Path::new("C:\\a")).unwrap(), "/prefix/drive_c/a");
+        assert_eq!(pt.to_local("/prefix/drive_c/a").unwrap(), Path::new("C:/a"));
         assert_eq!(pt.disk_mappings().count(), 1);
     }
 }
 
 #[cfg(unix)]
 mod path_transform {
+    use crate::util::path_to_string;
     use std::ffi::OsStr;
     use std::iter;
     use std::path::{Path, PathBuf};
@@ -410,14 +412,15 @@ mod path_transform {
         /// >       |                   const char*
         /// ```
         ///
-        pub fn as_dist_input_path(&mut self, input_path: &Path) -> Option<String> {
-            self.as_dist(
+        pub fn with_dist_extension(&mut self, input_path: &Path) -> Option<String> {
+            path_to_string(
                 &(if let Some(ext) = input_path.extension() {
                     input_path.with_extension([OsStr::new("dist"), ext].join(OsStr::new(".")))
                 } else {
                     input_path.with_extension("dist")
                 }),
             )
+            .ok()
         }
         pub fn as_dist_abs(&mut self, p: &Path) -> Option<String> {
             if !p.is_absolute() {
@@ -426,7 +429,7 @@ mod path_transform {
             self.as_dist(p)
         }
         pub fn as_dist(&mut self, p: &Path) -> Option<String> {
-            p.as_os_str().to_str().map(Into::into)
+            path_to_string(p).ok()
         }
         pub fn disk_mappings(&self) -> impl Iterator<Item = (PathBuf, String)> {
             iter::empty()

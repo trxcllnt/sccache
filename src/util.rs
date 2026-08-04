@@ -1098,6 +1098,10 @@ pub fn path_to_bytes<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<u8>> {
     os_str_to_bytes(path.as_ref().as_os_str())
 }
 
+pub fn path_to_string<P: AsRef<Path>>(path: P) -> std::io::Result<String> {
+    os_str_to_string(path.as_ref().as_os_str())
+}
+
 pub fn os_str_to_string<S: AsRef<OsStr>>(s: S) -> std::io::Result<String> {
     os_str_to_bytes(s.as_ref()).and_then(bytes_to_string)
 }

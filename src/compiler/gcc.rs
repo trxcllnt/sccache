@@ -883,7 +883,7 @@ where
     if language.needs_c_preprocessing() {
         // If the language needs preprocessing, include the source file in the dist inputs.
         // This ensures gcc embeds the correct source and line numbers in warnings/errors.
-        // See the docstring on the `PathTransformer::as_dist_input_path` impl for details.
+        // See the docstring on the `PathTransformer::with_dist_extension` impl for details.
         extra_dist_files.push(cwd.join(&input));
 
         if need_explicit_dep_target {
@@ -1463,10 +1463,12 @@ pub fn generate_compile_commands(
         None
     } else {
         (|| {
+            use crate::util::{os_str_to_string, path_to_string};
+
             let command = dist::CompileCommand {
                 cwd: path_transformer.as_dist_abs(cwd)?,
                 env_vars: dist::osstring_tuples_to_strings(env_vars)?,
-                executable: path_transformer.as_dist(executable)?,
+                executable: path_to_string(executable).ok()?,
                 arguments: {
                     let mut language = language.map(|lang| lang.to_owned());
 
@@ -1560,18 +1562,16 @@ pub fn generate_compile_commands(
                             .collect::<Vec<_>>(),
                     );
 
-                    arguments.extend_from_slice(
-                        &[
-                            parsed_args.compilation_flag.clone().into_string().ok()?,
-                            if !parsed_args.language.needs_c_preprocessing() {
-                                path_transformer.as_dist(&parsed_args.input)?
-                            } else {
-                                path_transformer.as_dist_input_path(&parsed_args.input)?
-                            },
-                            "-o".into(),
-                            path_transformer.as_dist(out_file)?,
-                        ][..],
-                    );
+                    arguments.push(os_str_to_string(&parsed_args.compilation_flag).ok()?);
+
+                    if !parsed_args.language.needs_c_preprocessing() {
+                        arguments.push(path_to_string(&parsed_args.input).ok()?);
+                    } else {
+                        arguments.push(path_transformer.with_dist_extension(&parsed_args.input)?);
+                    }
+
+                    arguments.push("-o".into());
+                    arguments.push(path_to_string(out_file).ok()?);
 
                     arguments
                 },

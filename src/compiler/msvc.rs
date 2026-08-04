@@ -924,7 +924,13 @@ pub fn parse_arguments(
         );
     }
 
-    let extra_dist_files = vec![cwd.join(&input)];
+    let mut extra_dist_files = vec![];
+    if language.needs_c_preprocessing() {
+        // If the language needs preprocessing, include the source file in the dist inputs.
+        // This ensures gcc embeds the correct source and line numbers in warnings/errors.
+        // See the docstring on the `PathTransformer::with_dist_extension` impl for details.
+        extra_dist_files.push(cwd.join(&input));
+    }
 
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),
@@ -1281,15 +1287,17 @@ fn generate_compile_commands(
     let dist_command = None;
     #[cfg(feature = "dist-client")]
     let dist_command = (|| {
+        use crate::util::path_to_string;
+
         let command = dist::CompileCommand {
             cwd: path_transformer.as_dist_abs(cwd)?,
             env_vars: dist::osstring_tuples_to_strings(&env_vars)?,
-            executable: path_transformer.as_dist(executable)?,
+            executable: path_to_string(executable).ok()?,
             arguments: {
                 // http://releases.llvm.org/6.0.0/tools/clang/docs/UsersManual.html#clang-cl
                 // TODO: Use /T... for language?
                 let mut fo = String::from("-Fo");
-                fo.push_str(&path_transformer.as_dist(out_file)?);
+                fo.push_str(&path_to_string(out_file).ok()?);
 
                 let mut arguments: Vec<String> =
                     vec![parsed_args.compilation_flag.clone().into_string().ok()?, fo];
@@ -1302,7 +1310,11 @@ fn generate_compile_commands(
                 if parsed_args.double_dash_input {
                     arguments.push("--".into());
                 }
-                arguments.push(path_transformer.as_dist_input_path(&parsed_args.input)?);
+                if !parsed_args.language.needs_c_preprocessing() {
+                    arguments.push(path_to_string(&parsed_args.input).ok()?);
+                } else {
+                    arguments.push(path_transformer.with_dist_extension(&parsed_args.input)?);
+                }
                 arguments
             },
         };

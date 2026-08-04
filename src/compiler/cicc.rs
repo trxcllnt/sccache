@@ -327,6 +327,8 @@ pub fn generate_compile_commands(
         Ok((
             command,
             (|| {
+                use crate::util::path_to_string;
+
                 let command = dist::CompileCommand {
                     arguments: [
                         &dist::osstrings_to_strings(&parsed_args.common_args)?[..],
@@ -334,15 +336,14 @@ pub fn generate_compile_commands(
                         // &dist::osstrings_to_strings(&parsed_args.unhashed_args)?[..],
                         &[
                             output_flag.into(),
-                            path_transformer.as_dist(output)?,
-                            path_transformer.as_dist(input)?,
+                            path_to_string(output).ok()?,
+                            path_to_string(input).ok()?,
                         ],
                     ]
                     .concat(),
                     cwd: path_transformer.as_dist_abs(cwd)?,
                     env_vars: dist::osstring_tuples_to_strings(env_vars)?,
-                    executable: path_transformer
-                        .as_dist(dunce::canonicalize(executable).ok()?.as_path())?,
+                    executable: path_to_string(executable).ok()?,
                 };
 
                 trace!("[{out_pretty}]: {language} dist_command: {command}");
