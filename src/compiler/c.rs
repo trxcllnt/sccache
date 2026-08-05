@@ -1479,7 +1479,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
         path_transformer: &mut dist::PathTransformer,
         compressor: Box<dyn InputsWriter>,
     ) -> Result<()> {
-        use std::collections::BTreeMap;
+        use std::collections::{BTreeMap, BTreeSet};
 
         let CCompilation {
             service,
@@ -1532,101 +1532,129 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
             parsed_args.common_args = common_args;
         }
 
-        let mut dirs_set = BTreeMap::new();
-        let mut symlinks = BTreeMap::new();
-        let mut builder = tar::Builder::new(compressor);
-        let mut path_transformer = path_transformer.clone();
+        // Clone the path transformer so the clone can be used in spawn_blocking
+        let mut pt = path_transformer.clone();
 
-        let (mut builder, mut dirs_set, mut symlinks, mut path_transformer) =
-            tokio::task::spawn_blocking(move || {
-                let mut simplifier = pkg::SimplifyPath {
-                    dirs: Some(&mut dirs_set),
-                    resolved_symlinks: Some(&mut symlinks),
-                };
-
-                // Find symlinks and simplify the input path first
-                let input_path = cwd.join(&parsed_args.input);
-                let input_path = simplifier.simplify(&input_path)?;
-                let dist_path = if !parsed_args.language.needs_c_preprocessing() {
-                    input_path.clone()
-                } else {
-                    path_transformer.with_dist_extension(&input_path)
-                };
-
-                let dist_path = path_transformer
-                    .as_dist(&dist_path)
-                    .with_context(|| format!("unable to transform input path {input_path:?}"))?;
-
-                let (mut header, dist_path) = pkg::make_tar_header(&input_path, &dist_path)?;
-                // The current size is from the non-preprocessed path, so set the actual size.
-                header.set_size(preprocessor_output.len() as u64);
-                header.set_cksum();
-                builder.append_data(&mut header, dist_path, &preprocessor_output[..])?;
-
-                Ok::<_, anyhow::Error>((builder, dirs_set, symlinks, path_transformer))
-            })
-            .await??;
-
-        // Add the dependencies and extra files
-        let builder = tokio::task::spawn_blocking(move || {
+        // Add the input file, symlinks, dependencies, and extra files
+        let (builder, pt) = tokio::task::spawn_blocking(move || {
+            let mut builder = tar::Builder::new(compressor);
+            let mut dirs_set = BTreeSet::new();
+            let mut symlinks = BTreeMap::new();
             let mut simplifier = pkg::SimplifyPath {
                 dirs: Some(&mut dirs_set),
                 resolved_symlinks: Some(&mut symlinks),
             };
 
-            // Find and add symlinks to the tar archive before the files.
-            // This ensures the symlinks are unpacked by the receiver before
-            // files which may traverse them.
-            let tarified_extra_paths = [
+            // Find symlinks and simplify the input path first
+            let input_path = cwd.join(&parsed_args.input);
+            let input_path = simplifier.simplify(&input_path)?;
+            let dist_path = if !parsed_args.language.needs_c_preprocessing() {
+                input_path.clone()
+            } else {
+                pt.with_dist_extension(&input_path)
+            };
+
+            let dist_path = pt
+                .as_dist(&dist_path)
+                .with_context(|| format!("Unable to transform input path {input_path:?}"))?;
+
+            // Add the preprocessor output to the tar archive
+            let (mut header, dist_path) = pkg::make_tar_header(&input_path, &dist_path)?;
+            // The current size is from the non-preprocessed path, so set the actual size.
+            header.set_size(preprocessor_output.len() as u64);
+            header.set_cksum();
+            builder.append_data(&mut header, dist_path, &preprocessor_output[..])?;
+            drop(preprocessor_output);
+
+            // Simplify and transform the extra files first, so we record
+            // intermediate directories and any traversed symlinks. Those
+            // must be added to the archive first, so they're unpacked by
+            // the receiver before the files which may traverse them.
+            let extra_files = [
                 &dependencies[..],
                 &parsed_args.extra_dist_files[..],
                 &parsed_args.extra_hash_files[..],
             ]
             .into_iter()
             .flatten()
-            .map(|path| simplifier.simplify(path))
-            .try_collect::<_, Vec<_>, _>()?;
+            .map(|src_path| {
+                let src_path = simplifier.simplify(src_path)?;
 
-            for (from_path, to_path) in symlinks.iter() {
-                let mut header = tar::Header::new_gnu();
-                header.set_size(0);
-                header.set_mtime(0);
-                header.set_entry_type(tar::EntryType::Symlink);
-                // Leave `to_path` as absolute, assuming the tar will
-                // be used in a chroot-like environment.
-                builder.append_link(&mut header, pkg::tar_safe_path(from_path), to_path)?;
-            }
-
-            for (tar_path, dir_path) in dirs_set.iter() {
-                builder.append_dir(tar_path, dir_path)?;
-            }
-
-            for path in tarified_extra_paths {
                 if !super::CAN_DIST_DYLIBS
-                    && path
+                    && src_path
                         .extension()
                         .is_some_and(|ext| ext == std::env::consts::DLL_EXTENSION)
                 {
-                    bail!(
-                        "Cannot distribute dylib input {} on this platform",
-                        path.display()
-                    )
-                }
-
-                builder.append_path_with_name(
-                    &path,
-                    path_transformer
-                        .as_dist(&path)
+                    bail!("Cannot distribute dylib input {src_path:?} on this platform")
+                } else {
+                    pt.as_dist(&src_path)
+                        .with_context(|| format!("Unable to transform input path {src_path:?}"))
+                        // Strip the leading slash
                         .map(pkg::tar_safe_path)
-                        .with_context(|| {
-                            format!("unable to transform input path {}", path.display())
-                        })?,
-                )?;
+                        .map(|tar_path| (tar_path, src_path))
+                }
+            })
+            .try_collect::<_, BTreeMap<PathBuf, PathBuf>, _>()
+            .context("Failed transforming input paths")?;
+
+            dirs_set
+                .into_iter()
+                .map(|dir_path| {
+                    pt.as_dist(&dir_path)
+                        .with_context(|| format!("Unable to transform directory path {dir_path:?}"))
+                        // Strip the leading slash
+                        .map(pkg::tar_safe_path)
+                        .map(|tar_path| (tar_path, dir_path))
+                })
+                .try_collect::<_, BTreeMap<PathBuf, PathBuf>, _>()
+                .context("Failed transforming intermediate directory paths")?
+                .into_iter()
+                .try_for_each(|(tar_path, dir_path)| {
+                    // Record each directory in the archive
+                    builder.append_dir(tar_path, dir_path)
+                })
+                .context("Failed adding intermediate directories to archive")?;
+
+            symlinks
+                .into_iter()
+                .map(|(src_path, dst_path)| {
+                    pt.as_dist(&src_path)
+                        .with_context(|| format!("Unable to transform symlink path {src_path:?}"))
+                        // Strip the leading slash
+                        .map(pkg::tar_safe_path)
+                        .map(|tar_path| {
+                            (
+                                tar_path,
+                                // Leave `dst_path` as absolute, assuming the tar will
+                                // be used in a chroot-like environment.
+                                dst_path,
+                            )
+                        })
+                })
+                .try_collect::<_, BTreeMap<PathBuf, PathBuf>, _>()
+                .context("Failed transforming symlink paths")?
+                .into_iter()
+                .try_for_each(|(src_path, dst_path)| {
+                    // Record each symlink in the archive
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(0);
+                    header.set_mtime(0);
+                    header.set_entry_type(tar::EntryType::Symlink);
+                    builder.append_link(&mut header, src_path, dst_path)
+                })
+                .context("Failed adding symlinks to archive")?;
+
+            // Now add the extra files
+            for (tar_path, src_path) in extra_files {
+                builder.append_path_with_name(src_path, tar_path)?;
             }
 
-            Ok::<_, anyhow::Error>(builder)
+            Ok::<_, anyhow::Error>((builder, pt))
         })
         .await??;
+
+        // Move the modified path transformer clone to the original
+        *path_transformer = pt;
 
         // Finish archive
         let _ = builder.into_inner()?.finish()?;
@@ -2156,8 +2184,8 @@ impl pkg::ToolchainPackager for CToolchainPackager {
         }
 
         // Return the builder so the archive can be lazily created, depending
-        // on whether the scheduler reports it already has the toolchain or not
-        Ok(package_builder.build())
+        // on whether or not the scheduler reports it already has the toolchain
+        package_builder.build()
     }
 }
 

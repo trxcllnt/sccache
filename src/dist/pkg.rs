@@ -18,7 +18,6 @@ use fs_err as fs;
 use std::{
     io::{self, Write},
     path::{Component, Path, PathBuf},
-    str,
     sync::Arc,
 };
 
@@ -154,7 +153,7 @@ mod toolchain_imp {
     use async_trait::async_trait;
     use fs_err as fs;
     use is_executable::IsExecutable;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::ffi::OsString;
     use std::io::Write;
     use std::path::{Component, Path, PathBuf};
@@ -172,8 +171,8 @@ mod toolchain_imp {
     pub struct ToolchainPackaged<'a> {
         executable: PathBuf,
         // Put dirs and file in a deterministic order (map from tar_path -> real_path)
-        dirs_set: BTreeMap<PathBuf, PathBuf>,
-        file_set: BTreeMap<PathBuf, PathBuf>,
+        dirs_set: BTreeSet<PathBuf>,
+        file_set: BTreeSet<PathBuf>,
         // Symlinks to add to the tar
         // These are _not_ tar safe, and must be made so before being added to the tar (see
         // `tar_safe_path`).
@@ -185,8 +184,8 @@ mod toolchain_imp {
         pub fn new(executable: PathBuf, path_transformer: &'a mut dist::PathTransformer) -> Self {
             Self {
                 executable,
-                dirs_set: BTreeMap::new(),
-                file_set: BTreeMap::new(),
+                dirs_set: BTreeSet::new(),
+                file_set: BTreeSet::new(),
                 symlinks: BTreeMap::new(),
                 path_transformer,
             }
@@ -209,21 +208,17 @@ mod toolchain_imp {
                 // This is important because ld-linux may not be configured to look in the resolved
                 // or non-resolved directory (i.e., both directories must work at runtime).
                 //
-                let tar_path = self.tarify_path(&obj_path)?;
+                let obj_path = self.simplify_path(&obj_path)?;
                 // If file already in the set, assume we've analysed all deps
-                if self.file_set.contains_key(&tar_path) {
+                if self.file_set.contains(&obj_path) {
                     continue;
                 }
                 let ldd_libraries = find_ldd_libraries(env_vars, &obj_path).with_context(|| {
                     format!("Failed to analyse {} with ldd", obj_path.display())
                 })?;
                 remaining.extend(ldd_libraries);
-                trace!(
-                    "add_executable_and_deps {} -> {}",
-                    obj_path.display(),
-                    tar_path.display()
-                );
-                self.file_set.insert(tar_path, obj_path);
+                trace!("add_executable_and_deps {}", obj_path.display());
+                self.file_set.insert(obj_path);
             }
             Ok(())
         }
@@ -245,9 +240,9 @@ mod toolchain_imp {
             {
                 return Ok(());
             }
-            let tar_path = self.tarify_path(dir_path)?;
-            trace!("add_dir {} -> {}", dir_path.display(), tar_path.display());
-            self.dirs_set.insert(tar_path, dir_path.to_path_buf());
+            let dir_path = self.simplify_path(dir_path)?;
+            trace!("add_dir {}", dir_path.display());
+            self.dirs_set.insert(dir_path);
             Ok(())
         }
 
@@ -269,9 +264,9 @@ mod toolchain_imp {
             {
                 return Ok(());
             }
-            let tar_path = self.tarify_path(file_path)?;
-            trace!("add_file {} -> {}", file_path.display(), tar_path.display());
-            self.file_set.insert(tar_path, file_path.to_path_buf());
+            let file_path = self.simplify_path(file_path)?;
+            trace!("add_file {}", file_path.display());
+            self.file_set.insert(file_path);
             Ok(())
         }
 
@@ -333,25 +328,66 @@ mod toolchain_imp {
             .simplify(path.as_ref())
         }
 
-        /// Simplify the path and strip the leading slash.
-        fn tarify_path<P: AsRef<Path>>(&mut self, path: P) -> Result<PathBuf> {
-            self.simplify_path(path)
-                .map(|path| {
-                    self.path_transformer
-                        .as_dist(&path)
-                        .map(Into::into)
-                        .unwrap_or_else(|| path)
-                })
-                .map(tar_safe_path)
-        }
+        pub fn build(self) -> Result<Arc<dyn super::PackagedToolchain>> {
+            use itertools::Itertools;
 
-        pub fn build(self) -> Arc<dyn super::PackagedToolchain> {
-            Arc::new(PackagedToolchain {
+            // Adjust the archive paths with the PathTransformer
+
+            let dirs_set = self
+                .dirs_set
+                .into_iter()
+                .map(|dir_path| {
+                    self.path_transformer
+                        .as_dist(&dir_path)
+                        .with_context(|| format!("Unable to transform directory path {dir_path:?}"))
+                        // Strip the leading slash
+                        .map(tar_safe_path)
+                        .map(|tar_path| (tar_path, dir_path))
+                })
+                .try_collect()
+                .context("Failed transforming intermediate directory paths")?;
+
+            let file_set = self
+                .file_set
+                .into_iter()
+                .map(|src_path| {
+                    self.path_transformer
+                        .as_dist(&src_path)
+                        .with_context(|| format!("Unable to transform file path {src_path:?}"))
+                        // Strip the leading slash
+                        .map(tar_safe_path)
+                        .map(|tar_path| (tar_path, src_path))
+                })
+                .try_collect()
+                .context("Failed transforming file paths")?;
+
+            let symlinks = self
+                .symlinks
+                .into_iter()
+                .map(|(src_path, dst_path)| {
+                    self.path_transformer
+                        .as_dist(&src_path)
+                        .with_context(|| format!("Unable to transform symlink path {src_path:?}"))
+                        // Strip the leading slash
+                        .map(tar_safe_path)
+                        .map(|tar_path| {
+                            (
+                                tar_path,
+                                // Leave `dst_path` as absolute, assuming the tar will
+                                // be used in a chroot-like environment.
+                                dst_path,
+                            )
+                        })
+                })
+                .try_collect()
+                .context("Failed transforming symlink paths")?;
+
+            Ok(Arc::new(PackagedToolchain {
                 executable: self.executable,
-                dirs_set: self.dirs_set,
-                file_set: self.file_set,
-                symlinks: self.symlinks,
-            })
+                dirs_set,
+                file_set,
+                symlinks,
+            }))
         }
     }
 
@@ -371,19 +407,21 @@ mod toolchain_imp {
         async fn compute_hash(&self) -> Result<String> {
             let mut digest = crate::util::Digest::new();
 
-            for (from_path, to_path) in self.symlinks.iter() {
-                if to_path.is_file() {
-                    digest = digest.with_file(to_path).await?;
+            for (src_path, dst_path) in self.symlinks.iter() {
+                if dst_path.is_file() {
+                    digest = digest.with_file(dst_path).await?;
                 }
-                digest.update(&path_to_bytes(to_path)?);
-                digest.update(&path_to_bytes(from_path)?);
+                digest.update(&path_to_bytes(dst_path)?);
+                digest.update(&path_to_bytes(src_path)?);
             }
-            for (_, dir_path) in self.dirs_set.iter() {
+            for (tar_path, dir_path) in self.dirs_set.iter() {
+                digest.update(&path_to_bytes(tar_path)?);
                 digest.update(&path_to_bytes(dir_path)?);
             }
-            for (_, file_path) in self.file_set.iter() {
-                digest = digest.with_file(file_path).await?;
-                digest.update(&path_to_bytes(file_path)?);
+            for (tar_path, src_path) in self.file_set.iter() {
+                digest = digest.with_file(src_path).await?;
+                digest.update(&path_to_bytes(tar_path)?);
+                digest.update(&path_to_bytes(src_path)?);
             }
 
             Ok(digest.finish())
@@ -418,19 +456,21 @@ mod toolchain_imp {
 
                     let mut builder = tar::Builder::new(compressor);
 
-                    // Add symlinks first to ensure the symlinks exist before
-                    // files are unpacked to paths that may traverse them
-                    for (from_path, to_path) in symlinks.iter() {
+                    // Add directories before symlinks to ensure the dirs exist
+                    // before symlinks that may point at them are unpacked
+                    for (tar_path, dir_path) in dirs_set.iter() {
+                        builder.append_dir(tar_path, dir_path)?;
+                    }
+                    // Add symlinks before files to ensure the symlinks exist
+                    // before files are unpacked to paths that may traverse them
+                    for (src_path, dst_path) in symlinks.iter() {
                         let mut header = tar::Header::new_gnu();
                         header.set_size(0);
                         header.set_mtime(0);
                         header.set_entry_type(tar::EntryType::Symlink);
                         // Leave `to_path` as absolute, assuming the tar will
                         // be used in a chroot-like environment.
-                        builder.append_link(&mut header, tar_safe_path(from_path), to_path)?;
-                    }
-                    for (tar_path, dir_path) in dirs_set.iter() {
-                        builder.append_dir(tar_path, dir_path)?;
+                        builder.append_link(&mut header, tar_safe_path(src_path), dst_path)?;
                     }
                     for (tar_path, file_path) in file_set.iter() {
                         builder.append_path_with_name(file_path, tar_path)?;
@@ -740,7 +780,8 @@ pub fn tar_safe_path<P: AsRef<Path>>(path: P) -> PathBuf {
     final_path
 }
 
-pub fn make_tar_header(src: &Path, dest: &str) -> io::Result<(tar::Header, PathBuf)> {
+pub fn make_tar_header<P: AsRef<Path>>(src: P, dst: P) -> io::Result<(tar::Header, PathBuf)> {
+    let src = src.as_ref();
     let metadata_res = fs::metadata(src);
 
     let mut file_header = tar::Header::new_ustar();
@@ -763,7 +804,7 @@ pub fn make_tar_header(src: &Path, dest: &str) -> io::Result<(tar::Header, PathB
         file_header.set_entry_type(tar::EntryType::file());
     }
 
-    Ok((file_header, tar_safe_path(dest)))
+    Ok((file_header, tar_safe_path(dst)))
 }
 
 /// Simplify a path to one without any relative components, erroring if it looks
@@ -784,7 +825,7 @@ pub fn simplify_path<P: AsRef<Path>>(path: P) -> Result<PathBuf> {
 }
 
 pub struct SimplifyPath<'a> {
-    pub dirs: Option<&'a mut std::collections::BTreeMap<PathBuf, PathBuf>>,
+    pub dirs: Option<&'a mut std::collections::BTreeSet<PathBuf>>,
     pub resolved_symlinks: Option<&'a mut std::collections::BTreeMap<PathBuf, PathBuf>>,
 }
 
@@ -816,7 +857,7 @@ impl SimplifyPath<'_> {
                         bail!("Cannot handle symlinks in parent paths")
                     }
                     if let Some(dirs) = self.dirs.as_mut() {
-                        dirs.insert(tar_safe_path(&final_path), final_path.clone());
+                        dirs.insert(final_path.clone());
                     }
                     final_path.pop();
                 }

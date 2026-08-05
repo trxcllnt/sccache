@@ -1720,7 +1720,7 @@ where
 impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
     fn generate_compile_commands(
         &self,
-        path_transformer: &mut dist::PathTransformer,
+        _path_transformer: &mut dist::PathTransformer,
         _rewrite_includes_only: bool,
         _hash_key: &str,
     ) -> Result<(
@@ -1742,7 +1742,7 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
         // Ignore unused variables
         #[cfg(not(feature = "dist-client"))]
         {
-            let _ = path_transformer;
+            let _ = _path_transformer;
             let _ = host;
             let _ = sysroot;
         }
@@ -1860,7 +1860,7 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
 
             let command = dist::CompileCommand {
                 arguments: dist_arguments,
-                cwd: path_transformer.as_dist_abs(cwd)?,
+                cwd: path_to_string(cwd).ok()?,
                 env_vars,
                 executable: path_to_string(sysroot_executable).ok()?,
             };
@@ -1926,7 +1926,9 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
 fn get_path_mappings(
     path_transformer: &dist::PathTransformer,
 ) -> impl Iterator<Item = (PathBuf, String)> {
-    path_transformer.disk_mappings()
+    path_transformer
+        .disk_mappings()
+        .map(|(local_path, dist_path)| (local_path, path_to_string(dist_path).unwrap()))
 }
 
 #[cfg(feature = "dist-client")]
@@ -2295,8 +2297,8 @@ impl pkg::ToolchainPackager for RustToolchainPackager {
         }
 
         // Return the builder so the archive can be lazily created, depending
-        // on whether the scheduler reports it already has the toolchain or not
-        Ok(package_builder.build())
+        // on whether or not the scheduler reports it already has the toolchain
+        package_builder.build()
     }
 }
 

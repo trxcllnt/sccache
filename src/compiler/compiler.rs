@@ -1287,18 +1287,23 @@ where
         service: &server::SccacheService<T>,
     ) -> Result<(DistType, ProcessOutput)> {
         use dist::RunJobResponse;
+        use itertools::Itertools;
         use std::io;
         use tokio_retry2::strategy::FibonacciBackoff;
 
         let Self {
             compilation,
             dist_client,
-            mut dist_compile_cmd,
+            dist_compile_cmd,
             ref out_pretty,
             mut path_transformer,
             weak_toolchain_key,
             ..
         } = self;
+
+        use crate::util::path_to_string;
+
+        let mut dist_compile_cmd = dist_compile_cmd.as_dist(&mut path_transformer)?;
 
         // Ensure the dependency file exists
         compilation.generate_dependencies(creator).await?;
@@ -1345,10 +1350,20 @@ where
                 archive_path
             });
 
-        let dist_output_paths: Vec<String> = outputs
+        let dist_output_paths = outputs
             .iter()
-            .map(|output| path_transformer.as_dist_abs(&output.path))
-            .collect::<Option<_>>()
+            .map(|output| {
+                path_transformer
+                    .as_dist_abs(&output.path)
+                    .with_context(|| {
+                        format!("Expected output path {:?} to be absolute", output.path)
+                    })
+                    .and_then(|p| {
+                        path_to_string(&p)
+                            .with_context(|| format!("Failed to serialize output path {p:?}"))
+                    })
+            })
+            .try_collect::<_, Vec<_>, _>()
             .context("Failed to adapt an output path for distributed compile")?;
 
         let dist_retry_limit = dist_client.max_retries() + 1.0;

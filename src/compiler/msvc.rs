@@ -1242,7 +1242,9 @@ fn generate_compile_commands(
     let _ = path_transformer;
 
     let out_pretty = parsed_args.output_pretty();
-    let out_file = match parsed_args.outputs.get("obj") {
+
+    let input = parsed_args.input.as_path();
+    let output = match parsed_args.outputs.get("obj") {
         Some(obj) => &obj.path,
         None => bail!("Missing object file output"),
     };
@@ -1262,7 +1264,7 @@ fn generate_compile_commands(
         });
 
     let mut fo = OsString::from("-Fo");
-    fo.push(out_file);
+    fo.push(output);
 
     let mut arguments: Vec<OsString> = vec![parsed_args.compilation_flag.clone(), fo];
     arguments.extend_from_slice(&parsed_args.preprocessor_args);
@@ -1272,7 +1274,7 @@ fn generate_compile_commands(
     if parsed_args.double_dash_input {
         arguments.push("--".into());
     }
-    arguments.push(parsed_args.input.clone().into());
+    arguments.push(input.into());
     let command = SingleCompileCommand {
         arguments,
         cwd: cwd.to_owned(),
@@ -1290,14 +1292,14 @@ fn generate_compile_commands(
         use crate::util::path_to_string;
 
         let command = dist::CompileCommand {
-            cwd: path_transformer.as_dist_abs(cwd)?,
+            cwd: path_to_string(cwd).ok()?,
             env_vars: dist::osstring_tuples_to_strings(&env_vars)?,
             executable: path_to_string(executable).ok()?,
             arguments: {
                 // http://releases.llvm.org/6.0.0/tools/clang/docs/UsersManual.html#clang-cl
                 // TODO: Use /T... for language?
                 let mut fo = String::from("-Fo");
-                fo.push_str(&path_to_string(out_file).ok()?);
+                fo.push_str(&path_to_string(output).ok()?);
 
                 let mut arguments: Vec<String> =
                     vec![parsed_args.compilation_flag.clone().into_string().ok()?, fo];
@@ -1310,14 +1312,17 @@ fn generate_compile_commands(
                 if parsed_args.double_dash_input {
                     arguments.push("--".into());
                 }
-                if !parsed_args.language.needs_c_preprocessing() {
-                    arguments.push(path_to_string(&parsed_args.input).ok()?);
-                } else {
-                    arguments.push(
-                        path_to_string(path_transformer.with_dist_extension(&parsed_args.input))
-                            .ok()?,
-                    );
-                }
+
+                arguments.push(
+                    parsed_args
+                        .language
+                        .needs_c_preprocessing()
+                        .then(|| path_transformer.with_dist_extension(input))
+                        .as_deref()
+                        .or(Some(input))
+                        .and_then(|p| path_to_string(p).ok())?,
+                );
+
                 arguments
             },
         };

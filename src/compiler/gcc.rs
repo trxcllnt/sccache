@@ -1394,7 +1394,8 @@ pub fn generate_compile_commands(
 
     let out_pretty = parsed_args.output_pretty();
 
-    let out_file = match parsed_args.outputs.get("obj") {
+    let input = parsed_args.input.as_path();
+    let output = match parsed_args.outputs.get("obj") {
         Some(obj) => &obj.path,
         None => return Err(anyhow!("Missing object file output")),
     };
@@ -1410,7 +1411,7 @@ pub fn generate_compile_commands(
     arguments.extend(vec![
         parsed_args.compilation_flag.clone(),
         "-o".into(),
-        out_file.into(),
+        output.into(),
     ]);
 
     let mut common_args = parsed_args.common_args.clone();
@@ -1436,7 +1437,7 @@ pub fn generate_compile_commands(
     if parsed_args.double_dash_input {
         arguments.push("--".into());
     }
-    arguments.push(parsed_args.input.clone().into());
+    arguments.push(input.into());
 
     #[cfg(feature = "dist-client")]
     let has_verbose_flag = arguments.contains(&OsString::from("-v"))
@@ -1466,7 +1467,7 @@ pub fn generate_compile_commands(
             use crate::util::{os_str_to_string, path_to_string};
 
             let command = dist::CompileCommand {
-                cwd: path_transformer.as_dist_abs(cwd)?,
+                cwd: path_to_string(cwd).ok()?,
                 env_vars: dist::osstring_tuples_to_strings(env_vars)?,
                 executable: path_to_string(executable).ok()?,
                 arguments: {
@@ -1564,19 +1565,18 @@ pub fn generate_compile_commands(
 
                     arguments.push(os_str_to_string(&parsed_args.compilation_flag).ok()?);
 
-                    if !parsed_args.language.needs_c_preprocessing() {
-                        arguments.push(path_to_string(&parsed_args.input).ok()?);
-                    } else {
-                        arguments.push(
-                            path_to_string(
-                                path_transformer.with_dist_extension(&parsed_args.input),
-                            )
-                            .ok()?,
-                        );
-                    }
+                    arguments.push(
+                        parsed_args
+                            .language
+                            .needs_c_preprocessing()
+                            .then(|| path_transformer.with_dist_extension(input))
+                            .as_deref()
+                            .or(Some(input))
+                            .and_then(|p| path_to_string(p).ok())?,
+                    );
 
                     arguments.push("-o".into());
-                    arguments.push(path_to_string(out_file).ok()?);
+                    arguments.push(path_to_string(output).ok()?);
 
                     arguments
                 },
