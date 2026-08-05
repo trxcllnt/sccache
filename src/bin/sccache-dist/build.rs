@@ -692,7 +692,6 @@ impl DockerBuilder {
         let host_root = host_temp.path();
 
         let cwd = Path::new(&cwd);
-        let cwd_host = join_suffix(host_root, cwd);
         let tc_dir = format!("{}", toolchain_dir.display());
 
         // Canonicalize output path as either absolute or relative to cwd
@@ -704,7 +703,7 @@ impl DockerBuilder {
         // Collect host CWD, input, and output dir paths
         let host_bindmount_paths = {
             // Always create the CWD even if it's not in the inputs archive
-            std::iter::once(cwd_host.as_path())
+            std::iter::once(cwd)
                 // Output paths
                 .chain(output_paths_absolute.iter().map(Path::new))
                 // If it doesn't have a parent, nothing needs creating
