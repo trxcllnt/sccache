@@ -3123,6 +3123,7 @@ pub mod server {
             match env::var("SCCACHE_DIST_BUILDER_TYPE")
                 .ok()
                 .as_deref()
+                .filter(|&val| matches!(val, "docker" | "overlay" | "pot"))
                 .or(docker_image.as_ref().map(|_| "docker"))
                 .or(overlay_build_dir.as_ref().map(|_| "overlay"))
                 .or(pot_clone_from.as_ref().map(|_| "pot"))
