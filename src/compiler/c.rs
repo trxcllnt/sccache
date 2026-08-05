@@ -27,10 +27,7 @@ use crate::{
     lru_disk_cache::LruCache,
     mock_command::{CommandCreatorSync, ProcessOutput},
     server::SccacheService,
-    util::{
-        Digest, HASH_BUFFER_SIZE, HashToDigest, hash_all, path_to_string, read_line_batches,
-        strip_basedirs,
-    },
+    util::{Digest, HASH_BUFFER_SIZE, HashToDigest, hash_all, read_line_batches, strip_basedirs},
 };
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
@@ -1551,13 +1548,14 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                 let input_path = cwd.join(&parsed_args.input);
                 let input_path = simplifier.simplify(&input_path)?;
                 let dist_path = if !parsed_args.language.needs_c_preprocessing() {
-                    path_to_string(&input_path)
-                        .with_context(|| format!("unable to transform input path {input_path:?}"))?
+                    input_path.clone()
                 } else {
-                    path_transformer
-                        .with_dist_extension(&input_path)
-                        .with_context(|| format!("unable to transform input path {input_path:?}"))?
+                    path_transformer.with_dist_extension(&input_path)
                 };
+
+                let dist_path = path_transformer
+                    .as_dist(&dist_path)
+                    .with_context(|| format!("unable to transform input path {input_path:?}"))?;
 
                 let (mut header, dist_path) = pkg::make_tar_header(&input_path, &dist_path)?;
                 // The current size is from the non-preprocessed path, so set the actual size.

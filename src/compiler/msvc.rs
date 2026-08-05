@@ -1313,7 +1313,10 @@ fn generate_compile_commands(
                 if !parsed_args.language.needs_c_preprocessing() {
                     arguments.push(path_to_string(&parsed_args.input).ok()?);
                 } else {
-                    arguments.push(path_transformer.with_dist_extension(&parsed_args.input)?);
+                    arguments.push(
+                        path_to_string(path_transformer.with_dist_extension(&parsed_args.input))
+                            .ok()?,
+                    );
                 }
                 arguments
             },

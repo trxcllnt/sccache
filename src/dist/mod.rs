@@ -194,15 +194,12 @@ mod path_transform {
                 dist_to_local_path: HashMap::new(),
             }
         }
-        pub fn with_dist_extension(&mut self, input_path: &Path) -> Option<String> {
-            path_to_string(
-                &(if let Some(ext) = input_path.extension() {
-                    input_path.with_extension([OsStr::new("dist"), ext].join(OsStr::new(".")))
-                } else {
-                    input_path.with_extension("dist")
-                }),
-            )
-            .ok()
+        pub fn with_dist_extension(&mut self, input_path: &Path) -> PathBuf {
+            if let Some(ext) = input_path.extension() {
+                input_path.with_extension([OsStr::new("dist"), ext].join(OsStr::new(".")))
+            } else {
+                input_path.with_extension("dist")
+            }
         }
         pub fn as_dist_abs(&mut self, p: &Path) -> Option<String> {
             if !p.is_absolute() {
@@ -418,15 +415,12 @@ mod path_transform {
         /// >       |                   const char*
         /// ```
         ///
-        pub fn with_dist_extension(&mut self, input_path: &Path) -> Option<String> {
-            path_to_string(
-                &(if let Some(ext) = input_path.extension() {
-                    input_path.with_extension([OsStr::new("dist"), ext].join(OsStr::new(".")))
-                } else {
-                    input_path.with_extension("dist")
-                }),
-            )
-            .ok()
+        pub fn with_dist_extension(&mut self, input_path: &Path) -> PathBuf {
+            if let Some(ext) = input_path.extension() {
+                input_path.with_extension([OsStr::new("dist"), ext].join(OsStr::new(".")))
+            } else {
+                input_path.with_extension("dist")
+            }
         }
         pub fn as_dist_abs(&mut self, p: &Path) -> Option<String> {
             if !p.is_absolute() {
