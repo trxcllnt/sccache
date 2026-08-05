@@ -402,7 +402,7 @@ mod client {
                     "/my/compiler".as_ref(),
                     "weak_key",
                     Box::new(PanicToolchainPackager),
-                    &mut PathTransformer,
+                    &mut PathTransformer::new(),
                 )
                 .await
                 .unwrap();
@@ -446,7 +446,7 @@ mod client {
                     "/my/compiler".as_ref(),
                     "weak_key",
                     Box::new(PanicToolchainPackager),
-                    &mut PathTransformer,
+                    &mut PathTransformer::new(),
                 )
                 .await
                 .unwrap();
@@ -456,7 +456,7 @@ mod client {
                     "/my/compiler2".as_ref(),
                     "weak_key",
                     Box::new(PanicToolchainPackager),
-                    &mut PathTransformer,
+                    &mut PathTransformer::new(),
                 )
                 .await
                 .unwrap();
@@ -466,7 +466,7 @@ mod client {
                     "/my/compiler3".as_ref(),
                     "weak_key",
                     Box::new(PanicToolchainPackager),
-                    &mut PathTransformer,
+                    &mut PathTransformer::new(),
                 )
                 .await
                 .unwrap();
@@ -492,7 +492,7 @@ mod client {
                         "/my/compiler".as_ref(),
                         "weak_key",
                         Box::new(PanicToolchainPackager),
-                        &mut PathTransformer,
+                        &mut PathTransformer::new(),
                     )
                     .await
                     .is_err()

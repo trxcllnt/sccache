@@ -952,7 +952,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                         .await?
                         .0
                         .get_toolchain_packager()
-                        .package(&mut PathTransformer)
+                        .package(&mut PathTransformer::new())
                         .await?;
 
                 packaged

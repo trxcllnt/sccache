@@ -368,16 +368,22 @@ mod path_transform {
 #[cfg(unix)]
 mod path_transform {
     use crate::util::path_to_string;
+    use std::collections::HashMap;
     use std::ffi::OsStr;
     use std::iter;
     use std::path::{Path, PathBuf};
 
     #[derive(Debug, Clone)]
-    pub struct PathTransformer;
+    pub struct PathTransformer {
+        #[allow(dead_code)]
+        dist_to_local_path: HashMap<String, PathBuf>,
+    }
 
     impl PathTransformer {
         pub fn new() -> Self {
-            PathTransformer
+            PathTransformer {
+                dist_to_local_path: HashMap::new(),
+            }
         }
         ///
         /// Remove the extension so preprocessed file doesn't have the same name as
