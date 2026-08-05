@@ -1338,14 +1338,20 @@ mod client {
             &self,
             compiler_path: &Path,
             weak_toolchain_key: &str,
-            toolchain_packager: &dyn ToolchainPackager,
+            toolchain_packager: Box<dyn ToolchainPackager>,
+            path_transformer: &mut dist::PathTransformer,
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
             Option<Arc<dyn PackagedToolchain>>,
         )> {
             self.tc_cache
-                .hash_toolchain(compiler_path, weak_toolchain_key, toolchain_packager)
+                .hash_toolchain(
+                    compiler_path,
+                    weak_toolchain_key,
+                    toolchain_packager,
+                    path_transformer,
+                )
                 .await
         }
 

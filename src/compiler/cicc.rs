@@ -344,6 +344,9 @@ pub fn generate_compile_commands(
                     cwd: path_transformer.as_dist_abs(cwd)?,
                     env_vars: dist::osstring_tuples_to_strings(env_vars)?,
                     executable: path_to_string(executable).ok()?,
+                    // executable: dunce::canonicalize(executable)
+                    //     .and_then(path_to_string)
+                    //     .ok()?,
                 };
 
                 trace!("[{out_pretty}]: {language} dist_command: {command}");

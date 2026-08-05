@@ -127,7 +127,6 @@ type OverlayChildren = Mutex<
 pub struct OverlayBuilder {
     bubblewrap: PathBuf,
     children: Arc<OverlayChildren>,
-    cmd_launcher: Option<PathBuf>,
     dir: PathBuf,
     job_queue: Arc<tokio::sync::Semaphore>,
 }
@@ -136,7 +135,6 @@ impl OverlayBuilder {
     pub async fn new(
         bubblewrap: PathBuf,
         build_dir: PathBuf,
-        cmd_launcher: Option<PathBuf>,
         job_queue: Arc<tokio::sync::Semaphore>,
     ) -> Result<Self> {
         tracing::info!("Creating overlay builder with dir {build_dir:?}");
@@ -181,7 +179,6 @@ impl OverlayBuilder {
         let ret = Self {
             bubblewrap,
             children: Default::default(),
-            cmd_launcher,
             dir,
             job_queue,
         };
@@ -227,7 +224,6 @@ impl OverlayBuilder {
     async fn perform_build(
         job_id: &str,
         bubblewrap: PathBuf,
-        cmd_launcher: Option<PathBuf>,
         CompileCommand {
             executable,
             arguments,
@@ -372,10 +368,6 @@ impl OverlayBuilder {
                     cmd.arg("--setenv").arg(k).arg(v);
                 }
                 cmd.arg("--");
-                // Launcher can be /usr/bin/wine
-                if let Some(launcher) = cmd_launcher {
-                    cmd.arg(&launcher);
-                }
                 cmd.arg(&executable);
                 cmd.args(arguments);
                 cmd.stdout(Stdio::piped());
@@ -579,7 +571,6 @@ impl BuilderIncoming for OverlayBuilder {
         let res = Self::perform_build(
             job_id,
             self.bubblewrap.clone(),
-            self.cmd_launcher.clone(),
             command,
             inputs,
             outputs,
@@ -621,16 +612,11 @@ impl BuilderIncoming for OverlayBuilder {
     }
 }
 
-// Name of the image to run
-// TODO: Make this configurable?
-const BUSYBOX_DOCKER_IMAGE: &str = "busybox:stable-musl";
-// Make sure sh doesn't exec the final command, since we need it to do
-// init duties (reaping zombies). Also, because we kill -9 -1, that kills
-// the sleep (it's not a builtin) so it needs to be a loop.
-const DOCKER_SHELL_INIT: &str = "while true; do busybox sleep 365d && busybox true; done";
-
 #[derive(Clone)]
 pub struct DockerBuilder {
+    image: String,
+    run_cmd: Vec<String>,
+    exec_cmd: Vec<String>,
     containers: Arc<Mutex<HashMap<String, String>>>,
     job_queue: Arc<tokio::sync::Semaphore>,
 }
@@ -639,17 +625,29 @@ impl DockerBuilder {
     // TODO: this should accept a unique string, e.g. inode of the tccache directory
     // having locked a pidfile, or at minimum should loudly detect other running
     // instances - pidfile in /tmp
-    pub async fn new(job_queue: Arc<tokio::sync::Semaphore>) -> Result<Self> {
+    pub async fn new(
+        image: String,
+        run_cmd: Vec<String>,
+        exec_cmd: Vec<String>,
+        job_queue: Arc<tokio::sync::Semaphore>,
+    ) -> Result<Self> {
         tracing::info!("Creating docker builder");
         Ok(Self {
+            image,
+            run_cmd,
+            exec_cmd,
             containers: Default::default(),
             job_queue,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn perform_build(
         job_id: &str,
         c_name: &str,
+        image: &str,
+        run_cmd: &[String],
+        exec_cmd: &[String],
         toolchain_dir: &Path,
         CompileCommand {
             executable,
@@ -745,13 +743,8 @@ impl DockerBuilder {
             cmd.args(["run", "--init", "-d", "--name", c_name])
                 // Mount output dirs
                 .args(host_bindmount_paths.iter().flat_map(bind_mount(host_root)))
-                .args([
-                    BUSYBOX_DOCKER_IMAGE,
-                    "busybox",
-                    "sh",
-                    "-c",
-                    DOCKER_SHELL_INIT,
-                ])
+                .arg(image)
+                .args(run_cmd)
                 .check_stdout_trim()
                 .await
                 .context("Failed to create docker container")
@@ -832,6 +825,8 @@ impl DockerBuilder {
                 }))
                 // container name
                 .arg(c_name)
+                // The exec command (e.g. /usr/bin/wine)
+                .args(exec_cmd)
                 // Finally, the executable and arguments
                 .arg(&executable)
                 .args(arguments);
@@ -943,6 +938,9 @@ impl BuilderIncoming for DockerBuilder {
         let res = Self::perform_build(
             job_id,
             &c_name,
+            &self.image,
+            &self.run_cmd,
+            &self.exec_cmd,
             toolchain_dir,
             command,
             outputs,

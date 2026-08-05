@@ -301,8 +301,12 @@ async fn init_builder(
 ) -> Result<Arc<dyn BuilderIncoming>> {
     match config {
         #[cfg(not(target_os = "freebsd"))]
-        BuilderType::Docker => Ok(Arc::new(
-            build::DockerBuilder::new(job_queue.clone())
+        BuilderType::Docker {
+            image,
+            run_cmd,
+            exec_cmd,
+        } => Ok(Arc::new(
+            build::DockerBuilder::new(image, run_cmd, exec_cmd, job_queue.clone())
                 .await
                 .context("Docker builder failed to start")?,
         ) as Arc<dyn BuilderIncoming>),
@@ -310,9 +314,8 @@ async fn init_builder(
         BuilderType::Overlay {
             bwrap_path,
             build_dir,
-            cmd_launcher,
         } => Ok(Arc::new(
-            build::OverlayBuilder::new(bwrap_path, build_dir, cmd_launcher, job_queue.clone())
+            build::OverlayBuilder::new(bwrap_path, build_dir, job_queue.clone())
                 .await
                 .context("Overlay builder failed to start")?,
         ) as Arc<dyn BuilderIncoming>),

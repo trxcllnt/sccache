@@ -233,15 +233,15 @@ mod path_transform {
                         error!("unexpected part in path {p:?}");
                         return None;
                     }
-                    Component::Normal(osstr) => os_str_to_string(osstr)?,
+                    Component::Normal(osstr) => os_str_to_string(osstr).ok()?,
                     // TODO: should be forbidden
-                    Component::CurDir => ".",
-                    Component::ParentDir => "..",
+                    Component::CurDir => ".".into(),
+                    Component::ParentDir => "..".into(),
                 };
                 if !dist_suffix.is_empty() {
                     dist_suffix.push('/');
                 }
-                dist_suffix.push_str(part);
+                dist_suffix.push_str(&part);
             }
 
             let dist_path = if let Some(mut dist_prefix) = maybe_dist_prefix {
@@ -919,7 +919,8 @@ pub trait Client: Send + Sync {
         &self,
         compiler_path: &Path,
         weak_toolchain_key: &str,
-        toolchain_packager: &dyn pkg::ToolchainPackager,
+        toolchain_packager: Box<dyn pkg::ToolchainPackager>,
+        path_transformer: &mut PathTransformer,
     ) -> Result<(
         Toolchain,
         Option<(String, PathBuf)>,

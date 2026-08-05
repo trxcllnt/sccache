@@ -932,7 +932,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
         #[cfg(feature = "dist-client")]
         Command::PackageToolchain(executable, out) => {
             use crate::compiler;
-            use crate::dist::Toolchain;
+            use crate::dist::{PathTransformer, Toolchain};
 
             trace!("Command::PackageToolchain({})", executable.display());
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -952,7 +952,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                         .await?
                         .0
                         .get_toolchain_packager()
-                        .package()
+                        .package(&mut PathTransformer)
                         .await?;
 
                 packaged

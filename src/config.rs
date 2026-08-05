@@ -3014,18 +3014,46 @@ pub mod server {
             .collect()
     }
 
-    #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+    fn default_docker_image() -> String {
+        "busybox:stable-musl".into()
+    }
+
+    fn default_docker_run_cmd() -> Vec<String> {
+        [
+            "busybox",
+            "sh",
+            "-c",
+            "while true; do busybox sleep 365d && busybox true; done",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect()
+    }
+
+    fn default_docker_exec_cmd() -> Vec<String> {
+        vec![]
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
     #[serde(tag = "type")]
     #[serde(deny_unknown_fields)]
     pub enum BuilderType {
-        #[default]
         #[serde(rename = "docker")]
-        Docker,
+        Docker {
+            // Name of the image to run
+            #[serde(default = "default_docker_image")]
+            image: String,
+            // Command to pass to `docker run <image>`
+            #[serde(default = "default_docker_run_cmd")]
+            run_cmd: Vec<String>,
+            // Command to pass to `docker exec <container>`
+            #[serde(default = "default_docker_exec_cmd")]
+            exec_cmd: Vec<String>,
+        },
         #[serde(rename = "overlay")]
         Overlay {
             build_dir: PathBuf,
             bwrap_path: PathBuf,
-            cmd_launcher: Option<PathBuf>,
         },
         #[serde(rename = "pot")]
         Pot {
@@ -3040,25 +3068,44 @@ pub mod server {
         },
     }
 
+    impl Default for BuilderType {
+        fn default() -> Self {
+            Self::Docker {
+                image: default_docker_image(),
+                run_cmd: default_docker_run_cmd(),
+                exec_cmd: default_docker_exec_cmd(),
+            }
+        }
+    }
+
     impl BuilderType {
         pub fn with_env_or_config(self) -> Self {
+            let mut docker_image = None;
+            let mut docker_run_cmd = None;
+            let mut docker_exec_cmd = None;
             let mut overlay_build_dir = None;
             let mut overlay_bwrap_path = None;
-            let mut overlay_cmd_launcher = None;
             let mut pot_clone_from = None;
             let mut pot_clone_args = None;
             let mut pot_cmd = None;
             let mut pot_fs_root = None;
 
             match self {
+                BuilderType::Docker {
+                    image,
+                    run_cmd,
+                    exec_cmd,
+                } => {
+                    docker_image = Some(image);
+                    docker_run_cmd = Some(run_cmd);
+                    docker_exec_cmd = Some(exec_cmd);
+                }
                 BuilderType::Overlay {
                     build_dir,
                     bwrap_path,
-                    cmd_launcher,
                 } => {
                     overlay_build_dir = Some(build_dir);
                     overlay_bwrap_path = Some(bwrap_path);
-                    overlay_cmd_launcher = cmd_launcher;
                 }
                 BuilderType::Pot {
                     pot_fs_root: fs_root,
@@ -3071,12 +3118,12 @@ pub mod server {
                     pot_cmd = Some(cmd);
                     pot_clone_args = Some(clone_args);
                 }
-                _ => {}
             }
 
             match env::var("SCCACHE_DIST_BUILDER_TYPE")
                 .ok()
                 .as_deref()
+                .or(docker_image.as_ref().map(|_| "docker"))
                 .or(overlay_build_dir.as_ref().map(|_| "overlay"))
                 .or(pot_clone_from.as_ref().map(|_| "pot"))
             {
@@ -3089,9 +3136,6 @@ pub mod server {
                         .map(Into::into)
                         .or(overlay_bwrap_path)
                         .unwrap(),
-                    cmd_launcher: env::var_os("SCCACHE_DIST_CMD_LAUNCHER")
-                        .map(Into::into)
-                        .or(overlay_cmd_launcher),
                 },
                 Some("pot") => BuilderType::Pot {
                     pot_fs_root: env::var_os("SCCACHE_DIST_BUILD_DIR")
@@ -3113,7 +3157,25 @@ pub mod server {
                         .or(pot_clone_args)
                         .unwrap_or_else(default_pot_clone_args),
                 },
-                _ => BuilderType::Docker,
+                Some("docker") => BuilderType::Docker {
+                    image: env::var("SCCACHE_DIST_DOCKER_IMAGE")
+                        .ok()
+                        .or(docker_image)
+                        .unwrap_or_else(default_docker_image),
+                    run_cmd: env::var("SCCACHE_DIST_DOCKER_RUN_CMD")
+                        .ok()
+                        .as_deref()
+                        .and_then(shlex::split)
+                        .or(docker_run_cmd)
+                        .unwrap_or_else(default_docker_run_cmd),
+                    exec_cmd: env::var("SCCACHE_DIST_DOCKER_EXEC_CMD")
+                        .ok()
+                        .as_deref()
+                        .and_then(shlex::split)
+                        .or(docker_exec_cmd)
+                        .unwrap_or_else(default_docker_exec_cmd),
+                },
+                _ => BuilderType::default(),
             }
         }
     }
@@ -3149,7 +3211,7 @@ pub mod server {
     impl Default for FileConfig {
         fn default() -> Self {
             Self {
-                builder: BuilderType::Docker,
+                builder: BuilderType::default(),
                 cache_dir: Config::default_cache_dir(),
                 health_check_bind_addr: None,
                 heartbeat_interval_ms: Config::default_heartbeat_interval_ms(),
@@ -4499,7 +4561,6 @@ key_prefix = "sccache-dist-toolchains"
             builder: BuilderType::Overlay {
                 build_dir: PathBuf::from("/tmp/build"),
                 bwrap_path: PathBuf::from("/usr/bin/bwrap"),
-                cmd_launcher: None
             },
             cache_dir: PathBuf::from("/tmp/toolchains"),
             max_per_core_load: 1.25,

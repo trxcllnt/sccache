@@ -40,7 +40,10 @@ pub use self::toolchain_imp::*;
 
 #[async_trait]
 pub trait ToolchainPackager: Send + Sync {
-    async fn package(&self) -> Result<Arc<dyn PackagedToolchain>>;
+    async fn package(
+        self: Box<Self>,
+        path_transformer: &mut dist::PathTransformer,
+    ) -> Result<Arc<dyn PackagedToolchain>>;
 }
 
 #[async_trait]
@@ -124,7 +127,10 @@ mod toolchain_imp {
     // create a failing implementation that will conflict with any others.
     #[async_trait]
     impl<T: Send + Sync> ToolchainPackager for T {
-        async fn package(&self) -> Result<Arc<dyn PackagedToolchain>> {
+        async fn package(
+            self: Box<Self>,
+            path_transformer: &mut dist::PathTransformer,
+        ) -> Result<Arc<dyn PackagedToolchain>> {
             bail!("Automatic packaging not supported on this platform")
         }
     }
@@ -154,29 +160,35 @@ mod toolchain_imp {
     use std::path::{Component, Path, PathBuf};
     use std::process;
     use std::str;
+    use std::sync::Arc;
     use walkdir::WalkDir;
 
-    use super::{PackagedToolchain, dist::Toolchain, tar_safe_path};
-    use crate::{errors::*, util::bytes_to_string};
+    use super::{SimplifyPath, dist, tar_safe_path};
+    use crate::{
+        errors::*,
+        util::{bytes_to_string, path_to_bytes},
+    };
 
-    pub struct ToolchainPackaged {
+    pub struct ToolchainPackaged<'a> {
         executable: PathBuf,
         // Put dirs and file in a deterministic order (map from tar_path -> real_path)
-        dir_set: BTreeMap<PathBuf, PathBuf>,
+        dirs_set: BTreeMap<PathBuf, PathBuf>,
         file_set: BTreeMap<PathBuf, PathBuf>,
         // Symlinks to add to the tar
         // These are _not_ tar safe, and must be made so before being added to the tar (see
         // `tar_safe_path`).
         symlinks: BTreeMap<PathBuf, PathBuf>,
+        path_transformer: &'a mut dist::PathTransformer,
     }
 
-    impl ToolchainPackaged {
-        pub fn new(executable: PathBuf) -> Self {
+    impl<'a> ToolchainPackaged<'a> {
+        pub fn new(executable: PathBuf, path_transformer: &'a mut dist::PathTransformer) -> Self {
             Self {
                 executable,
-                dir_set: BTreeMap::new(),
+                dirs_set: BTreeMap::new(),
                 file_set: BTreeMap::new(),
                 symlinks: BTreeMap::new(),
+                path_transformer,
             }
         }
 
@@ -222,7 +234,7 @@ mod toolchain_imp {
             if !dir_path.is_dir() {
                 bail!(format!(
                     "{} was not a dir when readying for tar",
-                    dir_path.to_string_lossy()
+                    dir_path.display()
                 ))
             }
             if dir_path
@@ -235,7 +247,7 @@ mod toolchain_imp {
             }
             let tar_path = self.tarify_path(dir_path)?;
             trace!("add_dir {} -> {}", dir_path.display(), tar_path.display());
-            self.dir_set.insert(tar_path, dir_path.to_path_buf());
+            self.dirs_set.insert(tar_path, dir_path.to_path_buf());
             Ok(())
         }
 
@@ -249,7 +261,7 @@ mod toolchain_imp {
             if !file_path.is_file() {
                 bail!(format!(
                     "{} was not a file when readying for tar",
-                    file_path.to_string_lossy()
+                    file_path.display()
                 ))
             }
             if file_path.is_executable()
@@ -263,31 +275,16 @@ mod toolchain_imp {
             Ok(())
         }
 
-        pub fn add_link(&mut self, file_path: &Path, link_name: &Path) -> Result<()> {
-            assert!(file_path.is_absolute());
-            assert!(link_name.is_absolute());
-            let mut tarify = |path: &Path| -> Result<PathBuf> {
-                Ok(if let Some(parent) = path.parent() {
-                    let root = path.components().next().unwrap();
-                    let root = Path::new(root.as_os_str());
-                    root.join(if let Some(name) = path.file_name() {
-                        self.tarify_path(parent)?.join(name)
-                    } else {
-                        self.tarify_path(path)?
-                    })
-                } else {
-                    self.tarify_path(path)?
-                })
-            };
-
-            let tar_link_name = tarify(link_name)?;
-            let tar_file_path = tarify(file_path)?;
-            trace!(
-                "add_link {} -> {}",
-                tar_link_name.display(),
-                tar_file_path.display()
-            );
-            self.symlinks.insert(tar_link_name, tar_file_path);
+        pub fn add_link(&mut self, path: &Path, name: &Path) -> Result<()> {
+            assert!(path.is_absolute());
+            assert!(name.is_absolute());
+            // Simplify the link path
+            let p = self.simplify_path(path)?;
+            // Simplify the link name to record any symlinks it traverses,
+            // but write the original name as the actual link name in the archive.
+            let _ = self.simplify_path(name)?;
+            trace!("add_link {} -> {}", p.display(), name.display());
+            self.symlinks.insert(p, name.to_path_buf());
             Ok(())
         }
 
@@ -326,16 +323,51 @@ mod toolchain_imp {
             Ok(())
         }
 
-        /// Simplify the path and strip the leading slash.
-        ///
+        /// Simplify the path.
         /// Symlinks in the path are recorded for inclusion in the tarball.
-        fn tarify_path(&mut self, path: &Path) -> Result<PathBuf> {
-            super::tarify_path(&mut self.symlinks, path).map(tar_safe_path)
+        fn simplify_path<P: AsRef<Path>>(&mut self, path: P) -> Result<PathBuf> {
+            SimplifyPath {
+                dirs: Some(&mut self.dirs_set),
+                resolved_symlinks: Some(&mut self.symlinks),
+            }
+            .simplify(path.as_ref())
+        }
+
+        /// Simplify the path and strip the leading slash.
+        fn tarify_path<P: AsRef<Path>>(&mut self, path: P) -> Result<PathBuf> {
+            self.simplify_path(path)
+                .map(|path| {
+                    self.path_transformer
+                        .as_dist(&path)
+                        .map(Into::into)
+                        .unwrap_or_else(|| path)
+                })
+                .map(tar_safe_path)
+        }
+
+        pub fn build(self) -> Arc<dyn super::PackagedToolchain> {
+            Arc::new(PackagedToolchain {
+                executable: self.executable,
+                dirs_set: self.dirs_set,
+                file_set: self.file_set,
+                symlinks: self.symlinks,
+            })
         }
     }
 
+    pub struct PackagedToolchain {
+        executable: PathBuf,
+        // Put dirs and file in a deterministic order (map from tar_path -> real_path)
+        dirs_set: BTreeMap<PathBuf, PathBuf>,
+        file_set: BTreeMap<PathBuf, PathBuf>,
+        // Symlinks to add to the tar
+        // These are _not_ tar safe, and must be made so before being added to the tar (see
+        // `tar_safe_path`).
+        symlinks: BTreeMap<PathBuf, PathBuf>,
+    }
+
     #[async_trait]
-    impl PackagedToolchain for ToolchainPackaged {
+    impl super::PackagedToolchain for PackagedToolchain {
         async fn compute_hash(&self) -> Result<String> {
             let mut digest = crate::util::Digest::new();
 
@@ -343,15 +375,15 @@ mod toolchain_imp {
                 if to_path.is_file() {
                     digest = digest.with_file(to_path).await?;
                 }
-                digest.update(to_path.to_string_lossy().as_bytes());
-                digest.update(from_path.to_string_lossy().as_bytes());
+                digest.update(&path_to_bytes(to_path)?);
+                digest.update(&path_to_bytes(from_path)?);
             }
-            for (_, dir_path) in self.dir_set.iter() {
-                digest.update(dir_path.to_string_lossy().as_bytes());
+            for (_, dir_path) in self.dirs_set.iter() {
+                digest.update(&path_to_bytes(dir_path)?);
             }
             for (_, file_path) in self.file_set.iter() {
                 digest = digest.with_file(file_path).await?;
-                digest.update(file_path.to_string_lossy().as_bytes());
+                digest.update(&path_to_bytes(file_path)?);
             }
 
             Ok(digest.finish())
@@ -359,7 +391,7 @@ mod toolchain_imp {
 
         async fn write_tar_gz(
             &self,
-            toolchain: &Toolchain,
+            toolchain: &dist::Toolchain,
             writer: &mut (dyn Write + Send),
         ) -> Result<()> {
             use gzp::{
@@ -367,7 +399,7 @@ mod toolchain_imp {
                 par::compress::{Compression, ParCompressBuilder},
             };
 
-            let dir_set = self.dir_set.clone();
+            let dirs_set = self.dirs_set.clone();
             let file_set = self.file_set.clone();
             let symlinks = self.symlinks.clone();
 
@@ -397,7 +429,7 @@ mod toolchain_imp {
                         // be used in a chroot-like environment.
                         builder.append_link(&mut header, tar_safe_path(from_path), to_path)?;
                     }
-                    for (tar_path, dir_path) in dir_set.iter() {
+                    for (tar_path, dir_path) in dirs_set.iter() {
                         builder.append_dir(tar_path, dir_path)?;
                     }
                     for (tar_path, file_path) in file_set.iter() {
@@ -734,16 +766,6 @@ pub fn make_tar_header(src: &Path, dest: &str) -> io::Result<(tar::Header, PathB
     Ok((file_header, tar_safe_path(dest)))
 }
 
-pub fn tarify_path(
-    symlinks: &mut std::collections::BTreeMap<PathBuf, PathBuf>,
-    path: &Path,
-) -> Result<PathBuf> {
-    SimplifyPath {
-        resolved_symlinks: Some(symlinks),
-    }
-    .simplify(path)
-}
-
 /// Simplify a path to one without any relative components, erroring if it looks
 /// like there could be any symlink complexity that means a simplified path is not
 /// equivalent to the original (see the documentation of `fs::canonicalize` for an
@@ -753,28 +775,30 @@ pub fn tarify_path(
 /// (usually) been added to an archive because something will try access it, but
 /// resolving symlinks (be they for the actual file or directory components) can
 /// make the accessed path 'disappear' in favour of the canonical path.
-pub fn simplify_path(path: &Path) -> Result<PathBuf> {
+pub fn simplify_path<P: AsRef<Path>>(path: P) -> Result<PathBuf> {
     SimplifyPath {
+        dirs: None,
         resolved_symlinks: None,
     }
-    .simplify(path)
+    .simplify(path.as_ref())
 }
 
-struct SimplifyPath<'a> {
+pub struct SimplifyPath<'a> {
+    pub dirs: Option<&'a mut std::collections::BTreeMap<PathBuf, PathBuf>>,
     pub resolved_symlinks: Option<&'a mut std::collections::BTreeMap<PathBuf, PathBuf>>,
 }
 
 impl SimplifyPath<'_> {
-    pub fn simplify(&mut self, path: &Path) -> Result<PathBuf> {
+    pub fn simplify<P: AsRef<Path>>(&mut self, path: P) -> Result<PathBuf> {
         let mut final_path = PathBuf::new();
-        for component in path.components() {
+        for component in path.as_ref().components() {
             match component {
                 c @ Component::RootDir | c @ Component::Prefix(_) | c @ Component::Normal(_) => {
                     final_path.push(c);
                     if self.resolved_symlinks.is_some() && final_path.is_symlink() {
                         let parent = final_path.parent().expect("symlinks have parents");
                         let link_target = final_path.read_link()?;
-                        let new_final_path = self.simplify(&parent.join(&link_target))?;
+                        let new_final_path = self.simplify(parent.join(&link_target))?;
                         let old_final_path =
                             std::mem::replace(&mut final_path, new_final_path.clone());
                         #[allow(clippy::unnecessary_unwrap)]
@@ -790,6 +814,9 @@ impl SimplifyPath<'_> {
                     // This case should only occur if `resolved_symlinks` is `None`.
                     if final_path.is_symlink() {
                         bail!("Cannot handle symlinks in parent paths")
+                    }
+                    if let Some(dirs) = self.dirs.as_mut() {
+                        dirs.insert(tar_safe_path(&final_path), final_path.clone());
                     }
                     final_path.pop();
                 }

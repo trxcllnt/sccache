@@ -1862,7 +1862,7 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
                 arguments: dist_arguments,
                 cwd: path_transformer.as_dist_abs(cwd)?,
                 env_vars,
-                executable: path_to_string(&sysroot_executable).ok()?,
+                executable: path_to_string(sysroot_executable).ok()?,
             };
 
             trace!("[{crate_name}]: dist command: {command}");
@@ -2272,28 +2272,31 @@ struct RustToolchainPackager {
     )
 ))]
 impl pkg::ToolchainPackager for RustToolchainPackager {
-    async fn package(&self) -> Result<Arc<dyn pkg::PackagedToolchain>> {
+    async fn package(
+        self: Box<Self>,
+        path_transformer: &mut dist::PathTransformer,
+    ) -> Result<Arc<dyn pkg::PackagedToolchain>> {
         debug!(
             "Packaging Rust compiler for sysroot {:?}",
             self.sysroot.display()
         );
-        let RustToolchainPackager { sysroot } = self;
 
-        let bins_path = sysroot.join(BINS_DIR);
+        let bins_path = self.sysroot.join(BINS_DIR);
         let sysroot_executable = bins_path.join("rustc").with_extension(EXE_EXTENSION);
-        let mut package_builder = pkg::ToolchainPackaged::new(sysroot_executable.clone());
+        let mut package_builder =
+            pkg::ToolchainPackaged::new(sysroot_executable.clone(), path_transformer);
         package_builder.add_common()?;
         package_builder.add_executable_and_deps(&[], &sysroot_executable)?;
 
         package_builder.add_dir_contents(&[], &bins_path)?;
         if BINS_DIR != LIBS_DIR {
-            let libs_path = sysroot.join(LIBS_DIR);
+            let libs_path = self.sysroot.join(LIBS_DIR);
             package_builder.add_dir_contents(&[], &libs_path)?;
         }
 
         // Return the builder so the archive can be lazily created, depending
         // on whether the scheduler reports it already has the toolchain or not
-        Ok(Arc::new(package_builder))
+        Ok(package_builder.build())
     }
 }
 

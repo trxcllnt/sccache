@@ -1535,15 +1535,21 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
             parsed_args.common_args = common_args;
         }
 
+        let mut dirs_set = BTreeMap::new();
         let mut symlinks = BTreeMap::new();
         let mut builder = tar::Builder::new(compressor);
         let mut path_transformer = path_transformer.clone();
 
-        let (mut builder, mut symlinks, mut path_transformer) =
+        let (mut builder, mut dirs_set, mut symlinks, mut path_transformer) =
             tokio::task::spawn_blocking(move || {
+                let mut simplifier = pkg::SimplifyPath {
+                    dirs: Some(&mut dirs_set),
+                    resolved_symlinks: Some(&mut symlinks),
+                };
+
                 // Find symlinks and simplify the input path first
                 let input_path = cwd.join(&parsed_args.input);
-                let input_path = pkg::tarify_path(&mut symlinks, &input_path)?;
+                let input_path = simplifier.simplify(&input_path)?;
                 let dist_path = if !parsed_args.language.needs_c_preprocessing() {
                     path_to_string(&input_path)
                         .with_context(|| format!("unable to transform input path {input_path:?}"))?
@@ -1559,12 +1565,17 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                 header.set_cksum();
                 builder.append_data(&mut header, dist_path, &preprocessor_output[..])?;
 
-                Ok::<_, anyhow::Error>((builder, symlinks, path_transformer))
+                Ok::<_, anyhow::Error>((builder, dirs_set, symlinks, path_transformer))
             })
             .await??;
 
         // Add the dependencies and extra files
         let builder = tokio::task::spawn_blocking(move || {
+            let mut simplifier = pkg::SimplifyPath {
+                dirs: Some(&mut dirs_set),
+                resolved_symlinks: Some(&mut symlinks),
+            };
+
             // Find and add symlinks to the tar archive before the files.
             // This ensures the symlinks are unpacked by the receiver before
             // files which may traverse them.
@@ -1575,7 +1586,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
             ]
             .into_iter()
             .flatten()
-            .map(|path| pkg::tarify_path(&mut symlinks, path))
+            .map(|path| simplifier.simplify(path))
             .try_collect::<_, Vec<_>, _>()?;
 
             for (from_path, to_path) in symlinks.iter() {
@@ -1586,6 +1597,10 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> pkg::InputsPackager for CCompilati
                 // Leave `to_path` as absolute, assuming the tar will
                 // be used in a chroot-like environment.
                 builder.append_link(&mut header, pkg::tar_safe_path(from_path), to_path)?;
+            }
+
+            for (tar_path, dir_path) in dirs_set.iter() {
+                builder.append_dir(tar_path, dir_path)?;
             }
 
             for path in tarified_extra_paths {
@@ -1661,7 +1676,10 @@ struct CToolchainPackager {
     )
 ))]
 impl pkg::ToolchainPackager for CToolchainPackager {
-    async fn package(&self) -> Result<Arc<dyn pkg::PackagedToolchain>> {
+    async fn package(
+        self: Box<Self>,
+        path_transformer: &mut dist::PathTransformer,
+    ) -> Result<Arc<dyn pkg::PackagedToolchain>> {
         use crate::util::bytes_to_path;
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
@@ -1669,7 +1687,8 @@ impl pkg::ToolchainPackager for CToolchainPackager {
             "Packaging toolchain for executable {:?}",
             self.executable.display()
         );
-        let mut package_builder = pkg::ToolchainPackaged::new(self.executable.clone());
+        let mut package_builder =
+            pkg::ToolchainPackaged::new(self.executable.clone(), path_transformer);
         package_builder.add_common()?;
 
         // Add gcc implicit specfiles
@@ -1712,13 +1731,13 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 
         // Helper to add a named file/program by to the package.
         // We ignore the case where the file doesn't exist, as we don't need it.
-        let add_named_prog = |builder: &mut pkg::ToolchainPackaged, name: &str| -> Result<()> {
+        let add_named_prog = |builder: &mut pkg::ToolchainPackaged<'_>, name: &str| -> Result<()> {
             if let Some(path) = named_file(&format!("-print-prog-name={name}")) {
                 builder.add_executable_and_deps(&self.env_vars, &path)?;
             }
             Ok(())
         };
-        let add_named_file = |builder: &mut pkg::ToolchainPackaged, name: &str| -> Result<()> {
+        let add_named_file = |builder: &mut pkg::ToolchainPackaged<'_>, name: &str| -> Result<()> {
             if let Some(path) = named_file(&format!("-print-file-name={name}")) {
                 builder.add_file(&self.env_vars, path)?;
             }
@@ -1789,7 +1808,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                                     return Err(orig_err);
                                 }
                                 // Symlink `bin/mpic++` -> `bin/.bin/mpic++`
-                                package_builder.add_link(&real_exe, &self.executable)?;
+                                package_builder.add_link(&self.executable, &real_exe)?;
                                 package_builder
                                     .add_executable_and_deps(&self.env_vars, &real_exe)?;
                             }
@@ -2140,7 +2159,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 
         // Return the builder so the archive can be lazily created, depending
         // on whether the scheduler reports it already has the toolchain or not
-        Ok(Arc::new(package_builder))
+        Ok(package_builder.build())
     }
 }
 

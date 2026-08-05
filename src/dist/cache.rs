@@ -14,12 +14,16 @@ mod client {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use crate::config;
-    use crate::dist::Toolchain;
-    use crate::dist::pkg::{PackagedToolchain, ToolchainPackager};
-    use crate::lru_disk_cache::Error as LruError;
-    use crate::lru_disk_cache::LruDiskCache;
-    use crate::util::Digest;
+    use crate::{
+        config,
+        dist::{
+            PathTransformer, Toolchain,
+            pkg::{PackagedToolchain, ToolchainPackager},
+        },
+        lru_disk_cache::Error as LruError,
+        lru_disk_cache::LruDiskCache,
+        util::Digest,
+    };
 
     async fn path_key<T: AsRef<Path>>(path: T) -> Result<String> {
         Digest::from_file(path).await.map(|digest| digest.finish())
@@ -182,7 +186,8 @@ mod client {
             &self,
             compiler_path: &Path,
             weak_toolchain_key: &str,
-            toolchain_packager: &dyn ToolchainPackager,
+            toolchain_packager: Box<dyn ToolchainPackager>,
+            path_transformer: &mut PathTransformer,
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
@@ -232,7 +237,7 @@ mod client {
             debug!("Weak key appears to be new: {weak_toolchain_key:?}");
 
             let package = toolchain_packager
-                .package()
+                .package(path_transformer)
                 .await
                 .context("Could not package toolchain")?;
 
@@ -352,7 +357,7 @@ mod client {
         )
     ))]
     mod test_dist {
-        use crate::{config, errors::*, test::utils::create_file};
+        use crate::{config, dist::PathTransformer, errors::*, test::utils::create_file};
         use std::{io::Write, sync::Arc};
 
         use {
@@ -366,7 +371,10 @@ mod client {
 
         #[async_trait]
         impl ToolchainPackager for PanicToolchainPackager {
-            async fn package(&self) -> Result<Arc<dyn PackagedToolchain>> {
+            async fn package(
+                self: Box<Self>,
+                _: &mut PathTransformer,
+            ) -> Result<Arc<dyn PackagedToolchain>> {
                 panic!("should not have called packager")
             }
         }
@@ -393,7 +401,8 @@ mod client {
                 .hash_toolchain(
                     "/my/compiler".as_ref(),
                     "weak_key",
-                    &PanicToolchainPackager {},
+                    Box::new(PanicToolchainPackager),
+                    &mut PathTransformer,
                 )
                 .await
                 .unwrap();
@@ -436,7 +445,8 @@ mod client {
                 .hash_toolchain(
                     "/my/compiler".as_ref(),
                     "weak_key",
-                    &PanicToolchainPackager {},
+                    Box::new(PanicToolchainPackager),
+                    &mut PathTransformer,
                 )
                 .await
                 .unwrap();
@@ -445,7 +455,8 @@ mod client {
                 .hash_toolchain(
                     "/my/compiler2".as_ref(),
                     "weak_key",
-                    &PanicToolchainPackager {},
+                    Box::new(PanicToolchainPackager),
+                    &mut PathTransformer,
                 )
                 .await
                 .unwrap();
@@ -454,7 +465,8 @@ mod client {
                 .hash_toolchain(
                     "/my/compiler3".as_ref(),
                     "weak_key",
-                    &PanicToolchainPackager {},
+                    Box::new(PanicToolchainPackager),
+                    &mut PathTransformer,
                 )
                 .await
                 .unwrap();
@@ -479,7 +491,8 @@ mod client {
                     .hash_toolchain(
                         "/my/compiler".as_ref(),
                         "weak_key",
-                        &PanicToolchainPackager {}
+                        Box::new(PanicToolchainPackager),
+                        &mut PathTransformer,
                     )
                     .await
                     .is_err()

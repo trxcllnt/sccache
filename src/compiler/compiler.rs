@@ -1331,7 +1331,12 @@ where
         trace!("[{out_pretty}]: Identifying dist toolchain for {executable:?}");
 
         let (dist_toolchain, maybe_dist_compile_executable, packaged_toolchain) = dist_client
-            .hash_toolchain(executable, &weak_toolchain_key, toolchain_packager.as_ref())
+            .hash_toolchain(
+                executable,
+                &weak_toolchain_key,
+                toolchain_packager,
+                &mut path_transformer,
+            )
             .await?;
 
         let tc_archive =
@@ -4619,7 +4624,7 @@ mod test_dist {
         SubmitToolchainResult, Toolchain,
     };
     use crate::dist::{
-        BuildResult,
+        BuildResult, PathTransformer,
         pkg::{PackagedToolchain, ToolchainPackager},
     };
     use crate::mock_command::ProcessOutput;
@@ -4687,7 +4692,8 @@ mod test_dist {
             &self,
             _: &Path,
             _: &str,
-            _: &dyn ToolchainPackager,
+            _: Box<dyn ToolchainPackager>,
+            _: &mut PathTransformer,
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
@@ -4761,7 +4767,8 @@ mod test_dist {
             &self,
             _: &Path,
             _: &str,
-            _: &dyn ToolchainPackager,
+            _: Box<dyn ToolchainPackager>,
+            _: &mut PathTransformer,
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
@@ -4854,7 +4861,8 @@ mod test_dist {
             &self,
             _: &Path,
             _: &str,
-            _: &dyn ToolchainPackager,
+            _: Box<dyn ToolchainPackager>,
+            _: &mut PathTransformer,
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
@@ -4951,7 +4959,8 @@ mod test_dist {
             &self,
             _: &Path,
             _: &str,
-            _: &dyn ToolchainPackager,
+            _: Box<dyn ToolchainPackager>,
+            _: &mut PathTransformer,
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
@@ -5080,7 +5089,8 @@ mod test_dist {
             &self,
             _: &Path,
             _: &str,
-            _: &dyn ToolchainPackager,
+            _: Box<dyn ToolchainPackager>,
+            _: &mut PathTransformer,
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
