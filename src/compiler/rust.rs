@@ -2368,13 +2368,14 @@ impl OutputsRewriter for RustOutputsRewriter {
 fn test_rust_outputs_rewriter() {
     use crate::compiler::compiler::OutputsRewriter;
     use crate::test::utils::create_file;
+    use crate::util::path_to_string;
     use std::io::Write;
 
     let mut pt = dist::PathTransformer::new();
     pt.as_dist(Path::new("c:\\")).unwrap();
     let mappings: Vec<_> = pt.disk_mappings().collect();
     assert!(mappings.len() == 1);
-    let linux_prefix = &mappings[0].1;
+    let linux_prefix = path_to_string(&mappings[0].1).unwrap();
 
     let depinfo_data = format!("{linux_prefix}/sccache/target/x86_64-unknown-linux-gnu/debug/deps/sccache_dist-c6f3229b9ef0a5c3.rmeta: src/bin/sccache-dist/main.rs src/bin/sccache-dist/build.rs src/bin/sccache-dist/token_check.rs
 

@@ -161,7 +161,7 @@ mod path_transform {
         Some(pc)
     }
 
-    fn transform_prefix_component(pc: PrefixComponent<'_>) -> Option<PathBuf> {
+    fn transform_prefix_component(pc: PrefixComponent<'_>) -> Option<OsString> {
         match pc.kind() {
             // Transforming these to the same place means these may flip-flop
             // in the tracking map, but they're equivalent so not really an
@@ -169,17 +169,12 @@ mod path_transform {
             Prefix::Disk(diskchar) | Prefix::VerbatimDisk(diskchar) => {
                 assert!(diskchar.is_ascii_alphabetic());
                 let diskchar = diskchar.to_ascii_lowercase();
-                let mut drive = OsString::new();
-                drive.push(OsStr::new("drive_"));
-                drive.push(OsStr::new(
+                let mut path = OsString::new();
+                path.push(OsStr::new("/prefix/drive_"));
+                path.push(OsStr::new(
                     str::from_utf8(&[diskchar]).expect("invalid disk char"),
                 ));
-                Some(
-                    PathBuf::new()
-                        .join(Component::RootDir)
-                        .join("prefix")
-                        .join(drive),
-                )
+                Some(path)
             }
             Prefix::Verbatim(_)
             | Prefix::VerbatimUNC(_, _)
@@ -256,23 +251,38 @@ mod path_transform {
                 if let Some(pc) = take_prefix(&mut components) {
                     Some(transform_prefix_component(pc)?)
                 } else {
-                    Some(Component::RootDir.as_os_str().into())
+                    Some(OsString::new())
                 }
             } else {
                 None
             };
 
-            // Reconstruct the path (minus the prefix) as a Linux path
-            let dist_path = if let Some(dist_prefix) = maybe_dist_prefix {
-                dist_prefix.join(components)
-            } else {
-                components.collect()
-            };
+            // Reconstruct the path as a Linux path
+            let mut component = components.next();
+            let mut dist_path = maybe_dist_prefix
+                .map(|mut dist_prefix| {
+                    if component.is_some() || dist_prefix.is_empty() {
+                        dist_prefix.push(OsStr::new("/"));
+                    }
+                    dist_prefix
+                })
+                .unwrap_or_default();
+            loop {
+                if let Some(part) = component {
+                    dist_path.push(part);
+                    component = components.next();
+                }
+                if component.is_some() {
+                    dist_path.push("/");
+                } else {
+                    break;
+                }
+            }
 
             self.dist_to_local_path
-                .insert(dist_path.clone().into_os_string(), p.to_owned());
+                .insert(dist_path.clone(), p.to_owned());
 
-            Some(dist_path)
+            Some(dist_path.into())
         }
         pub fn disk_mappings(&self) -> impl Iterator<Item = (PathBuf, PathBuf)> {
             let mut normal_mappings = HashMap::new();
@@ -309,13 +319,19 @@ mod path_transform {
 
                     mappings.insert(local_prefix_path.to_owned(), dist_prefix);
                 } else {
-                    mappings.insert(local_prefix_path.to_owned(), local_prefix_path.to_owned());
+                    mappings.insert(
+                        local_prefix_path.to_owned(),
+                        local_prefix_path.as_os_str().to_owned(),
+                    );
                 }
             }
 
             // Prioritise normal mappings for the same disk, as verbatim mappings can
             // look odd to users
-            normal_mappings.into_iter().chain(verbatim_mappings)
+            normal_mappings
+                .into_iter()
+                .chain(verbatim_mappings)
+                .map(|(a, b)| (a, b.into()))
         }
         pub fn to_local<P: AsRef<Path>>(&self, p: P) -> Option<PathBuf> {
             self.dist_to_local_path.get(p.as_ref().as_os_str()).cloned()
