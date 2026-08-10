@@ -117,7 +117,7 @@ pub trait InputsPackager: Send {
 mod toolchain_imp {
     use std::sync::Arc;
 
-    use super::{PackagedToolchain, ToolchainPackager};
+    use super::{PackagedToolchain, ToolchainPackager, dist};
     use async_trait::async_trait;
 
     use crate::errors::*;

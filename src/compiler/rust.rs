@@ -2321,9 +2321,11 @@ impl OutputsRewriter for RustOutputsRewriter {
         // remap-path-prefix is documented to only apply to 'inputs'.
         trace!("Pondering on rewriting dep file {:?}", self.dep_info);
         if let Some(dep_info) = self.dep_info.as_ref() {
-            let extra_input_str = extra_inputs
-                .iter()
-                .fold(String::new(), |s, p| s + " " + &p.display().to_string());
+            let extra_input_str = extra_inputs.iter().fold(String::new(), |mut s, p| {
+                s.push(' ');
+                s.push_str(&p.display().to_string());
+                s
+            });
             for dep_info_local_path in output_paths {
                 trace!("Comparing with {}", dep_info_local_path.display());
                 if dep_info == dep_info_local_path {
@@ -2342,7 +2344,7 @@ impl OutputsRewriter for RustOutputsRewriter {
                                 local_path.display()
                             )
                         })?;
-                        error!("RE replacing {re_str} with {local_path_str} in {deps}");
+                        debug!("RE replacing {re_str} with {local_path_str} in {deps}");
                         let re = regex::Regex::new(&re_str).expect("Invalid regex");
                         deps = re.replace_all(&deps, local_path_str).into_owned();
                     }
