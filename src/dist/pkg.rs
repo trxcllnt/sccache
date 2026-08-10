@@ -128,7 +128,7 @@ mod toolchain_imp {
     impl<T: Send + Sync> ToolchainPackager for T {
         async fn package(
             self: Box<Self>,
-            path_transformer: &mut dist::PathTransformer,
+            _: &mut dist::PathTransformer,
         ) -> Result<Arc<dyn PackagedToolchain>> {
             bail!("Automatic packaging not supported on this platform")
         }
