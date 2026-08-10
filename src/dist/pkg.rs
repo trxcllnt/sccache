@@ -191,10 +191,6 @@ mod toolchain_imp {
             }
         }
 
-        pub fn add_common(&mut self) -> Result<()> {
-            self.add_dir(std::env::temp_dir())
-        }
-
         pub fn add_executable_and_deps<P: AsRef<Path>>(
             &mut self,
             env_vars: &[(OsString, OsString)],
@@ -270,14 +266,28 @@ mod toolchain_imp {
             Ok(())
         }
 
-        pub fn add_link(&mut self, path: &Path, name: &Path) -> Result<()> {
-            assert!(path.is_absolute());
+        pub fn add_link<P: AsRef<Path>>(&mut self, target: P, name: P) -> Result<()> {
+            let target = target.as_ref();
+            let name = name.as_ref();
+            assert!(target.is_absolute());
             assert!(name.is_absolute());
+
+            let mut simplify = |path: &Path| -> Result<PathBuf> {
+                if path.is_symlink()
+                    && let Some(name) = path.file_name()
+                    && let Some(path) = path.parent()
+                {
+                    self.simplify_path(path).map(|path| path.join(name))
+                } else {
+                    self.simplify_path(path)
+                }
+            };
+
             // Simplify the link path
-            let p = self.simplify_path(path)?;
+            let p = simplify(target)?;
             // Simplify the link name to record any symlinks it traverses,
             // but write the original name as the actual link name in the archive.
-            let _ = self.simplify_path(name)?;
+            let _ = simplify(name)?;
             trace!("add_link {} -> {}", p.display(), name.display());
             self.symlinks.insert(p, name.to_path_buf());
             Ok(())

@@ -2287,7 +2287,7 @@ impl pkg::ToolchainPackager for RustToolchainPackager {
         let sysroot_executable = bins_path.join("rustc").with_extension(EXE_EXTENSION);
         let mut package_builder =
             pkg::ToolchainPackaged::new(sysroot_executable.clone(), path_transformer);
-        package_builder.add_common()?;
+
         package_builder.add_executable_and_deps(&[], &sysroot_executable)?;
 
         package_builder.add_dir_contents(&[], &bins_path)?;

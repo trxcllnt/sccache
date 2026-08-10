@@ -390,8 +390,8 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
     /// Return the compiler version reported by the compiler executable.
     fn version(&self) -> Option<String>;
     /// Return paths to extra files that should be included in the dist toolchain.
-    fn extra_dist_files(&self) -> &[PathBuf] {
-        &[]
+    fn extra_dist_files(&self) -> impl Iterator<Item = PathBuf> {
+        std::iter::empty()
     }
     /// Determine whether `arguments` are supported by this compiler.
     fn parse_arguments(
@@ -562,9 +562,9 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
         Box::new(CToolchainPackager {
             env_vars: vec![],
             executable: self.executable.clone(),
+            extra_files: self.compiler.extra_dist_files().collect(),
             kind: self.compiler.kind(),
-            parsed_args: Default::default(),
-            extra_files: self.compiler.extra_dist_files().to_vec(),
+            parsed_args: ParsedArguments::default(),
         })
     }
     fn parse_arguments(
@@ -1437,11 +1437,11 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
         );
 
         let toolchain_packager = Box::new(CToolchainPackager {
-            kind: self.compiler.kind(),
             env_vars: self.env_vars.clone(),
             executable: self.executable.clone(),
+            extra_files: self.compiler.extra_dist_files().collect(),
+            kind: self.compiler.kind(),
             parsed_args: self.parsed_args.clone(),
-            extra_files: self.compiler.extra_dist_files().to_vec(),
         });
 
         let outputs_rewriter = Box::new(NoopOutputsRewriter);
@@ -1715,11 +1715,17 @@ impl pkg::ToolchainPackager for CToolchainPackager {
         );
         let mut package_builder =
             pkg::ToolchainPackaged::new(self.executable.clone(), path_transformer);
-        package_builder.add_common()?;
 
         // Add gcc implicit specfiles
         for path in self.extra_files.iter() {
-            package_builder.add_file(&self.env_vars, path)?;
+            if path.is_dir() {
+                package_builder.add_dir(path)?;
+            } else if path.is_symlink() {
+                let target = path.read_link()?;
+                package_builder.add_link(&target, path)?;
+            } else if path.is_file() {
+                package_builder.add_file(&self.env_vars, path)?;
+            }
         }
 
         // Helper to use -print-file-name and -print-prog-name to look up
