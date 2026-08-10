@@ -150,8 +150,8 @@ impl CCompilerImpl for Gcc {
     fn version(&self) -> Option<String> {
         self.version.clone()
     }
-    fn extra_dist_files(&self) -> &[PathBuf] {
-        &self.specfiles
+    fn extra_dist_files(&self) -> impl Iterator<Item = PathBuf> {
+        self.specfiles.iter().cloned()
     }
     fn parse_arguments(
         &self,
