@@ -3015,19 +3015,14 @@ pub mod server {
     }
 
     fn default_docker_image() -> String {
-        "busybox:stable-musl".into()
+        "ubuntu:latest".into()
     }
 
     fn default_docker_run_cmd() -> Vec<String> {
-        [
-            "busybox",
-            "sh",
-            "-c",
-            "while true; do busybox sleep 365d && busybox true; done",
-        ]
-        .into_iter()
-        .map(Into::into)
-        .collect()
+        ["sh", "-c", "while true; do sleep 365d && true; done"]
+            .into_iter()
+            .map(Into::into)
+            .collect()
     }
 
     fn default_docker_exec_cmd() -> Vec<String> {
