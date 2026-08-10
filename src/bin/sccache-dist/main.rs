@@ -249,6 +249,7 @@ fn run(command: Command) -> Result<()> {
 
                     let job_queue = Arc::new(tokio::sync::Semaphore::new(occupancy));
 
+                    let should_inflate_toolchains = !matches!(builder, BuilderType::Docker { .. });
                     let builder = init_builder(builder, job_queue.clone()).await?;
 
                     let toolchains = Arc::new(ServerToolchains::new(
@@ -256,6 +257,7 @@ fn run(command: Command) -> Result<()> {
                         toolchain_cache_size,
                         toolchains,
                         metrics.clone(),
+                        should_inflate_toolchains,
                     ));
 
                     let tasks = tasks::Tasks::server(

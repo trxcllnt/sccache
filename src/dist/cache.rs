@@ -615,6 +615,7 @@ mod server {
         cache: Arc<DiskCache>,
         store: Arc<dyn cache::Storage>,
         metrics: ServerToolchainsMetrics,
+        should_inflate_toolchains: bool,
     }
 
     #[async_trait]
@@ -643,6 +644,7 @@ mod server {
             max_size: u64,
             store: Arc<dyn cache::Storage>,
             metrics: Metrics,
+            should_inflate_toolchains: bool,
         ) -> Self {
             Self {
                 cache: Arc::new(DiskCache::new(
@@ -653,6 +655,7 @@ mod server {
                 )),
                 store,
                 metrics: ServerToolchainsMetrics::new(metrics),
+                should_inflate_toolchains,
             }
         }
 
@@ -662,7 +665,7 @@ mod server {
             // Load and cache the deflated toolchain.
             // Inflate, unpack, and cache it in a directory.
             // Return the path to the unpacked toolchain dir.
-            self.load_inflated_toolchain(tc).await.map_err(|err| {
+            self.load_toolchain(tc).await.map_err(|err| {
                 if !is_special_tokio_shutdown_io_error(&err) {
                     tracing::error!(
                         "[ServerToolchains({})]: Error loading toolchain: {err:?}",
@@ -673,7 +676,7 @@ mod server {
             })
         }
 
-        async fn load_inflated_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
+        async fn load_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
             // Record toolchain load_inflated time
             let _timer = self.metrics.load_inflated_timer();
             if let Ok((inflated_path, _)) = self.cache.entry(&tc.archive_id).await {
@@ -682,11 +685,15 @@ mod server {
             } else {
                 // Load the compressed toolchain
                 let (deflated_path, deflated_size) = self.load_deflated_toolchain(tc).await?;
-                // Inflate and unpack the toolchain archive
-                let inflated_path = self
-                    .unpack_inflated_toolchain(&deflated_path, deflated_size, &tc.archive_id)
-                    .await?;
-                Ok(inflated_path)
+                if !self.should_inflate_toolchains {
+                    Ok(deflated_path)
+                } else {
+                    // Inflate and unpack the toolchain archive
+                    let inflated_path = self
+                        .unpack_inflated_toolchain(&deflated_path, deflated_size, &tc.archive_id)
+                        .await?;
+                    Ok(inflated_path)
+                }
             }
         }
 
