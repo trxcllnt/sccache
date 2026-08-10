@@ -2978,7 +2978,7 @@ pub mod scheduler {
 pub mod server {
     use super::{
         CacheConfigs, MessageBroker, MetricsConfigs, PrometheusMetricsConfig, config_from_env,
-        default_disk_cache_dir, number_from_env_var, try_read_config_file,
+        default_disk_cache_dir, number_from_env_var, string_from_env_var, try_read_config_file,
     };
     use serde::{Deserialize, Serialize};
     use std::{env, net::SocketAddr, path::PathBuf, str::FromStr};
@@ -3143,34 +3143,29 @@ pub mod server {
                         .map(Into::into)
                         .or(pot_fs_root)
                         .unwrap_or_else(default_pot_fs_root),
-                    clone_from: env::var("SCCACHE_DIST_POT_CLONE_FROM")
-                        .ok()
+                    clone_from: string_from_env_var("SCCACHE_DIST_POT_CLONE_FROM")
                         .or(pot_clone_from)
                         .unwrap_or_else(default_pot_clone_from),
                     pot_cmd: env::var_os("SCCACHE_DIST_POT_CMD")
                         .map(Into::into)
                         .or(pot_cmd)
                         .unwrap_or_else(default_pot_cmd),
-                    pot_clone_args: env::var("SCCACHE_DIST_POT_CLONE_ARGS")
-                        .ok()
+                    pot_clone_args: string_from_env_var("SCCACHE_DIST_POT_CLONE_ARGS")
                         .as_deref()
                         .and_then(shlex::split)
                         .or(pot_clone_args)
                         .unwrap_or_else(default_pot_clone_args),
                 },
                 Some("docker") => BuilderType::Docker {
-                    image: env::var("SCCACHE_DIST_DOCKER_IMAGE")
-                        .ok()
+                    image: string_from_env_var("SCCACHE_DIST_DOCKER_IMAGE")
                         .or(docker_image)
                         .unwrap_or_else(default_docker_image),
-                    run_cmd: env::var("SCCACHE_DIST_DOCKER_RUN_CMD")
-                        .ok()
+                    run_cmd: string_from_env_var("SCCACHE_DIST_DOCKER_RUN_CMD")
                         .as_deref()
                         .and_then(shlex::split)
                         .or(docker_run_cmd)
                         .unwrap_or_else(default_docker_run_cmd),
-                    exec_cmd: env::var("SCCACHE_DIST_DOCKER_EXEC_CMD")
-                        .ok()
+                    exec_cmd: string_from_env_var("SCCACHE_DIST_DOCKER_EXEC_CMD")
                         .as_deref()
                         .and_then(shlex::split)
                         .or(docker_exec_cmd)
