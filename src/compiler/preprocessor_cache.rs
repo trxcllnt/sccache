@@ -956,7 +956,7 @@ fn remember_include_file(
                 })
                 .is_some()
             {
-                debug!("nvcc internal implementation {include_path:?}");
+                trace!("nvcc internal implementation {include_path:?}");
                 return Ok(true);
             }
             debug!("Failed to stat include file {include_path:?}: {e}");
