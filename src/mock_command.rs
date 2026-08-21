@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 use std::boxed::Box;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
@@ -374,7 +374,6 @@ pub fn exit_status(v: ExitStatusValue) -> ExitStatus {
 
 /// A struct that mocks `std::process::Child`.
 #[allow(dead_code)]
-#[derive(Debug)]
 pub struct MockChild {
     //TODO: this doesn't work to actually track writes...
     /// A `Cursor` to hand out as stdin.
@@ -385,6 +384,30 @@ pub struct MockChild {
     pub stderr: Option<io::Cursor<Vec<u8>>>,
     /// The `Result` to be handed out when `wait` is called.
     pub wait_result: Option<io::Result<ExitStatus>>,
+}
+
+impl fmt::Debug for MockChild {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(ref status) = self.wait_result {
+            write!(f, "status: {status:?}, ")?;
+        }
+        if let Some(ref stdin) = self.stdin {
+            let mut stdin_str = String::new();
+            let _ = stdin.clone().read_to_string(&mut stdin_str);
+            write!(f, "stdin: {stdin_str:?}, ")?;
+        }
+        if let Some(ref stdout) = self.stdout {
+            let mut stdout_str = String::new();
+            let _ = stdout.clone().read_to_string(&mut stdout_str);
+            write!(f, "stdout: {stdout_str:?}, ")?;
+        }
+        if let Some(ref stderr) = self.stderr {
+            let mut stderr_str = String::new();
+            let _ = stderr.clone().read_to_string(&mut stderr_str);
+            write!(f, "stderr: {stderr_str:?}, ")?;
+        }
+        Ok(())
+    }
 }
 
 /// A mocked child process that simply returns stored values for its status and output.
