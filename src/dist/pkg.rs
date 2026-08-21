@@ -556,7 +556,7 @@ mod toolchain_imp {
         }
 
         if !stderr.is_empty() {
-            trace!("ldd stderr non-empty: {:?}", bytes_to_string(stderr));
+            trace!("ldd stderr non-empty: {:?}", bytes_to_string(stderr)?);
         }
 
         let stdout = bytes_to_string(stdout).context("ldd output not utf8")?;
