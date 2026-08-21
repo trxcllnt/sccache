@@ -52,6 +52,7 @@ impl CCompilerImpl for CudaFE {
         arguments: &[OsString],
         cwd: &Path,
         _env_vars: &[(OsString, OsString)],
+        _might_dist_compile: bool,
     ) -> CompilerArguments<ParsedArguments> {
         cicc::parse_arguments(arguments, cwd, Language::CudaFE, &ARGS[..])
     }

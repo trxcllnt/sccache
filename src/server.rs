@@ -1613,7 +1613,36 @@ where
         pending: SccacheGaugeIncrement,
     ) -> SccacheResponse {
         // Check that we can handle this compiler with the provided commandline.
-        match compiler.parse_arguments(&cmd, &cwd, &env_vars) {
+
+        let dist_client = match self.dist_client.get_client().await {
+            Ok(dist_client) => dist_client,
+            Err(err) => {
+                let output = match err.downcast::<HttpClientError>() {
+                    Ok(err) => {
+                        error!("HTTP {err}");
+                        self.dist_client.reset_state().await;
+                        let stderr = format!("sccache: HTTP {err}");
+                        ProcessOutput::new(1, vec![], stderr.into_bytes())
+                    }
+                    Err(err) => {
+                        let stderr = format!("sccache: {err}");
+                        ProcessOutput::new(1, vec![], stderr.into_bytes())
+                    }
+                };
+
+                return Message::WithBody(
+                    Response::Compile(CompileResponse::CompileStarted),
+                    Box::pin(async move {
+                        Ok(Response::CompileFinished(CompileFinished {
+                            output,
+                            ..Default::default()
+                        }))
+                    }),
+                );
+            }
+        };
+
+        match compiler.parse_arguments(&cmd, &cwd, &env_vars, dist_client.is_some()) {
             CompilerArguments::Ok(hasher) => {
                 let body = self
                     .clone()

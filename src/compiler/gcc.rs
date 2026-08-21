@@ -158,6 +158,7 @@ impl CCompilerImpl for Gcc {
         arguments: &[OsString],
         cwd: &Path,
         _env_vars: &[(OsString, OsString)],
+        _might_dist_compile: bool,
     ) -> CompilerArguments<ParsedArguments> {
         let mut parsed_args =
             parse_arguments(arguments, cwd, &ARGS[..], self.gplusplus, self.kind());

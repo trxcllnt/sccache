@@ -264,6 +264,7 @@ impl CCompilerImpl for Nvcc {
         arguments: &[OsString],
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
+        _might_dist_compile: bool,
     ) -> CompilerArguments<ParsedArguments> {
         let mut arguments = arguments.to_vec();
 
@@ -783,7 +784,7 @@ where
             $(
                 .or_else(|err| async {
                     if let Some(c) = compiler.downcast_ref::<CCompiler<$klass>>().map(|c| c.compiler()) {
-                        let mut parsed_arguments = match c.parse_arguments(&args, &cwd, &env_vars) {
+                        let mut parsed_arguments = match c.parse_arguments(&args, &cwd, &env_vars, false) {
                             CompilerArguments::Ok(args) => args,
                             err => bail!("Failed to parse arguments: {exe:?} {args:?}\n{err:?}"),
                         };
@@ -2531,7 +2532,7 @@ where
 
                 match service.compiler_info(exe, cwd, args, env_vars).await {
                     Err(err) => error_to_output(err),
-                    Ok(compiler) => match compiler.parse_arguments(args, cwd, env_vars) {
+                    Ok(compiler) => match compiler.parse_arguments(args, cwd, env_vars, false) {
                         CompilerArguments::Ok(hasher) => service
                             .clone()
                             .start_compile_task(
@@ -2739,7 +2740,7 @@ mod test {
             host_compiler_version: None,
             version: None,
         }
-        .parse_arguments(&arguments, ".".as_ref(), &[])
+        .parse_arguments(&arguments, ".".as_ref(), &[], false)
     }
     fn parse_arguments_msvc(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
@@ -2751,7 +2752,7 @@ mod test {
             host_compiler_version: None,
             version: None,
         }
-        .parse_arguments(&arguments, ".".as_ref(), &[])
+        .parse_arguments(&arguments, ".".as_ref(), &[], false)
     }
     fn parse_arguments_nvc(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
@@ -2763,7 +2764,7 @@ mod test {
             host_compiler_version: None,
             version: None,
         }
-        .parse_arguments(&arguments, ".".as_ref(), &[])
+        .parse_arguments(&arguments, ".".as_ref(), &[], false)
     }
 
     macro_rules! parses {

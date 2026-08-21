@@ -125,6 +125,7 @@ impl CCompilerImpl for Nvhpc {
         arguments: &[OsString],
         cwd: &Path,
         _env_vars: &[(OsString, OsString)],
+        _might_dist_compile: bool,
     ) -> CompilerArguments<ParsedArguments> {
         let mut parsed_args = gcc::parse_arguments(
             arguments,
@@ -313,7 +314,7 @@ mod test {
             version: None,
             native_arch: None,
         }
-        .parse_arguments(&arguments, ".".as_ref(), &[])
+        .parse_arguments(&arguments, ".".as_ref(), &[], false)
     }
 
     macro_rules! parses {

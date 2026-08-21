@@ -19,6 +19,7 @@ use crate::{
         args::*,
         c::{
             ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments,
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath, OutDir, ParsedArguments,
             PreprocessorOutput,
         },
         clang, gcc,
@@ -42,6 +43,17 @@ use std::{
     io::{self, BufWriter, Read, Write},
     path::{Path, PathBuf},
 };
+
+static MSVC_TMPDIR: LazyLock<std::result::Result<PathBuf, io::Error>> = LazyLock::new(|| {
+    SCCACHE_TMPDIR
+        .as_ref()
+        .map(|p| p.join("msvc"))
+        .map_err(|e| e.kind().into())
+        .and_then(|tmpdir| {
+            std::fs::create_dir_all(&tmpdir)?;
+            Ok(tmpdir)
+        })
+});
 
 /// A struct on which to implement `CCompilerImpl`.
 ///
@@ -70,6 +82,7 @@ impl CCompilerImpl for Msvc {
         arguments: &[OsString],
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
+        might_dist_compile: bool,
     ) -> CompilerArguments<ParsedArguments> {
         // Include MSVC's prepend/append flags envvars
         // https://learn.microsoft.com/en-us/cpp/build/reference/cl-environment-variables?view=msvc-170
@@ -101,7 +114,24 @@ impl CCompilerImpl for Msvc {
             );
         }
 
-        parse_arguments(&arguments, cwd, self.is_clang)
+        match parse_arguments(&arguments, cwd, self.is_clang) {
+            CompilerArguments::Ok(mut parsed_args) => {
+                // Set `out_dir` to a tmpdir so we have a place to write the preprocesed file.
+                // Don't needlessly create the tempdir if running `parse_arguments()` unit tests
+                if !cfg!(test) && might_dist_compile {
+                    parsed_args.out_dir = Some(Arc::new(OutDir::Tmp(
+                        MSVC_TMPDIR
+                            .as_ref()
+                            .map_err(anyhow::Error::new)
+                            .and_then(tempdir_in)
+                            .context("Failed to create tempdir")
+                            .unwrap(),
+                    )));
+                }
+                CompilerArguments::Ok(parsed_args)
+            }
+            other => other,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
