@@ -2636,7 +2636,7 @@ compiler_version=__VERSION__
                     &pool,
                 )
                 .await?;
-                trace!("showIncludes prefix: '{includes_prefix}'");
+                trace!("showIncludes prefix: {includes_prefix:?}");
 
                 return CCompiler::new(
                     Msvc {
@@ -3076,13 +3076,6 @@ mod test {
         let runtime = single_threaded_runtime();
         let pool = runtime.handle();
         let f = TestFixture::new();
-        let srcfile = f.touch("test.h").unwrap();
-        let mut s = srcfile.to_str().unwrap();
-        if s.starts_with("\\\\?\\") {
-            s = &s[4..];
-        }
-        let prefix = String::from("blah: ");
-        let stderr = format!("{prefix}{s}\r\n");
         // Compiler detection output
         next_command(
             &creator,
@@ -3097,10 +3090,12 @@ mod test {
             Ok(MockChild::new(exit_status(0), "\ncompiler_id=msvc\n", "")),
         );
         // showincludes prefix detection output
-        next_command(
-            &creator,
-            Ok(MockChild::new(exit_status(0), String::new(), stderr)),
-        );
+        next_command_calls(&creator, move |args| {
+            let c = args.last().map(Path::new).unwrap();
+            let h = c.with_extension("h");
+            let stderr = format!("blah: {}\r\n", h.display());
+            Ok(MockChild::new(exit_status(0), "", stderr))
+        });
         let c = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
             .wait()
             .unwrap()
