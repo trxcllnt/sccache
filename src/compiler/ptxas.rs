@@ -68,6 +68,7 @@ impl CCompilerImpl for Ptxas {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         _env_vars: &[(OsString, OsString)],
+        _might_dist_compile: bool,
         _rewrite_includes_only: bool,
         _generate_dependencies: bool,
         _include_line_numbers: bool,

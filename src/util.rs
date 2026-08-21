@@ -776,11 +776,22 @@ where
             }
             .into(),
         }
-        .map(|_| ())
         .map_err(Arc::new)
     }
     .shared();
 
+    Ok(make_process_output_stream(output, stdout, batch_size))
+}
+
+pub fn make_process_output_stream<O, R>(
+    output: futures::future::Shared<O>,
+    stdout: R,
+    batch_size: usize,
+) -> impl futures::Stream<Item = Result<BytesMut>>
+where
+    O: Future<Output = std::result::Result<ProcessOutput, Arc<Error>>>,
+    R: tokio::io::AsyncRead + Send,
+{
     let stdout =
         Box::pin(read_line_batches(stdout, batch_size)).take_until(output.clone().and_then(|_| {
             // Take stdout until output resolves to an error.
@@ -788,7 +799,7 @@ where
             futures::future::pending::<std::result::Result<(), Arc<anyhow::Error>>>()
         }));
 
-    Ok(async_stream::try_stream! {
+    async_stream::try_stream! {
         // Yield each stdout bytes chunk
         for await bytes in stdout {
             yield bytes?;
@@ -799,9 +810,9 @@ where
         // wait for the output future result and unwrap the Err's Arc so we
         // return a result containing the original anyhow::Error.
         yield output.await
-            .or_else(|err| Arc::into_inner(err).map(Err).unwrap_or_else(|| Ok(())))
+            .or_else(|err| Arc::into_inner(err).map(Err).unwrap_or_else(|| Ok(Default::default())))
             .map(|_| BytesMut::new())?;
-    })
+    }
 }
 
 pub fn read_line_batches<R>(
@@ -929,7 +940,10 @@ pub trait OsStrExt {
     fn split<P: AsRef<OsStr>>(&self, pat: P) -> impl Iterator<Item = &'_ OsStr>;
     fn split_once<P: AsRef<OsStr>>(&self, pat: P) -> Option<(&'_ OsStr, &'_ OsStr)>;
     fn strip_prefix<P: AsRef<OsStr>>(&self, pat: P) -> Option<&'_ OsStr>;
+    fn strip_suffix<P: AsRef<OsStr>>(&self, pat: P) -> Option<&'_ OsStr>;
     fn trim(&self) -> &OsStr;
+    fn trim_start(&self) -> &OsStr;
+    fn trim_end(&self) -> &OsStr;
     fn trim_start_matches<P: AsRef<OsStr>>(&self, pat: P) -> &OsStr;
     fn trim_end_matches<P: AsRef<OsStr>>(&self, pat: P) -> &OsStr;
 }
@@ -1019,25 +1033,42 @@ impl OsStrExt for OsStr {
         })
     }
 
+    fn strip_suffix<P: AsRef<OsStr>>(&self, pat: P) -> Option<&'_ OsStr> {
+        self.ends_with(pat.as_ref()).then(|| {
+            let p = pat.as_ref().as_encoded_bytes();
+            let s = self.as_encoded_bytes();
+            let b = &s[..s.len() - p.len()];
+            unsafe { OsStr::from_encoded_bytes_unchecked(b) }
+        })
+    }
+
     fn trim(&self) -> &OsStr {
+        self.trim_start().trim_end()
+    }
+
+    fn trim_start(&self) -> &OsStr {
         let mut buf = self.as_encoded_bytes();
 
         loop {
             buf = match buf {
-                #[cfg(windows)]
-                [b'\r', b'\n', ..] => &buf[2..],
                 [b'\n', ..] => &buf[1..],
+                [b'\r', ..] => &buf[1..],
                 [b'\t', ..] => &buf[1..],
                 [b' ', ..] => &buf[1..],
                 _ => break,
             }
         }
 
+        unsafe { OsStr::from_encoded_bytes_unchecked(buf) }
+    }
+
+    fn trim_end(&self) -> &OsStr {
+        let mut buf = self.as_encoded_bytes();
+
         loop {
             buf = match buf {
-                #[cfg(windows)]
-                [.., b'\r', b'\n'] => &buf[..buf.len() - 2],
                 [.., b'\n'] => &buf[..buf.len() - 1],
+                [.., b'\r'] => &buf[..buf.len() - 1],
                 [.., b'\t'] => &buf[..buf.len() - 1],
                 [.., b' '] => &buf[..buf.len() - 1],
                 _ => break,
@@ -1117,13 +1148,13 @@ pub fn bytes_to_string(multi_byte_str: Vec<u8>) -> std::io::Result<String> {
 }
 
 #[cfg(unix)]
-fn bytes_to_os_string<B: AsRef<[u8]>>(buf: B) -> std::io::Result<OsString> {
+pub fn bytes_to_os_string<B: AsRef<[u8]>>(buf: B) -> std::io::Result<OsString> {
     use std::os::unix::prelude::*;
     Ok(OsStr::from_bytes(buf.as_ref()).into())
 }
 
 #[cfg(windows)]
-fn bytes_to_os_string<B: AsRef<[u8]>>(buf: B) -> std::io::Result<OsString> {
+pub fn bytes_to_os_string<B: AsRef<[u8]>>(buf: B) -> std::io::Result<OsString> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::Globalization::{CP_OEMCP, MB_ERR_INVALID_CHARS};
 
@@ -1901,6 +1932,160 @@ pub fn strip_basedirs<'a>(preprocessor_output: &'a [u8], basedirs: &[Vec<u8>]) -
     result.extend_from_slice(&preprocessor_output[current_pos..]);
 
     Cow::Owned(result)
+}
+
+const PRAGMA_GCC_PCH_PREPROCESS: &[u8] = b"pragma GCC pch_preprocess";
+
+/// Strip #line directives from a batch of preprocessor output
+pub fn remove_preprocessor_linemarkers(mut lines: BytesMut) -> BytesMut {
+    let mut start = 0;
+    let mut ranges = vec![];
+
+    // Find newlines
+    for end in memchr::memmem::find_iter(&lines[..], "\n") {
+        let line = &lines[start..end];
+
+        // There are at least 7 characters (# 1 "x") in a #line directive
+        if line.len() >= 7
+            // Check if we look at a line containing the file name of an included file.
+            // At least the following formats exist (where N is a positive integer):
+            //
+            // GCC/Clang/NVHPC:
+            //
+            //   # N "file"
+            //   # N "file" N
+            //   #pragma GCC pch_preprocess "file"
+            //
+            // MSVC and HP's compiler:
+            //
+            //   #line N "file"
+            //
+            // AIX's compiler:
+            //
+            //   #line N "file"
+            //   #line N
+            //
+            // Note that there may be other lines starting with '#' left after
+            // preprocessing as well, for instance "#    pragma".
+            && line[0] == b'#'
+            && (
+                // GCC/Clang/NVHPC:
+                (line[1] == b' ' && line[2] >= b'0' && line[2] <= b'9')
+                // GCC precompiled header:
+                || line[1..].starts_with(PRAGMA_GCC_PCH_PREPROCESS)
+                // MSVC/HP/AIX:
+                || &line[1..6] == b"line "
+            )
+        {
+            ranges.push(start..end + 1);
+        }
+        start = end + 1;
+    }
+
+    // Collapse consecutive ranges
+    let ranges = {
+        let mut collapsed = vec![];
+        let mut itr = ranges.drain(..);
+        let mut curr = itr.next();
+        while let Some(mut lhs) = curr.take() {
+            for rhs in itr.by_ref() {
+                if lhs.end == rhs.start {
+                    lhs.end = rhs.end;
+                } else {
+                    curr.replace(rhs);
+                    break;
+                }
+            }
+            collapsed.push(lhs);
+        }
+        collapsed
+    };
+
+    // Remove #line directives
+    for range in ranges.into_iter().rev() {
+        lines.copy_within(range.end.., range.start);
+        lines.truncate(lines.len() - (range.end - range.start));
+    }
+
+    lines
+}
+
+/// Strip empty newlines from a batch of preprocessor output, except newlines inside C++11 raw string literals.
+pub fn remove_preprocessor_empty_newlines(mut lines: BytesMut) -> BytesMut {
+    use memchr::memmem::{find, find_iter};
+
+    let mut start = 0;
+    let mut ranges = vec![];
+    let mut str_lit_delimiter = None;
+
+    // Find empty newlines
+    for end in find_iter(&lines[..], "\n") {
+        let line = &lines[start..end];
+
+        if str_lit_delimiter.is_none() {
+            // Remove empty newlines as long as we're not inside a raw string literal
+            if line.is_empty() || (line.len() == 1 && line[0] == b'\r') {
+                ranges.push(start..end + 1);
+                start = end + 1;
+                continue;
+            }
+
+            // Pause removing newlines if the current line begins a raw string literal
+            if let Some(pos) = find(line, b"R\"") {
+                let rest = &line[pos + 2..];
+                if let Some(escape_sequence) = find(rest, b"(").map(|paren| &rest[..paren]) {
+                    let mut delim = vec![];
+                    delim.push(b')');
+                    delim.extend_from_slice(escape_sequence);
+                    delim.push(b'"');
+                    str_lit_delimiter = Some(delim);
+                }
+            }
+        }
+
+        // Continue removing newlines if this line terminates a raw string literal.
+        // This may find the end delimiter on the same line as the start delimiter,
+        // so that's why we don't continue early above. For example:
+        // ```
+        // R"esc(This is a raw string literal)esc"
+        // ```
+        if str_lit_delimiter
+            .as_deref()
+            .and_then(|delim| find(line, delim))
+            .is_some()
+        {
+            str_lit_delimiter = None;
+        }
+
+        start = end + 1;
+    }
+
+    // Collapse consecutive ranges
+    let ranges = {
+        let mut collapsed = vec![];
+        let mut itr = ranges.drain(..);
+        let mut curr = itr.next();
+        while let Some(mut lhs) = curr.take() {
+            for rhs in itr.by_ref() {
+                if lhs.end == rhs.start {
+                    lhs.end = rhs.end;
+                } else {
+                    curr.replace(rhs);
+                    break;
+                }
+            }
+            collapsed.push(lhs);
+        }
+        collapsed
+    };
+
+    // Remove empty newline ranges
+    for range in ranges.into_iter().rev() {
+        lines.copy_within(range.end.., range.start);
+        lines.truncate(lines.len() - (range.end - range.start));
+    }
+
+    lines
 }
 
 /// Double every `/` in a normalized path.

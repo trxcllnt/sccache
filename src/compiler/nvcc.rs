@@ -428,6 +428,7 @@ impl CCompilerImpl for Nvcc {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
+        _might_dist_compile: bool,
         rewrite_includes_only: bool,
         generate_dependencies: bool,
         _include_line_numbers: bool,
@@ -795,6 +796,7 @@ where
                             &mut parsed_arguments,
                             &cwd,
                             &env_vars,
+                            false, // might_dist_compile
                             rewrite_includes_only,
                             false, // generate_dependencies
                             true, // include_line_numbers

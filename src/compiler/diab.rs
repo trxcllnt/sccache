@@ -81,6 +81,7 @@ impl CCompilerImpl for Diab {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
+        _might_dist_compile: bool,
         _rewrite_includes_only: bool,
         generate_dependencies: bool,
         _include_line_numbers: bool,

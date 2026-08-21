@@ -3962,11 +3962,14 @@ LLVM version: 6.0",
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
         // Now compile again, which should be a cache hit.
         fs::remove_file(&obj).unwrap();
-        // The preprocessor invocation.
-        next_command(
-            &creator,
-            Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-        );
+        // The generate_hash_key preprocessor invocation.
+        let d = dep.clone();
+        next_command_calls(&creator, move |_| {
+            // Pretend to preprocess something.
+            let mut f = File::create(&d)?;
+            f.write_all(b"foo.o :")?;
+            Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+        });
         // There should be no actual compiler invocation.
         let hasher2 = hasher.clone();
         let (cached, res) = runtime

@@ -23,7 +23,7 @@ use crate::{
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
     server::SccacheService,
-    util::{bytes_to_string, run_input_output},
+    util::{OsStrExt, bytes_to_os_string, run_input_output},
 };
 use crate::{counted_array, dist};
 use async_trait::async_trait;
@@ -62,7 +62,7 @@ impl Nvhpc {
         let exe = if let Ok(out) = run_input_output(cmd, None).await {
             which::which(
                 // Remove the trailing newlines (if present)
-                bytes_to_string(out.stdout).ok()?.trim(),
+                bytes_to_os_string(out.stdout).ok()?.trim(),
             )
             .ok()
             .unwrap_or_else(|| exe.to_path_buf())
@@ -163,12 +163,13 @@ impl CCompilerImpl for Nvhpc {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        service: &SccacheService<T>,
+        _service: &SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
+        _might_dist_compile: bool,
         rewrite_includes_only: bool,
         generate_dependencies: bool,
         include_line_numbers: bool,
@@ -200,7 +201,6 @@ impl CCompilerImpl for Nvhpc {
         .concat();
 
         gcc::preprocess(
-            service,
             creator,
             executable,
             // nvc++ only preprocesses when there's no dependency flags

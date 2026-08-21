@@ -109,12 +109,13 @@ impl CCompilerImpl for Clang {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        service: &SccacheService<T>,
+        _service: &SccacheService<T>,
         creator: &T,
         executable: &Path,
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
+        _might_dist_compile: bool,
         rewrite_includes_only: bool,
         generate_dependencies: bool,
         include_line_numbers: bool,
@@ -136,7 +137,6 @@ impl CCompilerImpl for Clang {
         };
 
         gcc::preprocess(
-            service,
             creator,
             executable,
             parsed_args,
