@@ -636,7 +636,7 @@ where
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
         pool: &tokio::runtime::Handle,
-        rewrite_includes_only: bool,
+        dist_client: Option<Arc<dyn dist::Client>>,
         storage: Arc<dyn Storage>,
         cache_control: CacheControl,
     ) -> Result<(
@@ -669,11 +669,18 @@ where
         // [<file>] get_cached_or_compile: "/path/to/exe <args...>"
         debug!(
             "[{out_pretty}]: get_cached_or_compile: {}",
-            creator
-                .clone()
-                .new_command_sync(self.get_executable())
-                .args(&arguments)
-                .current_dir(&cwd)
+            if !cfg!(test) {
+                format!(
+                    "{}",
+                    creator
+                        .clone()
+                        .new_command_sync(self.get_executable())
+                        .args(&arguments)
+                        .current_dir(&cwd)
+                )
+            } else {
+                format!("{arguments:?}")
+            }
         );
 
         let start = Instant::now();
@@ -687,11 +694,6 @@ where
             })
         });
 
-        let rewrite_includes_only = dist_client
-            .as_ref()
-            .map(|client| client.rewrite_includes_only())
-            .unwrap_or_default();
-
         let hash_result = self
             .generate_hash_key(
                 service,
@@ -699,7 +701,7 @@ where
                 cwd.clone(),
                 env_vars,
                 &runtime,
-                rewrite_includes_only,
+                dist_client.clone(),
                 preprocessor_storage.clone(),
                 cache_control,
             )
@@ -744,7 +746,6 @@ where
             &cwd,
             dist_client,
             out_pretty.clone(),
-            rewrite_includes_only,
             runtime.clone(),
             service,
         );
@@ -900,7 +901,6 @@ struct CacheLookupOrCompile<'a, T: CommandCreatorSync> {
     out_pretty: String,
     outputs: Vec<FileObjectSource>,
     filtered_outputs: Vec<FileObjectSource>,
-    rewrite_includes_only: bool,
     runtime: tokio::runtime::Handle,
     sccache_service: &'a server::SccacheService<T>,
     weak_toolchain_key: String,
@@ -918,7 +918,6 @@ where
         cwd: &Path,
         dist_client: Option<Arc<dyn dist::Client>>,
         out_pretty: String,
-        rewrite_includes_only: bool,
         runtime: tokio::runtime::Handle,
         sccache_service: &'a server::SccacheService<T>,
     ) -> Self {
@@ -968,7 +967,6 @@ where
             out_pretty,
             outputs,
             filtered_outputs,
-            rewrite_includes_only,
             runtime,
             sccache_service,
             weak_toolchain_key,
@@ -1028,7 +1026,7 @@ where
         let mut path_transformer = dist::PathTransformer::new();
 
         let (compile_cmd, _dist_compile_cmd, cacheable) = compilation
-            .generate_compile_commands(&mut path_transformer, true, &hash_key)
+            .generate_compile_commands(&mut path_transformer, &hash_key)
             .context("Failed to generate compile commands")?;
 
         Ok(Compile {
@@ -1054,7 +1052,6 @@ where
             hash_key,
             out_pretty,
             outputs,
-            rewrite_includes_only,
             sccache_service,
             weak_toolchain_key,
             ..
@@ -1063,7 +1060,7 @@ where
         let mut path_transformer = dist::PathTransformer::new();
 
         let (compile_cmd, dist_compile_cmd, cacheable) = compilation
-            .generate_compile_commands(&mut path_transformer, rewrite_includes_only, &hash_key)
+            .generate_compile_commands(&mut path_transformer, &hash_key)
             .context("Failed to generate compile commands")?;
 
         let dist = dist_client.and_then(|dist_client| {
@@ -1805,7 +1802,6 @@ where
     fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
-        rewrite_includes_only: bool,
         hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
@@ -3445,7 +3441,7 @@ LLVM version: 6.0",
                         cwd.to_path_buf(),
                         vec![],
                         pool,
-                        false,
+                        None,
                         preprocessor_storage.clone(),
                         CacheControl::Default,
                     )
@@ -3526,7 +3522,7 @@ LLVM version: 6.0",
                         cwd.to_path_buf(),
                         vec![],
                         pool,
-                        false,
+                        None,
                         storage.clone(),
                         CacheControl::Default,
                     )
@@ -3603,7 +3599,7 @@ LLVM version: 6.0",
                         cwd.to_path_buf(),
                         vec![],
                         pool,
-                        false,
+                        None,
                         storage.clone(),
                         CacheControl::Default,
                     )

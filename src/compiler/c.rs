@@ -862,7 +862,7 @@ where
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
         _pool: &tokio::runtime::Handle,
-        rewrite_includes_only: bool,
+        dist_client: Option<Arc<dyn dist::Client>>,
         storage: Arc<dyn Storage>,
         cache_control: CacheControl,
     ) -> Result<(
@@ -879,6 +879,11 @@ where
 
         let basedirs = storage.basedirs();
         let out_pretty = parsed_args.output_pretty();
+
+        let rewrite_includes_only = dist_client
+            .as_ref()
+            .map(|client| client.rewrite_includes_only())
+            .unwrap_or_default();
 
         // Set a maximum time limit for the cache to respond before we
         // forge ahead ourselves with a compilation.
@@ -1473,7 +1478,6 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
     fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
-        rewrite_includes_only: bool,
         hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
@@ -1496,7 +1500,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
                 parsed_args,
                 cwd,
                 env_vars,
-                rewrite_includes_only,
+                *rewrite_includes_only,
                 hash_key,
             )
             .map(|(command, dist_command, cacheable)| {
@@ -1516,6 +1520,7 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
             compiler,
             cwd,
             env_vars,
+            rewrite_includes_only,
             ..
         } = self;
 
