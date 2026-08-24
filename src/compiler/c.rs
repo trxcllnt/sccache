@@ -2312,7 +2312,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                     // vcruntime140.dll
 
                     let dll_prefixes = [
-                        "c1xx",
+                        "c1",
                         "c2",
                         "mspdbcore",
                         "mspdbst",
