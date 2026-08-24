@@ -1943,7 +1943,10 @@ pub fn remove_preprocessor_linemarkers(mut lines: BytesMut) -> BytesMut {
 
     // Find newlines
     for end in memchr::memmem::find_iter(&lines[..], "\n") {
-        let line = &lines[start..end];
+        let line = str::from_utf8(&lines[start..end])
+            .unwrap()
+            .trim()
+            .as_bytes();
 
         // There are at least 7 characters (# 1 "x") in a #line directive
         if line.len() >= 7
@@ -2020,11 +2023,14 @@ pub fn remove_preprocessor_empty_newlines(mut lines: BytesMut) -> BytesMut {
 
     // Find empty newlines
     for end in find_iter(&lines[..], "\n") {
-        let line = &lines[start..end];
+        let line = str::from_utf8(&lines[start..end])
+            .unwrap()
+            .trim()
+            .as_bytes();
 
         if str_lit_delimiter.is_none() {
             // Remove empty newlines as long as we're not inside a raw string literal
-            if line.is_empty() || (line.len() == 1 && line[0] == b'\r') {
+            if line.is_empty() {
                 ranges.push(start..end + 1);
                 start = end + 1;
                 continue;
