@@ -261,14 +261,20 @@ where
     let stderr = bytes_to_os_string(output.stderr)
         .context("Failed to convert compiler stderr while detecting showIncludes prefix")?;
 
+    trace!("searching for path: '{}'", test_h.as_os_str().display());
+
     for line in stderr.split("\n") {
-        let line = line.trim_end();
+        let line = line.trim();
+        trace!("showIncludes line: '{}'", line.display());
         if let Some(prefix) = line.strip_suffix(&test_h) {
             return Ok(prefix.to_owned());
         }
     }
 
-    debug!("failed to detect showIncludes prefix with output: {stderr:?}");
+    debug!(
+        "failed to detect showIncludes prefix with output: '{}'",
+        stderr.display()
+    );
 
     bail!("Failed to detect showIncludes prefix")
 }
