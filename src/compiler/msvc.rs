@@ -30,8 +30,8 @@ use crate::{
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     server::SccacheService,
     util::{
-        OsStrExt, SCCACHE_TMPDIR, bytes_to_os_string, make_process_output_stream, os_str_to_string,
-        path_to_bytes, path_to_string, run_input_output, run_input_stream_output,
+        OsStrExt, SCCACHE_TMPDIR, bytes_to_os_string, bytes_to_string, make_process_output_stream,
+        os_str_to_string, path_to_bytes, path_to_string, run_input_output, run_input_stream_output,
         run_with_input_buffer_stderr, tempdir_in, temppath,
     },
 };
@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, LazyLock},
@@ -67,7 +67,7 @@ static MSVC_TMPDIR: LazyLock<std::result::Result<PathBuf, io::Error>> = LazyLock
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Msvc {
     /// The prefix used in the output of `-showIncludes`.
-    pub includes_prefix: OsString,
+    pub includes_prefix: String,
     pub is_clang: bool,
     pub version: Option<String>,
 }
@@ -219,28 +219,32 @@ impl CCompilerImpl for Msvc {
 /// Detect the prefix included in the output of MSVC's -showIncludes output.
 pub async fn detect_showincludes_prefix<T>(
     creator: &T,
-    exe: &Path,
+    exe: &OsStr,
     is_clang: bool,
     env: &[(OsString, OsString)],
     pool: &tokio::runtime::Handle,
-) -> Result<OsString>
+) -> Result<String>
 where
     T: CommandCreatorSync,
 {
     let (tempdir, input) =
         write_temp_file(pool, "test.c".as_ref(), b"#include \"test.h\"\n".to_vec()).await?;
 
-    let test_h = tempdir.path().join("test.h");
-    let mut file = tokio::fs::File::create(&test_h).await?;
-    file.write_all(b"/* empty */\n")
-        .await
+    let exe = exe.to_os_string();
+    let mut creator = creator.clone();
+    let pool = pool.clone();
+
+    let header = tempdir.path().join("test.h");
+    let tempdir = pool
+        .spawn_blocking(move || {
+            let mut file = File::create(&header)?;
+            file.write_all(b"/* empty */\n")?;
+            Ok::<_, std::io::Error>(tempdir)
+        })
+        .await?
         .context("Failed to write temporary file")?;
-    drop(file);
 
-    let input = dunce::canonicalize(input)?;
-    let test_h = dunce::canonicalize(test_h)?;
-
-    let mut cmd = creator.clone().new_command_sync(exe);
+    let mut cmd = creator.new_command_sync(&exe);
     // clang.exe on Windows reports the same set of built-in preprocessor defines as clang-cl,
     // but it doesn't accept MSVC commandline arguments unless you pass --driver-mode=cl.
     // clang-cl.exe will accept this argument as well, so always add it in this case.
@@ -261,23 +265,28 @@ where
         bail!("Failed to detect showIncludes prefix ({:?})", output.status)
     }
 
-    let stderr = bytes_to_os_string(output.stderr)
+    let stderr = bytes_to_string(output.stderr)
         .context("Failed to convert compiler stderr while detecting showIncludes prefix")?;
-
-    trace!("searching for path: '{}'", test_h.as_os_str().display());
-
-    for line in stderr.split("\n") {
-        let line = line.trim();
-        trace!("showIncludes line: '{}' ({line:?})", line.display());
-        if let Some(prefix) = line.strip_suffix(&test_h) {
-            return Ok(prefix.to_owned());
+    for line in stderr.lines() {
+        if !line.ends_with("test.h") {
+            continue;
+        }
+        for (i, c) in line.char_indices().rev() {
+            if c != ' ' {
+                continue;
+            }
+            let path = tempdir.path().join(&line[i + 1..]);
+            // See if the rest of this line is a full pathname.
+            if path.exists() {
+                // Everything from the beginning of the line
+                // to this index is the prefix.
+                return Ok(line[..=i].to_owned());
+            }
         }
     }
+    drop(tempdir);
 
-    debug!(
-        "failed to detect showIncludes prefix with output: '{}'",
-        stderr.display()
-    );
+    debug!("failed to detect showIncludes prefix with output: {stderr}");
 
     bail!("Failed to detect showIncludes prefix")
 }
@@ -1050,7 +1059,7 @@ pub async fn preprocess<T>(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-    includes_prefix: &OsStr,
+    includes_prefix: &str,
     might_dist_compile: bool,
     rewrite_includes_only: bool,
     generate_dependencies: bool,
@@ -1153,7 +1162,7 @@ async fn generate_dependencies<T>(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-    includes_prefix: &OsStr,
+    includes_prefix: &str,
     is_clang: bool,
 ) -> Result<DepfilePath>
 where
@@ -1214,7 +1223,7 @@ async fn preprocess_with_dependencies_from_showincludes<C>(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     depfile: Option<&Path>,
-    includes_prefix: &OsStr,
+    includes_prefix: &str,
 ) -> Result<(Pin<Box<ProcessOutputStream>>, Pin<Box<DependenciesFuture>>)>
 where
     C: RunCommand + std::fmt::Display + 'static,
@@ -1339,7 +1348,7 @@ where
 
 async fn parse_dependencies_from_showincludes(
     input: &mut Vec<u8>,
-    includes_prefix: &OsStr,
+    includes_prefix: &str,
     msvc_show_includes: bool,
 ) -> Result<Vec<PathBuf>> {
     let mut lines = vec![];
@@ -1349,11 +1358,7 @@ async fn parse_dependencies_from_showincludes(
         .context("Failed to convert preprocessor stderr")?
         .split("\n")
     {
-        if let Some(path) = line
-            .trim()
-            .strip_prefix(includes_prefix)
-            .map(|s| PathBuf::from(s.trim()))
-        {
+        if let Some(path) = line.trim().strip_prefix(includes_prefix).map(PathBuf::from) {
             paths.insert(path);
         } else if !msvc_show_includes {
             lines.extend(
