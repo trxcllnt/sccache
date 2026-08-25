@@ -237,6 +237,9 @@ where
         .context("Failed to write temporary file")?;
     drop(file);
 
+    let input = dunce::canonicalize(input)?;
+    let test_h = dunce::canonicalize(test_h)?;
+
     let mut cmd = creator.clone().new_command_sync(exe);
     // clang.exe on Windows reports the same set of built-in preprocessor defines as clang-cl,
     // but it doesn't accept MSVC commandline arguments unless you pass --driver-mode=cl.
@@ -261,7 +264,6 @@ where
     let stderr = bytes_to_os_string(output.stderr)
         .context("Failed to convert compiler stderr while detecting showIncludes prefix")?;
 
-    let test_h = dunce::canonicalize(test_h)?;
     trace!("searching for path: '{}'", test_h.as_os_str().display());
 
     for line in stderr.split("\n") {
