@@ -68,6 +68,7 @@ impl SccacheTest<'_> {
 
         Command::new(SCCACHE_BIN.as_os_str())
             .arg("--start-server")
+            .env("SCCACHE_CONF", &config_file)
             .env("SCCACHE_DIR", &cache_dir)
             .assert()
             .try_success()
@@ -87,10 +88,7 @@ impl SccacheTest<'_> {
             env.extend_from_slice(vec);
         }
 
-        Ok(SccacheTest {
-            tempdir,
-            env: env.clone(),
-        })
+        Ok(SccacheTest { tempdir, env })
     }
 
     /// Show the statistics for sccache. This will be called at the end of a test and making this
