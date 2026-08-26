@@ -26,7 +26,7 @@ use crate::{
     },
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
-    util::{OsStrExt, bytes_to_os_string, run_input_output},
+    util::{bytes_to_str, run_input_output},
 };
 use crate::{counted_array, dist};
 use async_trait::async_trait;
@@ -65,7 +65,7 @@ impl Nvhpc {
         let exe = if let Ok(out) = run_input_output(cmd, None).await {
             which::which(
                 // Remove the trailing newlines (if present)
-                bytes_to_os_string(out.stdout).ok()?.trim(),
+                bytes_to_str(out.stdout).ok()?.trim(),
             )
             .ok()
             .unwrap_or_else(|| exe.to_path_buf())

@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::mock_command::{CommandChild, ProcessOutput, RunCommand};
+use crate::{
+    errors::*,
+    mock_command::{CommandChild, ProcessOutput, RunCommand},
+};
 use async_trait::async_trait;
 use blake3::Hasher as blake3_Hasher;
 use byteorder::{BigEndian, ByteOrder};
@@ -46,8 +49,6 @@ use std::{
 use tokio_retry2::Retry;
 use tokio_retry2::strategy::FibonacciBackoff;
 use tokio_util::codec::{Decoder, FramedRead};
-
-use crate::errors::*;
 
 /// The url safe engine for base64.
 pub const BASE64_URL_SAFE_ENGINE: base64::engine::GeneralPurpose =
@@ -934,7 +935,6 @@ where
 pub trait OsStrExt {
     fn find<P: AsRef<OsStr>>(&self, pat: P) -> Option<usize>;
     fn contains<P: AsRef<OsStr>>(&self, pat: P) -> bool;
-    fn encode_to_bytes(&self) -> Result<Vec<u8>>;
     fn ends_with<P: AsRef<OsStr>>(&self, pat: P) -> bool;
     fn starts_with<P: AsRef<OsStr>>(&self, pat: P) -> bool;
     fn split<P: AsRef<OsStr>>(&self, pat: P) -> impl Iterator<Item = &'_ OsStr>;
@@ -951,10 +951,6 @@ pub trait OsStrExt {
 impl OsStrExt for OsStr {
     fn contains<P: AsRef<OsStr>>(&self, pat: P) -> bool {
         self.find(pat).is_some()
-    }
-
-    fn encode_to_bytes(&self) -> Result<Vec<u8>> {
-        Ok(os_str_to_bytes(self)?)
     }
 
     fn find<P: AsRef<OsStr>>(&self, pat: P) -> Option<usize> {
@@ -1110,69 +1106,93 @@ pub fn split_quoted_shell_str<S: AsRef<str>>(s: S) -> Option<Vec<String>> {
     args
 }
 
-pub fn bytes_to_path<B: AsRef<[u8]>>(buf: B) -> std::io::Result<PathBuf> {
-    Ok(bytes_to_os_string(buf)?.into())
+pub fn path_to_str<'a, B: Into<Cow<'a, Path>>>(p: B) -> std::io::Result<Cow<'a, str>> {
+    path_to_os_str(p)
+        .and_then(os_str_to_bytes)
+        .and_then(bytes_to_str)
 }
 
-pub fn path_to_bytes<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<u8>> {
-    os_str_to_bytes(path.as_ref().as_os_str())
+pub fn bytes_to_path<'a, B: Into<Cow<'a, [u8]>>>(b: B) -> std::io::Result<Cow<'a, Path>> {
+    bytes_to_str(b).map(|s| match s {
+        Cow::Borrowed(s) => Cow::Borrowed(Path::new(s)),
+        Cow::Owned(s) => Cow::Owned(PathBuf::from(s)),
+    })
 }
 
-pub fn path_to_string<P: AsRef<Path>>(path: P) -> std::io::Result<String> {
-    os_str_to_string(path.as_ref().as_os_str())
+pub fn path_to_bytes<'a, B: Into<Cow<'a, Path>>>(p: B) -> std::io::Result<Cow<'a, [u8]>> {
+    path_to_str(p).map(|s| match s {
+        Cow::Borrowed(s) => Cow::Borrowed(s.as_bytes()),
+        Cow::Owned(s) => Cow::Owned(s.into_bytes()),
+    })
 }
 
-pub fn os_str_to_string<S: AsRef<OsStr>>(s: S) -> std::io::Result<String> {
-    os_str_to_bytes(s.as_ref()).and_then(bytes_to_string)
+pub fn path_to_os_str<'a, B: Into<Cow<'a, Path>>>(p: B) -> std::io::Result<Cow<'a, OsStr>> {
+    match p.into() {
+        Cow::Borrowed(p) => Ok(Cow::Borrowed(p.as_os_str())),
+        Cow::Owned(p) => Ok(Cow::Owned(p.into_os_string())),
+    }
+}
+
+pub fn os_str_to_str<'a, B: Into<Cow<'a, OsStr>>>(s: B) -> std::io::Result<Cow<'a, str>> {
+    os_str_to_bytes(s).and_then(bytes_to_str)
 }
 
 #[cfg(unix)]
-pub fn bytes_to_string(multi_byte_str: Vec<u8>) -> std::io::Result<String> {
-    String::from_utf8(multi_byte_str)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+pub fn bytes_to_str<'a, B: Into<Cow<'a, [u8]>>>(b: B) -> std::io::Result<Cow<'a, str>> {
+    match b.into() {
+        Cow::Borrowed(b) => str::from_utf8(b)
+            .map(Cow::Borrowed)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e)),
+        Cow::Owned(b) => String::from_utf8(b)
+            .map(Cow::Owned)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e)),
+    }
 }
 
 #[cfg(windows)]
-pub fn bytes_to_string(multi_byte_str: Vec<u8>) -> std::io::Result<String> {
+pub fn bytes_to_str<'a, B: Into<Cow<'a, [u8]>>>(b: B) -> std::io::Result<Cow<'a, str>> {
     use windows_sys::Win32::Globalization::{CP_OEMCP, MB_ERR_INVALID_CHARS};
 
-    multi_byte_to_wide_char(CP_OEMCP, MB_ERR_INVALID_CHARS, &multi_byte_str)
+    multi_byte_to_wide_char(CP_OEMCP, MB_ERR_INVALID_CHARS, b.into().as_ref())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
         .and_then(|buf| {
             String::from_utf16(&buf)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                .map(Cow::Owned)
         })
 }
 
 #[cfg(unix)]
-pub fn bytes_to_os_string<B: AsRef<[u8]>>(buf: B) -> std::io::Result<OsString> {
-    use std::os::unix::prelude::*;
-    Ok(OsStr::from_bytes(buf.as_ref()).into())
+pub fn bytes_to_os_str<'a, B: Into<Cow<'a, [u8]>>>(b: B) -> std::io::Result<Cow<'a, OsStr>> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    match b.into() {
+        Cow::Borrowed(b) => Ok(Cow::Borrowed(OsStr::from_bytes(b))),
+        Cow::Owned(b) => Ok(Cow::Owned(OsString::from_vec(b))),
+    }
 }
 
 #[cfg(windows)]
-pub fn bytes_to_os_string<B: AsRef<[u8]>>(buf: B) -> std::io::Result<OsString> {
+pub fn bytes_to_os_str<'a, B: Into<Cow<'a, [u8]>>>(b: B) -> std::io::Result<Cow<'a, OsStr>> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::Globalization::{CP_OEMCP, MB_ERR_INVALID_CHARS};
-
-    let codepage = CP_OEMCP;
-    let flags = MB_ERR_INVALID_CHARS;
-
-    Ok(OsString::from_wide(&multi_byte_to_wide_char(
-        codepage, flags, buf,
-    )?))
+    multi_byte_to_wide_char(CP_OEMCP, MB_ERR_INVALID_CHARS, b.into().as_ref())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+        .map(|buf| OsString::from_wide(&buf))
+        .map(Cow::Owned)
 }
 
 #[cfg(unix)]
-pub fn os_str_to_bytes(os_str: &OsStr) -> std::io::Result<Vec<u8>> {
-    use std::os::unix::prelude::*;
-    Ok(os_str.as_bytes().to_vec())
+pub fn os_str_to_bytes<'a, B: Into<Cow<'a, OsStr>>>(s: B) -> std::io::Result<Cow<'a, [u8]>> {
+    match s.into() {
+        Cow::Borrowed(s) => Ok(Cow::Borrowed(s.as_encoded_bytes())),
+        Cow::Owned(s) => Ok(Cow::Owned(s.as_encoded_bytes().to_vec())),
+    }
 }
 
 #[cfg(windows)]
-pub fn os_str_to_bytes(os_str: &OsStr) -> std::io::Result<Vec<u8>> {
+pub fn os_str_to_bytes<'a, B: Into<Cow<'a, OsStr>>>(s: B) -> std::io::Result<Cow<'a, [u8]>> {
     use std::os::windows::ffi::OsStrExt;
-    wide_char_to_multi_byte(&os_str.encode_wide().collect::<Vec<_>>()) // use_default_char_flag
+    wide_char_to_multi_byte(&s.into().encode_wide().collect::<Vec<_>>()).map(Cow::Owned)
 }
 
 #[cfg(windows)]
@@ -2858,7 +2878,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn local_oem_codepage_conversions() {
-        use crate::util::{bytes_to_string, wide_char_to_multi_byte};
+        use crate::util::{bytes_to_str, wide_char_to_multi_byte};
         use windows_sys::Win32::Globalization::GetOEMCP;
 
         let current_oemcp = unsafe { GetOEMCP() };
@@ -2874,7 +2894,10 @@ mod tests {
             ];
 
             // Test the conversion from the OEM codepage to UTF-8
-            assert_eq!(bytes_to_string(INPUT_BYTES.to_vec()).unwrap(), INPUT_STRING);
+            assert_eq!(
+                bytes_to_str(INPUT_BYTES.to_vec()).unwrap().as_ref(),
+                INPUT_STRING
+            );
 
             // The characters in INPUT_STRING encoded in UTF-16
             const INPUT_WORDS: [u16; 16] = [

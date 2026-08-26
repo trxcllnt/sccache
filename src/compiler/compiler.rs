@@ -40,7 +40,7 @@ use crate::{
     mock_command::{CommandChild, CommandCreatorSync, ProcessOutput, RunCommand},
     server,
     util::{
-        bytes_to_string, fmt_duration_as_secs, resolve_compiler_avoiding_wrapper, run_input_output,
+        bytes_to_str, fmt_duration_as_secs, resolve_compiler_avoiding_wrapper, run_input_output,
         strip_basedirs,
     },
 };
@@ -1344,7 +1344,7 @@ where
             ..
         } = self;
 
-        use crate::util::path_to_string;
+        use crate::util::path_to_str;
 
         let mut dist_compile_cmd = dist_compile_cmd.as_dist(&mut path_transformer)?;
 
@@ -1402,9 +1402,11 @@ where
                         format!("Expected output path {:?} to be absolute", output.path)
                     })
                     .and_then(|p| {
-                        path_to_string(&p)
-                            .with_context(|| format!("Failed to serialize output path {p:?}"))
+                        path_to_str(p).with_context(|| {
+                            format!("Failed to serialize output path {:?}", output.path)
+                        })
                     })
+                    .map(Into::into)
             })
             .try_collect::<_, Vec<_>, _>()
             .context("Failed to adapt an output path for distributed compile")?;
@@ -2267,7 +2269,7 @@ where
 
         let output = run_input_output(cmd, None).await?;
 
-        let stdout = bytes_to_string(output.stdout).context("Failed to parse output")?;
+        let stdout = bytes_to_str(output.stdout).context("Failed to parse output")?;
 
         let version = stdout.lines().next().unwrap_or("unknown").to_string();
 
@@ -2341,12 +2343,13 @@ where
     child.env_clear().envs(env.to_vec()).args(&["-vV"]);
 
     let rustc_vv = run_input_output(child, None).await.map(|output| {
-        if let Ok(stdout) = bytes_to_string(output.stdout.clone())
+        if let Ok(stdout) = bytes_to_str(&output.stdout[..])
             && stdout.starts_with("rustc ")
         {
-            return Ok(stdout);
+            Ok(stdout.into_owned())
+        } else {
+            Err(ProcessError(output))
         }
-        Err(ProcessError(output))
     })?;
 
     // rustc -vV verification status
@@ -2558,7 +2561,7 @@ compiler_version=__VERSION__
     drop(tempdir);
 
     let status = output.desc();
-    let stdout = bytes_to_string(output.stdout).context("Failed to parse output")?;
+    let stdout = bytes_to_str(output.stdout).context("Failed to parse output")?;
 
     let mut lines = stdout.lines().filter_map(|line| {
         let line = line.trim();
@@ -2771,7 +2774,7 @@ compiler_version=__VERSION__
         }
     }
 
-    let stderr = bytes_to_string(output.stderr).context("Failed to parse output")?;
+    let stderr = bytes_to_str(output.stderr).context("Failed to parse output")?;
     debug!("nothing useful in detection output {stdout:?}");
     debug!("compiler status: {status}");
     debug!("compiler stderr:\n{stderr}");

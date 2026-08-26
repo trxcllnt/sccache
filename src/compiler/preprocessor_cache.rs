@@ -528,7 +528,7 @@ pub async fn preprocessor_cache_entry_hash_key(
         // - Compiling a/x.c records a/r.h in the preprocessor cache entry.
         // - Compiling b/x.c results in a false cache hit since a/x.c and b/x.c
         // share preprocessor cache entries and a/r.h exists.
-        let buf = path_to_bytes(&input_path)?;
+        let buf = path_to_bytes(input_path.as_path())?;
         // Strip basedirs from the input file path if configured
         let buf_to_hash = strip_basedirs(&buf, basedirs);
         digest.update(&buf_to_hash);

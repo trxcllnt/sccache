@@ -663,8 +663,9 @@ impl CompileCommand {
     pub fn as_dist(self, path_transformer: &mut PathTransformer) -> Result<Self> {
         let cwd = path_transformer
             .as_dist_abs(&self.cwd)
-            .map(|p| crate::util::path_to_string(p).map_err(Into::into))
-            .unwrap_or_else(|| bail!("Failed to translate cwd {:?}", self.cwd))?;
+            .map(|p| crate::util::path_to_str(p).map_err(Into::into))
+            .unwrap_or_else(|| bail!("Failed to translate cwd {:?}", self.cwd))?
+            .into_owned();
         Ok(Self { cwd, ..self })
     }
 }

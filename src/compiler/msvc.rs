@@ -30,8 +30,8 @@ use crate::{
     errors::*,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     util::{
-        OsStrExt, SCCACHE_TMPDIR, bytes_to_os_string, bytes_to_string, make_process_output_stream,
-        os_str_to_string, path_to_bytes, path_to_string, run_input_output, run_input_stream_output,
+        OsStrExt, SCCACHE_TMPDIR, bytes_to_str, make_process_output_stream, os_str_to_str,
+        path_to_bytes, path_to_str, run_input_output, run_input_stream_output,
         run_with_input_buffer_stderr, tempdir_in, temppath,
     },
 };
@@ -100,7 +100,7 @@ impl CCompilerImpl for Msvc {
         if let Some(prepend_flags) = env_vars
             .iter()
             .find(|(k, _)| k == "CL")
-            .and_then(|(_, v)| os_str_to_string(v).ok())
+            .and_then(|(_, v)| os_str_to_str(v).ok())
         {
             // Parse the `CL` environment variable value as MSVC flags.
             arguments = [
@@ -115,7 +115,7 @@ impl CCompilerImpl for Msvc {
         if let Some(append_flags) = env_vars
             .iter()
             .find(|(k, _)| k == "_CL_")
-            .and_then(|(_, v)| os_str_to_string(v).ok())
+            .and_then(|(_, v)| os_str_to_str(v).ok())
         {
             // Parse the `_CL_` environment variable value as MSVC flags.
             arguments.extend(
@@ -273,7 +273,7 @@ where
         bail!("Failed to detect showIncludes prefix ({:?})", output.status)
     }
 
-    let stderr = bytes_to_string(output.stderr)
+    let stderr = bytes_to_str(output.stderr)
         .context("Failed to convert compiler stderr while detecting showIncludes prefix")?;
     for line in stderr.lines() {
         if !line.ends_with("test.h") {
@@ -1362,17 +1362,14 @@ async fn parse_dependencies_from_showincludes(
     let mut lines = vec![];
     let mut paths = HashSet::new();
 
-    for line in bytes_to_os_string(&input[..])
+    for line in bytes_to_str(&input[..])
         .context("Failed to convert preprocessor stderr")?
         .split("\n")
     {
         if let Some(path) = line.trim().strip_prefix(includes_prefix).map(PathBuf::from) {
             paths.insert(path);
         } else if !msvc_show_includes {
-            lines.extend(
-                line.encode_to_bytes()
-                    .context("Failed to convert OsStr line to bytes")?,
-            );
+            lines.extend_from_slice(line.as_bytes());
             lines.push(b'\n');
         }
     }
@@ -1480,7 +1477,7 @@ async fn write_clang_dependencies_file(
     f.write_all(
         dependencies
             .iter()
-            .map(path_to_string)
+            .map(path_to_str)
             .try_collect::<_, Vec<_>, _>()?
             .iter()
             .join(" ")
@@ -1495,7 +1492,7 @@ async fn write_clang_dependencies_file(
         [src_path]
             .into_iter()
             .chain(dependencies.iter().map(|p| p.as_path()).sorted())
-            .map(path_to_string)
+            .map(path_to_str)
             .try_collect::<_, Vec<_>, _>()?
             .iter()
             .join(":\n")
@@ -1574,17 +1571,17 @@ fn generate_compile_commands(
     let dist_command = None;
     #[cfg(feature = "dist-client")]
     let dist_command = (|| {
-        use crate::util::path_to_string;
+        use crate::util::path_to_str;
 
         let command = dist::CompileCommand {
-            cwd: path_to_string(cwd).ok()?,
+            cwd: path_to_str(cwd).ok().map(Into::into)?,
             env_vars: dist::osstring_tuples_to_strings(&env_vars)?,
-            executable: path_to_string(executable).ok()?,
+            executable: path_to_str(executable).ok().map(Into::into)?,
             arguments: {
                 // http://releases.llvm.org/6.0.0/tools/clang/docs/UsersManual.html#clang-cl
                 // TODO: Use /T... for language?
                 let mut fo = String::from("-Fo");
-                fo.push_str(&path_to_string(output).ok()?);
+                fo.push_str(&path_to_str(output).ok()?);
 
                 let mut arguments: Vec<String> =
                     vec![parsed_args.compilation_flag.clone().into_string().ok()?, fo];
@@ -1605,7 +1602,7 @@ fn generate_compile_commands(
                         .then(|| path_transformer.with_dist_extension(input))
                         .as_deref()
                         .or(Some(input))
-                        .and_then(|p| path_to_string(p).ok())?,
+                        .and_then(|p| path_to_str(p).ok().map(Into::into))?,
                 );
 
                 arguments
@@ -1777,7 +1774,7 @@ struct SplitMsvcResponseFileArgs<'a> {
 
 impl<'a, T> From<&'a T> for SplitMsvcResponseFileArgs<'a>
 where
-    T: AsRef<str> + 'static,
+    T: AsRef<str> + 'a,
 {
     fn from(file_content: &'a T) -> Self {
         Self {

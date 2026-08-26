@@ -42,8 +42,8 @@ use crate::{
     mock_command::{CommandCreatorSync, RunCommand},
     server::SccacheService,
     util::{
-        Digest, HashToDigest, OsStrExt, bytes_to_string, fmt_duration_as_secs, hash_all,
-        hash_all_archives, path_to_string, run_input_output,
+        Digest, HashToDigest, OsStrExt, bytes_to_str, fmt_duration_as_secs, hash_all,
+        hash_all_archives, path_to_str, run_input_output,
     },
 };
 use async_trait::async_trait;
@@ -385,7 +385,7 @@ where
     trace!("get_compiler_outputs: {cmd}");
     let outputs = run_input_output(cmd, None).await?;
 
-    let outstr = bytes_to_string(outputs.stdout).context("Error parsing rustc output")?;
+    let outstr = bytes_to_str(outputs.stdout).context("Error parsing rustc output")?;
     trace!("get_compiler_outputs: {outstr:?}");
     Ok(outstr.lines().map(|l| l.to_owned()).collect())
 }
@@ -423,7 +423,7 @@ impl Rust {
         let sysroot_and_libs = async move {
             let output = run_input_output(cmd, None).await?;
             //debug!("output.and_then: {}", output);
-            let outstr = bytes_to_string(output.stdout).context("Error parsing sysroot")?;
+            let outstr = bytes_to_str(output.stdout).context("Error parsing sysroot")?;
             let sysroot = PathBuf::from(outstr.trim_end());
             #[cfg(windows)]
             let libs_path = sysroot.join(BINS_DIR);
@@ -584,7 +584,7 @@ where
                 .await
                 .context("Failed to execute rustup which rustc")?;
 
-            let stdout = bytes_to_string(output.stdout)
+            let stdout = bytes_to_str(output.stdout)
                 .context("Failed to parse output of rustup which rustc")?;
 
             let proxied_compiler = PathBuf::from(stdout.trim());
@@ -722,7 +722,7 @@ impl RustupProxy {
                 child.env_clear().envs(env.to_vec()).args(&["--version"]);
                 let rustup_candidate_check = run_input_output(child, None).await?;
 
-                let stdout = bytes_to_string(rustup_candidate_check.stdout)
+                let stdout = bytes_to_str(rustup_candidate_check.stdout)
                     .map_err(|_e| anyhow!("Response of `rustup --version` is not valid UTF-8"))?;
                 Ok(if stdout.trim().starts_with("rustup ") {
                     trace!("PROXY rustup --version produced: {}", stdout);
@@ -1841,7 +1841,7 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
 
             // flat_map would be nice but the lifetimes don't work out
             for argument in arguments.iter() {
-                let path_transformer_fn = &mut |p: &Path| path_to_string(p).ok();
+                let path_transformer_fn = &mut |p: &Path| path_to_str(p).ok().map(Into::into);
                 if let Argument::Raw(input_path) = argument {
                     // Need to explicitly handle the input argument as it's not parsed as a path
                     let input_path = Path::new(input_path).to_owned();
@@ -1880,9 +1880,9 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
 
             let command = dist::CompileCommand {
                 arguments: dist_arguments,
-                cwd: path_to_string(cwd).ok()?,
+                cwd: path_to_str(cwd).ok()?.into_owned(),
                 env_vars,
-                executable: path_to_string(sysroot_executable).ok()?,
+                executable: path_to_str(sysroot_executable).ok()?.into_owned(),
             };
 
             trace!("[{crate_name}]: dist command: {command}");
@@ -1948,7 +1948,9 @@ fn get_path_mappings(
 ) -> impl Iterator<Item = (PathBuf, String)> {
     path_transformer
         .disk_mappings()
-        .map(|(local_path, dist_path)| (local_path, path_to_string(dist_path).unwrap()))
+        .map(|(local_path, dist_path)| {
+            (local_path, path_to_str(dist_path).map(Into::into).unwrap())
+        })
 }
 
 #[cfg(feature = "dist-client")]
@@ -2390,14 +2392,14 @@ impl OutputsRewriter for RustOutputsRewriter {
 fn test_rust_outputs_rewriter() {
     use crate::compiler::compiler::OutputsRewriter;
     use crate::test::utils::create_file;
-    use crate::util::path_to_string;
+    use crate::util::path_to_str;
     use std::io::Write;
 
     let mut pt = dist::PathTransformer::new();
     pt.as_dist(Path::new("c:\\")).unwrap();
     let mappings: Vec<_> = pt.disk_mappings().collect();
     assert!(mappings.len() == 1);
-    let linux_prefix = path_to_string(&mappings[0].1).unwrap();
+    let linux_prefix = path_to_str(&mappings[0].1).unwrap();
 
     let depinfo_data = format!("{linux_prefix}/sccache/target/x86_64-unknown-linux-gnu/debug/deps/sccache_dist-c6f3229b9ef0a5c3.rmeta: src/bin/sccache-dist/main.rs src/bin/sccache-dist/build.rs src/bin/sccache-dist/token_check.rs
 
@@ -2629,13 +2631,10 @@ impl RlibDepReader {
             bail!(format!("Failed to list deps of {}", rlib.display()))
         }
         if !stderr.is_empty() {
-            bail!(
-                "rustc -Z ls stderr non-empty: {:?}",
-                String::from_utf8_lossy(&stderr)
-            )
+            bail!("rustc -Z ls stderr non-empty: {:?}", bytes_to_str(stderr)?)
         }
 
-        let stdout = bytes_to_string(stdout).context("Error parsing rustc -Z ls output")?;
+        let stdout = bytes_to_str(stdout).context("Error parsing rustc -Z ls output")?;
         let deps: Vec<_> = parse_rustc_z_ls(&stdout)
             .map(|deps| deps.into_iter().map(|dep| dep.to_owned()).collect())?;
 

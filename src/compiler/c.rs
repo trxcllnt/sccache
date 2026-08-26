@@ -1953,11 +1953,11 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 
             // Create our PathBuf from the raw bytes.  Assume that relative
             // paths can be found via PATH.
-            let path = bytes_to_path(&output.stdout).ok()?;
+            let path = bytes_to_path(&output.stdout[..]).ok()?;
             if path.is_absolute() {
-                Some(path)
+                Some(path.into_owned())
             } else {
-                which::which(path).ok()
+                which::which(path.as_ref()).ok()
             }
         };
 
