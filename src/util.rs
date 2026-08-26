@@ -982,7 +982,7 @@ impl OsStrExt for OsStr {
         let p = pat.as_ref().as_encoded_bytes();
         let s = self.as_encoded_bytes();
         let (m, n) = (s.len(), p.len());
-        if m < n { false } else { p == &s[0..n] }
+        if m < n { false } else { p == &s[..n] }
     }
 
     fn split<P: AsRef<OsStr>>(&self, pat: P) -> impl Iterator<Item = &'_ OsStr> {
@@ -1049,14 +1049,12 @@ impl OsStrExt for OsStr {
     fn trim_start(&self) -> &OsStr {
         let mut buf = self.as_encoded_bytes();
 
-        loop {
-            buf = match buf {
-                [b'\n', ..] => &buf[1..],
-                [b'\r', ..] => &buf[1..],
-                [b'\t', ..] => &buf[1..],
-                [b' ', ..] => &buf[1..],
-                _ => break,
-            }
+        while !buf.is_empty()
+            && char::from_u32(buf[1] as u32)
+                .filter(|c| c.is_whitespace())
+                .is_some()
+        {
+            buf = &buf[1..];
         }
 
         unsafe { OsStr::from_encoded_bytes_unchecked(buf) }
@@ -1065,14 +1063,13 @@ impl OsStrExt for OsStr {
     fn trim_end(&self) -> &OsStr {
         let mut buf = self.as_encoded_bytes();
 
-        loop {
-            buf = match buf {
-                [.., b'\n'] => &buf[..buf.len() - 1],
-                [.., b'\r'] => &buf[..buf.len() - 1],
-                [.., b'\t'] => &buf[..buf.len() - 1],
-                [.., b' '] => &buf[..buf.len() - 1],
-                _ => break,
-            }
+        while !buf.is_empty()
+            && let idx = buf.len() - 1
+            && char::from_u32(buf[idx] as u32)
+                .filter(|c| c.is_whitespace())
+                .is_some()
+        {
+            buf = &buf[..idx];
         }
 
         unsafe { OsStr::from_encoded_bytes_unchecked(buf) }
@@ -1082,7 +1079,7 @@ impl OsStrExt for OsStr {
         let pat = pat.as_ref().as_encoded_bytes();
         let mut buf = self.as_encoded_bytes();
         loop {
-            if pat.len() > buf.len() || &buf[0..pat.len()] != pat {
+            if pat.len() > buf.len() || &buf[..pat.len()] != pat {
                 break;
             } else {
                 buf = &buf[pat.len()..];
@@ -1219,7 +1216,7 @@ pub fn wide_char_to_multi_byte(wide_char_str: &[u16]) -> std::io::Result<Vec<u8>
                 if (len as usize) == astr.len() {
                     return Ok(astr);
                 } else {
-                    return Ok(astr[0..(len as usize)].to_vec());
+                    return Ok(astr[..(len as usize)].to_vec());
                 }
             }
         }
