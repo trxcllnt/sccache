@@ -15,21 +15,21 @@
 
 use crate::{
     compiler::{
-        c::{CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments, PreprocessorOutput},
+        c::{
+            CCompilerImpl, CCompilerKind, DepfilePath, GenerateCompileCommandsArgs,
+            GenerateDependenciesArgs, ParseArgs, ParsedArguments, PreprocessArgs,
+            PreprocessorOutput,
+        },
         cicc, {Cacheable, CompilerArguments, Language},
         {CompileCommandImpl, args::*},
     },
     counted_array, dist,
     mock_command::CommandCreatorSync,
-    server::SccacheService,
 };
 
 use async_trait::async_trait;
 
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-};
+use std::{ffi::OsString, path::PathBuf};
 
 use crate::errors::*;
 
@@ -52,26 +52,15 @@ impl CCompilerImpl for Ptxas {
     }
     fn parse_arguments(
         &self,
-        arguments: &[OsString],
-        cwd: &Path,
-        _env_vars: &[(OsString, OsString)],
-        _might_dist_compile: bool,
+        ParseArgs { arguments, cwd, .. }: ParseArgs<'_>,
     ) -> CompilerArguments<ParsedArguments> {
         cicc::parse_arguments(arguments, cwd, Language::Cubin, &ARGS[..])
     }
-    #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        _service: &SccacheService<T>,
-        _creator: &T,
-        _executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        _env_vars: &[(OsString, OsString)],
-        _might_dist_compile: bool,
-        _rewrite_includes_only: bool,
-        _generate_dependencies: bool,
-        _include_line_numbers: bool,
+        PreprocessArgs {
+            parsed_args, cwd, ..
+        }: PreprocessArgs<'_, T>,
     ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
@@ -80,11 +69,7 @@ impl CCompilerImpl for Ptxas {
     }
     async fn generate_dependencies<T>(
         &self,
-        _creator: &T,
-        _executable: &Path,
-        _parsed_args: &ParsedArguments,
-        _cwd: &Path,
-        _env_vars: &[(OsString, OsString)],
+        GenerateDependenciesArgs { .. }: GenerateDependenciesArgs<'_, T>,
     ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
@@ -93,13 +78,14 @@ impl CCompilerImpl for Ptxas {
     }
     fn generate_compile_commands(
         &self,
-        path_transformer: &mut dist::PathTransformer,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        _rewrite_includes_only: bool,
-        _hash_key: &str,
+        GenerateCompileCommandsArgs {
+            path_transformer,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            ..
+        }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
         impl CompileCommandImpl,
         Option<dist::CompileCommand>,

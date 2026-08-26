@@ -131,6 +131,44 @@ impl AsRef<Path> for OutDir {
     }
 }
 
+pub struct ParseArgs<'a> {
+    pub arguments: &'a [OsString],
+    pub cwd: &'a Path,
+    pub env_vars: &'a [(OsString, OsString)],
+    pub might_dist_compile: bool,
+}
+
+pub struct PreprocessArgs<'a, T: CommandCreatorSync> {
+    pub service: &'a SccacheService<T>,
+    pub creator: &'a T,
+    pub executable: &'a Path,
+    pub parsed_args: &'a ParsedArguments,
+    pub cwd: &'a Path,
+    pub env_vars: &'a [(OsString, OsString)],
+    pub might_dist_compile: bool,
+    pub rewrite_includes_only: bool,
+    pub generate_dependencies: bool,
+    pub include_line_numbers: bool,
+}
+
+pub struct GenerateDependenciesArgs<'a, T: CommandCreatorSync> {
+    pub creator: &'a T,
+    pub executable: &'a Path,
+    pub parsed_args: &'a ParsedArguments,
+    pub cwd: &'a Path,
+    pub env_vars: &'a [(OsString, OsString)],
+}
+
+pub struct GenerateCompileCommandsArgs<'a> {
+    pub path_transformer: &'a mut dist::PathTransformer,
+    pub executable: &'a Path,
+    pub parsed_args: &'a ParsedArguments,
+    pub cwd: &'a Path,
+    pub env_vars: &'a [(OsString, OsString)],
+    pub rewrite_includes_only: bool,
+    pub hash_key: &'a str,
+}
+
 /// The results of parsing a compiler commandline.
 #[allow(dead_code)]
 #[derive(Default, Debug, Clone)]
@@ -402,55 +440,25 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         std::iter::empty()
     }
     /// Determine whether `arguments` are supported by this compiler.
-    fn parse_arguments(
-        &self,
-        arguments: &[OsString],
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        might_dist_compile: bool,
-    ) -> CompilerArguments<ParsedArguments>;
+    fn parse_arguments(&self, args: ParseArgs<'_>) -> CompilerArguments<ParsedArguments>;
     /// Run the C preprocessor with the specified set of arguments.
-    #[allow(clippy::too_many_arguments)]
-    async fn preprocess<T>(
-        &self,
-        service: &SccacheService<T>,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        might_dist_compile: bool,
-        rewrite_includes_only: bool,
-        generate_dependencies: bool,
-        include_line_numbers: bool,
-    ) -> Result<PreprocessorOutput>
+    async fn preprocess<T>(&self, args: PreprocessArgs<'_, T>) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync;
 
     /// Run the C preprocessor to generate the dependencies file.
     async fn generate_dependencies<T>(
         &self,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
+        args: GenerateDependenciesArgs<'_, T>,
     ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync;
 
     /// Generate a command that can be used to invoke the C compiler to perform
     /// the compilation.
-    #[allow(clippy::too_many_arguments)]
     fn generate_compile_commands(
         &self,
-        path_transformer: &mut dist::PathTransformer,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        rewrite_includes_only: bool,
-        hash_key: &str,
+        args: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
         impl CompileCommandImpl,
         Option<dist::CompileCommand>,
@@ -579,10 +587,12 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
         env_vars: &[(OsString, OsString)],
         might_dist_compile: bool,
     ) -> CompilerArguments<Box<dyn CompilerHasher<T> + 'static>> {
-        match self
-            .compiler
-            .parse_arguments(arguments, cwd, env_vars, might_dist_compile)
-        {
+        match self.compiler.parse_arguments(ParseArgs {
+            arguments,
+            cwd,
+            env_vars,
+            might_dist_compile,
+        }) {
             CompilerArguments::Ok(mut args) => {
                 // Handle SCCACHE_EXTRAFILES
                 for (k, v) in env_vars.iter() {
@@ -1282,10 +1292,10 @@ where
             PreprocessorOutput::File(cwd.join(&parsed_args.input), None)
         } else {
             compiler
-                .preprocess(
+                .preprocess(PreprocessArgs {
                     service,
                     creator,
-                    exe,
+                    executable: exe,
                     parsed_args,
                     cwd,
                     env_vars,
@@ -1293,9 +1303,9 @@ where
                     rewrite_includes_only,
                     // Generate dependencies if we're going to need them for the dist-
                     // compile or if we're going to update the preprocessor cache entry
-                    might_dist_compile || generate_dependencies,
+                    generate_dependencies: might_dist_compile || generate_dependencies,
                     include_line_numbers,
-                )
+                })
                 .await?
         };
 
@@ -1527,15 +1537,15 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
         } = self;
 
         compiler
-            .generate_compile_commands(
+            .generate_compile_commands(GenerateCompileCommandsArgs {
                 path_transformer,
                 executable,
                 parsed_args,
                 cwd,
                 env_vars,
-                *rewrite_includes_only,
+                rewrite_includes_only: *rewrite_includes_only,
                 hash_key,
-            )
+            })
             .map(|(command, dist_command, cacheable)| {
                 (
                     CCompilerCommand::new(command, self.clone()),
@@ -1575,7 +1585,13 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<T,
             && !depfile.exists()
         {
             compiler
-                .generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
+                .generate_dependencies(GenerateDependenciesArgs {
+                    creator,
+                    executable,
+                    parsed_args,
+                    cwd,
+                    env_vars,
+                })
                 .await?;
         }
         Ok(())

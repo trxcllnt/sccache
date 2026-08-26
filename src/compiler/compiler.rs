@@ -2801,6 +2801,7 @@ mod test {
     use super::*;
     use crate::{
         cache::{CacheMode, PreprocessorCache, disk::DiskCache},
+        compiler::c::ParseArgs,
         config::PreprocessorCacheModeConfig,
         mock_command::*,
         test::{mock_storage::MockStorage, utils::*},
@@ -2973,8 +2974,8 @@ mod test {
 
             use crate::compiler::c::CCompilerImpl;
 
-            match c1.compiler().parse_arguments(
-                ovec![
+            match c1.compiler().parse_arguments(ParseArgs {
+                arguments: ovec![
                     "-c",
                     "foo.cxx",
                     "-march=native",
@@ -2983,10 +2984,10 @@ mod test {
                     "foo.o"
                 ]
                 .as_slice(),
-                ".".as_ref(),
-                &[],
-                false,
-            ) {
+                cwd: ".".as_ref(),
+                env_vars: &[],
+                might_dist_compile: false,
+            }) {
                 CompilerArguments::Ok(parsed_args) => {
                     assert_eq!(
                         parsed_args.arch_args,

@@ -12,14 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compiler::{
-    Cacheable, CompileCommandImpl, CompilerArguments, Language,
-    args::*,
-    c::{CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments, PreprocessorOutput},
-    gcc::{self, ArgData::*},
+use crate::{
+    compiler::{
+        Cacheable, CompileCommandImpl, CompilerArguments, Language,
+        args::*,
+        c::{
+            CCompilerImpl, CCompilerKind, DepfilePath, GenerateCompileCommandsArgs,
+            GenerateDependenciesArgs, ParseArgs, ParsedArguments, PreprocessArgs,
+            PreprocessorOutput,
+        },
+        gcc::{self, ArgData::*},
+    },
+    counted_array, dist,
+    mock_command::CommandCreatorSync,
 };
-use crate::mock_command::CommandCreatorSync;
-use crate::{counted_array, dist, server::SccacheService};
 use async_trait::async_trait;
 use semver::{BuildMetadata, Prerelease, Version};
 use std::ffi::OsString;
@@ -92,10 +98,7 @@ impl CCompilerImpl for Clang {
     }
     fn parse_arguments(
         &self,
-        arguments: &[OsString],
-        cwd: &Path,
-        _env_vars: &[(OsString, OsString)],
-        _might_dist_compile: bool,
+        ParseArgs { arguments, cwd, .. }: ParseArgs<'_>,
     ) -> CompilerArguments<ParsedArguments> {
         gcc::parse_arguments(
             arguments,
@@ -106,19 +109,19 @@ impl CCompilerImpl for Clang {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        _service: &SccacheService<T>,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        _might_dist_compile: bool,
-        rewrite_includes_only: bool,
-        generate_dependencies: bool,
-        include_line_numbers: bool,
+        PreprocessArgs {
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            rewrite_includes_only,
+            generate_dependencies,
+            include_line_numbers,
+            ..
+        }: PreprocessArgs<'_, T>,
     ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
@@ -152,11 +155,14 @@ impl CCompilerImpl for Clang {
 
     async fn generate_dependencies<T>(
         &self,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
+        GenerateDependenciesArgs {
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            ..
+        }: GenerateDependenciesArgs<'_, T>,
     ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
@@ -168,13 +174,15 @@ impl CCompilerImpl for Clang {
 
     fn generate_compile_commands(
         &self,
-        path_transformer: &mut dist::PathTransformer,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        rewrite_includes_only: bool,
-        _hash_key: &str,
+        GenerateCompileCommandsArgs {
+            path_transformer,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            rewrite_includes_only,
+            ..
+        }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
         impl CompileCommandImpl,
         Option<dist::CompileCommand>,
@@ -296,7 +304,12 @@ mod test {
             false, // is_appleclang
             None,  // version
         )
-        .parse_arguments(&arguments, &std::env::current_dir().unwrap(), &[], false)
+        .parse_arguments(ParseArgs {
+            arguments: &arguments,
+            cwd: &std::env::current_dir().unwrap(),
+            env_vars: &[],
+            might_dist_compile: false,
+        })
     }
 
     macro_rules! parses {

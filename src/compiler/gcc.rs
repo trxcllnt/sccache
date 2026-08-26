@@ -18,8 +18,9 @@ use crate::{
         SingleCompileCommand,
         args::*,
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments,
-            PreprocessorOutput,
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath,
+            GenerateCompileCommandsArgs, GenerateDependenciesArgs, ParseArgs, ParsedArguments,
+            PreprocessArgs, PreprocessorOutput,
         },
         clang,
         preprocessor_cache::normalize_path,
@@ -27,7 +28,6 @@ use crate::{
     counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
-    server::SccacheService,
     util::{OsStrExt, bytes_to_string, run_input_output, run_input_stream_output, temppath},
 };
 
@@ -155,10 +155,7 @@ impl CCompilerImpl for Gcc {
     }
     fn parse_arguments(
         &self,
-        arguments: &[OsString],
-        cwd: &Path,
-        _env_vars: &[(OsString, OsString)],
-        _might_dist_compile: bool,
+        ParseArgs { arguments, cwd, .. }: ParseArgs<'_>,
     ) -> CompilerArguments<ParsedArguments> {
         let mut parsed_args =
             parse_arguments(arguments, cwd, &ARGS[..], self.gplusplus, self.kind());
@@ -181,16 +178,17 @@ impl CCompilerImpl for Gcc {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        _service: &SccacheService<T>,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        _might_dist_compile: bool,
-        rewrite_includes_only: bool,
-        generate_dependencies: bool,
-        include_line_numbers: bool,
+        PreprocessArgs {
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            rewrite_includes_only,
+            generate_dependencies,
+            include_line_numbers,
+            ..
+        }: PreprocessArgs<'_, T>,
     ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
@@ -217,11 +215,14 @@ impl CCompilerImpl for Gcc {
 
     async fn generate_dependencies<T>(
         &self,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
+        GenerateDependenciesArgs {
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            ..
+        }: GenerateDependenciesArgs<'_, T>,
     ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
@@ -233,13 +234,15 @@ impl CCompilerImpl for Gcc {
 
     fn generate_compile_commands(
         &self,
-        path_transformer: &mut dist::PathTransformer,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        rewrite_includes_only: bool,
-        _hash_key: &str,
+        GenerateCompileCommandsArgs {
+            path_transformer,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            rewrite_includes_only,
+            ..
+        }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
         impl CompileCommandImpl,
         Option<dist::CompileCommand>,
@@ -1731,6 +1734,7 @@ mod test {
     use super::*;
     use crate::compiler::*;
     use crate::mock_command::*;
+    use crate::server::SccacheService;
     use crate::test::mock_storage::MockStorage;
     use crate::test::utils::*;
 

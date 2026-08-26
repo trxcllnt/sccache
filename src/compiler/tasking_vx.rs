@@ -21,15 +21,15 @@ use crate::{
             NormalizedDisposition, PathTransformerFn, SearchableArgInfo,
         },
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments,
-            PreprocessorOutput,
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath,
+            GenerateCompileCommandsArgs, GenerateDependenciesArgs, ParseArgs, ParsedArguments,
+            PreprocessArgs, PreprocessorOutput,
         },
         gcc,
     },
     counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
-    server::SccacheService,
     util::{run_input_output, temppath},
 };
 use async_trait::async_trait;
@@ -59,26 +59,22 @@ impl CCompilerImpl for TaskingVX {
 
     fn parse_arguments(
         &self,
-        arguments: &[OsString],
-        cwd: &Path,
-        _env_vars: &[(OsString, OsString)],
-        _might_dist_compile: bool,
+        ParseArgs { arguments, cwd, .. }: ParseArgs<'_>,
     ) -> CompilerArguments<ParsedArguments> {
         parse_arguments(arguments, cwd, &ARGS[..])
     }
 
     async fn preprocess<T>(
         &self,
-        _service: &SccacheService<T>,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        _might_dist_compile: bool,
-        _rewrite_includes_only: bool,
-        generate_dependencies: bool,
-        _include_line_numbers: bool,
+        PreprocessArgs {
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            generate_dependencies,
+            ..
+        }: PreprocessArgs<'_, T>,
     ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
@@ -94,12 +90,17 @@ impl CCompilerImpl for TaskingVX {
         // of the input file, with the extension .o. With the option --make-target
         // you can specify a target name which overrules the default target name.
         let dependencies = if generate_dependencies || parsed_args.depfile.is_some() {
-            self.generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
-                .await?
-                .map(|depfile| {
-                    gcc::parse_dependencies(cwd.to_owned(), parsed_args.input.clone(), depfile)
-                        .boxed()
-                })
+            self.generate_dependencies(GenerateDependenciesArgs {
+                creator,
+                executable,
+                parsed_args,
+                cwd,
+                env_vars,
+            })
+            .await?
+            .map(|depfile| {
+                gcc::parse_dependencies(cwd.to_owned(), parsed_args.input.clone(), depfile).boxed()
+            })
         } else {
             None
         };
@@ -111,11 +112,14 @@ impl CCompilerImpl for TaskingVX {
 
     async fn generate_dependencies<T>(
         &self,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
+        GenerateDependenciesArgs {
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            ..
+        }: GenerateDependenciesArgs<'_, T>,
     ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
@@ -127,13 +131,14 @@ impl CCompilerImpl for TaskingVX {
 
     fn generate_compile_commands(
         &self,
-        path_transformer: &mut dist::PathTransformer,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        _rewrite_includes_only: bool,
-        _hash_key: &str,
+        GenerateCompileCommandsArgs {
+            path_transformer,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            ..
+        }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
         impl CompileCommandImpl,
         Option<dist::CompileCommand>,
@@ -428,12 +433,13 @@ fn generate_compile_commands(
 #[cfg(test)]
 mod test {
     use super::{
-        ARGS, Language, OsString, ParsedArguments, PathBuf, SccacheService, dist,
-        generate_compile_commands, parse_arguments,
+        ARGS, Language, OsString, ParsedArguments, PathBuf, dist, generate_compile_commands,
+        parse_arguments,
     };
     use crate::compiler::c::ArtifactDescriptor;
     use crate::compiler::*;
     use crate::mock_command::*;
+    use crate::server::SccacheService;
     use crate::test::mock_storage::MockStorage;
     use crate::test::utils::*;
 

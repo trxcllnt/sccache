@@ -19,7 +19,8 @@ use crate::{
         args::*,
         c::{
             ArtifactDescriptor, CCompilerImpl, CCompilerKind, DependenciesFuture, DepfilePath,
-            OutDir, ParsedArguments, PreprocessorOutput, ProcessOutputStream,
+            GenerateCompileCommandsArgs, GenerateDependenciesArgs, OutDir, ParseArgs,
+            ParsedArguments, PreprocessArgs, PreprocessorOutput, ProcessOutputStream,
         },
         clang, gcc,
         preprocessor_cache::normalize_path,
@@ -28,7 +29,6 @@ use crate::{
     counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
-    server::SccacheService,
     util::{
         OsStrExt, SCCACHE_TMPDIR, bytes_to_os_string, bytes_to_string, make_process_output_stream,
         os_str_to_string, path_to_bytes, path_to_string, run_input_output, run_input_stream_output,
@@ -85,10 +85,13 @@ impl CCompilerImpl for Msvc {
     }
     fn parse_arguments(
         &self,
-        arguments: &[OsString],
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        might_dist_compile: bool,
+        ParseArgs {
+            arguments,
+            cwd,
+            env_vars,
+            might_dist_compile,
+            ..
+        }: ParseArgs<'_>,
     ) -> CompilerArguments<ParsedArguments> {
         // Include MSVC's prepend/append flags envvars
         // https://learn.microsoft.com/en-us/cpp/build/reference/cl-environment-variables?view=msvc-170
@@ -140,19 +143,20 @@ impl CCompilerImpl for Msvc {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        _service: &SccacheService<T>,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        might_dist_compile: bool,
-        rewrite_includes_only: bool,
-        generate_dependencies: bool,
-        include_line_numbers: bool,
+        PreprocessArgs {
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            might_dist_compile,
+            rewrite_includes_only,
+            generate_dependencies,
+            include_line_numbers,
+            ..
+        }: PreprocessArgs<'_, T>,
     ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
@@ -176,11 +180,14 @@ impl CCompilerImpl for Msvc {
     /// Run the C preprocessor to generate the dependencies file.
     async fn generate_dependencies<T>(
         &self,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
+        GenerateDependenciesArgs {
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            ..
+        }: GenerateDependenciesArgs<'_, T>,
     ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
@@ -200,13 +207,14 @@ impl CCompilerImpl for Msvc {
 
     fn generate_compile_commands(
         &self,
-        path_transformer: &mut dist::PathTransformer,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        _rewrite_includes_only: bool,
-        _hash_key: &str,
+        GenerateCompileCommandsArgs {
+            path_transformer,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            ..
+        }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
         impl CompileCommandImpl,
         Option<dist::CompileCommand>,
@@ -1864,6 +1872,7 @@ mod test {
     use super::*;
     use crate::compiler::*;
     use crate::mock_command::*;
+    use crate::server::SccacheService;
     use crate::test::mock_storage::MockStorage;
     use crate::test::utils::*;
     use std::io::Write;
