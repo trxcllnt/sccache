@@ -75,16 +75,10 @@ const RLIB_EXTENSION: &str = "rlib";
 const RMETA_EXTENSION: &str = "rmeta";
 
 /// Directory in the sysroot containing binary to which rustc is linked.
-#[cfg(feature = "dist-client")]
 const BINS_DIR: &str = "bin";
 
 /// Directory in the sysroot containing shared libraries to which rustc is linked.
-#[cfg(not(windows))]
 const LIBS_DIR: &str = "lib";
-
-/// Directory in the sysroot containing shared libraries to which rustc is linked.
-#[cfg(windows)]
-const LIBS_DIR: &str = "bin";
 
 /// A struct on which to hang a `Compiler` impl.
 #[derive(Debug, Clone)]
@@ -266,7 +260,7 @@ where
         .env_clear()
         .envs(env_vars.to_vec())
         .current_dir(cwd);
-    trace!("[{crate_name}]: get dep-info: {cmd:?}");
+    trace!("[{crate_name}]: get dep-info: {cmd}");
     // Output of command is in file under dep_file, so we ignore stdout&stderr
     let _dep_info = run_input_output(cmd, None).await?;
     // Parse the dep-info file, then hash the contents of those files.
@@ -388,7 +382,7 @@ where
         .env_clear()
         .envs(env_vars.to_vec())
         .current_dir(cwd);
-    trace!("get_compiler_outputs: {cmd:?}");
+    trace!("get_compiler_outputs: {cmd}");
     let outputs = run_input_output(cmd, None).await?;
 
     let outstr = bytes_to_string(outputs.stdout).context("Error parsing rustc output")?;
@@ -431,6 +425,9 @@ impl Rust {
             //debug!("output.and_then: {}", output);
             let outstr = bytes_to_string(output.stdout).context("Error parsing sysroot")?;
             let sysroot = PathBuf::from(outstr.trim_end());
+            #[cfg(windows)]
+            let libs_path = sysroot.join(BINS_DIR);
+            #[cfg(not(windows))]
             let libs_path = sysroot.join(LIBS_DIR);
             let mut libs = fs::read_dir(&libs_path)
                 .with_context(|| format!("Failed to list rustc sysroot: `{libs_path:?}`"))?
@@ -516,6 +513,7 @@ where
     #[cfg(feature = "dist-client")]
     fn get_toolchain_packager(&self) -> Box<dyn pkg::ToolchainPackager> {
         Box::new(RustToolchainPackager {
+            env_vars: std::env::vars_os().collect(),
             sysroot: self.sysroot.clone(),
         })
     }
@@ -1910,13 +1908,13 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
         trace!("Dist inputs: inputs={inputs:?} crate_link_paths={crate_link_paths:?}");
 
         let inputs_packager = Box::new(RustInputsPackager {
-            env_vars,
+            env_vars: env_vars.clone(),
             crate_link_paths,
             crate_types,
             inputs,
             rlib_dep_reader,
         });
-        let toolchain_packager = Box::new(RustToolchainPackager { sysroot });
+        let toolchain_packager = Box::new(RustToolchainPackager { env_vars, sysroot });
         let outputs_rewriter = Box::new(RustOutputsRewriter { dep_info });
 
         Ok((inputs_packager, toolchain_packager, outputs_rewriter))
@@ -2263,6 +2261,7 @@ impl pkg::InputsPackager for RustInputsPackager {
 #[cfg(feature = "dist-client")]
 #[allow(unused)]
 struct RustToolchainPackager {
+    env_vars: Vec<(OsString, OsString)>,
     sysroot: PathBuf,
 }
 
@@ -2310,13 +2309,12 @@ impl pkg::ToolchainPackager for RustToolchainPackager {
         let mut package_builder =
             pkg::ToolchainPackaged::new(sysroot_executable.clone(), path_transformer);
 
-        package_builder.add_executable_and_deps(&[], &sysroot_executable)?;
+        package_builder.add_executable_and_deps(&self.env_vars, &sysroot_executable)?;
 
-        package_builder.add_dir_contents(&[], &bins_path)?;
-        if BINS_DIR != LIBS_DIR {
-            let libs_path = self.sysroot.join(LIBS_DIR);
-            package_builder.add_dir_contents(&[], &libs_path)?;
-        }
+        package_builder.add_dir_contents(&self.env_vars, &bins_path)?;
+
+        let libs_path = self.sysroot.join(LIBS_DIR);
+        package_builder.add_dir_contents(&self.env_vars, &libs_path)?;
 
         // Return the builder so the archive can be lazily created, depending
         // on whether or not the scheduler reports it already has the toolchain
