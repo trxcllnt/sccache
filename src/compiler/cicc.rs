@@ -14,17 +14,18 @@
 // limitations under the License.
 
 use crate::{
-    compiler::c::{
-        ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments,
-        PreprocessorOutput,
-    },
     compiler::{
-        Cacheable, CompileCommandImpl, CompilerArguments, Language, SingleCompileCommand, args::*,
+        Cacheable, CompileCommandImpl, CompilerArguments, Language, SingleCompileCommand,
+        args::*,
+        c::{
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath,
+            GenerateCompileCommandsArgs, GenerateDependenciesArgs, ParseArgs, ParsedArguments,
+            PreprocessArgs, PreprocessorOutput,
+        },
     },
     counted_array, dist,
     errors::*,
     mock_command::CommandCreatorSync,
-    server::SccacheService,
     util::OsStrExt,
 };
 use async_trait::async_trait;
@@ -53,24 +54,15 @@ impl CCompilerImpl for Cicc {
     }
     fn parse_arguments(
         &self,
-        arguments: &[OsString],
-        cwd: &Path,
-        _env_vars: &[(OsString, OsString)],
+        ParseArgs { arguments, cwd, .. }: ParseArgs<'_>,
     ) -> CompilerArguments<ParsedArguments> {
         parse_arguments(arguments, cwd, Language::Ptx, &ARGS[..])
     }
-    #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        _service: &SccacheService<T>,
-        _creator: &T,
-        _executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        _env_vars: &[(OsString, OsString)],
-        _rewrite_includes_only: bool,
-        _generate_dependencies: bool,
-        _include_line_numbers: bool,
+        PreprocessArgs {
+            parsed_args, cwd, ..
+        }: PreprocessArgs<'_, T>,
     ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
@@ -79,11 +71,7 @@ impl CCompilerImpl for Cicc {
     }
     async fn generate_dependencies<T>(
         &self,
-        _creator: &T,
-        _executable: &Path,
-        _parsed_args: &ParsedArguments,
-        _cwd: &Path,
-        _env_vars: &[(OsString, OsString)],
+        GenerateDependenciesArgs { .. }: GenerateDependenciesArgs<'_, T>,
     ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
@@ -92,13 +80,14 @@ impl CCompilerImpl for Cicc {
     }
     fn generate_compile_commands(
         &self,
-        path_transformer: &mut dist::PathTransformer,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        _rewrite_includes_only: bool,
-        _hash_key: &str,
+        GenerateCompileCommandsArgs {
+            path_transformer,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            ..
+        }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
         impl CompileCommandImpl,
         Option<dist::CompileCommand>,
@@ -324,7 +313,7 @@ pub fn generate_compile_commands(
         Ok((
             command,
             (|| {
-                use crate::util::path_to_string;
+                use crate::util::path_to_str;
 
                 let command = dist::CompileCommand {
                     arguments: [
@@ -333,22 +322,23 @@ pub fn generate_compile_commands(
                         // &dist::osstrings_to_strings(&parsed_args.unhashed_args)?[..],
                         &[
                             output_flag.into(),
-                            path_to_string(output).ok()?,
+                            path_to_str(output).map(Into::into).ok()?,
                             parsed_args
                                 .language
                                 .needs_c_preprocessing()
                                 .then(|| path_transformer.with_dist_extension(input))
                                 .as_deref()
                                 .or(Some(input))
-                                .and_then(|p| path_to_string(p).ok())?,
+                                .and_then(|p| path_to_str(p).map(Into::into).ok())?,
                         ],
                     ]
                     .concat(),
-                    cwd: path_to_string(cwd).ok()?,
+                    cwd: path_to_str(cwd).map(Into::into).ok()?,
                     env_vars: dist::osstring_tuples_to_strings(env_vars)?,
-                    // executable: path_to_string(executable).ok()?,
+                    // executable: path_to_str(executable).ok().map(Into::into)?,
                     executable: dunce::canonicalize(executable)
-                        .and_then(path_to_string)
+                        .and_then(path_to_str)
+                        .map(Into::into)
                         .ok()?,
                 };
 

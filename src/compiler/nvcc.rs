@@ -18,8 +18,9 @@ use crate::{
         Cacheable, CompileCommandImpl, CompilerArguments,
         args::*,
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath, OutDir, ParsedArguments,
-            PreprocessorOutput,
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath,
+            GenerateCompileCommandsArgs, GenerateDependenciesArgs, OutDir, ParseArgs,
+            ParsedArguments, PreprocessArgs, PreprocessorOutput,
         },
         gcc::{self, ArgData::*},
     },
@@ -28,7 +29,7 @@ use crate::{
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     server::SccacheService,
     util::{
-        HASH_BUFFER_SIZE, OsStrExt, SCCACHE_TMPDIR, bytes_to_string, read_line_batches,
+        HASH_BUFFER_SIZE, OsStrExt, SCCACHE_TMPDIR, bytes_to_str, read_line_batches,
         resolve_compiler_avoiding_wrapper, run_input_output, split_quoted_shell_str, tempdir_in,
     },
 };
@@ -261,9 +262,12 @@ impl CCompilerImpl for Nvcc {
     }
     fn parse_arguments(
         &self,
-        arguments: &[OsString],
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
+        ParseArgs {
+            arguments,
+            cwd,
+            env_vars,
+            ..
+        }: ParseArgs<'_>,
     ) -> CompilerArguments<ParsedArguments> {
         let mut arguments = arguments.to_vec();
 
@@ -418,18 +422,19 @@ impl CCompilerImpl for Nvcc {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        service: &SccacheService<T>,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        rewrite_includes_only: bool,
-        generate_dependencies: bool,
-        _include_line_numbers: bool,
+        PreprocessArgs {
+            service,
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            rewrite_includes_only,
+            generate_dependencies,
+            ..
+        }: PreprocessArgs<'_, T>,
     ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
@@ -446,19 +451,25 @@ impl CCompilerImpl for Nvcc {
         let dependencies = if (generate_dependencies || !parsed_args.dependency_args.is_empty())
             && !matches!(compile_flag, NvccCompileFlag::Executable)
         {
-            self.generate_dependencies(creator, executable, parsed_args, cwd, &env_vars)
-                .await?
-                .map(|depfile| {
-                    gcc::parse_dependencies(cwd.to_owned(), parsed_args.input.clone(), depfile)
-                        .map_ok(|dependencies| {
-                            dependencies
-                                .into_iter()
-                                .sorted()
-                                .unique()
-                                .collect::<Vec<_>>()
-                        })
-                        .boxed()
-                })
+            self.generate_dependencies(GenerateDependenciesArgs {
+                creator,
+                executable,
+                parsed_args,
+                cwd,
+                env_vars: &env_vars,
+            })
+            .await?
+            .map(|depfile| {
+                gcc::parse_dependencies(cwd.to_owned(), parsed_args.input.clone(), depfile)
+                    .map_ok(|dependencies| {
+                        dependencies
+                            .into_iter()
+                            .sorted()
+                            .unique()
+                            .collect::<Vec<_>>()
+                    })
+                    .boxed()
+            })
         } else {
             None
         };
@@ -554,11 +565,14 @@ impl CCompilerImpl for Nvcc {
 
     async fn generate_dependencies<T>(
         &self,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
+        GenerateDependenciesArgs {
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            ..
+        }: GenerateDependenciesArgs<'_, T>,
     ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
@@ -570,13 +584,14 @@ impl CCompilerImpl for Nvcc {
 
     fn generate_compile_commands(
         &self,
-        _path_transformer: &mut dist::PathTransformer,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        _rewrite_includes_only: bool,
-        hash_key: &str,
+        GenerateCompileCommandsArgs {
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            hash_key,
+            ..
+        }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
         impl CompileCommandImpl,
         Option<dist::CompileCommand>,
@@ -783,21 +798,27 @@ where
             $(
                 .or_else(|err| async {
                     if let Some(c) = compiler.downcast_ref::<CCompiler<$klass>>().map(|c| c.compiler()) {
-                        let mut parsed_arguments = match c.parse_arguments(&args, &cwd, &env_vars) {
+                        let parsed_args = match c.parse_arguments(ParseArgs {
+                            arguments: &args,
+                            cwd: &cwd,
+                            env_vars: &env_vars,
+                            might_dist_compile: false
+                        }) {
                             CompilerArguments::Ok(args) => args,
                             err => bail!("Failed to parse arguments: {exe:?} {args:?}\n{err:?}"),
                         };
-                        c.preprocess(
-                            &service,
-                            &creator,
-                            &exe,
-                            &mut parsed_arguments,
-                            &cwd,
-                            &env_vars,
+                        c.preprocess(PreprocessArgs {
+                            service: &service,
+                            creator: &creator,
+                            executable: &exe,
+                            parsed_args: &parsed_args,
+                            cwd: &cwd,
+                            env_vars: &env_vars,
+                            might_dist_compile: false,
                             rewrite_includes_only,
-                            false, // generate_dependencies
-                            true, // include_line_numbers
-                        )
+                            generate_dependencies: false,
+                            include_line_numbers: true,
+                    })
                         .await
                     } else {
                         Err(err)
@@ -1873,7 +1894,7 @@ where
             #[cfg(windows)]
             let lines = output.stdout;
             // Avoid dropping Windows wide chars in paths
-            bytes_to_string(lines)?
+            bytes_to_str(lines)?
         }
         Err(err) => {
             match err.downcast::<ProcessError>() {
@@ -2531,7 +2552,7 @@ where
 
                 match service.compiler_info(exe, cwd, args, env_vars).await {
                     Err(err) => error_to_output(err),
-                    Ok(compiler) => match compiler.parse_arguments(args, cwd, env_vars) {
+                    Ok(compiler) => match compiler.parse_arguments(args, cwd, env_vars, false) {
                         CompilerArguments::Ok(hasher) => service
                             .clone()
                             .start_compile_task(
@@ -2739,7 +2760,12 @@ mod test {
             host_compiler_version: None,
             version: None,
         }
-        .parse_arguments(&arguments, ".".as_ref(), &[])
+        .parse_arguments(ParseArgs {
+            arguments: &arguments,
+            cwd: ".".as_ref(),
+            env_vars: &[],
+            might_dist_compile: false,
+        })
     }
     fn parse_arguments_msvc(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
@@ -2751,7 +2777,12 @@ mod test {
             host_compiler_version: None,
             version: None,
         }
-        .parse_arguments(&arguments, ".".as_ref(), &[])
+        .parse_arguments(ParseArgs {
+            arguments: &arguments,
+            cwd: ".".as_ref(),
+            env_vars: &[],
+            might_dist_compile: false,
+        })
     }
     fn parse_arguments_nvc(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
@@ -2763,7 +2794,12 @@ mod test {
             host_compiler_version: None,
             version: None,
         }
-        .parse_arguments(&arguments, ".".as_ref(), &[])
+        .parse_arguments(ParseArgs {
+            arguments: &arguments,
+            cwd: ".".as_ref(),
+            env_vars: &[],
+            might_dist_compile: false,
+        })
     }
 
     macro_rules! parses {

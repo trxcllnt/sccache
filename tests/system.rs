@@ -3071,7 +3071,10 @@ fn find_hip_compiler() -> Option<Compiler> {
 
 #[test]
 fn test_stats_no_server() {
-    let client = SccacheClient::new_no_cfg();
+    let config = tempfile::NamedTempFile::new()
+        .map(|p| p.into_temp_path())
+        .unwrap();
+    let client = SccacheClient::new(&config, &config);
     let _ = client.stats();
     assert!(
         !client.stop(),

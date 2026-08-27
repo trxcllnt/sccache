@@ -71,8 +71,10 @@ fn test_run_log() -> Result<()> {
         .tempdir()
         .context("Failed to create tempdir")?;
     let tmppath = tempdir.path().join("perm.log");
+    let config = tempfile::NamedTempFile::new_in(tempdir.path()).map(|p| p.into_temp_path())?;
     let mut cmd = Command::new(SCCACHE_BIN.as_os_str());
     cmd.arg("--start-server")
+        .env("SCCACHE_CONF", &config)
         .env("SCCACHE_ERROR_LOG", &tmppath) // Should not work
         .env("SCCACHE_LOG", "debug");
 
@@ -193,14 +195,16 @@ fn restart_sccache(
     additional_envs: Option<Vec<(String, String)>>,
 ) -> Result<()> {
     let cache_dir = test_info.tempdir.path().join("cache");
+    let config = tempfile::NamedTempFile::new().map(|p| p.into_temp_path())?;
 
     stop_sccache()?;
 
     trace!("sccache --start-server");
 
     let mut cmd = Command::new(SCCACHE_BIN.as_os_str());
-    cmd.arg("--start-server");
-    cmd.env("SCCACHE_DIR", &cache_dir);
+    cmd.arg("--start-server")
+        .env("SCCACHE_CONF", &config)
+        .env("SCCACHE_DIR", &cache_dir);
 
     if let Some(additional_envs) = additional_envs {
         cmd.envs(additional_envs);

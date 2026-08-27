@@ -17,13 +17,16 @@ use crate::{
     compiler::{
         Cacheable, ColorMode, CompileCommandImpl, CompilerArguments,
         args::*,
-        c::{CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments, PreprocessorOutput},
+        c::{
+            CCompilerImpl, CCompilerKind, DepfilePath, GenerateCompileCommandsArgs,
+            GenerateDependenciesArgs, ParseArgs, ParsedArguments, PreprocessArgs,
+            PreprocessorOutput,
+        },
         gcc::{self, ArgData::*},
     },
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
-    server::SccacheService,
-    util::{bytes_to_string, run_input_output},
+    util::{bytes_to_str, run_input_output},
 };
 use crate::{counted_array, dist};
 use async_trait::async_trait;
@@ -62,7 +65,7 @@ impl Nvhpc {
         let exe = if let Ok(out) = run_input_output(cmd, None).await {
             which::which(
                 // Remove the trailing newlines (if present)
-                bytes_to_string(out.stdout).ok()?.trim(),
+                bytes_to_str(out.stdout).ok()?.trim(),
             )
             .ok()
             .unwrap_or_else(|| exe.to_path_buf())
@@ -122,9 +125,7 @@ impl CCompilerImpl for Nvhpc {
     }
     fn parse_arguments(
         &self,
-        arguments: &[OsString],
-        cwd: &Path,
-        _env_vars: &[(OsString, OsString)],
+        ParseArgs { arguments, cwd, .. }: ParseArgs<'_>,
     ) -> CompilerArguments<ParsedArguments> {
         let mut parsed_args = gcc::parse_arguments(
             arguments,
@@ -159,30 +160,36 @@ impl CCompilerImpl for Nvhpc {
         parsed_args
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        service: &SccacheService<T>,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        rewrite_includes_only: bool,
-        generate_dependencies: bool,
-        include_line_numbers: bool,
+        PreprocessArgs {
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            rewrite_includes_only,
+            generate_dependencies,
+            include_line_numbers,
+            ..
+        }: PreprocessArgs<'_, T>,
     ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
     {
         // Chain the dependency generation and preprocessor commands to emulate a `proper` front end
         let dependencies = if generate_dependencies || !parsed_args.dependency_args.is_empty() {
-            self.generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
-                .await?
-                .map(|depfile| {
-                    gcc::parse_dependencies(cwd.to_owned(), parsed_args.input.clone(), depfile)
-                        .boxed()
-                })
+            self.generate_dependencies(GenerateDependenciesArgs {
+                creator,
+                executable,
+                parsed_args,
+                cwd,
+                env_vars,
+            })
+            .await?
+            .map(|depfile| {
+                gcc::parse_dependencies(cwd.to_owned(), parsed_args.input.clone(), depfile).boxed()
+            })
         } else {
             None
         };
@@ -199,7 +206,6 @@ impl CCompilerImpl for Nvhpc {
         .concat();
 
         gcc::preprocess(
-            service,
             creator,
             executable,
             // nvc++ only preprocesses when there's no dependency flags
@@ -223,11 +229,14 @@ impl CCompilerImpl for Nvhpc {
 
     async fn generate_dependencies<T>(
         &self,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
+        GenerateDependenciesArgs {
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            ..
+        }: GenerateDependenciesArgs<'_, T>,
     ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
@@ -239,13 +248,15 @@ impl CCompilerImpl for Nvhpc {
 
     fn generate_compile_commands(
         &self,
-        path_transformer: &mut dist::PathTransformer,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        rewrite_includes_only: bool,
-        _hash_key: &str,
+        GenerateCompileCommandsArgs {
+            path_transformer,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            rewrite_includes_only,
+            ..
+        }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
         impl CompileCommandImpl,
         Option<dist::CompileCommand>,
@@ -313,7 +324,12 @@ mod test {
             version: None,
             native_arch: None,
         }
-        .parse_arguments(&arguments, ".".as_ref(), &[])
+        .parse_arguments(ParseArgs {
+            arguments: &arguments,
+            cwd: ".".as_ref(),
+            env_vars: &[],
+            might_dist_compile: false,
+        })
     }
 
     macro_rules! parses {

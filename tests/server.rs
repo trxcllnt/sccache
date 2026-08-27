@@ -13,8 +13,12 @@ fn test_server_port_in_use() {
     // Bind an arbitrary free port.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let sccache = env!("CARGO_BIN_EXE_sccache");
+    let config = tempfile::NamedTempFile::new()
+        .map(|p| p.into_temp_path())
+        .unwrap();
     let output = Command::new(sccache)
         .arg("--start-server")
+        .env("SCCACHE_CONF", &config)
         .env(
             "SCCACHE_SERVER_PORT",
             listener.local_addr().unwrap().port().to_string(),

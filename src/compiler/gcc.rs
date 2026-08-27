@@ -18,8 +18,9 @@ use crate::{
         SingleCompileCommand,
         args::*,
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath, ParsedArguments,
-            PreprocessorOutput,
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath,
+            GenerateCompileCommandsArgs, GenerateDependenciesArgs, ParseArgs, ParsedArguments,
+            PreprocessArgs, PreprocessorOutput,
         },
         clang,
         preprocessor_cache::normalize_path,
@@ -27,8 +28,7 @@ use crate::{
     counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
-    server::SccacheService,
-    util::{OsStrExt, bytes_to_string, run_input_output, run_input_stream_output, temppath},
+    util::{OsStrExt, bytes_to_str, run_input_output, run_input_stream_output, temppath},
 };
 
 use async_trait::async_trait;
@@ -155,9 +155,7 @@ impl CCompilerImpl for Gcc {
     }
     fn parse_arguments(
         &self,
-        arguments: &[OsString],
-        cwd: &Path,
-        _env_vars: &[(OsString, OsString)],
+        ParseArgs { arguments, cwd, .. }: ParseArgs<'_>,
     ) -> CompilerArguments<ParsedArguments> {
         let mut parsed_args =
             parse_arguments(arguments, cwd, &ARGS[..], self.gplusplus, self.kind());
@@ -180,15 +178,17 @@ impl CCompilerImpl for Gcc {
     #[allow(clippy::too_many_arguments)]
     async fn preprocess<T>(
         &self,
-        service: &SccacheService<T>,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        rewrite_includes_only: bool,
-        generate_dependencies: bool,
-        include_line_numbers: bool,
+        PreprocessArgs {
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            rewrite_includes_only,
+            generate_dependencies,
+            include_line_numbers,
+            ..
+        }: PreprocessArgs<'_, T>,
     ) -> Result<PreprocessorOutput>
     where
         T: CommandCreatorSync,
@@ -200,7 +200,6 @@ impl CCompilerImpl for Gcc {
         };
 
         preprocess(
-            service,
             creator,
             executable,
             parsed_args,
@@ -216,11 +215,14 @@ impl CCompilerImpl for Gcc {
 
     async fn generate_dependencies<T>(
         &self,
-        creator: &T,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
+        GenerateDependenciesArgs {
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            ..
+        }: GenerateDependenciesArgs<'_, T>,
     ) -> Result<Option<DepfilePath>>
     where
         T: CommandCreatorSync,
@@ -232,13 +234,15 @@ impl CCompilerImpl for Gcc {
 
     fn generate_compile_commands(
         &self,
-        path_transformer: &mut dist::PathTransformer,
-        executable: &Path,
-        parsed_args: &ParsedArguments,
-        cwd: &Path,
-        env_vars: &[(OsString, OsString)],
-        rewrite_includes_only: bool,
-        _hash_key: &str,
+        GenerateCompileCommandsArgs {
+            path_transformer,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            rewrite_includes_only,
+            ..
+        }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
         impl CompileCommandImpl,
         Option<dist::CompileCommand>,
@@ -1092,7 +1096,6 @@ where
 
 #[allow(clippy::too_many_arguments)]
 pub async fn preprocess<T>(
-    _service: &SccacheService<T>,
     creator: &T,
     executable: &Path,
     parsed_args: &ParsedArguments,
@@ -1324,9 +1327,10 @@ pub async fn parse_dependencies<P: AsRef<Path>>(
 
     let lines = tokio::fs::read(&depfile)
         .await
-        // Avoid dropping Windows wide chars in paths
-        .and_then(bytes_to_string)
         .with_context(|| format!("{depfile:?}"))?;
+
+    // Avoid dropping Windows wide chars in paths
+    let lines = bytes_to_str(lines)?;
 
     let lines = lines
         .split("\n")
@@ -1464,12 +1468,12 @@ pub fn generate_compile_commands(
         None
     } else {
         (|| {
-            use crate::util::{os_str_to_string, path_to_string};
+            use crate::util::{os_str_to_str, path_to_str};
 
             let command = dist::CompileCommand {
-                cwd: path_to_string(cwd).ok()?,
+                cwd: path_to_str(cwd).ok().map(Into::into)?,
                 env_vars: dist::osstring_tuples_to_strings(env_vars)?,
-                executable: path_to_string(executable).ok()?,
+                executable: path_to_str(executable).ok().map(Into::into)?,
                 arguments: {
                     let mut language = language.map(|lang| lang.to_owned());
 
@@ -1563,7 +1567,11 @@ pub fn generate_compile_commands(
                             .collect::<Vec<_>>(),
                     );
 
-                    arguments.push(os_str_to_string(&parsed_args.compilation_flag).ok()?);
+                    arguments.push(
+                        os_str_to_str(&parsed_args.compilation_flag)
+                            .map(Into::into)
+                            .ok()?,
+                    );
 
                     arguments.push(
                         parsed_args
@@ -1572,11 +1580,11 @@ pub fn generate_compile_commands(
                             .then(|| path_transformer.with_dist_extension(input))
                             .as_deref()
                             .or(Some(input))
-                            .and_then(|p| path_to_string(p).ok())?,
+                            .and_then(|p| path_to_str(p).ok().map(Into::into))?,
                     );
 
                     arguments.push("-o".into());
-                    arguments.push(path_to_string(output).ok()?);
+                    arguments.push(path_to_str(output).ok().map(Into::into)?);
 
                     arguments
                 },
@@ -1731,6 +1739,7 @@ mod test {
     use super::*;
     use crate::compiler::*;
     use crate::mock_command::*;
+    use crate::server::SccacheService;
     use crate::test::mock_storage::MockStorage;
     use crate::test::utils::*;
 

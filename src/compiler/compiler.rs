@@ -40,7 +40,7 @@ use crate::{
     mock_command::{CommandChild, CommandCreatorSync, ProcessOutput, RunCommand},
     server,
     util::{
-        bytes_to_string, fmt_duration_as_secs, resolve_compiler_avoiding_wrapper, run_input_output,
+        bytes_to_str, fmt_duration_as_secs, resolve_compiler_avoiding_wrapper, run_input_output,
         strip_basedirs,
     },
 };
@@ -580,6 +580,7 @@ where
         arguments: &[OsString],
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
+        might_dist_compile: bool,
     ) -> CompilerArguments<Box<dyn CompilerHasher<T> + 'static>>;
     fn box_clone(&self) -> Box<dyn Compiler<T>>;
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send + Sync>;
@@ -635,7 +636,7 @@ where
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
         pool: &tokio::runtime::Handle,
-        rewrite_includes_only: bool,
+        dist_client: Option<Arc<dyn dist::Client>>,
         storage: Arc<dyn Storage>,
         cache_control: CacheControl,
     ) -> Result<(
@@ -668,11 +669,18 @@ where
         // [<file>] get_cached_or_compile: "/path/to/exe <args...>"
         debug!(
             "[{out_pretty}]: get_cached_or_compile: {}",
-            creator
-                .clone()
-                .new_command_sync(self.get_executable())
-                .args(&arguments)
-                .current_dir(&cwd)
+            if !cfg!(test) {
+                format!(
+                    "{}",
+                    creator
+                        .clone()
+                        .new_command_sync(self.get_executable())
+                        .args(&arguments)
+                        .current_dir(&cwd)
+                )
+            } else {
+                format!("{arguments:?}")
+            }
         );
 
         let start = Instant::now();
@@ -686,11 +694,6 @@ where
             })
         });
 
-        let rewrite_includes_only = dist_client
-            .as_ref()
-            .map(|client| client.rewrite_includes_only())
-            .unwrap_or_default();
-
         let hash_result = self
             .generate_hash_key(
                 service,
@@ -698,7 +701,7 @@ where
                 cwd.clone(),
                 env_vars,
                 &runtime,
-                rewrite_includes_only,
+                dist_client.clone(),
                 preprocessor_storage.clone(),
                 cache_control,
             )
@@ -743,7 +746,6 @@ where
             &cwd,
             dist_client,
             out_pretty.clone(),
-            rewrite_includes_only,
             runtime.clone(),
             service,
         );
@@ -899,7 +901,6 @@ struct CacheLookupOrCompile<'a, T: CommandCreatorSync> {
     out_pretty: String,
     outputs: Vec<FileObjectSource>,
     filtered_outputs: Vec<FileObjectSource>,
-    rewrite_includes_only: bool,
     runtime: tokio::runtime::Handle,
     sccache_service: &'a server::SccacheService<T>,
     weak_toolchain_key: String,
@@ -917,7 +918,6 @@ where
         cwd: &Path,
         dist_client: Option<Arc<dyn dist::Client>>,
         out_pretty: String,
-        rewrite_includes_only: bool,
         runtime: tokio::runtime::Handle,
         sccache_service: &'a server::SccacheService<T>,
     ) -> Self {
@@ -967,7 +967,6 @@ where
             out_pretty,
             outputs,
             filtered_outputs,
-            rewrite_includes_only,
             runtime,
             sccache_service,
             weak_toolchain_key,
@@ -1027,7 +1026,7 @@ where
         let mut path_transformer = dist::PathTransformer::new();
 
         let (compile_cmd, _dist_compile_cmd, cacheable) = compilation
-            .generate_compile_commands(&mut path_transformer, true, &hash_key)
+            .generate_compile_commands(&mut path_transformer, &hash_key)
             .context("Failed to generate compile commands")?;
 
         Ok(Compile {
@@ -1053,7 +1052,6 @@ where
             hash_key,
             out_pretty,
             outputs,
-            rewrite_includes_only,
             sccache_service,
             weak_toolchain_key,
             ..
@@ -1062,7 +1060,7 @@ where
         let mut path_transformer = dist::PathTransformer::new();
 
         let (compile_cmd, dist_compile_cmd, cacheable) = compilation
-            .generate_compile_commands(&mut path_transformer, rewrite_includes_only, &hash_key)
+            .generate_compile_commands(&mut path_transformer, &hash_key)
             .context("Failed to generate compile commands")?;
 
         let dist = dist_client.and_then(|dist_client| {
@@ -1346,7 +1344,7 @@ where
             ..
         } = self;
 
-        use crate::util::path_to_string;
+        use crate::util::path_to_str;
 
         let mut dist_compile_cmd = dist_compile_cmd.as_dist(&mut path_transformer)?;
 
@@ -1404,9 +1402,11 @@ where
                         format!("Expected output path {:?} to be absolute", output.path)
                     })
                     .and_then(|p| {
-                        path_to_string(&p)
-                            .with_context(|| format!("Failed to serialize output path {p:?}"))
+                        path_to_str(p).with_context(|| {
+                            format!("Failed to serialize output path {:?}", output.path)
+                        })
                     })
+                    .map(Into::into)
             })
             .try_collect::<_, Vec<_>, _>()
             .context("Failed to adapt an output path for distributed compile")?;
@@ -1804,7 +1804,6 @@ where
     fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
-        rewrite_includes_only: bool,
         hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
@@ -2270,7 +2269,7 @@ where
 
         let output = run_input_output(cmd, None).await?;
 
-        let stdout = bytes_to_string(output.stdout).context("Failed to parse output")?;
+        let stdout = bytes_to_str(output.stdout).context("Failed to parse output")?;
 
         let version = stdout.lines().next().unwrap_or("unknown").to_string();
 
@@ -2344,12 +2343,13 @@ where
     child.env_clear().envs(env.to_vec()).args(&["-vV"]);
 
     let rustc_vv = run_input_output(child, None).await.map(|output| {
-        if let Ok(stdout) = bytes_to_string(output.stdout.clone())
+        if let Ok(stdout) = bytes_to_str(&output.stdout[..])
             && stdout.starts_with("rustc ")
         {
-            return Ok(stdout);
+            Ok(stdout.into_owned())
+        } else {
+            Err(ProcessError(output))
         }
-        Err(ProcessError(output))
     })?;
 
     // rustc -vV verification status
@@ -2561,7 +2561,7 @@ compiler_version=__VERSION__
     drop(tempdir);
 
     let status = output.desc();
-    let stdout = bytes_to_string(output.stdout).context("Failed to parse output")?;
+    let stdout = bytes_to_str(output.stdout).context("Failed to parse output")?;
 
     let mut lines = stdout.lines().filter_map(|line| {
         let line = line.trim();
@@ -2774,7 +2774,7 @@ compiler_version=__VERSION__
         }
     }
 
-    let stderr = bytes_to_string(output.stderr).context("Failed to parse output")?;
+    let stderr = bytes_to_str(output.stderr).context("Failed to parse output")?;
     debug!("nothing useful in detection output {stdout:?}");
     debug!("compiler status: {status}");
     debug!("compiler stderr:\n{stderr}");
@@ -2804,6 +2804,7 @@ mod test {
     use super::*;
     use crate::{
         cache::{CacheMode, PreprocessorCache, disk::DiskCache},
+        compiler::c::ParseArgs,
         config::PreprocessorCacheModeConfig,
         mock_command::*,
         test::{mock_storage::MockStorage, utils::*},
@@ -2976,8 +2977,8 @@ mod test {
 
             use crate::compiler::c::CCompilerImpl;
 
-            match c1.compiler().parse_arguments(
-                ovec![
+            match c1.compiler().parse_arguments(ParseArgs {
+                arguments: ovec![
                     "-c",
                     "foo.cxx",
                     "-march=native",
@@ -2986,9 +2987,10 @@ mod test {
                     "foo.o"
                 ]
                 .as_slice(),
-                ".".as_ref(),
-                &[],
-            ) {
+                cwd: ".".as_ref(),
+                env_vars: &[],
+                might_dist_compile: false,
+            }) {
                 CompilerArguments::Ok(parsed_args) => {
                     assert_eq!(
                         parsed_args.arch_args,
@@ -3432,7 +3434,7 @@ LLVM version: 6.0",
                     f.write_all(b"foo.o :")?;
                     Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
                 });
-                let hasher = match c.parse_arguments(&arguments, cwd, &[]) {
+                let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
                     CompilerArguments::Ok(h) => h,
                     o => panic!("Bad result from parse_arguments: {o:?}"),
                 };
@@ -3443,7 +3445,7 @@ LLVM version: 6.0",
                         cwd.to_path_buf(),
                         vec![],
                         pool,
-                        false,
+                        None,
                         preprocessor_storage.clone(),
                         CacheControl::Default,
                     )
@@ -3513,7 +3515,7 @@ LLVM version: 6.0",
                     &creator,
                     Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
                 );
-                let hasher = match c.parse_arguments(argument, cwd, &[]) {
+                let hasher = match c.parse_arguments(argument, cwd, &[], false) {
                     CompilerArguments::Ok(h) => h,
                     o => panic!("Bad result from parse_arguments: {o:?}"),
                 };
@@ -3524,7 +3526,7 @@ LLVM version: 6.0",
                         cwd.to_path_buf(),
                         vec![],
                         pool,
-                        false,
+                        None,
                         storage.clone(),
                         CacheControl::Default,
                     )
@@ -3590,7 +3592,7 @@ LLVM version: 6.0",
                         Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
                     );
                 }
-                let hasher = match c.parse_arguments(&arguments, ".".as_ref(), &[]) {
+                let hasher = match c.parse_arguments(&arguments, ".".as_ref(), &[], false) {
                     CompilerArguments::Ok(h) => h,
                     o => panic!("Bad result from parse_arguments: {o:?}"),
                 };
@@ -3601,7 +3603,7 @@ LLVM version: 6.0",
                         cwd.to_path_buf(),
                         vec![],
                         pool,
-                        false,
+                        None,
                         storage.clone(),
                         CacheControl::Default,
                     )
@@ -3750,7 +3752,7 @@ LLVM version: 6.0",
         });
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
-        let hasher = match c.parse_arguments(&arguments, cwd, &[]) {
+        let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
@@ -3924,7 +3926,7 @@ LLVM version: 6.0",
 
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
-        let hasher = match c.parse_arguments(&arguments, cwd, &[]) {
+        let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
@@ -3964,11 +3966,14 @@ LLVM version: 6.0",
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
         // Now compile again, which should be a cache hit.
         fs::remove_file(&obj).unwrap();
-        // The preprocessor invocation.
-        next_command(
-            &creator,
-            Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-        );
+        // The generate_hash_key preprocessor invocation.
+        let d = dep.clone();
+        next_command_calls(&creator, move |_| {
+            // Pretend to preprocess something.
+            let mut f = File::create(&d)?;
+            f.write_all(b"foo.o :")?;
+            Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+        });
         // There should be no actual compiler invocation.
         let hasher2 = hasher.clone();
         let (cached, res) = runtime
@@ -4082,7 +4087,7 @@ LLVM version: 6.0",
         });
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
-        let hasher = match c.parse_arguments(&arguments, cwd, &[]) {
+        let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
@@ -4207,7 +4212,7 @@ LLVM version: 6.0",
 
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
-        let hasher = match c.parse_arguments(&arguments, cwd, &[]) {
+        let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
@@ -4337,7 +4342,7 @@ LLVM version: 6.0",
         }
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
-        let hasher = match c.parse_arguments(&arguments, cwd, &[]) {
+        let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
@@ -4495,7 +4500,7 @@ LLVM version: 6.0",
         );
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
-        let hasher = match c.parse_arguments(&arguments, cwd, &[]) {
+        let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
@@ -4632,7 +4637,7 @@ LLVM version: 6.0",
         }
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
-        let hasher = match c.parse_arguments(&arguments, cwd, &[]) {
+        let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };

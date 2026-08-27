@@ -165,7 +165,7 @@ mod toolchain_imp {
     use super::{SimplifyPath, dist, tar_safe_path};
     use crate::{
         errors::*,
-        util::{bytes_to_string, path_to_bytes},
+        util::{bytes_to_str, path_to_bytes},
     };
 
     pub struct ToolchainPackaged<'a> {
@@ -421,17 +421,17 @@ mod toolchain_imp {
                 if dst_path.is_file() {
                     digest = digest.with_file(dst_path).await?;
                 }
-                digest.update(&path_to_bytes(dst_path)?);
-                digest.update(&path_to_bytes(src_path)?);
+                digest.update(&path_to_bytes(dst_path.as_path())?);
+                digest.update(&path_to_bytes(src_path.as_path())?);
             }
             for (tar_path, dir_path) in self.dirs_set.iter() {
-                digest.update(&path_to_bytes(tar_path)?);
-                digest.update(&path_to_bytes(dir_path)?);
+                digest.update(&path_to_bytes(tar_path.as_path())?);
+                digest.update(&path_to_bytes(dir_path.as_path())?);
             }
             for (tar_path, src_path) in self.file_set.iter() {
                 digest = digest.with_file(src_path).await?;
-                digest.update(&path_to_bytes(tar_path)?);
-                digest.update(&path_to_bytes(src_path)?);
+                digest.update(&path_to_bytes(tar_path.as_path())?);
+                digest.update(&path_to_bytes(src_path.as_path())?);
             }
 
             Ok(digest.finish())
@@ -556,11 +556,12 @@ mod toolchain_imp {
         }
 
         if !stderr.is_empty() {
-            trace!("ldd stderr non-empty: {:?}", bytes_to_string(stderr));
+            trace!("ldd stderr non-empty: {:?}", bytes_to_str(stderr)?);
         }
 
-        let stdout = bytes_to_string(stdout).context("ldd output not utf8")?;
-        Ok(parse_ldd_output(&stdout))
+        bytes_to_str(stdout)
+            .context("ldd output not utf8")
+            .map(|stdout| parse_ldd_output(&stdout))
     }
 
     // If it's a static PIE the output will be a line like "\tstatically linked", so be forgiving
@@ -651,7 +652,7 @@ mod toolchain_imp {
             .output()?;
 
         if !stderr.is_empty() {
-            trace!("dumpbin stderr: {:?}", bytes_to_string(stderr));
+            trace!("dumpbin stderr: {:?}", bytes_to_str(stderr)?);
         }
 
         if !status.success() {
@@ -682,22 +683,26 @@ mod toolchain_imp {
             )
         });
 
-        Ok(parse_ldd_output(&bytes_to_string(stdout)?)
-            .iter()
-            .filter(|lib| {
-                // # Skip virtual API sets entirely
-                !(lib.starts_with("api-ms-win-") || lib.starts_with("ext-ms-win-"))
+        bytes_to_str(stdout)
+            .context("invalid dumpbin output")
+            .map(|stdout| parse_ldd_output(&stdout))
+            .map(|libs| {
+                libs.iter()
+                    .filter(|lib| {
+                        // # Skip virtual API sets entirely
+                        !(lib.starts_with("api-ms-win-") || lib.starts_with("ext-ms-win-"))
+                    })
+                    .filter_map(|lib| {
+                        for dir in paths.iter() {
+                            let lib = dir.join(lib);
+                            if lib.exists() {
+                                return Some(lib);
+                            }
+                        }
+                        None
+                    })
+                    .collect::<Vec<_>>()
             })
-            .filter_map(|lib| {
-                for dir in paths.iter() {
-                    let lib = dir.join(lib);
-                    if lib.exists() {
-                        return Some(lib);
-                    }
-                }
-                None
-            })
-            .collect::<Vec<_>>())
     }
 
     #[cfg(windows)]

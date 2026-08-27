@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::mock_command::{CommandChild, ProcessOutput, RunCommand};
+use crate::{
+    errors::*,
+    mock_command::{CommandChild, ProcessOutput, RunCommand},
+};
 use async_trait::async_trait;
 use blake3::Hasher as blake3_Hasher;
 use byteorder::{BigEndian, ByteOrder};
@@ -46,8 +49,6 @@ use std::{
 use tokio_retry2::Retry;
 use tokio_retry2::strategy::FibonacciBackoff;
 use tokio_util::codec::{Decoder, FramedRead};
-
-use crate::errors::*;
 
 /// The url safe engine for base64.
 pub const BASE64_URL_SAFE_ENGINE: base64::engine::GeneralPurpose =
@@ -776,11 +777,22 @@ where
             }
             .into(),
         }
-        .map(|_| ())
         .map_err(Arc::new)
     }
     .shared();
 
+    Ok(make_process_output_stream(output, stdout, batch_size))
+}
+
+pub fn make_process_output_stream<O, R>(
+    output: futures::future::Shared<O>,
+    stdout: R,
+    batch_size: usize,
+) -> impl futures::Stream<Item = Result<BytesMut>>
+where
+    O: Future<Output = std::result::Result<ProcessOutput, Arc<Error>>>,
+    R: tokio::io::AsyncRead + Send,
+{
     let stdout =
         Box::pin(read_line_batches(stdout, batch_size)).take_until(output.clone().and_then(|_| {
             // Take stdout until output resolves to an error.
@@ -788,7 +800,7 @@ where
             futures::future::pending::<std::result::Result<(), Arc<anyhow::Error>>>()
         }));
 
-    Ok(async_stream::try_stream! {
+    async_stream::try_stream! {
         // Yield each stdout bytes chunk
         for await bytes in stdout {
             yield bytes?;
@@ -799,9 +811,9 @@ where
         // wait for the output future result and unwrap the Err's Arc so we
         // return a result containing the original anyhow::Error.
         yield output.await
-            .or_else(|err| Arc::into_inner(err).map(Err).unwrap_or_else(|| Ok(())))
+            .or_else(|err| Arc::into_inner(err).map(Err).unwrap_or_else(|| Ok(Default::default())))
             .map(|_| BytesMut::new())?;
-    })
+    }
 }
 
 pub fn read_line_batches<R>(
@@ -923,13 +935,15 @@ where
 pub trait OsStrExt {
     fn find<P: AsRef<OsStr>>(&self, pat: P) -> Option<usize>;
     fn contains<P: AsRef<OsStr>>(&self, pat: P) -> bool;
-    fn encode_to_bytes(&self) -> Result<Vec<u8>>;
     fn ends_with<P: AsRef<OsStr>>(&self, pat: P) -> bool;
     fn starts_with<P: AsRef<OsStr>>(&self, pat: P) -> bool;
     fn split<P: AsRef<OsStr>>(&self, pat: P) -> impl Iterator<Item = &'_ OsStr>;
     fn split_once<P: AsRef<OsStr>>(&self, pat: P) -> Option<(&'_ OsStr, &'_ OsStr)>;
     fn strip_prefix<P: AsRef<OsStr>>(&self, pat: P) -> Option<&'_ OsStr>;
+    fn strip_suffix<P: AsRef<OsStr>>(&self, pat: P) -> Option<&'_ OsStr>;
     fn trim(&self) -> &OsStr;
+    fn trim_start(&self) -> &OsStr;
+    fn trim_end(&self) -> &OsStr;
     fn trim_start_matches<P: AsRef<OsStr>>(&self, pat: P) -> &OsStr;
     fn trim_end_matches<P: AsRef<OsStr>>(&self, pat: P) -> &OsStr;
 }
@@ -937,10 +951,6 @@ pub trait OsStrExt {
 impl OsStrExt for OsStr {
     fn contains<P: AsRef<OsStr>>(&self, pat: P) -> bool {
         self.find(pat).is_some()
-    }
-
-    fn encode_to_bytes(&self) -> Result<Vec<u8>> {
-        Ok(os_str_to_bytes(self)?)
     }
 
     fn find<P: AsRef<OsStr>>(&self, pat: P) -> Option<usize> {
@@ -968,7 +978,7 @@ impl OsStrExt for OsStr {
         let p = pat.as_ref().as_encoded_bytes();
         let s = self.as_encoded_bytes();
         let (m, n) = (s.len(), p.len());
-        if m < n { false } else { p == &s[0..n] }
+        if m < n { false } else { p == &s[..n] }
     }
 
     fn split<P: AsRef<OsStr>>(&self, pat: P) -> impl Iterator<Item = &'_ OsStr> {
@@ -1019,29 +1029,43 @@ impl OsStrExt for OsStr {
         })
     }
 
+    fn strip_suffix<P: AsRef<OsStr>>(&self, pat: P) -> Option<&'_ OsStr> {
+        self.ends_with(pat.as_ref()).then(|| {
+            let p = pat.as_ref().as_encoded_bytes();
+            let s = self.as_encoded_bytes();
+            let b = &s[..s.len() - p.len()];
+            unsafe { OsStr::from_encoded_bytes_unchecked(b) }
+        })
+    }
+
     fn trim(&self) -> &OsStr {
+        self.trim_start().trim_end()
+    }
+
+    fn trim_start(&self) -> &OsStr {
         let mut buf = self.as_encoded_bytes();
 
-        loop {
-            buf = match buf {
-                #[cfg(windows)]
-                [b'\r', b'\n', ..] => &buf[2..],
-                [b'\n', ..] => &buf[1..],
-                [b'\t', ..] => &buf[1..],
-                [b' ', ..] => &buf[1..],
-                _ => break,
-            }
+        while !buf.is_empty()
+            && char::from_u32(buf[1] as u32)
+                .filter(|c| c.is_whitespace())
+                .is_some()
+        {
+            buf = &buf[1..];
         }
 
-        loop {
-            buf = match buf {
-                #[cfg(windows)]
-                [.., b'\r', b'\n'] => &buf[..buf.len() - 2],
-                [.., b'\n'] => &buf[..buf.len() - 1],
-                [.., b'\t'] => &buf[..buf.len() - 1],
-                [.., b' '] => &buf[..buf.len() - 1],
-                _ => break,
-            }
+        unsafe { OsStr::from_encoded_bytes_unchecked(buf) }
+    }
+
+    fn trim_end(&self) -> &OsStr {
+        let mut buf = self.as_encoded_bytes();
+
+        while !buf.is_empty()
+            && let idx = buf.len() - 1
+            && char::from_u32(buf[idx] as u32)
+                .filter(|c| c.is_whitespace())
+                .is_some()
+        {
+            buf = &buf[..idx];
         }
 
         unsafe { OsStr::from_encoded_bytes_unchecked(buf) }
@@ -1051,7 +1075,7 @@ impl OsStrExt for OsStr {
         let pat = pat.as_ref().as_encoded_bytes();
         let mut buf = self.as_encoded_bytes();
         loop {
-            if pat.len() > buf.len() || &buf[0..pat.len()] != pat {
+            if pat.len() > buf.len() || &buf[..pat.len()] != pat {
                 break;
             } else {
                 buf = &buf[pat.len()..];
@@ -1082,69 +1106,93 @@ pub fn split_quoted_shell_str<S: AsRef<str>>(s: S) -> Option<Vec<String>> {
     args
 }
 
-pub fn bytes_to_path<B: AsRef<[u8]>>(buf: B) -> std::io::Result<PathBuf> {
-    Ok(bytes_to_os_string(buf)?.into())
+pub fn path_to_str<'a, B: Into<Cow<'a, Path>>>(p: B) -> std::io::Result<Cow<'a, str>> {
+    path_to_os_str(p)
+        .and_then(os_str_to_bytes)
+        .and_then(bytes_to_str)
 }
 
-pub fn path_to_bytes<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<u8>> {
-    os_str_to_bytes(path.as_ref().as_os_str())
+pub fn bytes_to_path<'a, B: Into<Cow<'a, [u8]>>>(b: B) -> std::io::Result<Cow<'a, Path>> {
+    bytes_to_str(b).map(|s| match s {
+        Cow::Borrowed(s) => Cow::Borrowed(Path::new(s)),
+        Cow::Owned(s) => Cow::Owned(PathBuf::from(s)),
+    })
 }
 
-pub fn path_to_string<P: AsRef<Path>>(path: P) -> std::io::Result<String> {
-    os_str_to_string(path.as_ref().as_os_str())
+pub fn path_to_bytes<'a, B: Into<Cow<'a, Path>>>(p: B) -> std::io::Result<Cow<'a, [u8]>> {
+    path_to_str(p).map(|s| match s {
+        Cow::Borrowed(s) => Cow::Borrowed(s.as_bytes()),
+        Cow::Owned(s) => Cow::Owned(s.into_bytes()),
+    })
 }
 
-pub fn os_str_to_string<S: AsRef<OsStr>>(s: S) -> std::io::Result<String> {
-    os_str_to_bytes(s.as_ref()).and_then(bytes_to_string)
+pub fn path_to_os_str<'a, B: Into<Cow<'a, Path>>>(p: B) -> std::io::Result<Cow<'a, OsStr>> {
+    match p.into() {
+        Cow::Borrowed(p) => Ok(Cow::Borrowed(p.as_os_str())),
+        Cow::Owned(p) => Ok(Cow::Owned(p.into_os_string())),
+    }
+}
+
+pub fn os_str_to_str<'a, B: Into<Cow<'a, OsStr>>>(s: B) -> std::io::Result<Cow<'a, str>> {
+    os_str_to_bytes(s).and_then(bytes_to_str)
 }
 
 #[cfg(unix)]
-pub fn bytes_to_string(multi_byte_str: Vec<u8>) -> std::io::Result<String> {
-    String::from_utf8(multi_byte_str)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+pub fn bytes_to_str<'a, B: Into<Cow<'a, [u8]>>>(b: B) -> std::io::Result<Cow<'a, str>> {
+    match b.into() {
+        Cow::Borrowed(b) => str::from_utf8(b)
+            .map(Cow::Borrowed)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e)),
+        Cow::Owned(b) => String::from_utf8(b)
+            .map(Cow::Owned)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e)),
+    }
 }
 
 #[cfg(windows)]
-pub fn bytes_to_string(multi_byte_str: Vec<u8>) -> std::io::Result<String> {
+pub fn bytes_to_str<'a, B: Into<Cow<'a, [u8]>>>(b: B) -> std::io::Result<Cow<'a, str>> {
     use windows_sys::Win32::Globalization::{CP_OEMCP, MB_ERR_INVALID_CHARS};
 
-    multi_byte_to_wide_char(CP_OEMCP, MB_ERR_INVALID_CHARS, &multi_byte_str)
+    multi_byte_to_wide_char(CP_OEMCP, MB_ERR_INVALID_CHARS, b.into().as_ref())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
         .and_then(|buf| {
             String::from_utf16(&buf)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                .map(Cow::Owned)
         })
 }
 
 #[cfg(unix)]
-fn bytes_to_os_string<B: AsRef<[u8]>>(buf: B) -> std::io::Result<OsString> {
-    use std::os::unix::prelude::*;
-    Ok(OsStr::from_bytes(buf.as_ref()).into())
+pub fn bytes_to_os_str<'a, B: Into<Cow<'a, [u8]>>>(b: B) -> std::io::Result<Cow<'a, OsStr>> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    match b.into() {
+        Cow::Borrowed(b) => Ok(Cow::Borrowed(OsStr::from_bytes(b))),
+        Cow::Owned(b) => Ok(Cow::Owned(OsString::from_vec(b))),
+    }
 }
 
 #[cfg(windows)]
-fn bytes_to_os_string<B: AsRef<[u8]>>(buf: B) -> std::io::Result<OsString> {
+pub fn bytes_to_os_str<'a, B: Into<Cow<'a, [u8]>>>(b: B) -> std::io::Result<Cow<'a, OsStr>> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::Globalization::{CP_OEMCP, MB_ERR_INVALID_CHARS};
-
-    let codepage = CP_OEMCP;
-    let flags = MB_ERR_INVALID_CHARS;
-
-    Ok(OsString::from_wide(&multi_byte_to_wide_char(
-        codepage, flags, buf,
-    )?))
+    multi_byte_to_wide_char(CP_OEMCP, MB_ERR_INVALID_CHARS, b.into().as_ref())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+        .map(|buf| OsString::from_wide(&buf))
+        .map(Cow::Owned)
 }
 
 #[cfg(unix)]
-pub fn os_str_to_bytes(os_str: &OsStr) -> std::io::Result<Vec<u8>> {
-    use std::os::unix::prelude::*;
-    Ok(os_str.as_bytes().to_vec())
+pub fn os_str_to_bytes<'a, B: Into<Cow<'a, OsStr>>>(s: B) -> std::io::Result<Cow<'a, [u8]>> {
+    match s.into() {
+        Cow::Borrowed(s) => Ok(Cow::Borrowed(s.as_encoded_bytes())),
+        Cow::Owned(s) => Ok(Cow::Owned(s.as_encoded_bytes().to_vec())),
+    }
 }
 
 #[cfg(windows)]
-pub fn os_str_to_bytes(os_str: &OsStr) -> std::io::Result<Vec<u8>> {
+pub fn os_str_to_bytes<'a, B: Into<Cow<'a, OsStr>>>(s: B) -> std::io::Result<Cow<'a, [u8]>> {
     use std::os::windows::ffi::OsStrExt;
-    wide_char_to_multi_byte(&os_str.encode_wide().collect::<Vec<_>>()) // use_default_char_flag
+    wide_char_to_multi_byte(&s.into().encode_wide().collect::<Vec<_>>()).map(Cow::Owned)
 }
 
 #[cfg(windows)]
@@ -1188,7 +1236,7 @@ pub fn wide_char_to_multi_byte(wide_char_str: &[u16]) -> std::io::Result<Vec<u8>
                 if (len as usize) == astr.len() {
                     return Ok(astr);
                 } else {
-                    return Ok(astr[0..(len as usize)].to_vec());
+                    return Ok(astr[..(len as usize)].to_vec());
                 }
             }
         }
@@ -1901,6 +1949,166 @@ pub fn strip_basedirs<'a>(preprocessor_output: &'a [u8], basedirs: &[Vec<u8>]) -
     result.extend_from_slice(&preprocessor_output[current_pos..]);
 
     Cow::Owned(result)
+}
+
+const PRAGMA_GCC_PCH_PREPROCESS: &[u8] = b"pragma GCC pch_preprocess";
+
+/// Strip #line directives from a batch of preprocessor output
+pub fn remove_preprocessor_linemarkers(mut lines: BytesMut) -> BytesMut {
+    let mut start = 0;
+    let mut ranges = vec![];
+
+    // Find newlines
+    for end in memchr::memmem::find_iter(&lines[..], "\n") {
+        let line = str::from_utf8(&lines[start..end])
+            .unwrap()
+            .trim()
+            .as_bytes();
+
+        // There are at least 7 characters (# 1 "x") in a #line directive
+        if line.len() >= 7
+            // Check if we look at a line containing the file name of an included file.
+            // At least the following formats exist (where N is a positive integer):
+            //
+            // GCC/Clang/NVHPC:
+            //
+            //   # N "file"
+            //   # N "file" N
+            //   #pragma GCC pch_preprocess "file"
+            //
+            // MSVC and HP's compiler:
+            //
+            //   #line N "file"
+            //
+            // AIX's compiler:
+            //
+            //   #line N "file"
+            //   #line N
+            //
+            // Note that there may be other lines starting with '#' left after
+            // preprocessing as well, for instance "#    pragma".
+            && line[0] == b'#'
+            && (
+                // GCC/Clang/NVHPC:
+                (line[1] == b' ' && line[2] >= b'0' && line[2] <= b'9')
+                // GCC precompiled header:
+                || line[1..].starts_with(PRAGMA_GCC_PCH_PREPROCESS)
+                // MSVC/HP/AIX:
+                || &line[1..6] == b"line "
+            )
+        {
+            ranges.push(start..end + 1);
+        }
+        start = end + 1;
+    }
+
+    // Collapse consecutive ranges
+    let ranges = {
+        let mut collapsed = vec![];
+        let mut itr = ranges.drain(..);
+        let mut curr = itr.next();
+        while let Some(mut lhs) = curr.take() {
+            for rhs in itr.by_ref() {
+                if lhs.end == rhs.start {
+                    lhs.end = rhs.end;
+                } else {
+                    curr.replace(rhs);
+                    break;
+                }
+            }
+            collapsed.push(lhs);
+        }
+        collapsed
+    };
+
+    // Remove #line directives
+    for range in ranges.into_iter().rev() {
+        lines.copy_within(range.end.., range.start);
+        lines.truncate(lines.len() - (range.end - range.start));
+    }
+
+    lines
+}
+
+/// Strip empty newlines from a batch of preprocessor output, except newlines inside C++11 raw string literals.
+pub fn remove_preprocessor_empty_newlines(mut lines: BytesMut) -> BytesMut {
+    use memchr::memmem::{find, find_iter};
+
+    let mut start = 0;
+    let mut ranges = vec![];
+    let mut str_lit_delimiter = None;
+
+    // Find empty newlines
+    for end in find_iter(&lines[..], "\n") {
+        let line = str::from_utf8(&lines[start..end])
+            .unwrap()
+            .trim()
+            .as_bytes();
+
+        if str_lit_delimiter.is_none() {
+            // Remove empty newlines as long as we're not inside a raw string literal
+            if line.is_empty() {
+                ranges.push(start..end + 1);
+                start = end + 1;
+                continue;
+            }
+
+            // Pause removing newlines if the current line begins a raw string literal
+            if let Some(pos) = find(line, b"R\"") {
+                let rest = &line[pos + 2..];
+                if let Some(escape_sequence) = find(rest, b"(").map(|paren| &rest[..paren]) {
+                    let mut delim = vec![];
+                    delim.push(b')');
+                    delim.extend_from_slice(escape_sequence);
+                    delim.push(b'"');
+                    str_lit_delimiter = Some(delim);
+                }
+            }
+        }
+
+        // Continue removing newlines if this line terminates a raw string literal.
+        // This may find the end delimiter on the same line as the start delimiter,
+        // so that's why we don't continue early above. For example:
+        // ```
+        // R"esc(This is a raw string literal)esc"
+        // ```
+        if str_lit_delimiter
+            .as_deref()
+            .and_then(|delim| find(line, delim))
+            .is_some()
+        {
+            str_lit_delimiter = None;
+        }
+
+        start = end + 1;
+    }
+
+    // Collapse consecutive ranges
+    let ranges = {
+        let mut collapsed = vec![];
+        let mut itr = ranges.drain(..);
+        let mut curr = itr.next();
+        while let Some(mut lhs) = curr.take() {
+            for rhs in itr.by_ref() {
+                if lhs.end == rhs.start {
+                    lhs.end = rhs.end;
+                } else {
+                    curr.replace(rhs);
+                    break;
+                }
+            }
+            collapsed.push(lhs);
+        }
+        collapsed
+    };
+
+    // Remove empty newline ranges
+    for range in ranges.into_iter().rev() {
+        lines.copy_within(range.end.., range.start);
+        lines.truncate(lines.len() - (range.end - range.start));
+    }
+
+    lines
 }
 
 /// Double every `/` in a normalized path.
@@ -2670,7 +2878,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn local_oem_codepage_conversions() {
-        use crate::util::{bytes_to_string, wide_char_to_multi_byte};
+        use crate::util::{bytes_to_str, wide_char_to_multi_byte};
         use windows_sys::Win32::Globalization::GetOEMCP;
 
         let current_oemcp = unsafe { GetOEMCP() };
@@ -2686,7 +2894,10 @@ mod tests {
             ];
 
             // Test the conversion from the OEM codepage to UTF-8
-            assert_eq!(bytes_to_string(INPUT_BYTES.to_vec()).unwrap(), INPUT_STRING);
+            assert_eq!(
+                bytes_to_str(INPUT_BYTES.to_vec()).unwrap().as_ref(),
+                INPUT_STRING
+            );
 
             // The characters in INPUT_STRING encoded in UTF-16
             const INPUT_WORDS: [u16; 16] = [

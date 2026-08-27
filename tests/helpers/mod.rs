@@ -58,6 +58,8 @@ impl SccacheTest<'_> {
         fs::create_dir(&cache_dir)?;
         let cargo_dir = tempdir.path().join("cargo");
         fs::create_dir(&cargo_dir)?;
+        let config_file = tempdir.path().join("config");
+        std::fs::File::create(&config_file)?;
 
         // Ensure there's no existing sccache server running.
         stop_sccache()?;
@@ -66,12 +68,14 @@ impl SccacheTest<'_> {
 
         Command::new(SCCACHE_BIN.as_os_str())
             .arg("--start-server")
+            .env("SCCACHE_CONF", &config_file)
             .env("SCCACHE_DIR", &cache_dir)
             .assert()
             .try_success()
             .context("Failed to start sccache server")?;
 
         let mut env = vec![
+            ("SCCACHE_CONF", config_file.as_os_str().to_owned()),
             ("CARGO_TARGET_DIR", cargo_dir.as_os_str().to_owned()),
             ("RUSTC_WRAPPER", SCCACHE_BIN.as_os_str().to_owned()),
             // Explicitly disable incremental compilation because sccache is unable to cache it at
@@ -84,10 +88,7 @@ impl SccacheTest<'_> {
             env.extend_from_slice(vec);
         }
 
-        Ok(SccacheTest {
-            tempdir,
-            env: env.clone(),
-        })
+        Ok(SccacheTest { tempdir, env })
     }
 
     /// Show the statistics for sccache. This will be called at the end of a test and making this
