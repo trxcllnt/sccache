@@ -472,7 +472,7 @@ pub struct MemcachedCacheConfig {
     /// The maximum number of connections allowed.
     ///
     /// Default to 10
-    pub connection_pool_max_size: Option<u32>,
+    pub connection_pool_max_size: Option<usize>,
 
     pub preprocessor_cache_mode: Option<PreprocessorCacheModeConfig>,
 
@@ -540,7 +540,7 @@ pub struct RedisCacheConfig {
     /// The maximum number of connections allowed.
     ///
     /// Default to 10
-    pub connection_pool_max_size: Option<u32>,
+    pub connection_pool_max_size: Option<usize>,
 
     #[serde(default)]
     pub key_prefix: String,

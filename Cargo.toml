@@ -117,23 +117,22 @@ rustls = { version = "0.23", default-features = false, features = [
 mime = "0.3"
 notify-debouncer-full = { version = "0.7", optional = true }
 object = "0.37"
-opendal = { version = "0.55.0", default-features = false }
+opendal = { version = "0.58.1", optional = true, default-features = false }
+opendal-http-transport-reqwest = { version = "0.58.1", optional = true }
+opendal-layer-logging = { version = "0.58.1", optional = true }
 openssl = { version = "0.10.81", optional = true }
 rand = "0.8.4"
 regex = "1.10.3"
 regex_static = "0.1.1"
 reqsign = { version = "0.18.0", optional = true }
-reqwest = { version = "0.12", default-features = false, features = [
-  "http2",
-  "charset",
+reqwest = { version = "0.13", features = [
   "json",
   "blocking",
   "stream",
-  "rustls-tls",
-  "rustls-tls-native-roots",
+  "rustls",
   "hickory-dns",
-  "system-proxy",
 ], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
 semver = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = ">=1.0, <1.0.147" # zmij (used in 1.0.147+) requires Rust 1.84+
@@ -232,7 +231,12 @@ version = "0.52"
 
 [features]
 all = ["cloud-storage", "dist-client"]
-azure = ["opendal/services-azblob", "reqsign", "reqwest"]
+azure = [
+  "opendal/services-azblob",
+  "opendal-layer-logging",
+  "opendal-http-transport-reqwest",
+  "reqwest",
+]
 cloud-storage = [
   "redis",
   "s3",
@@ -244,23 +248,54 @@ cloud-storage = [
   "oss",
   "cos",
 ]
-cos = ["opendal/services-cos", "reqsign", "reqwest"]
+cos = [
+  "opendal/services-cos",
+  "opendal-layer-logging",
+  "opendal-http-transport-reqwest",
+  "reqwest",
+]
 default = ["all"]
-gcs = ["opendal/services-gcs", "reqsign", "url", "reqwest"]
-gha = ["opendal/services-ghac", "reqwest"]
-memcached = ["opendal/services-memcached"]
+gcs = [
+  "opendal/services-gcs",
+  "opendal-layer-logging",
+  "opendal-http-transport-reqwest",
+  "url",
+  "reqwest",
+]
+gha = [
+  "opendal/services-ghac",
+  "opendal-layer-logging",
+  "opendal-http-transport-reqwest",
+  "reqwest",
+]
+memcached = ["opendal/services-memcached", "opendal-layer-logging"]
 native-zlib = []
-oss = ["opendal/services-oss", "reqsign", "reqwest"]
-redis = ["url", "opendal/services-redis"]
-s3 = ["opendal/services-s3", "reqsign", "reqwest", "watcher"]
-watcher = ["notify-debouncer-full"]
-webdav = ["opendal/services-webdav", "reqwest"]
+oss = [
+  "opendal/services-oss",
+  "opendal-layer-logging",
+  "opendal-http-transport-reqwest",
+  "reqwest",
+]
+redis = ["url", "opendal/services-redis", "opendal-layer-logging"]
+s3 = [
+  "opendal/services-s3",
+  "opendal-layer-logging",
+  "opendal-http-transport-reqwest",
+  "reqwest",
+  "watcher"
+]
+watcher = ["notify-debouncer-full", "reqsign"]
+webdav = [
+  "opendal/services-webdav",
+  "opendal-layer-logging",
+  "opendal-http-transport-reqwest",
+  "reqwest",
+]
 # Enable features that will build a vendored version of openssl and
 # statically linked with it, instead of linking against the system-wide openssl
 # dynamically or statically.
 vendored-openssl = [
   "openssl?/vendored",
-  "reqwest?/native-tls-alpn",
   "reqwest?/native-tls-vendored",
 ]
 # Enable features that require unstable features of Nightly Rust.
@@ -273,6 +308,7 @@ dist-client = [
   "reqwest",
   "url",
   "sha2",
+  "rustls-native-certs",
 ]
 # Enables the sccache-dist binary
 dist-server = [
@@ -299,6 +335,7 @@ dist-server = [
   "tracing-subscriber",
   "tracing",
   "version-compare",
+  "rustls-native-certs",
 ]
 # Enables dist tests with external requirements
 dist-tests = ["dist-client", "dist-server"]

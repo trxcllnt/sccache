@@ -15,8 +15,8 @@
 
 use crate::errors::*;
 use opendal::Operator;
-use opendal::layers::LoggingLayer;
 use opendal::services::Redis;
+use opendal_layer_logging::LoggingLayer;
 use std::collections::HashMap;
 use std::time::Duration;
 use url::Url;
@@ -30,7 +30,7 @@ impl RedisCache {
         url: &str,
         key_prefix: &str,
         ttl: u64,
-        connection_pool_max_size: u32,
+        connection_pool_max_size: usize,
     ) -> Result<Operator> {
         let parsed = Url::parse(url)?;
 
@@ -56,9 +56,7 @@ impl RedisCache {
             .map(|v| v.parse().unwrap_or_default())
             .unwrap_or_default());
 
-        let op = Operator::new(builder)?
-            .layer(LoggingLayer::default())
-            .finish();
+        let op = Operator::new(builder)?.layer(LoggingLayer::default());
         Ok(op)
     }
 
@@ -70,7 +68,7 @@ impl RedisCache {
         db: u32,
         key_prefix: &str,
         ttl: u64,
-        connection_pool_max_size: u32,
+        connection_pool_max_size: usize,
     ) -> Result<Operator> {
         let builder = Redis::default().endpoint(endpoint);
 
@@ -93,7 +91,7 @@ impl RedisCache {
         db: u32,
         key_prefix: &str,
         ttl: u64,
-        connection_pool_max_size: u32,
+        connection_pool_max_size: usize,
     ) -> Result<Operator> {
         let builder = Redis::default().cluster_endpoints(endpoints);
 
@@ -115,7 +113,7 @@ impl RedisCache {
         db: u32,
         key_prefix: &str,
         ttl: u64,
-        connection_pool_max_size: u32,
+        connection_pool_max_size: usize,
     ) -> Result<Operator> {
         builder = builder
             .username(username.unwrap_or_default())
@@ -129,9 +127,7 @@ impl RedisCache {
             builder = builder.default_ttl(Duration::from_secs(ttl));
         }
 
-        let op = Operator::new(builder)?
-            .layer(LoggingLayer::default())
-            .finish();
+        let op = Operator::new(builder)?.layer(LoggingLayer::default());
         Ok(op)
     }
 }

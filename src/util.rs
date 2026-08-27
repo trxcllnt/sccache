@@ -1595,6 +1595,13 @@ where
         // Prefer HTTP/2
         .http2_prior_knowledge();
 
+    // Query the native store; fallback if it's completely empty
+    let builder = if rustls_native_certs::load_native_certs().certs.is_empty() {
+        builder.tls_certs_only(Vec::new())
+    } else {
+        builder
+    };
+
     let builder = if let Some(config) = config.into() {
         let request_timeout = Duration::from_secs(config.request_timeout as u64);
         let connect_timeout = Duration::from_secs(config.connect_timeout as u64);
