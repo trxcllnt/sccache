@@ -638,6 +638,8 @@ impl From<(StorageKind, Vec<Vec<u8>>, AzureCacheConfig)> for StorageBuilder {
             container,
             key_prefix,
             preprocessor_cache_mode,
+            storage_account,
+            endpoint,
             rw_mode,
             ..
         } = config;
@@ -648,7 +650,7 @@ impl From<(StorageKind, Vec<Vec<u8>>, AzureCacheConfig)> for StorageBuilder {
             .create_storage(move || {
                 debug!("Init azure {storage_kind} cache with container {container}, key_prefix {key_prefix}");
 
-                AzureBlobCache::build(&connection_string, &container, &key_prefix)
+                AzureBlobCache::build(connection_string.as_deref(), &container, &key_prefix, storage_account.as_deref(), endpoint.as_deref())
                     .map(|storage| Arc::new(RemoteStorage::new(storage, basedirs.clone())) as Arc<dyn Storage>)
                     .map_err(|err| anyhow!("create azure cache failed: {err:?}"))
             })

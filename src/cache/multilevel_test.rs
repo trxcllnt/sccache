@@ -486,7 +486,7 @@ fn test_remote_to_remote_backfill() {
 }
 
 #[test]
-#[serial_test::serial(multilevel_env)]
+#[serial_test::serial(config_from_env)]
 fn test_config_validation_invalid_level_name() {
     // Test that invalid level names are rejected
     let runtime = RuntimeBuilder::new_multi_thread()
@@ -569,7 +569,7 @@ fn test_config_validation_single_level() {
 }
 
 #[test]
-#[serial_test::serial(multilevel_env)]
+#[serial_test::serial(config_from_env)]
 fn test_config_level_not_configured() {
     let runtime = RuntimeBuilder::new_multi_thread()
         .enable_all()
