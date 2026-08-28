@@ -2628,7 +2628,9 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     flag!("--device-debug", PassThroughFlag),
     flag!("--device-link", NotCompilationFlag),
     flag!("--device-w", DoCompilation),
+    take_arg!("--diag-error", OsString, CanBeSeparated(b'='), PassThrough),
     take_arg!("--diag-suppress", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("--diag-warn", OsString, CanBeSeparated(b'='), PassThrough),
     flag!("--dlink-time-opt", PassThroughFlag),
     take_arg!("--dopt", OsString, CanBeSeparated, PassThrough),
     take_arg!("--dopt=", OsString, Concatenated, PassThrough),
@@ -2696,6 +2698,9 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     flag!("-cuda", NotCompilationFlag),
     flag!("-dc", DoCompilation),
     take_arg!("-default-stream", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("-diag-error", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("-diag-suppress", OsString, CanBeSeparated(b'='), PassThrough),
+    take_arg!("-diag-warn", OsString, CanBeSeparated(b'='), PassThrough),
     flag!("-dlink", NotCompilationFlag),
     flag!("-dlto", PassThroughFlag),
     take_arg!("-dopt", OsString, CanBeSeparated, PassThrough),
@@ -3451,6 +3456,38 @@ mod test {
                 "--suppress-stack-size-warning",
                 "-Xcudafe",
                 "--display_error_number",
+                "-c"
+            ],
+            a.common_args
+        );
+    }
+
+    #[test]
+    fn test_parse_diag_suppress_separated() {
+        // The separated form (`--diag-suppress 1394,1388`, as OpenCV emits
+        // it) must not be mistaken for a second input file.
+        let a = parses!(
+            "-x=cu",
+            "-Xcudafe",
+            "--display_error_number",
+            "--diag-suppress",
+            "1394,1388",
+            "-diag-warn=68",
+            "-c",
+            "foo.c",
+            "-o",
+            "foo.o"
+        );
+        assert_eq!(Some("foo.c"), a.input.to_str());
+        assert_eq!(Language::Cuda, a.language);
+        assert_eq!(
+            ovec![
+                "-Xcudafe",
+                "--display_error_number",
+                "--diag-suppress",
+                "1394,1388",
+                "-diag-warn",
+                "68",
                 "-c"
             ],
             a.common_args
