@@ -2847,7 +2847,6 @@ mod test {
     }
 
     #[test]
-    #[cfg(windows)]
     fn test_group_nvcc_subcommands_preserves_escaped_quotes_in_defines() {
         let bin_dir = tempfile::tempdir().unwrap();
 
@@ -2886,17 +2885,17 @@ mod test {
             )),
         );
 
-        let groups = group_nvcc_subcommands_by_compilation_stage(
+        let (_nvcc_internal_files, groups) = group_nvcc_subcommands_by_compilation_stage(
             &creator,
             &bin_dir.path().join("nvcc"),
             &["-c", "kernel.cu", "-o", "kernel.o"].map(OsString::from),
-            OsStr::new("-c"),
+            &NvccCompileFlag::Device,
             bin_dir.path(),
             bin_dir.path(),
             None,
             &[],
             &NvccHostCompiler::Msvc,
-            OsStr::new("kernel.o"),
+            Path::new("kernel.o"),
         )
         .wait()
         .unwrap();
