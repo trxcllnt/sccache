@@ -385,10 +385,7 @@ fn test_rust_cargo_cmd_readonly_preemtive_block() -> Result<()> {
         .try_success()?;
 
     let log_contents = fs::read_to_string(sccache_log)?;
-    assert!(
-        predicates::str::contains("server configured with object cache: ReadOnly")
-            .eval(log_contents.as_str())
-    );
+    assert!(predicates::str::contains("Configured object storage").eval(log_contents.as_str()));
     assert!(
         predicates::str::contains("Error executing cache write: Cannot write to read-only storage")
             .eval(log_contents.as_str())

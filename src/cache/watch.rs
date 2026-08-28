@@ -41,7 +41,10 @@ impl WatchStorage {
         let storage = create().await?;
         let paths = Self::dirs_and_paths(paths);
         if paths.is_empty() {
-            trace!("No paths to watch, returning storage");
+            trace!(
+                "No paths to watch for {} storage",
+                storage.cache_type_name()
+            );
             return Ok(storage);
         }
         let basedirs = storage.basedirs().to_vec();
@@ -104,21 +107,8 @@ impl WatchStorage {
         )?;
 
         for (dir, _) in dirs.iter() {
-            debug!("Watching for changes in dir: {dir:?}");
             debouncer.watch(dir, RecursiveMode::NonRecursive)?;
         }
-
-        let paths = dirs
-            .into_iter()
-            .flat_map(|(parent, filenames)| {
-                filenames
-                    .into_iter()
-                    .map(|filename| parent.join(filename))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-
-        debug!("Watching for changes to files: {paths:?}");
 
         tokio::spawn(async move {
             use itertools::Itertools;
@@ -127,6 +117,24 @@ impl WatchStorage {
                 event::{AccessKind, AccessMode, CreateKind, ModifyKind},
             };
             use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
+
+            let name = storage.lock().await.cache_type_name().to_owned();
+
+            for (dir, _) in dirs.iter() {
+                debug!("{name} storage watching for changes in dir: {dir:?}");
+            }
+
+            let paths = dirs
+                .into_iter()
+                .flat_map(|(parent, filenames)| {
+                    filenames
+                        .into_iter()
+                        .map(|filename| parent.join(filename))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+
+            debug!("{name} storage watching for changes to files: {paths:?}");
 
             let changes = UnboundedReceiverStream::new(rx)
                 .filter_map(|res| {

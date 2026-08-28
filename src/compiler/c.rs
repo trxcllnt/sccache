@@ -3089,12 +3089,9 @@ mod test {
 
         // Test Read Write
         {
-            let caches = make_config(CacheModeConfig::ReadWrite).caches;
             runtime.block_on(async {
-                let storage = StorageKind::Preprocessor
-                    .create(&caches, &[])
-                    .await
-                    .unwrap();
+                let config = make_config(CacheModeConfig::ReadWrite);
+                let storage = StorageKind::Preprocessor.create(&config).await.unwrap();
                 PreprocessorCacheEntry::default()
                     .put(storage.as_ref(), "test1")
                     .await
@@ -3104,12 +3101,9 @@ mod test {
 
         // Test Read-only
         {
-            let caches = make_config(CacheModeConfig::ReadOnly).caches;
             runtime.block_on(async {
-                let storage = StorageKind::Preprocessor
-                    .create(&caches, &[])
-                    .await
-                    .unwrap();
+                let config = make_config(CacheModeConfig::ReadOnly);
+                let storage = StorageKind::Preprocessor.create(&config).await.unwrap();
                 assert_eq!(
                     PreprocessorCacheEntry::default()
                         .put(storage.as_ref(), "test1",)

@@ -9,7 +9,7 @@ mod cmdline;
 use cmdline::Command;
 
 use sccache::{
-    cache::cache::StorageKind,
+    cache::{StorageArgs, cache::StorageKind},
     config::{
         scheduler as scheduler_config,
         server::{self as server_config, BuilderType},
@@ -124,7 +124,11 @@ fn run(command: Command) -> Result<()> {
                     )?;
 
                     let jobs = StorageKind::Compilations
-                        .create(&jobs, &[])
+                        .create(StorageArgs {
+                            caches: &jobs,
+                            basedirs: &[],
+                            skip_check: false,
+                        })
                         .await
                         .context("Failed to initialize jobs storage")?;
 
@@ -137,7 +141,11 @@ fn run(command: Command) -> Result<()> {
                     }
 
                     let toolchains = StorageKind::Compilations
-                        .create(&toolchains, &[])
+                        .create(StorageArgs {
+                            caches: &toolchains,
+                            basedirs: &[],
+                            skip_check: false,
+                        })
                         .await
                         .context("Failed to initialize toolchain storage")?;
 
@@ -216,7 +224,11 @@ fn run(command: Command) -> Result<()> {
                     )?;
 
                     let jobs = StorageKind::Compilations
-                        .create(&jobs, &[])
+                        .create(StorageArgs {
+                            caches: &jobs,
+                            basedirs: &[],
+                            skip_check: false,
+                        })
                         .await
                         .context("Failed to initialize jobs storage")?;
 
@@ -229,7 +241,11 @@ fn run(command: Command) -> Result<()> {
                     }
 
                     let toolchains = StorageKind::Compilations
-                        .create(&toolchains, &[])
+                        .create(StorageArgs {
+                            caches: &toolchains,
+                            basedirs: &[],
+                            skip_check: false,
+                        })
                         .await
                         .context("Failed to initialize toolchain storage")?;
 

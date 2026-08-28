@@ -502,7 +502,7 @@ fn test_config_validation_invalid_level_name() {
     }
 
     let config = Config::load().unwrap();
-    let result = runtime.block_on(StorageKind::Compilations.create(&config.caches, &[]));
+    let result = runtime.block_on(StorageKind::Compilations.create(&config));
 
     // Should error with unknown cache level
     assert!(result.is_err());
@@ -586,7 +586,7 @@ fn test_config_level_not_configured() {
     }
 
     let config = Config::load().unwrap();
-    let result = runtime.block_on(StorageKind::Compilations.create(&config.caches, &[]));
+    let result = runtime.block_on(StorageKind::Compilations.create(&config));
 
     // Should error with "not configured" or "requires" (when feature disabled)
     assert!(result.is_err());
@@ -824,46 +824,6 @@ fn test_all_levels_fail_on_put() {
     });
 }
 
-// #[test]
-// fn test_preprocessor_cache_mode() {
-//     // Test preprocessor_cache_mode_config() returns first level's config
-//     let runtime = RuntimeBuilder::new_multi_thread()
-//         .enable_all()
-//         .worker_threads(1)
-//         .build()
-//         .unwrap();
-
-//     let tempdir = TempBuilder::new()
-//         .prefix("sccache_test_preprocessor_")
-//         .tempdir()
-//         .unwrap();
-//     let cache_dir = tempdir.path().join("cache");
-//     fs::create_dir(&cache_dir).unwrap();
-
-//     let preprocessor_config = PreprocessorCacheModeConfig {
-//         use_preprocessor_cache_mode: true,
-//         ..Default::default()
-//     };
-
-//     let disk_cache = Arc::new(DiskCache::new(
-//         &cache_dir,
-//         1024 * 1024 * 100,
-//         CacheMode::ReadWrite,
-//         vec![],
-//     ));
-
-//     let cache_l1 = Arc::new(InMemoryStorage::new());
-
-//     let storage = MultiLevelStorage::new(vec![
-//         disk_cache as Arc<dyn Storage>,
-//         cache_l1 as Arc<dyn Storage>,
-//     ]);
-
-//     // Should return first level's config
-//     let config = storage.preprocessor_cache_mode_config();
-//     assert!(config.use_preprocessor_cache_mode);
-// }
-
 #[tokio::test]
 async fn test_empty_levels_new() {
     // Edge case: creating MultiLevelStorage with empty vec
@@ -877,48 +837,6 @@ async fn test_empty_levels_new() {
     let location = storage.location().await;
     assert!(location.contains("0"));
 }
-
-// #[test]
-// fn test_preprocessor_cache_methods() {
-//     // Test get_preprocessor_cache_entry and put_preprocessor_cache_entry
-//     let runtime = RuntimeBuilder::new_multi_thread()
-//         .enable_all()
-//         .worker_threads(1)
-//         .build()
-//         .unwrap();
-
-//     let tempdir = TempBuilder::new()
-//         .prefix("sccache_test_prep_")
-//         .tempdir()
-//         .unwrap();
-//     let cache_dir = tempdir.path().join("cache");
-//     fs::create_dir(&cache_dir).unwrap();
-
-//     let disk_cache = Arc::new(DiskCache::new(
-//         &cache_dir,
-//         1024 * 1024 * 100,
-//         runtime.handle(),
-//         PreprocessorCacheModeConfig::default(),
-//         CacheMode::ReadWrite,
-//         vec![],
-//     ));
-
-//     let storage = MultiLevelStorage::new(vec![disk_cache as Arc<dyn Storage>]);
-
-//     runtime.block_on(async {
-//         // Test get_preprocessor_cache_entry - should return None for non-existent key
-//         let result = storage.get_preprocessor_cache_entry("test_key").await;
-//         assert!(result.is_ok());
-//         assert!(result.unwrap().is_none());
-
-//         // Test put_preprocessor_cache_entry
-//         let entry = PreprocessorCacheEntry::default();
-//         let result = storage
-//             .put_preprocessor_cache_entry("test_key", entry)
-//             .await;
-//         assert!(result.is_ok());
-//     });
-// }
 
 #[test]
 fn test_readonly_level_in_check() {

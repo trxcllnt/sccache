@@ -70,12 +70,26 @@ impl<T> fmt::Debug for Cache<T> {
 }
 
 /// CacheMode is used to represent which mode we are using.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CacheMode {
     /// Only read cache from storage.
     ReadOnly,
     /// Full support of cache storage: read and write.
+    #[default]
     ReadWrite,
+}
+
+impl fmt::Display for CacheMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReadOnly => {
+                write!(f, "read-only")
+            }
+            Self::ReadWrite => {
+                write!(f, "read-write")
+            }
+        }
+    }
 }
 
 /// Trait objects can't be bounded by more than one non-builtin trait.

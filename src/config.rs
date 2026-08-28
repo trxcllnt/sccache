@@ -80,7 +80,7 @@ impl fmt::Display for WriteErrorPolicy {
 }
 
 /// Configuration for multi-level cache.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MultiLevelConfig {
     /// Ordered list of cache backends (L0, L1, L2, ...)
     #[serde(rename = "chain")]
@@ -1258,6 +1258,7 @@ pub struct FileConfig {
     /// Base directories to strip from paths for cache key computation.
     pub basedirs: Vec<String>,
     pub client_side_mode: bool,
+    pub skip_cache_check: bool,
 }
 
 // If the file doesn't exist or we can't read it, log the issue and proceed. If the
@@ -1301,6 +1302,7 @@ pub struct EnvConfig {
     cache_read_timeout_secs: Option<u64>,
     /// Timeout for cache writes (default: None)
     cache_write_timeout_secs: Option<u64>,
+    skip_cache_check: Option<bool>,
 }
 
 fn string_from_env_var(env_var_name: &str) -> Option<String> {
@@ -1351,6 +1353,8 @@ pub fn bool_from_env_var(env_var_name: &str) -> Result<Option<bool>> {
 fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvConfig> {
     let envvar_prefix = envvar_prefix.into().unwrap_or("SCCACHE_").to_owned();
     let envvar = |key: &str| envvar_prefix.clone() + key;
+
+    let skip_cache_check = bool_from_env_var(&envvar("SKIP_CACHE_CHECK"))?;
 
     // ======= AWS =======
     let s3 = if let Some(bucket) = string_from_env_var(&envvar("BUCKET")) {
@@ -1653,7 +1657,10 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         let has_entra_source = storage_account.is_some() || endpoint.is_some();
         if connection_string.is_some() && has_entra_source {
             bail!(
-                "Set either SCCACHE_AZURE_CONNECTION_STRING (shared key) or SCCACHE_AZURE_STORAGE_ACCOUNT / SCCACHE_AZURE_ENDPOINT (Entra ID), not both."
+                "Set either {} (shared key) or {} / {} (Entra ID), not both.",
+                envvar("AZURE_CONNECTION_STRING"),
+                envvar("AZURE_STORAGE_ACCOUNT"),
+                envvar("AZURE_ENDPOINT"),
             );
         }
         if connection_string.is_none() && !has_entra_source {
@@ -1922,6 +1929,7 @@ fn config_from_env<'a>(envvar_prefix: impl Into<Option<&'a str>>) -> Result<EnvC
         client_side_mode,
         cache_read_timeout_secs,
         cache_write_timeout_secs,
+        skip_cache_check,
     })
 }
 
@@ -1957,6 +1965,7 @@ pub struct Config {
     pub cache_write_timeout: Option<Duration>,
     pub dist: DistConfig,
     pub server_startup_timeout: Option<Duration>,
+    pub skip_cache_check: bool,
     /// Base directory (or directories) to strip from paths for cache key computation.
     /// Similar to ccache's CCACHE_BASEDIR.
     pub basedirs: Vec<Vec<u8>>,
@@ -1981,6 +1990,10 @@ impl Config {
             server_startup_timeout_ms,
             ..
         } = file_conf;
+
+        let skip_cache_check = env_conf
+            .skip_cache_check
+            .unwrap_or(file_conf.skip_cache_check);
 
         let cache_read_timeout = env_conf
             .cache_read_timeout_secs
@@ -2059,6 +2072,7 @@ impl Config {
             server_startup_timeout,
             cache_read_timeout,
             cache_write_timeout,
+            skip_cache_check,
             basedirs,
             client_side_mode,
         })
@@ -3606,6 +3620,55 @@ fn test_string_from_env_var() {
 
         assert_eq!(result, expected);
     }
+}
+
+#[test]
+#[serial(config_from_env)]
+fn test_skip_cache_check_from_env() -> Result<()> {
+    const ENV_VAR: &str = "SCCACHE_SKIP_CACHE_CHECK";
+
+    unsafe {
+        std::env::remove_var(ENV_VAR);
+    }
+
+    assert!(
+        !config_from_env("SCCACHE_")?
+            .skip_cache_check
+            .unwrap_or_default()
+    );
+
+    for (value, expected) in [
+        ("true", true),
+        ("on", true),
+        ("1", true),
+        ("false", false),
+        ("off", false),
+        ("0", false),
+    ] {
+        unsafe {
+            std::env::set_var(ENV_VAR, value);
+        }
+        assert_eq!(
+            config_from_env("SCCACHE_")?
+                .skip_cache_check
+                .unwrap_or_default(),
+            expected
+        );
+    }
+
+    unsafe {
+        std::env::set_var(ENV_VAR, "invalid");
+    }
+    assert_eq!(
+        config_from_env("SCCACHE_").unwrap_err().to_string(),
+        "SCCACHE_SKIP_CACHE_CHECK must be 'true', 'on', '1', 'false', 'off' or '0'."
+    );
+
+    unsafe {
+        std::env::remove_var(ENV_VAR);
+    }
+
+    Ok(())
 }
 
 #[test]

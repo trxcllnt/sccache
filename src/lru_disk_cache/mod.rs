@@ -516,6 +516,7 @@ impl LruDiskCache {
         }
         file.persist(&abs_path).map_err(|e| e.error)?;
         self.lru.insert(key, real_size);
+        trace!("LruDiskCache::commit({abs_path:?})");
         Ok(())
     }
 

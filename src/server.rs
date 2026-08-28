@@ -451,12 +451,8 @@ pub fn start_server(config: Config, addr: &crate::net::SocketAddr) -> Result<()>
     let init_storage = || -> Result<(Arc<dyn Storage>, Arc<dyn Storage>)> {
         runtime.block_on(async {
             Ok((
-                StorageKind::Compilations
-                    .create(&config.caches, &config.basedirs)
-                    .await?,
-                StorageKind::Preprocessor
-                    .create(&config.caches, &config.basedirs)
-                    .await?,
+                StorageKind::Compilations.create(&config).await?,
+                StorageKind::Preprocessor.create(&config).await?,
             ))
         })
     };

@@ -768,8 +768,8 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                     let runtime = new_client_runtime()?;
                     runtime.block_on(async {
                         let (compilations_storage, preprocessor_storage) = tokio::try_join!(
-                            StorageKind::Compilations.create(&config.caches, &config.basedirs),
-                            StorageKind::Preprocessor.create(&config.caches, &config.basedirs),
+                            StorageKind::Compilations.create(&config),
+                            StorageKind::Preprocessor.create(&config),
                         )?;
                         ServerInfo::new(
                             ServerStats::default(),
@@ -790,9 +790,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             let config = Config::load()?;
             let runtime = Runtime::new()?;
             runtime.block_on(async {
-                let storage = StorageKind::Preprocessor
-                    .create(&config.caches, &config.basedirs)
-                    .await?;
+                let storage = StorageKind::Preprocessor.create(&config).await?;
                 match crate::compiler::PreprocessorCacheEntry::get(storage.as_ref(), &key).await {
                     Err(err) => {
                         eprintln!("Err retrieving preprocessor entry for key {key:?}: {err:#?}");
