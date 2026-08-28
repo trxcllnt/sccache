@@ -212,7 +212,7 @@ impl Storage for DiskCache {
 
     async fn check(&self) -> Result<CacheMode> {
         if matches!(self.rw_mode, CacheMode::ReadWrite) {
-            self.put("__.sccache_check", "Hello, World!".into()).await?;
+            self.put("__.sccache_check", "".into()).await?;
         }
 
         Ok(self.rw_mode)

@@ -1190,7 +1190,10 @@ impl DistSystem {
         server
             .toolchains_dir(self.dist_dir())
             .and_then(|dir| fs::read_dir(dir).map_err(Into::into))
-            .map(|dir| dir.count())
+            .map(|dir| {
+                dir.filter_map(|d| d.ok().filter(|d| d.file_name() != "_"))
+                    .count()
+            })
     }
 }
 

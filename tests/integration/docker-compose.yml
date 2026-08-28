@@ -4,6 +4,7 @@ x-common-env: &common-env
   RUST_LOG: sccache=trace
   SCCACHE_SERVER_LOG: sccache=trace
   SCCACHE_PATH: ${SCCACHE_PATH:-/sccache/target/debug/sccache}
+  SCCACHE_DIR: /build/sccache
   LLVM_PROFILE_FILE: ${LLVM_PROFILE_FILE:-}
 
 x-test-runner: &test-runner
@@ -254,7 +255,6 @@ services:
     entrypoint: /sccache/tests/integration/scripts/test-gcc.sh
     environment:
       <<: *common-env
-      SCCACHE_DIR: /build/sccache
       SCCACHE_ERROR_LOG: /tmp/sccache-gcc.log
     profiles:
       - test
@@ -266,7 +266,6 @@ services:
     entrypoint: /sccache/tests/integration/scripts/test-clang.sh
     environment:
       <<: *common-env
-      SCCACHE_DIR: /build/sccache
       SCCACHE_ERROR_LOG: /tmp/sccache-clang.log
     profiles:
       - test
@@ -278,7 +277,6 @@ services:
     entrypoint: /sccache/tests/integration/scripts/test-cmake.sh
     environment:
       <<: *common-env
-      SCCACHE_DIR: /build/sccache
       SCCACHE_ERROR_LOG: /tmp/sccache-cmake.log
     profiles:
       - test
@@ -292,7 +290,7 @@ services:
     entrypoint: /sccache/tests/integration/scripts/test-cmake-modules.sh
     environment:
       <<: *common-env
-      SCCACHE_DIR: /build/sccache
+      SCCACHE_ERROR_LOG: /tmp/sccache-cmake-modules.log
     profiles:
       - test
       - cmake-modules
@@ -305,7 +303,7 @@ services:
     entrypoint: /sccache/tests/integration/scripts/test-cmake-modules-v4.sh
     environment:
       <<: *common-env
-      SCCACHE_DIR: /build/sccache
+      SCCACHE_ERROR_LOG: /tmp/sccache-cmake-modules-v4.log
     profiles:
       - test
       - cmake-modules-v4
@@ -316,7 +314,6 @@ services:
     entrypoint: /sccache/tests/integration/scripts/test-autotools.sh
     environment:
       <<: *common-env
-      SCCACHE_DIR: /build/sccache
       SCCACHE_ERROR_LOG: /tmp/sccache-autotools.log
     profiles:
       - test
@@ -328,7 +325,6 @@ services:
     entrypoint: /sccache/tests/integration/scripts/test-coverage.sh
     environment:
       <<: *common-env
-      SCCACHE_DIR: /build/sccache
       SCCACHE_ERROR_LOG: /tmp/sccache-coverage.log
     profiles:
       - test
@@ -350,6 +346,9 @@ services:
     <<: *test-runner
     image: gcc:latest
     entrypoint: /sccache/tests/integration/scripts/test-basedirs.sh
+    environment:
+      <<: *common-env
+      SCCACHE_ERROR_LOG: /tmp/sccache-test-basedirs.log
     depends_on:
       redis:
         condition: service_healthy
@@ -373,6 +372,9 @@ services:
     <<: *test-runner
     image: rust:latest
     entrypoint: /sccache/tests/integration/scripts/test-multilevel.sh
+    environment:
+      <<: *common-env
+      SCCACHE_ERROR_LOG: /tmp/sccache-test-multilevel.log
     depends_on:
       redis:
         condition: service_healthy
@@ -396,6 +398,9 @@ services:
     <<: *test-runner
     image: rust:latest
     entrypoint: /sccache/tests/integration/scripts/test-multilevel-chain.sh
+    environment:
+      <<: *common-env
+      SCCACHE_ERROR_LOG: /tmp/sccache-test-multilevel-chain.log
     depends_on:
       redis:
         condition: service_healthy
