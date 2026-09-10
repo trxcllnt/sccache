@@ -22,7 +22,8 @@
             },
             "stdio": null,
             "terminal": "console",
-            "internalConsoleOptions": "neverOpen"
+            "internalConsoleOptions": "neverOpen",
+            "sourceLanguages": ["rust"],
         },
         {
             "type": "lldb",
@@ -31,19 +32,31 @@
             "cargo": {
                 "args": [
                     "test",
+                    "--locked",
+                    "--profile", "dev",
                     "-F",
                     "all,dist-server,vendored-openssl",
                     "--no-run",
                     "--lib",
-                    "--package", "sccache"
+                    "--package", "sccache",
                 ],
+                "env": {
+                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
+                },
                 "filter": {
                     "name": "sccache",
                     "kind": "lib"
                 }
             },
-            "args": ["test_parse_threads_argument_simple_cu"],
-            "cwd": "${workspaceFolder}"
+            "args": [
+                "config::client::test::gcs::credentials_require_bucket",
+                "--",
+                "--nocapture"
+            ],
+            "cwd": "${workspaceFolder}",
+            "terminal": "console",
+            "internalConsoleOptions": "neverOpen",
+            "sourceLanguages": ["rust"]
         },
         {
             "type": "lldb",
@@ -55,15 +68,21 @@
                     "-F",
                     "all,dist-server,vendored-openssl",
                     "--bin=sccache",
-                    "--package=sccache"
+                    "--package=sccache",
                 ],
+                "env": {
+                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
+                },
                 "filter": {
                     "name": "sccache",
                     "kind": "bin"
                 }
             },
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "terminal": "console",
+            "internalConsoleOptions": "neverOpen",
+            "sourceLanguages": ["rust"],
         },
         {
             "type": "lldb",
@@ -72,19 +91,27 @@
             "cargo": {
                 "args": [
                     "test",
+                    "--locked",
+                    "--profile", "dev",
                     "-F",
                     "all,dist-server,vendored-openssl",
                     "--no-run",
                     "--bin=sccache",
-                    "--package=sccache"
+                    "--package=sccache",
                 ],
+                "env": {
+                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
+                },
                 "filter": {
                     "name": "sccache",
                     "kind": "bin"
                 }
             },
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "terminal": "console",
+            "internalConsoleOptions": "neverOpen",
+            "sourceLanguages": ["rust"],
         },
         {
             "type": "lldb",
@@ -96,15 +123,21 @@
                     "-F",
                     "all,dist-server,vendored-openssl",
                     "--bin=sccache-dist",
-                    "--package=sccache"
+                    "--package=sccache",
                 ],
+                "env": {
+                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
+                },
                 "filter": {
                     "name": "sccache-dist",
                     "kind": "bin"
                 }
             },
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "terminal": "console",
+            "internalConsoleOptions": "neverOpen",
+            "sourceLanguages": ["rust"],
         },
         {
             "type": "lldb",
@@ -113,19 +146,27 @@
             "cargo": {
                 "args": [
                     "test",
+                    "--locked",
+                    "--profile", "dev",
                     "-F",
                     "all,dist-server,vendored-openssl",
                     "--no-run",
                     "--bin=sccache-dist",
-                    "--package=sccache"
+                    "--package=sccache",
                 ],
+                "env": {
+                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
+                },
                 "filter": {
                     "name": "sccache-dist",
                     "kind": "bin"
                 }
             },
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "terminal": "console",
+            "internalConsoleOptions": "neverOpen",
+            "sourceLanguages": ["rust"],
         },
         {
             "type": "lldb",
@@ -134,19 +175,27 @@
             "cargo": {
                 "args": [
                     "test",
+                    "--locked",
+                    "--profile", "dev",
                     "-F",
                     "all,dist-server,vendored-openssl",
                     "--no-run",
                     "--test=cache_hit_rate",
-                    "--package=sccache"
+                    "--package=sccache",
                 ],
+                "env": {
+                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
+                },
                 "filter": {
                     "name": "cache_hit_rate",
                     "kind": "test"
                 }
             },
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "terminal": "console",
+            "internalConsoleOptions": "neverOpen",
+            "sourceLanguages": ["rust"],
         },
         {
             "type": "lldb",
@@ -155,19 +204,27 @@
             "cargo": {
                 "args": [
                     "test",
+                    "--locked",
+                    "--profile", "dev",
                     "-F",
                     "all,dist-server,vendored-openssl",
                     "--no-run",
                     "--test=dist",
-                    "--package=sccache"
+                    "--package=sccache",
                 ],
+                "env": {
+                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
+                },
                 "filter": {
                     "name": "dist",
                     "kind": "test"
                 }
             },
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "terminal": "console",
+            "internalConsoleOptions": "neverOpen",
+            "sourceLanguages": ["rust"],
         },
         {
             "type": "lldb",
@@ -176,19 +233,27 @@
             "cargo": {
                 "args": [
                     "test",
+                    "--locked",
+                    "--profile", "dev",
                     "-F",
                     "all,dist-server,vendored-openssl",
                     "--no-run",
                     "--test=oauth",
-                    "--package=sccache"
+                    "--package=sccache",
                 ],
+                "env": {
+                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
+                },
                 "filter": {
                     "name": "oauth",
                     "kind": "test"
                 }
             },
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "terminal": "console",
+            "internalConsoleOptions": "neverOpen",
+            "sourceLanguages": ["rust"],
         },
         {
             "type": "lldb",
@@ -197,19 +262,27 @@
             "cargo": {
                 "args": [
                     "test",
+                    "--locked",
+                    "--profile", "dev",
                     "-F",
                     "all,dist-server,vendored-openssl",
                     "--no-run",
                     "--test=sccache_args",
-                    "--package=sccache"
+                    "--package=sccache",
                 ],
+                "env": {
+                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
+                },
                 "filter": {
                     "name": "sccache_args",
                     "kind": "test"
                 }
             },
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "terminal": "console",
+            "internalConsoleOptions": "neverOpen",
+            "sourceLanguages": ["rust"],
         },
         {
             "type": "lldb",
@@ -218,19 +291,27 @@
             "cargo": {
                 "args": [
                     "test",
+                    "--locked",
+                    "--profile", "dev",
                     "-F",
                     "all,dist-server,vendored-openssl",
                     "--no-run",
                     "--test=sccache_cargo",
-                    "--package=sccache"
+                    "--package=sccache",
                 ],
+                "env": {
+                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
+                },
                 "filter": {
                     "name": "sccache_cargo",
                     "kind": "test"
                 }
             },
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "terminal": "console",
+            "internalConsoleOptions": "neverOpen",
+            "sourceLanguages": ["rust"],
         },
         {
             "type": "lldb",
@@ -239,19 +320,27 @@
             "cargo": {
                 "args": [
                     "test",
+                    "--locked",
+                    "--profile", "dev",
                     "-F",
                     "all,dist-server,vendored-openssl",
                     "--no-run",
                     "--test=sccache_rustc",
-                    "--package=sccache"
+                    "--package=sccache",
                 ],
+                "env": {
+                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
+                },
                 "filter": {
                     "name": "sccache_rustc",
                     "kind": "test"
                 }
             },
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "terminal": "console",
+            "internalConsoleOptions": "neverOpen",
+            "sourceLanguages": ["rust"],
         },
         {
             "type": "lldb",
@@ -260,19 +349,27 @@
             "cargo": {
                 "args": [
                     "test",
+                    "--locked",
+                    "--profile", "dev",
                     "-F",
                     "all,dist-server,vendored-openssl",
                     "--no-run",
                     "--test=system",
-                    "--package=sccache"
+                    "--package=sccache",
                 ],
+                "env": {
+                    "CARGO_TARGET_DIR": "${workspaceFolder}/.vscode/.debugger"
+                },
                 "filter": {
                     "name": "system",
                     "kind": "test"
                 }
             },
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "terminal": "console",
+            "internalConsoleOptions": "neverOpen",
+            "sourceLanguages": ["rust"],
         }
     ]
 }
