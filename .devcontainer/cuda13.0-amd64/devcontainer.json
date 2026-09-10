@@ -117,8 +117,13 @@
             "editor.formatOnSave": true,
             "editor.defaultFormatter": "rust-lang.rust-analyzer"
         },
+        "lldb.launch.preRunCommands": [
+            "script lldb.debugger.HandleCommand('settings set target.source-map /rustc/{} \"{}/lib/rustlib/src/rust\"'.format(os.popen('rustc --version --verbose').read().split('commit-hash: ')[1].split('\\n')[0].strip(), os.popen('rustc --print sysroot').readline().strip()))"
+        ],
+        "rust-analyzer.cachePriming.enable": false,
         "rust-analyzer.cargo.allTargets": true,
         "rust-analyzer.cargo.features": "all",
+        "rust-analyzer.cargo.targetDir": ".vscode/.rust-analyzer",
         "rust-analyzer.checkOnSave": true,
         "rust-analyzer.check.command": "clippy",
         "search.exclude": {
