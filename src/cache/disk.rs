@@ -14,8 +14,8 @@
 
 use super::lazy_disk_cache::LazyDiskCache;
 use crate::{
-    cache::{Cache, CacheMode, GetPathResult, Storage},
-    config::DiskCacheConfig,
+    cache::{Cache, GetPathResult, Storage},
+    config::{self, CacheMode},
     lru_disk_cache::Error as LruError,
 };
 use async_trait::async_trait;
@@ -211,10 +211,6 @@ impl Storage for DiskCache {
     }
 
     async fn check(&self) -> Result<CacheMode> {
-        if matches!(self.rw_mode, CacheMode::ReadWrite) {
-            self.put("__.sccache_check", "".into()).await?;
-        }
-
         Ok(self.rw_mode)
     }
 
@@ -230,6 +226,12 @@ impl Storage for DiskCache {
         Ok(self.lru.lock().await.get().map(|l| l.size()))
     }
 
+    /// Return whether the storage is enabled.
+    /// Currently only NoStorage impl returns false.
+    fn enabled(&self) -> bool {
+        true
+    }
+
     fn basedirs(&self) -> &[Vec<u8>] {
         &self.basedirs
     }
@@ -239,12 +241,12 @@ impl Storage for DiskCache {
     }
 }
 
-impl From<&DiskCacheConfig> for Arc<dyn Storage> {
-    fn from(config: &DiskCacheConfig) -> Self {
+impl From<&config::cache::Disk> for Arc<dyn Storage> {
+    fn from(config: &config::cache::Disk) -> Self {
         Arc::new(DiskCache::new(
             &config.dir,
             config.size,
-            config.rw_mode.into(),
+            config.rw_mode,
             vec![],
         ))
     }

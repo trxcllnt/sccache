@@ -20,9 +20,11 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::cache::{Cache, CacheMode, Storage};
-use crate::config::{PreprocessorCacheModeConfig, WriteErrorPolicy};
-use crate::errors::*;
+use crate::{
+    cache::{Cache, Storage},
+    config::{CacheMode, WriteErrorPolicy},
+    errors::*,
+};
 
 /// Increment an atomic stats counter, handling the Option check.
 /// Usage: `inc_stat!(optional_stats, field_name, value)`
@@ -703,11 +705,8 @@ impl Storage for MultiLevelStorage {
         Some(self.stats())
     }
 
-    fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
-        self.levels
-            .first()
-            .map(|level| level.preprocessor_cache_mode_config())
-            .unwrap_or_default()
+    fn enabled(&self) -> bool {
+        self.levels.iter().any(|level| level.enabled())
     }
 
     fn basedirs(&self) -> &[Vec<u8>] {

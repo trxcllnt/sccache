@@ -1,7 +1,7 @@
 use crate::{
-    cache::{CacheMode, GetPathResult, StorageKind},
+    cache::{GetPathResult, StorageKind},
     compiler::ColorMode,
-    config::PreprocessorCacheModeConfig,
+    config::CacheMode,
     mock_command::ProcessOutput,
     server::{DistInfo, ServerInfo, ServerStats},
 };
@@ -122,8 +122,8 @@ pub struct Compile {
 pub struct StorageHandshakeInfo {
     pub location: String,
     pub cache_type_name: String,
+    pub enabled: bool,
     pub basedirs: Vec<Vec<u8>>,
-    pub preprocessor_cache_mode_config: PreprocessorCacheModeConfig,
     pub cache_mode: CacheMode,
     pub max_size: Option<u64>,
 }

@@ -11,16 +11,15 @@
 // limitations under the License.
 
 use super::utils::{get_file_mode, set_file_mode};
-use crate::errors::*;
-use crate::mock_command::ProcessOutput;
+use crate::{errors::*, mock_command::ProcessOutput};
 use fs_err as fs;
-use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::io::{self, Cursor, Read, Seek, Write};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
-use zip::write::FileOptions;
-use zip::{CompressionMethod, ZipArchive, ZipWriter};
+use std::{
+    fmt,
+    io::{self, Cursor, Read, Seek, Write},
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
+use zip::{CompressionMethod, ZipArchive, ZipWriter, write::FileOptions};
 
 /// Cache object sourced by a file.
 #[derive(Clone)]
@@ -65,29 +64,6 @@ impl<T> fmt::Debug for Cache<T> {
         match *self {
             Cache::Hit(_) => write!(f, "Cache::Hit(...)"),
             Cache::Miss => write!(f, "Cache::Miss"),
-        }
-    }
-}
-
-/// CacheMode is used to represent which mode we are using.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CacheMode {
-    /// Only read cache from storage.
-    ReadOnly,
-    /// Full support of cache storage: read and write.
-    #[default]
-    ReadWrite,
-}
-
-impl fmt::Display for CacheMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ReadOnly => {
-                write!(f, "read-only")
-            }
-            Self::ReadWrite => {
-                write!(f, "read-write")
-            }
         }
     }
 }

@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use crate::{
-    cache::{Cache, CacheMode, Storage},
-    config::PreprocessorCacheModeConfig,
+    cache::{Cache, Storage},
+    config::CacheMode,
     errors::*,
 };
 
@@ -82,9 +82,10 @@ impl Storage for SimplexCache {
         self.0.max_size().await
     }
 
-    /// Return the config for preprocessor cache mode if applicable
-    fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
-        self.1.preprocessor_cache_mode_config()
+    /// Return whether the storage is enabled.
+    /// Currently only NoStorage impl returns false.
+    fn enabled(&self) -> bool {
+        self.0.enabled() || self.1.enabled()
     }
 
     fn basedirs(&self) -> &[Vec<u8>] {

@@ -89,6 +89,8 @@ impl S3Cache {
 
         if let Some(region) = &self.region {
             builder = builder.region(region);
+        } else {
+            builder = builder.region("auto");
         }
 
         if let Some(true) = &self.enable_virtual_host_style {

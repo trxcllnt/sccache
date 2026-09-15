@@ -9,10 +9,7 @@ use std::{
 };
 
 use sccache::{
-    config::{
-        CacheConfigs, DiskCacheConfig, DistConfig, DistNetworking, FileConfig,
-        PreprocessorCacheModeConfig, try_read_config_file,
-    },
+    config::{self, CacheType, ClientConfig, PreprocessorCaches},
     server::{ServerInfo, ServerStats},
 };
 
@@ -36,7 +33,11 @@ pub fn make_sccache_client(
     };
 
     // Create the configurations
-    let sccache_cfg = sccache_client_cfg(&tempdir_path, preprocessor_cache_mode);
+    let sccache_cfg = sccache_client_cfg(
+        &tempdir_path,
+        preprocessor_cache_mode,
+        sccache::config::defaults::default_disk_cache_size(),
+    );
     write_json_cfg(&tempdir_path, "sccache-cfg.json", &sccache_cfg);
     let sccache_cached_cfg_path = tempdir_path.join("sccache-cached-cfg");
     // Start the server daemon on a unique port
@@ -48,42 +49,43 @@ pub fn make_sccache_client(
     (maybe_tempdir, tempdir_path, client)
 }
 
-pub fn sccache_client_cfg(data_dir: &Path, preprocessor_cache_mode: bool) -> FileConfig {
+pub fn sccache_client_cfg(
+    data_dir: &Path,
+    preprocessor_cache_mode: bool,
+    size: u64,
+) -> ClientConfig {
     let disk_cache_dir = data_dir.join("cache");
     let toolchains_dir = data_dir.join("toolchains");
     fs::create_dir_all(&disk_cache_dir).unwrap();
     fs::create_dir_all(&toolchains_dir).unwrap();
 
-    let disk_cache = DiskCacheConfig {
-        dir: disk_cache_dir,
-        preprocessor_cache_mode: PreprocessorCacheModeConfig {
-            use_preprocessor_cache_mode: preprocessor_cache_mode,
-            ..Default::default()
-        },
+    let disk = config::cache::Disk {
+        dir: disk_cache_dir.clone(),
+        size,
         ..Default::default()
     };
-    FileConfig {
-        cache: CacheConfigs {
-            azure: None,
-            disk: Some(disk_cache),
-            gcs: None,
-            gha: None,
-            memcached: None,
-            redis: None,
-            s3: None,
-            webdav: None,
-            oss: None,
-            cos: None,
-            multilevel: None,
+
+    ClientConfig {
+        cache: vec![disk.clone().into()].into(),
+        preprocessor: PreprocessorCaches {
+            cache: vec![
+                config::cache::Disk {
+                    dir: disk_cache_dir.join("preprocessor"),
+                    enabled: preprocessor_cache_mode,
+                    ..disk
+                }
+                .into(),
+            ]
+            .into(),
         },
-        dist: DistConfig {
+        dist: config::client::dist::Config {
             auth: Default::default(), // dangerously_insecure
-            scheduler_url: None,
+            url: None,
             cache_dir: toolchains_dir,
             toolchains: vec![],
             toolchain_cache_size: TC_CACHE_SIZE,
             rewrite_includes_only: false, // TODO
-            net: DistNetworking {
+            net: config::client::dist::Networking {
                 max_connections: 1,
                 connect_timeout: 10,
                 request_timeout: 300,
@@ -210,29 +212,50 @@ impl SccacheClient {
         );
     }
 
-    pub fn config(&self) -> FileConfig {
-        if let Some(cfg_path_idx) = self.envvars.iter().position(|(k, _)| k == "SCCACHE_CONF")
-            && let Some((_, cfg_path)) = self.envvars.get(cfg_path_idx)
-            && let Ok(Some(cfg)) = try_read_config_file::<FileConfig>(&PathBuf::from(cfg_path))
-        {
-            return cfg;
-        }
-        FileConfig::default()
+    pub fn config(&self) -> ClientConfig {
+        ClientConfig::load_from_envs(
+            self.envvars
+                .iter()
+                .map(|(k, v)| (k.as_os_str(), v.as_os_str())),
+        )
+        .unwrap_or_default()
     }
 
-    pub fn disk_cache_config(&self) -> DiskCacheConfig {
-        self.config().cache.disk.unwrap_or_default()
+    pub fn compilations_cache(&self) -> config::cache::Disk {
+        self.config()
+            .cache
+            .configs
+            .iter()
+            .find_map(|(_, c)| match c {
+                CacheType::Disk(c) => Some(c.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn preprocessor_cache(&self) -> config::cache::Disk {
+        self.config()
+            .preprocessor
+            .cache
+            .configs
+            .iter()
+            .find_map(|(_, c)| match c {
+                CacheType::Disk(c) => Some(c.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     pub fn clear_disk_cache(&self) -> sccache::errors::Result<(PathBuf, PathBuf)> {
-        Ok((self.clear_object_cache()?, self.clear_preprocessor_cache()?))
+        Ok((
+            self.clear_compilations_cache()?,
+            self.clear_preprocessor_cache()?,
+        ))
     }
 
     pub fn clear_preprocessor_cache(&self) -> sccache::errors::Result<PathBuf> {
-        let disk_cache = self.disk_cache_config();
-        let preprocessor_cache_dir = disk_cache
-            .dir
-            .join(disk_cache.preprocessor_cache_mode.key_prefix);
+        let disk_cache = self.preprocessor_cache();
+        let preprocessor_cache_dir = disk_cache.dir;
         println!("clear_preprocessor_cache: {preprocessor_cache_dir:?}");
         if preprocessor_cache_dir.is_dir() {
             fs::remove_dir_all(&preprocessor_cache_dir)?;
@@ -240,20 +263,20 @@ impl SccacheClient {
         Ok(preprocessor_cache_dir)
     }
 
-    pub fn clear_object_cache(&self) -> sccache::errors::Result<PathBuf> {
-        let disk_cache = self.disk_cache_config();
-        let object_cache_dir = disk_cache.dir;
-        println!("clear_object_cache: {object_cache_dir:?}");
+    pub fn clear_compilations_cache(&self) -> sccache::errors::Result<PathBuf> {
+        let disk_cache = self.compilations_cache();
+        let compilations_cache_dir = disk_cache.dir;
+        println!("clear_object_cache: {compilations_cache_dir:?}");
         for path in "0123456789abcdef"
             .chars()
-            .map(|c| object_cache_dir.join(String::from(c)))
+            .map(|c| compilations_cache_dir.join(String::from(c)))
         {
             if path.is_dir() {
                 println!("rmdir: {path:?}");
                 fs::remove_dir_all(path)?;
             }
         }
-        Ok(object_cache_dir)
+        Ok(compilations_cache_dir)
     }
 
     pub fn clear_toolchains_cache(&self) -> sccache::errors::Result<PathBuf> {

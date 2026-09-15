@@ -13,22 +13,13 @@
 // limitations under the License.
 
 use super::*;
-use crate::cache::CacheRead;
-use crate::cache::CacheWrite;
-use crate::cache::StorageKind;
-use crate::cache::disk::DiskCache;
-use crate::cache::readonly::ReadOnlyStorage;
-use crate::config::Config;
-use crate::config::PreprocessorCacheModeConfig;
-use std::collections::HashMap;
-use std::env;
-use std::fs;
-use std::sync::Arc;
-use std::time::Duration;
+use crate::{
+    cache::{CacheRead, CacheWrite, StorageKind, disk::DiskCache, readonly::ReadOnlyStorage},
+    config::ClientConfig,
+};
+use std::{collections::HashMap, env, fs, sync::Arc, time::Duration};
 use tempfile::Builder as TempBuilder;
-use tokio::runtime::Builder as RuntimeBuilder;
-use tokio::sync::Mutex;
-use tokio::time::sleep;
+use tokio::{runtime::Builder as RuntimeBuilder, sync::Mutex, time::sleep};
 
 #[test]
 fn test_multi_level_storage_get() {
@@ -238,6 +229,12 @@ impl Storage for InMemoryStorage {
 
     async fn max_size(&self) -> Result<Option<u64>> {
         Ok(None)
+    }
+
+    /// Return whether the storage is enabled.
+    /// Currently only NoStorage impl returns false.
+    fn enabled(&self) -> bool {
+        true
     }
 
     fn basedirs(&self) -> &[Vec<u8>] {
@@ -501,8 +498,16 @@ fn test_config_validation_invalid_level_name() {
         env::set_var("SCCACHE_DIR", "/tmp/test-cache");
     }
 
-    let config = Config::load().unwrap();
-    let result = runtime.block_on(StorageKind::Compilations.create(&config));
+    let config = match ClientConfig::load() {
+        Ok(config) => config,
+        Err(e) => {
+            let err_msg = format!("{e}");
+            assert!(err_msg.contains("Unknown cache level") || err_msg.contains("invalid_backend"));
+            return;
+        }
+    };
+
+    let result = runtime.block_on(StorageKind::Compilations.create(&config.cache, &[]));
 
     // Should error with unknown cache level
     assert!(result.is_err());
@@ -585,11 +590,26 @@ fn test_config_level_not_configured() {
         env::remove_var("SCCACHE_REDIS_ENDPOINT");
     }
 
-    let config = Config::load().unwrap();
-    let result = runtime.block_on(StorageKind::Compilations.create(&config));
+    let config = match ClientConfig::load() {
+        Ok(config) => config,
+        Err(e) => {
+            let err_msg = format!("{e}");
+            assert!(
+                err_msg.contains("not configured")
+                    || err_msg.contains("missing")
+                    || err_msg.contains("requires")
+                    || err_msg.contains("none could be built"),
+                "Expected error about missing config or feature, got: {err_msg}"
+            );
+            return;
+        }
+    };
+
+    let result = runtime.block_on(StorageKind::Compilations.create(&config.cache, &[]));
 
     // Should error with "not configured" or "requires" (when feature disabled)
     assert!(result.is_err());
+
     if let Err(e) = result {
         let err_msg = format!("{e}");
         assert!(
@@ -1021,10 +1041,6 @@ impl Storage for FailingStorage {
         "FailingStorage"
     }
 
-    fn basedirs(&self) -> &[Vec<u8>] {
-        &[]
-    }
-
     async fn current_size(&self) -> Result<Option<u64>> {
         Ok(None)
     }
@@ -1033,8 +1049,12 @@ impl Storage for FailingStorage {
         Ok(None)
     }
 
-    fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
-        PreprocessorCacheModeConfig::default()
+    fn enabled(&self) -> bool {
+        true
+    }
+
+    fn basedirs(&self) -> &[Vec<u8>] {
+        &[]
     }
 }
 

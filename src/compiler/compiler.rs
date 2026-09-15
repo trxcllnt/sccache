@@ -753,11 +753,9 @@ where
         let lookup = lookup_or_compile
             .cache_lookup(
                 compilations_storage.as_ref(),
-                // Set a maximum time limit for the cache to respond before we
+                // Maximum time limit for the cache to respond before we
                 // forge ahead ourselves with a compilation.
-                service
-                    .cache_read_timeout
-                    .unwrap_or(Duration::from_secs(60)),
+                service.cache_read_timeout,
             )
             .await;
 
@@ -2803,9 +2801,9 @@ where
 mod test {
     use super::*;
     use crate::{
-        cache::{CacheMode, PreprocessorCache, disk::DiskCache},
+        cache::disk::DiskCache,
         compiler::c::ParseArgs,
-        config::PreprocessorCacheModeConfig,
+        config::CacheMode,
         mock_command::*,
         test::{mock_storage::MockStorage, utils::*},
     };
@@ -3399,7 +3397,7 @@ LLVM version: 6.0",
         let pool = runtime.handle();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
         let cwd = f.tempdir.path();
-        let compilations_storage = Arc::new(MockStorage::new(None, false));
+        let compilations_storage = Arc::new(MockStorage::new(None, true));
         let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
         let service = server::SccacheService::mock_with_storage(
             compilations_storage.clone(),
@@ -3669,24 +3667,18 @@ LLVM version: 6.0",
         let gcc = f.mk_bin("gcc").unwrap();
         let runtime = Runtime::new().unwrap();
         let pool = runtime.handle().clone();
-        let storage = PreprocessorCache(
-            Arc::new(DiskCache::new(
-                f.tempdir.path().join("cache"),
-                u64::MAX,
-                CacheMode::ReadWrite,
-                vec![],
-            )),
-            PreprocessorCacheModeConfig {
-                use_preprocessor_cache_mode: preprocessor_cache_mode,
-                ..Default::default()
-            },
-        );
+        let compilations_storage = Arc::new(DiskCache::new(
+            f.tempdir.path().join("cache"),
+            u64::MAX,
+            CacheMode::ReadWrite,
+            vec![],
+        ));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
-        let storage = Arc::new(storage);
         let service = server::SccacheService::mock_with_storage(
-            storage.clone(),
-            storage.clone(),
+            compilations_storage.clone(),
+            preprocessor_storage.clone(),
             pool.clone(),
         );
 
@@ -3764,8 +3756,8 @@ LLVM version: 6.0",
                         &service,
                         None,
                         creator.clone(),
-                        storage.clone(),
-                        storage.clone(),
+                        compilations_storage.clone(),
+                        preprocessor_storage.clone(),
                         arguments.clone(),
                         cwd.to_path_buf(),
                         vec![],
@@ -3806,8 +3798,8 @@ LLVM version: 6.0",
                         &service,
                         None,
                         creator,
-                        storage.clone(),
-                        storage,
+                        compilations_storage.clone(),
+                        preprocessor_storage.clone(),
                         arguments,
                         cwd.to_path_buf(),
                         vec![],
@@ -3841,21 +3833,15 @@ LLVM version: 6.0",
         let gcc = f.mk_bin("gcc").unwrap();
         let runtime = Runtime::new().unwrap();
         let pool = runtime.handle().clone();
-        let storage = PreprocessorCache(
-            Arc::new(DiskCache::new(
-                f.tempdir.path().join("cache"),
-                u64::MAX,
-                CacheMode::ReadWrite,
-                vec![],
-            )),
-            PreprocessorCacheModeConfig {
-                use_preprocessor_cache_mode: preprocessor_cache_mode,
-                ..Default::default()
-            },
-        );
+        let compilations_storage = Arc::new(DiskCache::new(
+            f.tempdir.path().join("cache"),
+            u64::MAX,
+            CacheMode::ReadWrite,
+            vec![],
+        ));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
-        let storage = Arc::new(storage);
         // Pretend to be GCC.
         next_command(
             &creator,
@@ -3919,8 +3905,8 @@ LLVM version: 6.0",
         );
         let service = server::SccacheService::mock_with_dist_client(
             dist_client.clone(),
-            storage.clone(),
-            storage.clone(),
+            compilations_storage.clone(),
+            preprocessor_storage.clone(),
             pool.clone(),
         );
 
@@ -3938,8 +3924,8 @@ LLVM version: 6.0",
                         &service,
                         Some(dist_client.clone()),
                         creator.clone(),
-                        storage.clone(),
-                        storage.clone(),
+                        compilations_storage.clone(),
+                        preprocessor_storage.clone(),
                         arguments.clone(),
                         cwd.to_path_buf(),
                         vec![],
@@ -3983,8 +3969,8 @@ LLVM version: 6.0",
                         &service,
                         Some(dist_client.clone()),
                         creator,
-                        storage.clone(),
-                        storage,
+                        compilations_storage.clone(),
+                        preprocessor_storage.clone(),
                         arguments,
                         cwd.to_path_buf(),
                         vec![],
@@ -4015,7 +4001,7 @@ LLVM version: 6.0",
         let gcc = f.mk_bin("gcc").unwrap();
         let runtime = Runtime::new().unwrap();
         let pool = runtime.handle().clone();
-        let compilations_storage = Arc::new(MockStorage::new(None, false));
+        let compilations_storage = Arc::new(MockStorage::new(None, true));
         let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
         let service = server::SccacheService::mock_with_storage(
             compilations_storage.clone(),
@@ -4140,7 +4126,7 @@ LLVM version: 6.0",
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
         // Make our storage wait 2ms for each get/put operation.
         let storage_delay = Duration::from_millis(2);
-        let compilations_storage = Arc::new(MockStorage::new(Some(storage_delay), false));
+        let compilations_storage = Arc::new(MockStorage::new(Some(storage_delay), true));
         let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
         let service = server::SccacheService::mock_with_storage(
             compilations_storage.clone(),
@@ -4256,22 +4242,16 @@ LLVM version: 6.0",
             .build()
             .unwrap();
         let pool = runtime.handle().clone();
-        let storage = PreprocessorCache(
-            Arc::new(DiskCache::new(
-                f.tempdir.path().join("cache"),
-                u64::MAX,
-                CacheMode::ReadWrite,
-                vec![],
-            )),
-            PreprocessorCacheModeConfig {
-                use_preprocessor_cache_mode: preprocessor_cache_mode,
-                ..Default::default()
-            },
-        );
-        let storage = Arc::new(storage);
+        let compilations_storage = Arc::new(DiskCache::new(
+            f.tempdir.path().join("cache"),
+            u64::MAX,
+            CacheMode::ReadWrite,
+            vec![],
+        ));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
         let service = server::SccacheService::mock_with_storage(
-            storage.clone(),
-            storage.clone(),
+            compilations_storage.clone(),
+            preprocessor_storage.clone(),
             pool.clone(),
         );
         // Write a dummy input file so the preprocessor cache mode can work
@@ -4354,8 +4334,8 @@ LLVM version: 6.0",
                         &service,
                         None,
                         creator.clone(),
-                        storage.clone(),
-                        storage.clone(),
+                        compilations_storage.clone(),
+                        preprocessor_storage.clone(),
                         arguments.clone(),
                         cwd.to_path_buf(),
                         vec![],
@@ -4388,8 +4368,8 @@ LLVM version: 6.0",
                 &service,
                 None,
                 creator,
-                storage.clone(),
-                storage,
+                compilations_storage.clone(),
+                preprocessor_storage.clone(),
                 arguments,
                 cwd.to_path_buf(),
                 vec![],
@@ -4425,22 +4405,16 @@ LLVM version: 6.0",
         let gcc = f.mk_bin("gcc").unwrap();
         let runtime = single_threaded_runtime();
         let pool = runtime.handle().clone();
-        let storage = PreprocessorCache(
-            Arc::new(DiskCache::new(
-                f.tempdir.path().join("cache"),
-                u64::MAX,
-                CacheMode::ReadWrite,
-                vec![],
-            )),
-            PreprocessorCacheModeConfig {
-                use_preprocessor_cache_mode: preprocessor_cache_mode,
-                ..Default::default()
-            },
-        );
-        let storage = Arc::new(storage);
+        let compilations_storage = Arc::new(DiskCache::new(
+            f.tempdir.path().join("cache"),
+            u64::MAX,
+            CacheMode::ReadWrite,
+            vec![],
+        ));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
         let service = server::SccacheService::mock_with_storage(
-            storage.clone(),
-            storage.clone(),
+            compilations_storage.clone(),
+            preprocessor_storage.clone(),
             pool.clone(),
         );
 
@@ -4511,8 +4485,8 @@ LLVM version: 6.0",
                         &service,
                         None,
                         creator,
-                        storage.clone(),
-                        storage,
+                        compilations_storage.clone(),
+                        preprocessor_storage.clone(),
                         arguments,
                         cwd.to_path_buf(),
                         vec![],
@@ -4551,19 +4525,13 @@ LLVM version: 6.0",
         ];
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
-        let storage = PreprocessorCache(
-            Arc::new(DiskCache::new(
-                f.tempdir.path().join("cache"),
-                u64::MAX,
-                CacheMode::ReadWrite,
-                vec![],
-            )),
-            PreprocessorCacheModeConfig {
-                use_preprocessor_cache_mode: preprocessor_cache_mode,
-                ..Default::default()
-            },
-        );
-        let storage = Arc::new(storage);
+        let compilations_storage = Arc::new(DiskCache::new(
+            f.tempdir.path().join("cache"),
+            u64::MAX,
+            CacheMode::ReadWrite,
+            vec![],
+        ));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
         // Pretend to be GCC.
         next_command(
             &creator,
@@ -4645,8 +4613,8 @@ LLVM version: 6.0",
         for (_, dist_client) in dist_clients {
             let service = server::SccacheService::mock_with_dist_client(
                 dist_client.clone(),
-                storage.clone(),
-                storage.clone(),
+                compilations_storage.clone(),
+                preprocessor_storage.clone(),
                 pool.clone(),
             );
 
@@ -4662,8 +4630,8 @@ LLVM version: 6.0",
                     &service,
                     Some(dist_client.clone()),
                     creator.clone(),
-                    storage.clone(),
-                    storage.clone(),
+                    compilations_storage.clone(),
+                    preprocessor_storage.clone(),
                     arguments.clone(),
                     cwd.to_path_buf(),
                     vec![],

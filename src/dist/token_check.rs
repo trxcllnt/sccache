@@ -1,7 +1,7 @@
 use crate::{
     config::{
         INSECURE_DIST_CLIENT_TOKEN,
-        scheduler::{ClientAuth, ProxyTokenDecodeConfig},
+        dist::scheduler::{Auth as ClientAuth, JWTDecode, ProxyTokenDecode},
     },
     dist::http::{ClientAuthCheck, ClientClaims},
     errors::*,
@@ -140,16 +140,16 @@ impl ProxyTokenCheck {
         token_ttl: Option<u64>,
         rate_limit_on_error_count: Option<usize>,
         rate_limit_on_error_window_size_secs: Option<u64>,
-        decode: Option<ProxyTokenDecodeConfig>,
+        decode: Option<ProxyTokenDecode>,
     ) -> Result<Self> {
         let decoder = match decode {
-            Some(ProxyTokenDecodeConfig::JwtDecoder {
+            Some(ProxyTokenDecode::Jwt(JWTDecode {
                 audience,
                 claims,
                 issuer,
                 jwks_url,
                 leeway,
-            }) => ProxyTokenDecoder::Jwt(
+            })) => ProxyTokenDecoder::Jwt(
                 ValidJWTCheck::new(audience, issuer, jwks_url, claims, leeway)
                     .await
                     .context("Failed to create a checker for valid JWTs")?,
@@ -242,7 +242,7 @@ pub struct ValidJWTCheck {
     claims_to_log: Vec<(String, String)>,
     issuer: Vec<String>,
     keys: HashMap<String, jwt::DecodingKey>,
-    leeway: Option<u64>,
+    leeway: u64,
 }
 
 #[async_trait]
@@ -257,8 +257,8 @@ impl ValidJWTCheck {
         audience: Vec<String>,
         issuer: Vec<String>,
         jwks_url: Vec<String>,
-        claims: Option<HashMap<String, String>>,
-        leeway: Option<u64>,
+        claims: HashMap<String, String>,
+        leeway: u64,
     ) -> Result<Self> {
         let mut keys = HashMap::new();
 
@@ -288,10 +288,8 @@ impl ValidJWTCheck {
                 });
         }
 
-        let (claims_to_log, claims_to_check): (Vec<_>, Vec<_>) = claims
-            .unwrap_or_default()
-            .into_iter()
-            .partition_map(|(key, val)| {
+        let (claims_to_log, claims_to_check): (Vec<_>, Vec<_>) =
+            claims.into_iter().partition_map(|(key, val)| {
                 if matches!(val.as_str(), "*" | "") {
                     itertools::Either::Left((key, val))
                 } else {
@@ -320,7 +318,7 @@ impl ValidJWTCheck {
         let mut validation = jwt::Validation::new(header.alg);
         validation.set_audience(self.audience.as_slice());
         validation.set_issuer(self.issuer.as_slice());
-        validation.leeway = self.leeway.unwrap_or(60);
+        validation.leeway = self.leeway;
 
         let value_to_string = |v: &serde_json::Value| {
             if let Some(s) = v.as_str() {
@@ -386,13 +384,13 @@ pub async fn new_client_auth_check(client_auth: ClientAuth) -> Result<Box<dyn Cl
     Ok(match client_auth {
         ClientAuth::Insecure => Box::new(EqCheck::new(INSECURE_DIST_CLIENT_TOKEN.to_owned())),
         ClientAuth::Token { token } => Box::new(EqCheck::new(token)),
-        ClientAuth::JwtValidate {
+        ClientAuth::Jwt(JWTDecode {
             audience,
             issuer,
             jwks_url,
             claims,
             leeway,
-        } => Box::new(
+        }) => Box::new(
             ValidJWTCheck::new(audience, issuer, jwks_url, claims, leeway)
                 .await
                 .context("Failed to create a checker for valid JWTs")?,

@@ -765,7 +765,7 @@ mod test {
             ..Default::default()
         };
         let runtime = single_threaded_runtime();
-        let storage = MockStorage::new(None, false);
+        let storage = MockStorage::new(None, true);
         let storage: std::sync::Arc<MockStorage> = std::sync::Arc::new(storage);
         let service =
             SccacheService::mock_with_storage(storage.clone(), storage, runtime.handle().clone());
@@ -808,7 +808,7 @@ mod test {
             ..Default::default()
         };
         let runtime = single_threaded_runtime();
-        let storage = MockStorage::new(None, false);
+        let storage = MockStorage::new(None, true);
         let storage: std::sync::Arc<MockStorage> = std::sync::Arc::new(storage);
         let service =
             SccacheService::mock_with_storage(storage.clone(), storage, runtime.handle().clone());

@@ -123,7 +123,7 @@ pub fn try_parse_from(
             let config_path = matches.get_one::<PathBuf>("config");
 
             Command::Scheduler(
-                config::scheduler::Config::load(config_path.cloned())
+                config::dist::scheduler::Config::load::<&PathBuf, _>(config_path)
                     .with_context(|| "Could not load config")?,
             )
         }
@@ -138,7 +138,7 @@ pub fn try_parse_from(
             let config_path = matches.get_one::<PathBuf>("config");
 
             Command::Server(
-                config::server::Config::load(config_path.cloned())
+                config::dist::server::Config::load::<&PathBuf, _>(config_path)
                     .with_context(|| "Could not load config")?,
             )
         }

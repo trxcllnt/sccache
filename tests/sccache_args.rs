@@ -32,7 +32,7 @@ fn test_gcp_arg_check() -> Result<()> {
         .env("SCCACHE_GCS_KEY_PATH", "foo.json");
 
     cmd.assert().failure().stderr(predicate::str::contains(
-        "If setting GCS credentials, SCCACHE_GCS_BUCKET",
+        "If setting GCS credentials, SCCACHE_CACHE_GCS_BUCKET",
     ));
 
     stop_sccache()?;
@@ -44,7 +44,7 @@ fn test_gcp_arg_check() -> Result<()> {
         .env("SCCACHE_GCS_OAUTH_URL", "http://127.0.0.1");
 
     cmd.assert().failure().stderr(predicate::str::contains(
-        "If setting GCS credentials, SCCACHE_GCS_BUCKET",
+        "SCCACHE_CACHE_GCS_OAUTH_URL has been deprecated",
     ));
 
     stop_sccache()?;

@@ -12,11 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::cache::{Cache, Storage};
 use crate::errors::*;
-use crate::{
-    cache::{Cache, Storage},
-    config::PreprocessorCacheModeConfig,
-};
 use async_trait::async_trait;
 use futures::channel::mpsc;
 use std::sync::Arc;
@@ -29,18 +26,18 @@ pub struct MockStorage {
     rx: Arc<Mutex<mpsc::UnboundedReceiver<Result<Cache<opendal::Buffer>>>>>,
     tx: mpsc::UnboundedSender<Result<Cache<opendal::Buffer>>>,
     delay: Option<Duration>,
-    preprocessor_cache_mode: bool,
+    enabled: bool,
 }
 
 impl MockStorage {
     /// Create a new `MockStorage`. if `delay` is `Some`, wait for that amount of time before returning from operations.
-    pub(crate) fn new(delay: Option<Duration>, preprocessor_cache_mode: bool) -> MockStorage {
+    pub(crate) fn new(delay: Option<Duration>, enabled: bool) -> MockStorage {
         let (tx, rx) = mpsc::unbounded();
         Self {
             tx,
             rx: Arc::new(Mutex::new(rx)),
             delay,
-            preprocessor_cache_mode,
+            enabled,
         }
     }
 
@@ -64,15 +61,18 @@ impl Storage for MockStorage {
 
         next.expect("MockStorage get called but no get results available")
     }
+
     async fn del(&self, _key: &str) -> Result<()> {
         if let Some(delay) = self.delay {
             sleep(delay).await;
         }
         Ok(())
     }
+
     async fn has(&self, _key: &str) -> bool {
         false
     }
+
     async fn put(&self, _key: &str, _entry: opendal::Buffer) -> Result<Duration> {
         Ok(if let Some(delay) = self.delay {
             sleep(delay).await;
@@ -81,6 +81,7 @@ impl Storage for MockStorage {
             Duration::from_secs(0)
         })
     }
+
     async fn size(&self, _key: &str) -> Result<u64> {
         if let Some(delay) = self.delay {
             sleep(delay).await;
@@ -92,24 +93,27 @@ impl Storage for MockStorage {
         }
         Ok(0)
     }
+
     async fn location(&self) -> String {
         "Mock Storage".to_string()
     }
+
     fn cache_type_name(&self) -> &'static str {
         "MockStorage"
     }
+
     async fn current_size(&self) -> Result<Option<u64>> {
         Ok(None)
     }
+
     async fn max_size(&self) -> Result<Option<u64>> {
         Ok(None)
     }
-    fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
-        PreprocessorCacheModeConfig {
-            use_preprocessor_cache_mode: self.preprocessor_cache_mode,
-            ..Default::default()
-        }
+
+    fn enabled(&self) -> bool {
+        self.enabled
     }
+
     fn basedirs(&self) -> &[Vec<u8>] {
         &[]
     }

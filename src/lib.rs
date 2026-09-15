@@ -82,7 +82,7 @@ pub fn main() {
     std::process::exit(match commands::run_command(command) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("sccache: error: {e}");
+            eprintln!("sccache: error: {e:?}");
             for e in e.chain().skip(1) {
                 eprintln!("sccache: caused by: {e}");
             }

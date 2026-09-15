@@ -17,7 +17,7 @@ use crate::{
     client::{ServerConnection, connect_to_server, connect_with_retry},
     cmdline::{Command, StatsFormat},
     compiler::ColorMode,
-    config::Config,
+    config::ClientConfig,
     errors::*,
     jobserver::Client,
     mock_command::{CommandChild, CommandCreatorSync, ProcessCommandCreator, RunCommand},
@@ -48,9 +48,6 @@ use which::which_in;
 
 /// The default sccache server port.
 pub const DEFAULT_PORT: u16 = 4226;
-
-/// The number of milliseconds to wait for server startup.
-const SERVER_STARTUP_TIMEOUT: Duration = Duration::from_millis(10000);
 
 /// Get the port on which the server should listen.
 fn get_addr() -> crate::net::SocketAddr {
@@ -92,7 +89,7 @@ async fn read_server_startup_status<R: AsyncReadExt + Unpin>(
 /// Re-execute the current executable as a background server, and wait
 /// for it to start up.
 #[cfg(not(windows))]
-fn run_server_process(startup_timeout: Option<Duration>) -> Result<ServerStartup> {
+fn run_server_process(startup_timeout: Duration) -> Result<ServerStartup> {
     trace!("run_server_process");
     let tempdir = crate::util::temp_dir()?;
     let socket_path = tempdir.path().join("sock");
@@ -132,9 +129,8 @@ fn run_server_process(startup_timeout: Option<Duration>) -> Result<ServerStartup
         read_server_startup_status(socket).await
     };
 
-    let timeout = startup_timeout.unwrap_or(SERVER_STARTUP_TIMEOUT);
     runtime.block_on(async move {
-        match tokio::time::timeout(timeout, startup).await {
+        match tokio::time::timeout(startup_timeout, startup).await {
             Ok(result) => result,
             Err(_elapsed) => Ok(ServerStartup::TimedOut),
         }
@@ -320,7 +316,7 @@ fn run_server_process(startup_timeout: Option<Duration>) -> Result<ServerStartup
 /// Attempt to connect to an sccache server listening on `addr`, or start one if no server is running.
 fn connect_or_start_server(
     addr: &crate::net::SocketAddr,
-    startup_timeout: Option<Duration>,
+    startup_timeout: Duration,
 ) -> Result<ServerConnection> {
     trace!("connect_or_start_server({addr})");
     match connect_to_server(addr) {
@@ -720,7 +716,7 @@ where
         server::DistClientContainer::new_disabled(),
         Arc::new(compilations_storage),
         Arc::new(preprocessor_storage),
-        None,
+        Duration::from_secs(60),
         None,
         jobserver,
         runtime.handle().clone(),
@@ -759,7 +755,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
     match cmd {
         Command::ShowStats(fmt, advanced) => {
             trace!("Command::ShowStats({fmt:?})");
-            let config = Config::load()?;
+            let config = ClientConfig::load()?;
             let stats = match connect_to_server(&get_addr()) {
                 Ok(srv) => request_stats(srv).context("failed to get stats from server")?,
                 // If there is no server, spawning a new server would start with zero stats
@@ -768,8 +764,9 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                     let runtime = new_client_runtime()?;
                     runtime.block_on(async {
                         let (compilations_storage, preprocessor_storage) = tokio::try_join!(
-                            StorageKind::Compilations.create(&config),
-                            StorageKind::Preprocessor.create(&config),
+                            StorageKind::Compilations.create(&config.cache, &config.basedirs),
+                            StorageKind::Preprocessor
+                                .create(&config.preprocessor.cache, &config.basedirs),
                         )?;
                         ServerInfo::new(
                             ServerStats::default(),
@@ -787,10 +784,12 @@ pub fn run_command(cmd: Command) -> Result<i32> {
         }
         Command::DebugPreprocessorCacheEntries(key) => {
             trace!("Command::DebugPreprocessorCacheEntries");
-            let config = Config::load()?;
+            let config = ClientConfig::load()?;
             let runtime = Runtime::new()?;
             runtime.block_on(async {
-                let storage = StorageKind::Preprocessor.create(&config).await?;
+                let storage = StorageKind::Preprocessor
+                    .create(&config.preprocessor.cache, &[])
+                    .await?;
                 match crate::compiler::PreprocessorCacheEntry::get(storage.as_ref(), &key).await {
                     Err(err) => {
                         eprintln!("Err retrieving preprocessor entry for key {key:?}: {err:#?}");
@@ -826,7 +825,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 version = env!("CARGO_PKG_VERSION")
             );
             // Load config after redirecting stderr so those are captured in the file
-            let config = Config::load()?;
+            let config = ClientConfig::load()?;
             server::start_server(config, &get_addr())?;
         }
         Command::StartServer => {
@@ -836,9 +835,10 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 sccache = env!("CARGO_PKG_NAME"),
                 version = env!("CARGO_PKG_VERSION")
             );
-            let config = Config::load()?;
-            let startup = run_server_process(config.server_startup_timeout)
-                .context("failed to start server process")?;
+            let config = ClientConfig::load()?;
+            let startup =
+                run_server_process(Duration::from_millis(config.server_startup_timeout_ms))
+                    .context("failed to start server process")?;
             match startup {
                 ServerStartup::Ok { addr } => {
                     println!("sccache: Listening on address {addr}");
@@ -857,8 +857,11 @@ pub fn run_command(cmd: Command) -> Result<i32> {
         }
         Command::ZeroStats => {
             trace!("Command::ZeroStats");
-            let config = Config::load()?;
-            let conn = connect_or_start_server(&get_addr(), config.server_startup_timeout)?;
+            let config = ClientConfig::load()?;
+            let conn = connect_or_start_server(
+                &get_addr(),
+                Duration::from_millis(config.server_startup_timeout_ms),
+            )?;
             request_zero_stats(conn).context("couldn't zero stats on server")?;
             eprintln!("Statistics zeroed.");
         }
@@ -868,16 +871,17 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             use crate::dist;
             use url::Url;
 
-            let config = Config::load()?;
+            let config = ClientConfig::load()?;
 
             match &config.dist.auth {
-                config::DistAuth::Token { .. } => {
+                config::client::dist::Auth::Token { .. } => {
                     info!("No authentication needed for type 'token'");
                 }
-                config::DistAuth::Oauth2CodeGrantPKCE {
+                config::client::dist::Auth::Oauth2CodeGrantPKCE {
                     client_id,
                     auth_url,
                     token_url,
+                    ..
                 } => {
                     let cached_config = config::CachedConfig::load()?;
 
@@ -896,9 +900,10 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                         .context("Unable to save auth token")?;
                     println!("Saved token");
                 }
-                config::DistAuth::Oauth2Implicit {
+                config::client::dist::Auth::Oauth2Implicit {
                     client_id,
                     auth_url,
+                    ..
                 } => {
                     let cached_config = config::CachedConfig::load()?;
 
@@ -922,8 +927,11 @@ pub fn run_command(cmd: Command) -> Result<i32> {
         ),
         Command::DistStatus => {
             trace!("Command::DistStatus");
-            let config = Config::load()?;
-            let srv = connect_or_start_server(&get_addr(), config.server_startup_timeout)?;
+            let config = ClientConfig::load()?;
+            let srv = connect_or_start_server(
+                &get_addr(),
+                Duration::from_millis(config.server_startup_timeout_ms),
+            )?;
             let status =
                 request_dist_status(srv).context("failed to get dist-status from server")?;
             serde_json::to_writer(&mut io::stdout(), &status)?;
@@ -976,7 +984,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             env_vars,
         } => {
             trace!("Command::Compile {{ {exe:?}, {cmdline:?}, {cwd:?} }}");
-            let config = Config::load()?;
+            let config = ClientConfig::load()?;
             let incr_env_strs = ["CARGO_BUILD_INCREMENTAL", "CARGO_INCREMENTAL"];
             incr_env_strs
                 .iter()
@@ -991,7 +999,10 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 });
 
             let jobserver = Client::new_num(1);
-            let conn = connect_or_start_server(&get_addr(), config.server_startup_timeout)?;
+            let conn = connect_or_start_server(
+                &get_addr(),
+                Duration::from_millis(config.server_startup_timeout_ms),
+            )?;
             if config.client_side_mode {
                 // Under make -jN each CLI process gets only 2 worker threads;
                 // one for preprocessing/compilation and one for IPC.  The

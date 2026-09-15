@@ -17,7 +17,7 @@ use harness::{
 use harness::{find_compilers, find_cuda_compilers};
 #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 use pastey::paste;
-use sccache::{config::HTTPUrl, errors::*};
+use sccache::{config::utils::HTTPUrl, errors::*};
 use std::path::Path;
 use std::process::Output;
 use test_case::test_case;
@@ -190,10 +190,11 @@ pub fn dist_test_sccache_client_cfg(
     tmpdir: &Path,
     scheduler_url: HTTPUrl,
     preprocessor_cache_mode: bool,
-) -> sccache::config::FileConfig {
-    let mut sccache_cfg = harness::client::sccache_client_cfg(tmpdir, preprocessor_cache_mode);
-    sccache_cfg.cache.disk.as_mut().unwrap().size = 0;
-    sccache_cfg.dist.scheduler_url = Some(scheduler_url);
+    cache_size: u64,
+) -> sccache::config::ClientConfig {
+    let mut sccache_cfg =
+        harness::client::sccache_client_cfg(tmpdir, preprocessor_cache_mode, cache_size);
+    sccache_cfg.dist.url = Some(scheduler_url);
     sccache_cfg
 }
 
@@ -219,6 +220,7 @@ async fn test_dist_cargo_build(message_broker: &str) -> Result<()> {
             system.data_dir(),
             system.scheduler(0)?.url(),
             false,
+            0,
         ));
 
         let output = rust_compile(&client, system.test_dir()).await?;
@@ -278,6 +280,7 @@ async fn test_dist_cpp_disk_storage(message_broker: &str) -> Result<()> {
         system.data_dir(),
         system.scheduler(0)?.url(),
         false,
+        0,
     ));
 
     cc_compile(&client, system.test_dir()).await?;
@@ -313,6 +316,7 @@ async fn test_dist_cpp_toolchain(message_broker: &str) -> Result<()> {
             system.data_dir(),
             system.scheduler(0)?.url(),
             false,
+            0,
         ));
 
         let tc_dir = client.clear_toolchains_cache()?;
@@ -359,6 +363,7 @@ async fn test_dist_cpp_cloud_storage(message_broker: &str) -> Result<()> {
         system.data_dir(),
         system.scheduler(0)?.url(),
         false,
+        0,
     ));
 
     cc_compile(&client, system.test_dir()).await?;
@@ -393,6 +398,7 @@ async fn test_dist_cpp_server_restart(message_broker: &str) -> Result<()> {
         system.data_dir(),
         system.scheduler(0)?.url(),
         false,
+        0,
     ));
 
     cc_compile(&client, system.test_dir()).await?;
@@ -431,6 +437,7 @@ async fn test_dist_cpp_no_server_times_out(message_broker: &str) -> Result<()> {
         system.data_dir(),
         system.scheduler(0)?.url(),
         false,
+        0,
     ));
 
     cc_compile(&client, system.test_dir()).await?;
@@ -466,6 +473,7 @@ async fn test_dist_cpp_two_servers(message_broker: &str) -> Result<()> {
         system.data_dir(),
         system.scheduler(0)?.url(),
         false,
+        0,
     ));
 
     let _ = tokio::try_join!(
@@ -506,6 +514,7 @@ async fn test_dist_cpp_errors_on_job_load_failures(message_broker: &str) -> Resu
         system.data_dir(),
         system.scheduler(0)?.url(),
         false,
+        0,
     ));
 
     cc_compile(&client, system.test_dir()).await?;
@@ -541,6 +550,7 @@ async fn test_dist_cpp_errors_on_toolchain_load_failures(message_broker: &str) -
         system.data_dir(),
         system.scheduler(0)?.url(),
         false,
+        0,
     ));
 
     cc_compile(&client, system.test_dir()).await?;
@@ -575,12 +585,12 @@ async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Resu
         .build()
         .await?;
 
-    let client = system.new_client(&{
-        let mut config =
-            dist_test_sccache_client_cfg(system.data_dir(), system.scheduler(0)?.url(), true);
-        config.cache.disk.as_mut().unwrap().size = 10_000_000; // enough for one tiny object file
-        config
-    });
+    let client = system.new_client(&dist_test_sccache_client_cfg(
+        system.data_dir(),
+        system.scheduler(0)?.url(),
+        true,
+        10_000_000, // enough for one tiny object file
+    ));
 
     let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
 
@@ -606,7 +616,7 @@ async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Resu
     );
 
     // Delete the object cache to ensure a cache miss
-    client.clear_object_cache()?;
+    client.clear_compilations_cache()?;
 
     cc_compile(&client, system.test_dir()).await?;
 
@@ -647,12 +657,12 @@ async fn test_dist_cuda_compiles(
         .build()
         .await?;
 
-    let client = system.new_client(&{
-        let mut config =
-            dist_test_sccache_client_cfg(system.data_dir(), system.scheduler(0)?.url(), true);
-        config.cache.disk.as_mut().unwrap().size = 10_000_000; // enough for one tiny object file
-        config
-    });
+    let client = system.new_client(&dist_test_sccache_client_cfg(
+        system.data_dir(),
+        system.scheduler(0)?.url(),
+        true,
+        10_000_000, // enough for one tiny object file
+    ));
 
     let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
 
@@ -681,7 +691,7 @@ async fn test_dist_cuda_compiles(
     );
 
     // Delete the object cache to ensure a cache miss
-    client.clear_object_cache()?;
+    client.clear_compilations_cache()?;
     client.zero_stats();
 
     nvcc_compile(&client, cuda_compiler, host_compiler, system.test_dir()).await?;
@@ -732,6 +742,7 @@ async fn test_dist_stdpar_compiles(compiler: &Compiler, message_broker: &str) ->
         system.data_dir(),
         system.scheduler(0)?.url(),
         false,
+        0,
     ));
 
     stdpar_compile(&client, compiler, system.test_dir()).await?;

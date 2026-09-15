@@ -1582,7 +1582,7 @@ pub fn daemonize() -> Result<()> {
 #[cfg(any(feature = "dist-server", feature = "dist-client"))]
 pub fn new_reqwest_client<'a, C>(config: C) -> reqwest::Client
 where
-    C: Into<Option<&'a crate::config::DistNetworking>>,
+    C: Into<Option<&'a crate::config::client::dist::Networking>>,
 {
     let builder = reqwest::Client::builder()
         .user_agent(format!(

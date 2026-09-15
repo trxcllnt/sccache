@@ -21,6 +21,6 @@ pub use parse::try_parse_from;
 
 #[derive(Debug)]
 pub enum Command {
-    Scheduler(config::scheduler::Config),
-    Server(config::server::Config),
+    Scheduler(config::dist::scheduler::Config),
+    Server(config::dist::server::Config),
 }

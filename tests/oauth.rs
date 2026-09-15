@@ -26,8 +26,8 @@ const BROWSER_MAX_WAIT: Duration = Duration::from_secs(10);
 const TEST_USERNAME: &str = "test@example.com";
 const TEST_PASSWORD: &str = "test1234";
 
-fn generate_code_grant_pkce_auth_config() -> sccache::config::DistAuth {
-    sccache::config::DistAuth::Oauth2CodeGrantPKCE {
+fn generate_code_grant_pkce_auth_config() -> sccache::config::client::dist::Auth {
+    sccache::config::client::dist::Auth::Oauth2CodeGrantPKCE {
         client_id: "Xmbl6zRW1o1tJ5LQOz0p65NwY47aMO7A".to_owned(),
         auth_url:
             "https://sccache-test.auth0.com/authorize?audience=https://sccache-dist-test-api/"
@@ -35,8 +35,8 @@ fn generate_code_grant_pkce_auth_config() -> sccache::config::DistAuth {
         token_url: "https://sccache-test.auth0.com/oauth/token".to_owned(),
     }
 }
-fn generate_implicit_auth_config() -> sccache::config::DistAuth {
-    sccache::config::DistAuth::Oauth2Implicit {
+fn generate_implicit_auth_config() -> sccache::config::client::dist::Auth {
+    sccache::config::client::dist::Auth::Oauth2Implicit {
         client_id: "TTborSAyjBnSi1W11201ZzNu9gSg63bq".to_owned(),
         auth_url:
             "https://sccache-test.auth0.com/authorize?audience=https://sccache-dist-test-api/"
@@ -46,22 +46,19 @@ fn generate_implicit_auth_config() -> sccache::config::DistAuth {
 
 fn config_with_dist_auth(
     tmpdir: &Path,
-    auth_config: sccache::config::DistAuth,
-) -> sccache::config::FileConfig {
-    sccache::config::FileConfig {
+    auth_config: sccache::config::client::dist::Auth,
+) -> sccache::config::ClientConfig {
+    sccache::config::ClientConfig {
         cache: Default::default(),
-        dist: sccache::config::DistConfig {
+        dist: sccache::config::client::dist::Config {
             auth: auth_config,
-            scheduler_url: None,
+            url: None,
             cache_dir: tmpdir.join("unused-cache"),
             toolchains: vec![],
             toolchain_cache_size: 0,
             rewrite_includes_only: true,
             ..Default::default()
         },
-        server_startup_timeout_ms: None,
-        basedirs: vec![],
-        client_side_mode: false,
         ..Default::default()
     }
 }
@@ -228,7 +225,7 @@ async fn test_auth() {
     test_auth_with_config(generate_implicit_auth_config()).await;
 }
 
-async fn test_auth_with_config(dist_auth: sccache::config::DistAuth) {
+async fn test_auth_with_config(dist_auth: sccache::config::client::dist::Auth) {
     let conf_dir = tempfile::Builder::new()
         .prefix("sccache-test-conf")
         .tempdir()

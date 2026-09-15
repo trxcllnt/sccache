@@ -194,7 +194,7 @@ fn restart_sccache(
     test_info: &SccacheTest,
     additional_envs: Option<Vec<(String, String)>>,
 ) -> Result<()> {
-    let cache_dir = test_info.tempdir.path().join("cache");
+    let cache_dir = test_info.tempdir.join("cache");
     let config = tempfile::NamedTempFile::new().map(|p| p.into_temp_path())?;
 
     stop_sccache()?;
@@ -358,7 +358,7 @@ fn test_rust_cargo_cmd_readonly_preemtive_block() -> Result<()> {
     // `cargo clean` first, just to be sure there's no leftover build objects.
     cargo_clean(&test_info)?;
 
-    let sccache_log = test_info.tempdir.path().join("sccache.log");
+    let sccache_log = test_info.tempdir.join("sccache.log");
 
     stop_sccache()?;
 

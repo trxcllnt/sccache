@@ -13,12 +13,12 @@
 // limitations under the License.SCCACHE_MAX_FRAME_LENGTH
 
 use crate::{
-    cache::{Cache, CacheMode, Storage, StorageKind, multilevel::MultiLevelStats},
+    cache::{Cache, Storage, StorageKind, multilevel::MultiLevelStats},
     compiler::{
         CacheControl, CompileResult, Compiler, CompilerArguments, CompilerHasher, CompilerKind,
         CompilerProxy, DistType, Language, MissType, compiler_info_args, get_compiler_info,
     },
-    config::Config,
+    config::{CacheMode, ClientConfig},
     dist,
     errors::*,
     jobserver::Client,
@@ -140,14 +140,14 @@ pub struct DistClientContainer {
 #[cfg(feature = "dist-client")]
 pub struct DistClientConfig {
     // From the static dist configuration
-    scheduler_url: Option<config::HTTPUrl>,
-    auth: config::DistAuth,
+    scheduler_url: Option<config::utils::HTTPUrl>,
+    auth: config::client::dist::Auth,
     fallback_to_local_compile: bool,
     max_retries: f64,
-    net: config::DistNetworking,
+    net: config::client::dist::Networking,
     cache_dir: PathBuf,
     toolchain_cache_size: u64,
-    toolchains: Vec<config::DistToolchainConfig>,
+    toolchains: Vec<config::client::dist::Toolchain>,
     rewrite_includes_only: bool,
 }
 
@@ -165,7 +165,7 @@ pub enum DistClientState {
 #[cfg(not(feature = "dist-client"))]
 impl DistClientContainer {
     #[cfg(not(feature = "dist-client"))]
-    fn new(config: &Config, _: &tokio::runtime::Handle) -> Self {
+    fn new(config: &ClientConfig, _: &tokio::runtime::Handle) -> Self {
         if config.dist.scheduler_url.is_some() {
             warn!(
                 "Scheduler address configured but dist feature disabled, disabling distributed sccache"
@@ -196,12 +196,12 @@ impl DistClientContainer {
 
 #[cfg(feature = "dist-client")]
 impl DistClientContainer {
-    fn new(config: &Config, pool: &tokio::runtime::Handle) -> Self {
+    fn new(config: &ClientConfig, pool: &tokio::runtime::Handle) -> Self {
         let config = DistClientConfig {
-            scheduler_url: config.dist.scheduler_url.clone(),
+            scheduler_url: config.dist.url.clone(),
             auth: config.dist.auth.clone(),
             fallback_to_local_compile: config.dist.fallback_to_local_compile,
-            max_retries: config.dist.max_retries,
+            max_retries: config.dist.max_retries.clone().into(),
             net: config.dist.net.clone(),
             cache_dir: config.dist.cache_dir.clone(),
             toolchain_cache_size: config.dist.toolchain_cache_size,
@@ -354,9 +354,9 @@ impl DistClientContainer {
                 let url = addr.to_url();
                 info!("Enabling distributed sccache to {url}");
                 let auth_token = match &config.auth {
-                    config::DistAuth::Token { token } => Ok(token.to_owned()),
-                    config::DistAuth::Oauth2CodeGrantPKCE { auth_url, .. }
-                    | config::DistAuth::Oauth2Implicit { auth_url, .. } => {
+                    config::client::dist::Auth::Token { token, .. } => Ok(token.to_owned()),
+                    config::client::dist::Auth::Oauth2CodeGrantPKCE { auth_url, .. }
+                    | config::client::dist::Auth::Oauth2Implicit { auth_url, .. } => {
                         Self::get_cached_config_auth_token(auth_url)
                     }
                 };
@@ -425,7 +425,11 @@ thread_local! {
 ///
 /// Spins an event loop handling client connections until a client
 /// requests a shutdown.
-pub fn start_server(config: Config, addr: &crate::net::SocketAddr) -> Result<()> {
+pub fn start_server<C: AsRef<ClientConfig>>(
+    config: C,
+    addr: &crate::net::SocketAddr,
+) -> Result<()> {
+    let config = config.as_ref();
     info!("start_server: {addr}");
     let panic_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -444,15 +448,17 @@ pub fn start_server(config: Config, addr: &crate::net::SocketAddr) -> Result<()>
     }
     let runtime = builder.enable_all().build()?;
     let pool = runtime.handle().clone();
-    let dist_client = DistClientContainer::new(&config, &pool);
+    let dist_client = DistClientContainer::new(config, &pool);
 
     let notify = env::var_os("SCCACHE_STARTUP_NOTIFY");
 
     let init_storage = || -> Result<(Arc<dyn Storage>, Arc<dyn Storage>)> {
         runtime.block_on(async {
             Ok((
-                StorageKind::Compilations.create(&config).await?,
-                StorageKind::Preprocessor.create(&config).await?,
+                StorageKind::Compilations.create(&config.cache, &[]).await?,
+                StorageKind::Preprocessor
+                    .create(&config.preprocessor.cache, &[])
+                    .await?,
             ))
         })
     };
@@ -479,8 +485,8 @@ pub fn start_server(config: Config, addr: &crate::net::SocketAddr) -> Result<()>
                     dist_client,
                     storage,
                     preprocessor_storage,
-                    config.cache_read_timeout,
-                    config.cache_write_timeout,
+                    Duration::from_secs(config.cache.read_timeout_secs),
+                    config.cache.write_timeout_secs.map(Duration::from_secs),
                 );
                 Ok((
                     srv.local_addr().unwrap(),
@@ -503,8 +509,8 @@ pub fn start_server(config: Config, addr: &crate::net::SocketAddr) -> Result<()>
                     dist_client,
                     storage,
                     preprocessor_storage,
-                    config.cache_read_timeout,
-                    config.cache_write_timeout,
+                    Duration::from_secs(config.cache.read_timeout_secs),
+                    config.cache.write_timeout_secs.map(Duration::from_secs),
                 );
                 Ok((
                     srv.local_addr().unwrap(),
@@ -528,8 +534,8 @@ pub fn start_server(config: Config, addr: &crate::net::SocketAddr) -> Result<()>
                     dist_client,
                     storage,
                     preprocessor_storage,
-                    config.cache_read_timeout,
-                    config.cache_write_timeout,
+                    Duration::from_secs(config.cache.read_timeout_secs),
+                    config.cache.write_timeout_secs.map(Duration::from_secs),
                 );
                 Ok((
                     srv.local_addr()
@@ -588,7 +594,7 @@ impl<C: CommandCreatorSync> SccacheServer<tokio::net::TcpListener, C> {
         dist_client: DistClientContainer,
         storage: Arc<dyn Storage>,
         preprocessor_storage: Arc<dyn Storage>,
-        cache_read_timeout: Option<Duration>,
+        cache_read_timeout: Duration,
         cache_write_timeout: Option<Duration>,
     ) -> Result<Self> {
         let addr = crate::net::SocketAddr::with_port(port);
@@ -616,7 +622,7 @@ impl<A: crate::net::Acceptor, C: CommandCreatorSync> SccacheServer<A, C> {
         dist_client: DistClientContainer,
         storage: Arc<dyn Storage>,
         preprocessor_storage: Arc<dyn Storage>,
-        cache_read_timeout: Option<Duration>,
+        cache_read_timeout: Duration,
         cache_write_timeout: Option<Duration>,
     ) -> Self {
         // Prepare the service which we'll use to service all incoming TCP
@@ -746,7 +752,7 @@ impl<A: crate::net::Acceptor, C: CommandCreatorSync> SccacheServer<A, C> {
 
         // Optionally log sysinfo (helpful in CI)
         let sys_info = async move {
-            use crate::config::{bool_from_env_var, number_from_env_var};
+            use crate::config::utils::{bool_from_env_var, number_from_env_var};
             if !log_enabled!(log::Level::Info)
                 || !matches!(bool_from_env_var("SCCACHE_LOG_SYSINFO"), Ok(Some(true)))
             {
@@ -950,7 +956,7 @@ where
     pub stats: Arc<Mutex<ServerStats>>,
 
     /// Timeout for cache reads (default: 60s)
-    pub cache_read_timeout: Option<Duration>,
+    pub cache_read_timeout: Duration,
 
     /// Timeout for cache writes (default: None)
     pub cache_write_timeout: Option<Duration>,
@@ -1126,8 +1132,8 @@ where
                     let info = StorageHandshakeInfo {
                         location: storage.location().await,
                         cache_type_name: storage.cache_type_name().to_owned(),
+                        enabled: storage.enabled(),
                         basedirs: storage.basedirs().to_vec(),
-                        preprocessor_cache_mode_config: storage.preprocessor_cache_mode_config(),
                         cache_mode: storage.check().await.unwrap_or(CacheMode::ReadWrite),
                         max_size: storage.max_size().await.unwrap_or(None),
                     };
@@ -1221,7 +1227,7 @@ where
         dist_client: DistClientContainer,
         storage: Arc<dyn Storage>,
         preprocessor_storage: Arc<dyn Storage>,
-        cache_read_timeout: Option<Duration>,
+        cache_read_timeout: Duration,
         cache_write_timeout: Option<Duration>,
         client: &Client,
         rt: tokio::runtime::Handle,
@@ -1286,7 +1292,7 @@ where
             preprocessor_storage,
             pending_compilations_limit: util::num_cpus() as u64,
             compiler_info_queue,
-            cache_read_timeout: None,
+            cache_read_timeout: Duration::from_secs(60),
             cache_write_timeout: None,
             rt,
             creator,
@@ -1310,7 +1316,7 @@ where
         let dist_client = Arc::new(DistClientContainer::new_with_state(DistClientState::Some(
             Box::new(DistClientConfig {
                 scheduler_url: None,
-                auth: config::DistAuth::Token {
+                auth: config::client::dist::Auth::Token {
                     token: String::new(),
                 },
                 fallback_to_local_compile: true,
@@ -1341,7 +1347,7 @@ where
             preprocessor_storage,
             pending_compilations_limit: util::num_cpus() as u64,
             compiler_info_queue,
-            cache_read_timeout: None,
+            cache_read_timeout: Duration::from_secs(60),
             cache_write_timeout: None,
             rt: rt.clone(),
             creator,
@@ -1964,7 +1970,7 @@ where
                 .map(|attr| FileTime::from_last_modification_time(&attr))
                 .ok()
                 .map(move |filetime| (path.to_owned(), filetime))
-                .expect("Must contain sane data, otherwise mtime is not avail")
+                .context("Must contain sane data, otherwise mtime is not avail")?
         }
     };
 
@@ -2267,9 +2273,9 @@ pub struct ServerInfo {
 pub enum DistInfo {
     Disabled(String),
     #[cfg(feature = "dist-client")]
-    NotConnected(Option<config::HTTPUrl>, String),
+    NotConnected(Option<config::utils::HTTPUrl>, String),
     #[cfg(feature = "dist-client")]
-    SchedulerStatus(Option<config::HTTPUrl>, dist::SchedulerStatus),
+    SchedulerStatus(Option<config::utils::HTTPUrl>, dist::SchedulerStatus),
 }
 
 impl Default for ServerStats {
@@ -2722,10 +2728,7 @@ impl ServerInfo {
         ) = storage_info(preprocessor_storage).await;
 
         let use_preprocessor_cache_mode = preprocessor_storage
-            .map(|s| {
-                s.preprocessor_cache_mode_config()
-                    .use_preprocessor_cache_mode
-            })
+            .map(|s| s.enabled())
             .unwrap_or_default();
 
         let version = env!("CARGO_PKG_VERSION").to_string();

@@ -28,9 +28,13 @@ use nix::{
 
 use sccache::{
     config::{
-        CacheType, DiskCacheConfig, FileConfig, HTTPUrl, INSECURE_DIST_CLIENT_TOKEN, MessageBroker,
-        RedisCacheConfig, scheduler::ClientAuth, scheduler::Config as SchedulerConfig,
-        server::BuilderType, server::Config as ServerConfig,
+        self, CacheType, ClientConfig, INSECURE_DIST_CLIENT_TOKEN,
+        dist::{
+            MessageBroker,
+            scheduler::Config as SchedulerConfig,
+            server::{Builder, Config as ServerConfig, OverlayBuilder},
+        },
+        utils::HTTPUrl,
     },
     dist::{SchedulerStatus, http::urls::scheduler_status as scheduler_status_url},
     errors::*,
@@ -64,57 +68,58 @@ fn sccache_scheduler_cfg(message_broker: &MessageBroker) -> SchedulerConfig {
     let scheduler_port = SCHEDULER_PORT.fetch_add(1, Ordering::SeqCst);
 
     SchedulerConfig {
-        client_auth: vec![ClientAuth::Insecure],
         message_broker: Some(message_broker.clone()),
         public_addr: SocketAddr::from(([0, 0, 0, 0], scheduler_port)),
-        jobs: sccache::config::CacheConfigs {
-            disk: Some(DiskCacheConfig {
+        jobs: vec![
+            config::cache::Disk {
                 dir: Path::new(CONTAINER_EXTERNAL_PATH).join("jobs"),
-                ..DiskCacheConfig::default()
-            }),
-            ..Default::default()
-        },
-        toolchains: sccache::config::CacheConfigs {
-            disk: Some(DiskCacheConfig {
+                ..config::cache::Disk::default()
+            }
+            .into(),
+        ]
+        .into(),
+        toolchains: vec![
+            config::cache::Disk {
                 dir: Path::new(CONTAINER_EXTERNAL_PATH).join("toolchains"),
-                ..DiskCacheConfig::default()
-            }),
-            ..Default::default()
-        },
-        ..SchedulerConfig::default()
+                ..config::cache::Disk::default()
+            }
+            .into(),
+        ]
+        .into(),
+        ..Default::default()
     }
 }
 
 fn sccache_server_cfg(message_broker: &MessageBroker) -> ServerConfig {
     ServerConfig {
-        max_per_core_load: 0.0,
-        max_per_core_prefetch: 0.0,
+        max_per_core_load: 0.0.into(),
+        max_per_core_prefetch: 0.0.into(),
         message_broker: Some(message_broker.clone()),
-        builder: BuilderType::Overlay {
+        builder: Builder::Overlay(OverlayBuilder {
             build_dir: CONTAINER_EXTERNAL_PATH.into(),
             bwrap_path: DIST_IMAGE_BWRAP_PATH.into(),
-            exec_cmd: None,
-            lower_dirs: None,
-            overlay_env: None,
-        },
+            ..Default::default()
+        }),
         // Unpack toolchains inside each container
         cache_dir: Path::new(CONTAINER_INTERNAL_PATH).into(),
         // Store job results outside the container
-        jobs: sccache::config::CacheConfigs {
-            disk: Some(DiskCacheConfig {
+        jobs: vec![
+            config::cache::Disk {
                 dir: Path::new(CONTAINER_EXTERNAL_PATH).join("jobs"),
-                ..DiskCacheConfig::default()
-            }),
-            ..Default::default()
-        },
+                ..config::cache::Disk::default()
+            }
+            .into(),
+        ]
+        .into(),
         // Store toolchain archives outside the container
-        toolchains: sccache::config::CacheConfigs {
-            disk: Some(DiskCacheConfig {
+        toolchains: vec![
+            config::cache::Disk {
                 dir: Path::new(CONTAINER_EXTERNAL_PATH).join("toolchains"),
-                ..DiskCacheConfig::default()
-            }),
-            ..Default::default()
-        },
+                ..config::cache::Disk::default()
+            }
+            .into(),
+        ]
+        .into(),
         toolchain_cache_size: TC_CACHE_SIZE,
         ..ServerConfig::default()
     }
@@ -385,7 +390,7 @@ impl DistMessageBroker {
                 let host_port = RABBITMQ_PORT.fetch_add(1, Ordering::SeqCst);
                 let path = format!("amqp://127.0.0.1:{host_port}//");
                 Self {
-                    config: MessageBroker::AMQP(path.clone()),
+                    config: MessageBroker::AMQP(path.clone().into()),
                     image: "rabbitmq:latest".into(),
                     container_port: 5672,
                     host_port,
@@ -396,7 +401,7 @@ impl DistMessageBroker {
                 let host_port = REDIS_PORT.fetch_add(1, Ordering::SeqCst);
                 let path = format!("redis://127.0.0.1:{host_port}/");
                 Self {
-                    config: MessageBroker::Redis(path.clone()),
+                    config: MessageBroker::Redis(path.clone().into()),
                     image: "redis:7".into(),
                     container_port: 6379,
                     host_port,
@@ -408,11 +413,11 @@ impl DistMessageBroker {
     }
 
     pub fn is_amqp(&self) -> bool {
-        matches!(self.config, MessageBroker::AMQP(_))
+        matches!(self.config, MessageBroker::AMQP { .. })
     }
 
     pub fn is_redis(&self) -> bool {
-        matches!(self.config, MessageBroker::Redis(_))
+        matches!(self.config, MessageBroker::Redis { .. })
     }
 
     pub fn url(&self) -> HTTPUrl {
@@ -463,11 +468,11 @@ impl SchedulerHandle {
         self.handle.name()
     }
     pub fn config<P: AsRef<Path>>(&self, root: P) -> Result<SchedulerConfig> {
-        SchedulerConfig::load(self.config_path(root).into())
+        SchedulerConfig::load(self.config_path(root))
     }
     pub fn config_file<P: AsRef<Path>>(&self, root: P, cfg: SchedulerConfig) -> Result<()> {
         let mut f = fs::File::create(self.config_path(root))?;
-        let buf = serde_json::to_vec(&cfg.into_file())?;
+        let buf = serde_json::to_vec(&cfg)?;
         f.write_all(&buf).map_err(Into::into)
     }
     pub fn config_path<P: AsRef<Path>>(&self, root: P) -> PathBuf {
@@ -475,10 +480,15 @@ impl SchedulerHandle {
     }
     pub fn jobs_dir<P: AsRef<Path>>(&self, root: P) -> Result<PathBuf> {
         self.config(root.as_ref())
-            .and_then(|cfg| (&cfg.jobs).into())
-            .and_then(|cfg| match &cfg[0] {
-                CacheType::Disk(DiskCacheConfig { dir, .. }) => Ok(dir.clone()),
-                _ => bail!("Scheduler should have disk cache as first job storage config"),
+            .and_then(|cfg| {
+                cfg.jobs
+                    .configs
+                    .iter()
+                    .find_map(|(_, c)| match c {
+                        CacheType::Disk(config::cache::Disk { dir, .. }) => Some(dir.clone()),
+                        _ => None,
+                    })
+                    .context("Scheduler should have a job storage disk cache config")
             })
             .and_then(|jobs_path| {
                 jobs_path
@@ -489,10 +499,15 @@ impl SchedulerHandle {
     }
     pub fn toolchains_dir<P: AsRef<Path>>(&self, root: P) -> Result<PathBuf> {
         self.config(root.as_ref())
-            .and_then(|cfg| (&cfg.toolchains).into())
-            .and_then(|cfg| match &cfg[0] {
-                CacheType::Disk(DiskCacheConfig { dir, .. }) => Ok(dir.clone()),
-                _ => bail!("Scheduler should have disk cache as first toolchain storage config"),
+            .and_then(|cfg| {
+                cfg.toolchains
+                    .configs
+                    .iter()
+                    .find_map(|(_, c)| match c {
+                        CacheType::Disk(config::cache::Disk { dir, .. }) => Some(dir.clone()),
+                        _ => None,
+                    })
+                    .context("Scheduler should have a toolchain storage disk cache config")
             })
             .and_then(|toolchains_path| {
                 toolchains_path
@@ -523,11 +538,11 @@ impl ServerHandle {
         self.handle.name()
     }
     pub fn config<P: AsRef<Path>>(&self, root: P) -> Result<ServerConfig> {
-        ServerConfig::load(self.config_path(root).into())
+        ServerConfig::load(self.config_path(root))
     }
     pub fn config_file<P: AsRef<Path>>(&self, root: P, cfg: ServerConfig) -> Result<()> {
         let mut f = fs::File::create(self.config_path(root))?;
-        let buf = serde_json::to_vec(&cfg.into_file())?;
+        let buf = serde_json::to_vec(&cfg)?;
         f.write_all(&buf).map_err(Into::into)
     }
     pub fn config_path<P: AsRef<Path>>(&self, root: P) -> PathBuf {
@@ -535,10 +550,15 @@ impl ServerHandle {
     }
     pub fn jobs_dir<P: AsRef<Path>>(&self, root: P) -> Result<PathBuf> {
         self.config(root.as_ref())
-            .and_then(|cfg| (&cfg.jobs).into())
-            .and_then(|cfg| match &cfg[0] {
-                CacheType::Disk(DiskCacheConfig { dir, .. }) => Ok(dir.clone()),
-                _ => bail!("Server should have disk cache as first job storage config"),
+            .and_then(|cfg| {
+                cfg.jobs
+                    .configs
+                    .iter()
+                    .find_map(|(_, c)| match c {
+                        CacheType::Disk(config::cache::Disk { dir, .. }) => Some(dir.clone()),
+                        _ => None,
+                    })
+                    .context("Server should have a job storage disk cache config")
             })
             .and_then(|jobs_path| {
                 jobs_path
@@ -549,10 +569,15 @@ impl ServerHandle {
     }
     pub fn toolchains_dir<P: AsRef<Path>>(&self, root: P) -> Result<PathBuf> {
         self.config(root.as_ref())
-            .and_then(|cfg| (&cfg.toolchains).into())
-            .and_then(|cfg| match &cfg[0] {
-                CacheType::Disk(DiskCacheConfig { dir, .. }) => Ok(dir.clone()),
-                _ => bail!("Server should have disk cache as first toolchain storage config"),
+            .and_then(|cfg| {
+                cfg.toolchains
+                    .configs
+                    .iter()
+                    .find_map(|(_, c)| match c {
+                        CacheType::Disk(config::cache::Disk { dir, .. }) => Some(dir.clone()),
+                        _ => None,
+                    })
+                    .context("Server should have a toolchain storage disk cache config")
             })
             .and_then(|toolchains_path| {
                 toolchains_path
@@ -778,23 +803,17 @@ impl DistSystemBuilder {
         let mut system = DistSystem::new(name);
         let message_broker = self.message_broker.as_ref().expect("Message broker exists");
 
-        fn storage_cfg(redis: &DistMessageBroker) -> sccache::config::CacheConfigs {
-            sccache::config::CacheConfigs {
-                redis: Some(RedisCacheConfig {
-                    endpoint: Some(redis.url().to_url().to_string()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }
+        fn storage_cfg(redis: &DistMessageBroker) -> sccache::config::Caches {
+            vec![config::cache::Redis::from_url(redis.url().to_url()).into()].into()
         }
 
         for i in 0..self.scheduler_count {
             let mut cfg = SchedulerConfig {
-                scheduler_id: format!("{name}_scheduler_{i}"),
+                id: format!("{name}_scheduler_{i}"),
                 ..system.scheduler_cfg(&message_broker.config)
             };
             if let Some(job_time_limit) = self.job_time_limit {
-                cfg.job_time_limit = job_time_limit;
+                cfg.job_time_limit_secs = job_time_limit;
             }
             if let Some(redis) = self.scheduler_jobs_redis_storage.as_ref() {
                 cfg.jobs = storage_cfg(redis);
@@ -807,7 +826,7 @@ impl DistSystemBuilder {
 
         for i in 0..self.server_count {
             let mut cfg = ServerConfig {
-                server_id: format!("{name}_server_{i}"),
+                id: format!("{name}_server_{i}"),
                 ..system.server_cfg(&message_broker.config)
             };
             if let Some(redis) = self.server_jobs_redis_storage.as_ref() {
@@ -896,7 +915,7 @@ impl DistSystem {
         self.test_dir.0.as_path()
     }
 
-    pub fn new_client(&self, client_config: &FileConfig) -> Arc<SccacheClient> {
+    pub fn new_client(&self, client_config: &ClientConfig) -> Arc<SccacheClient> {
         let data_dir = self.data_dir();
         write_json_cfg(data_dir, "sccache-client.json", client_config);
         Arc::new(
@@ -913,7 +932,7 @@ impl DistSystem {
     }
 
     pub async fn add_scheduler(&mut self, scheduler_cfg: SchedulerConfig) -> Result<&mut Self> {
-        let scheduler_id = scheduler_cfg.scheduler_id.clone();
+        let scheduler_id = scheduler_cfg.id.clone();
         let scheduler_port = scheduler_cfg.public_addr.port();
         let container_name = name_with_uuid(&scheduler_id);
 
@@ -1024,7 +1043,7 @@ impl DistSystem {
     }
 
     pub async fn add_server(&mut self, server_cfg: ServerConfig) -> Result<&mut Self> {
-        let server_id = server_cfg.server_id.clone();
+        let server_id = server_cfg.id.clone();
         let container_name = name_with_uuid(&server_id);
 
         let server = ServerHandle {

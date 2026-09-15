@@ -40,8 +40,9 @@ static LOGGER: LazyLock<Result<(), Infallible>> = LazyLock::new(|| {
 pub struct SccacheTest<'a> {
     /// Tempdir used for Sccache cache and cargo output. It is kept in the struct only to have the
     /// destructor run when SccacheTest goes out of scope, but is never used otherwise.
+    pub tempdir: PathBuf,
     #[allow(dead_code)]
-    pub tempdir: tempfile::TempDir,
+    pub _tempdir: Option<tempfile::TempDir>,
     pub env: Vec<(&'a str, std::ffi::OsString)>,
 }
 
@@ -54,11 +55,25 @@ impl SccacheTest<'_> {
             .prefix("sccache_test_rust_cargo")
             .tempdir()
             .context("Failed to create tempdir")?;
-        let cache_dir = tempdir.path().join("cache");
+
+        let sccache_debug = matches!(std::env::var("SCCACHE_DEBUG").ok().as_deref(), Some("1"));
+
+        // Persist the tempdir if SCCACHE_DEBUG is defined
+        let (tempdir_path, tempdir) = if sccache_debug {
+            println!(
+                "SCCACHE_DEBUG=1, keeping tempdir '{}'",
+                tempdir.path().display()
+            );
+            (tempdir.keep(), None)
+        } else {
+            (tempdir.path().to_path_buf(), Some(tempdir))
+        };
+
+        let cache_dir = tempdir_path.join("cache");
         fs::create_dir(&cache_dir)?;
-        let cargo_dir = tempdir.path().join("cargo");
+        let cargo_dir = tempdir_path.join("cargo");
         fs::create_dir(&cargo_dir)?;
-        let config_file = tempdir.path().join("config");
+        let config_file = tempdir_path.join("config");
         std::fs::File::create(&config_file)?;
 
         // Ensure there's no existing sccache server running.
@@ -66,11 +81,32 @@ impl SccacheTest<'_> {
 
         trace!("sccache --start-server");
 
-        Command::new(SCCACHE_BIN.as_os_str())
-            .arg("--start-server")
+        let mut cmd = Command::new(SCCACHE_BIN.as_os_str());
+
+        cmd.arg("--start-server")
             .env("SCCACHE_CONF", &config_file)
-            .env("SCCACHE_DIR", &cache_dir)
-            .assert()
+            .env("SCCACHE_DIR", &cache_dir);
+
+        if sccache_debug {
+            cmd.env(
+                "SCCACHE_SERVER_LOG",
+                // Allow overriding log level
+                std::env::var_os("SCCACHE_SERVER_LOG")
+                    .or(std::env::var_os("SCCACHE_LOG"))
+                    .unwrap_or("sccache=trace".into()),
+            )
+            .env(
+                "SCCACHE_ERROR_LOG",
+                // Allow overriding log output path
+                std::env::var_os("SCCACHE_ERROR_LOG").unwrap_or(
+                    tempdir_path
+                        .join("sccache_local_daemon.txt")
+                        .into_os_string(),
+                ),
+            );
+        }
+
+        cmd.assert()
             .try_success()
             .context("Failed to start sccache server")?;
 
@@ -88,7 +124,11 @@ impl SccacheTest<'_> {
             env.extend_from_slice(vec);
         }
 
-        Ok(SccacheTest { tempdir, env })
+        Ok(SccacheTest {
+            tempdir: tempdir_path,
+            _tempdir: tempdir,
+            env,
+        })
     }
 
     /// Show the statistics for sccache. This will be called at the end of a test and making this

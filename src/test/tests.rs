@@ -13,14 +13,14 @@
 // limitations under the License.
 
 use crate::{
-    cache::{CacheMode, PreprocessorCache, disk::DiskCache},
+    cache::disk::DiskCache,
     client::connect_to_server,
     commands::{do_compile, request_shutdown, request_stats},
-    config::PreprocessorCacheModeConfig,
+    config::CacheMode,
     jobserver::Client,
     mock_command::*,
     server::{DistClientContainer, SccacheServer, ServerMessage},
-    test::utils::*,
+    test::{mock_storage::MockStorage, utils::*},
 };
 use fs::File;
 use fs_err as fs;
@@ -75,15 +75,13 @@ where
     let handle = thread::spawn(move || {
         let runtime = Runtime::new().unwrap();
         let dist_client = DistClientContainer::new_disabled();
-        let storage = Arc::new(PreprocessorCache(
-            Arc::new(DiskCache::new(
-                &cache_dir,
-                cache_size,
-                CacheMode::ReadWrite,
-                vec![],
-            )),
-            PreprocessorCacheModeConfig::default(),
+        let compilations_storage = Arc::new(DiskCache::new(
+            &cache_dir,
+            cache_size,
+            CacheMode::ReadWrite,
+            vec![],
         ));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, false));
 
         let client = Client::new();
         let srv = SccacheServer::new(
@@ -91,9 +89,9 @@ where
             runtime,
             client,
             dist_client,
-            storage.clone(),
-            storage,
-            None,
+            compilations_storage.clone(),
+            preprocessor_storage.clone(),
+            Duration::from_secs(60),
             None,
         )
         .unwrap();

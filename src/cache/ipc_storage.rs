@@ -11,9 +11,9 @@
 // limitations under the License.
 
 use crate::{
-    cache::{CacheMode, GetPathResult, StorageKind, cache::Storage, cache_io::Cache},
+    cache::{GetPathResult, StorageKind, cache::Storage, cache_io::Cache},
     client::ServerConnection,
-    config::PreprocessorCacheModeConfig,
+    config::CacheMode,
     errors::*,
     protocol::{Request, Response, StorageHandshakeInfo},
 };
@@ -189,8 +189,10 @@ impl Storage for IpcStorage {
         Ok(self.handshake.max_size)
     }
 
-    fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
-        self.handshake.preprocessor_cache_mode_config.clone()
+    /// Return whether the storage is enabled.
+    /// Currently only NoStorage impl returns false.
+    fn enabled(&self) -> bool {
+        self.handshake.enabled
     }
 
     fn basedirs(&self) -> &[Vec<u8>] {

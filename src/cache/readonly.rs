@@ -13,8 +13,8 @@
 use async_trait::async_trait;
 
 use crate::{
-    cache::{Cache, CacheMode, Storage},
-    config::PreprocessorCacheModeConfig,
+    cache::{Cache, Storage},
+    config::CacheMode,
     errors::*,
 };
 
@@ -81,9 +81,10 @@ impl Storage for ReadOnlyStorage {
         self.0.max_size().await
     }
 
-    /// Return the config for preprocessor cache mode if applicable
-    fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
-        self.0.preprocessor_cache_mode_config()
+    /// Return whether the storage is enabled.
+    /// Currently only NoStorage impl returns false.
+    fn enabled(&self) -> bool {
+        self.0.enabled()
     }
 
     /// Return the base directories for path normalization if configured
@@ -101,7 +102,7 @@ mod test {
 
     #[test]
     fn readonly_storage_is_readonly() {
-        let storage = ReadOnlyStorage(Arc::new(MockStorage::new(None, false)));
+        let storage = ReadOnlyStorage(Arc::new(MockStorage::new(None, true)));
         assert_eq!(
             storage.check().now_or_never().unwrap().unwrap(),
             CacheMode::ReadOnly
@@ -112,19 +113,11 @@ mod test {
     fn readonly_storage_forwards_preprocessor_cache_mode_config() {
         let storage_no_preprocessor_cache =
             ReadOnlyStorage(Arc::new(MockStorage::new(None, false)));
-        assert!(
-            !storage_no_preprocessor_cache
-                .preprocessor_cache_mode_config()
-                .use_preprocessor_cache_mode
-        );
+        assert!(!storage_no_preprocessor_cache.enabled());
 
         let storage_with_preprocessor_cache =
             ReadOnlyStorage(Arc::new(MockStorage::new(None, true)));
-        assert!(
-            storage_with_preprocessor_cache
-                .preprocessor_cache_mode_config()
-                .use_preprocessor_cache_mode
-        );
+        assert!(storage_with_preprocessor_cache.enabled());
     }
 
     #[test]

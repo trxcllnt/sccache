@@ -63,7 +63,7 @@ mod client {
         pub fn new(
             cache_dir: &Path,
             cache_size: u64,
-            toolchain_configs: &[config::DistToolchainConfig],
+            toolchain_configs: &[config::client::dist::Toolchain],
         ) -> Result<Self> {
             let cache_dir = cache_dir.to_owned();
             fs::create_dir_all(&cache_dir).context(format!(
@@ -98,7 +98,7 @@ mod client {
             let mut disabled_toolchains = HashSet::new();
             for ct in toolchain_configs.iter() {
                 match ct {
-                    config::DistToolchainConfig::PathOverride {
+                    config::client::dist::Toolchain::PathOverride {
                         compiler_executable,
                         archive,
                         archive_compiler_executable,
@@ -124,7 +124,7 @@ mod client {
                             )
                         }
                     }
-                    config::DistToolchainConfig::NoDist {
+                    config::client::dist::Toolchain::NoDist {
                         compiler_executable,
                     } => {
                         debug!("Disabling toolchain {}", compiler_executable.display());
@@ -389,7 +389,7 @@ mod client {
             let client_toolchains = ClientToolchains::new(
                 &td.path().join("cache"),
                 1024,
-                &[config::DistToolchainConfig::PathOverride {
+                &[config::client::dist::Toolchain::PathOverride {
                     compiler_executable: "/my/compiler".into(),
                     archive: ct1.clone(),
                     archive_compiler_executable: "/my/compiler/in_archive".into(),
@@ -420,19 +420,19 @@ mod client {
                 &td.path().join("cache"),
                 1024,
                 &[
-                    config::DistToolchainConfig::PathOverride {
+                    config::client::dist::Toolchain::PathOverride {
                         compiler_executable: "/my/compiler".into(),
                         archive: ct1.clone(),
                         archive_compiler_executable: "/my/compiler/in_archive".into(),
                     },
                     // Uses the same archive, but a maps a different external compiler to a different archive compiler
-                    config::DistToolchainConfig::PathOverride {
+                    config::client::dist::Toolchain::PathOverride {
                         compiler_executable: "/my/compiler2".into(),
                         archive: ct1.clone(),
                         archive_compiler_executable: "/my/compiler2/in_archive".into(),
                     },
                     // Uses the same archive, but a maps a different external compiler to the same archive compiler as the first
-                    config::DistToolchainConfig::PathOverride {
+                    config::client::dist::Toolchain::PathOverride {
                         compiler_executable: "/my/compiler3".into(),
                         archive: ct1.clone(),
                         archive_compiler_executable: "/my/compiler/in_archive".into(),
@@ -480,7 +480,7 @@ mod client {
             let client_toolchains = ClientToolchains::new(
                 &td.path().join("cache"),
                 1024,
-                &[config::DistToolchainConfig::NoDist {
+                &[config::client::dist::Toolchain::NoDist {
                     compiler_executable: "/my/compiler".into(),
                 }],
             )
@@ -518,12 +518,12 @@ mod client {
                 &td.path().join("cache"),
                 1024,
                 &[
-                    config::DistToolchainConfig::PathOverride {
+                    config::client::dist::Toolchain::PathOverride {
                         compiler_executable: "/my/compiler".into(),
                         archive: ct1,
                         archive_compiler_executable: "/my/compiler".into(),
                     },
-                    config::DistToolchainConfig::NoDist {
+                    config::client::dist::Toolchain::NoDist {
                         compiler_executable: "/my/compiler".into(),
                     },
                 ],
@@ -650,7 +650,7 @@ mod server {
                 cache: Arc::new(DiskCache::new(
                     root,
                     max_size,
-                    crate::cache::CacheMode::ReadWrite,
+                    crate::config::CacheMode::ReadWrite,
                     vec![],
                 )),
                 store,

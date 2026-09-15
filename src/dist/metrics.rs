@@ -21,12 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{
-    config::{
-        DogStatsDAggregationMode, DogStatsDMetricsConfig, MetricsConfigs, PrometheusMetricsConfig,
-    },
-    errors::*,
-};
+use crate::{config, errors::*};
 
 use metrics::SharedString;
 use metrics_exporter_dogstatsd::{AggregationMode, DogStatsDBuilder};
@@ -168,22 +163,23 @@ tokio::task_local! {
 }
 
 impl Metrics {
-    pub fn new(config: MetricsConfigs, global_labels: BTreeMap<String, String>) -> Result<Self> {
-        if let Some(config) = config.dogstatsd {
-            Ok(Self {
-                global_labels: Arc::new(global_labels),
-                inner: Arc::new(DogStatsDMetrics::new(config)?),
-            })
-        } else if let Some(config) = config.prometheus {
-            Ok(Self {
-                global_labels: Arc::new(Default::default()),
-                inner: Arc::new(PrometheusMetrics::new(config, global_labels)?),
-            })
-        } else {
-            Ok(Self {
+    pub fn new(
+        config: config::dist::Metrics,
+        global_labels: BTreeMap<String, String>,
+    ) -> Result<Self> {
+        match config {
+            config::dist::Metrics::None => Ok(Self {
                 global_labels: Arc::new(global_labels),
                 inner: Arc::new(NoopMetrics {}),
-            })
+            }),
+            config::dist::Metrics::Dogstatsd(config) => Ok(Self {
+                global_labels: Arc::new(global_labels),
+                inner: Arc::new(DogStatsDMetrics::new(config)?),
+            }),
+            config::dist::Metrics::Prometheus(config) => Ok(Self {
+                global_labels: Arc::new(Default::default()),
+                inner: Arc::new(PrometheusMetrics::new(config, global_labels)?),
+            }),
         }
     }
 
@@ -280,25 +276,27 @@ impl MetricsInner for NoopMetrics {
 struct DogStatsDMetrics {}
 
 impl DogStatsDMetrics {
-    pub fn new(config: DogStatsDMetricsConfig) -> Result<Self> {
+    pub fn new(config: config::dist::DogStatsD) -> Result<Self> {
         let mut builder = DogStatsDBuilder::default();
 
-        builder = builder.with_remote_address(config.remote_addr)?;
+        builder = builder.with_remote_address(config.addr)?;
 
-        if let Some(write_timeout) = config.write_timeout {
-            builder = builder.with_write_timeout(Duration::from_millis(write_timeout));
+        if let Some(write_timeout_ms) = config.write_timeout_ms {
+            builder = builder.with_write_timeout(Duration::from_millis(write_timeout_ms));
         }
-        if let Some(maximum_payload_length) = config.maximum_payload_length {
+        if let Some(maximum_payload_length) = config.maximum_payload_length_bytes {
             builder = builder.with_maximum_payload_length(maximum_payload_length)?;
         }
         if let Some(aggregation_mode) = config.aggregation_mode {
             builder = builder.with_aggregation_mode(match aggregation_mode {
-                DogStatsDAggregationMode::Aggressive => AggregationMode::Aggressive,
-                DogStatsDAggregationMode::Conservative => AggregationMode::Conservative,
+                config::dist::DogStatsDAggregationMode::Aggressive => AggregationMode::Aggressive,
+                config::dist::DogStatsDAggregationMode::Conservative => {
+                    AggregationMode::Conservative
+                }
             });
         }
-        if let Some(flush_interval) = config.flush_interval {
-            builder = builder.with_flush_interval(Duration::from_millis(flush_interval));
+        if let Some(write_timeout_ms) = config.flush_interval_ms {
+            builder = builder.with_flush_interval(Duration::from_millis(write_timeout_ms));
         }
         if let Some(telemetry) = config.telemetry {
             builder = builder.with_telemetry(telemetry);
@@ -306,7 +304,7 @@ impl DogStatsDMetrics {
         if let Some(histogram_sampling) = config.histogram_sampling {
             builder = builder.with_histogram_sampling(histogram_sampling);
         }
-        if let Some(histogram_reservoir_size) = config.histogram_reservoir_size {
+        if let Some(histogram_reservoir_size) = config.histogram_reservoir_size_bytes {
             builder = builder.with_histogram_reservoir_size(histogram_reservoir_size);
         }
         if let Some(histograms_as_distributions) = config.histograms_as_distributions {
@@ -340,7 +338,7 @@ struct PrometheusMetrics {
 
 impl PrometheusMetrics {
     pub fn new(
-        config: PrometheusMetricsConfig,
+        config: config::dist::Prometheus,
         global_labels: BTreeMap<String, String>,
     ) -> Result<Self> {
         let builder = global_labels
@@ -350,9 +348,9 @@ impl PrometheusMetrics {
             });
 
         let (recorder, exporter, listen_path) = match config {
-            PrometheusMetricsConfig::ListenAddr {
-                ref addr,
-                ref idle_timeout_secs,
+            config::dist::Prometheus::ListenAddr {
+                addr,
+                idle_timeout_secs,
             } => {
                 let addr = addr.unwrap_or(SocketAddr::from_str("0.0.0.0:9000")?);
                 let (recorder, exporter) = builder
@@ -365,9 +363,9 @@ impl PrometheusMetrics {
                 tracing::info!("Listening for metrics at {addr}");
                 (recorder, exporter, None)
             }
-            PrometheusMetricsConfig::ListenPath {
-                ref path,
-                ref idle_timeout_secs,
+            config::dist::Prometheus::ListenPath {
+                path,
+                idle_timeout_secs,
             } => {
                 let path = path.clone().unwrap_or("/metrics".to_owned());
                 let (recorder, exporter) = builder
@@ -379,15 +377,15 @@ impl PrometheusMetrics {
                 tracing::info!("Listening for metrics at {path}");
                 (recorder, exporter, Some(path))
             }
-            PrometheusMetricsConfig::PushGateway {
+            config::dist::Prometheus::PushGateway {
                 ref endpoint,
-                ref interval,
-                ref username,
-                ref password,
-                ref http_method,
-                ref idle_timeout_secs,
+                interval_ms,
+                username,
+                password,
+                http_method,
+                idle_timeout_secs,
             } => {
-                let interval = Duration::from_millis(interval.unwrap_or(10_000));
+                let interval = Duration::from_millis(interval_ms);
                 let (recorder, exporter) = builder
                     .set_bucket_duration(interval)?
                     .idle_timeout(

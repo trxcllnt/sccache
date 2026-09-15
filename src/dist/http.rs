@@ -207,7 +207,7 @@ mod scheduler {
     };
 
     use crate::{
-        config::DistNetworkingKeepalive,
+        config,
         dist::{
             RunJobRequest, RunJobRequestV2, SchedulerService, Toolchain,
             http::{bincode_deserialize, bincode_serialize},
@@ -982,7 +982,7 @@ mod scheduler {
             self,
             metrics: Metrics,
             bind_addr: SocketAddr,
-            keepalive: DistNetworkingKeepalive,
+            keepalive: config::dist::Keepalive,
             max_body_size: usize,
             max_concurrent_streams: impl Into<Option<u32>>,
         ) -> (
@@ -1129,7 +1129,7 @@ mod client {
     }
 
     impl ReqwestClients {
-        fn new(net: &config::DistNetworking) -> Self {
+        fn new(net: &config::client::dist::Networking) -> Self {
             Self {
                 clients: (0..net.max_connections.max(1))
                     .map(|_| new_reqwest_client(net))
@@ -1196,12 +1196,12 @@ mod client {
             scheduler_url: reqwest::Url,
             cache_dir: &Path,
             cache_size: u64,
-            toolchain_configs: &[config::DistToolchainConfig],
+            toolchain_configs: &[config::client::dist::Toolchain],
             auth_token: String,
             fallback_to_local_compile: bool,
             max_retries: f64,
             rewrite_includes_only: bool,
-            net: &config::DistNetworking,
+            net: &config::client::dist::Networking,
         ) -> Result<Self> {
             let request_timeout = net.request_timeout;
             let client = Arc::new(ReqwestClients::new(net));

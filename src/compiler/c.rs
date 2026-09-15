@@ -22,7 +22,6 @@ use crate::{
             preprocessor_cache_entry_hash_key,
         },
     },
-    config::PreprocessorCacheModeConfig,
     dist,
     errors::*,
     mock_command::{CommandCreatorSync, ProcessOutput},
@@ -670,9 +669,8 @@ where
         } = self;
 
         let out_pretty = parsed_args.output_pretty();
-        let preprocessor_cache_mode_config = storage.preprocessor_cache_mode_config();
 
-        if !use_preprocessor_cache_mode(parsed_args, env_vars, &preprocessor_cache_mode_config) {
+        if !use_preprocessor_cache_mode(parsed_args, env_vars, storage.enabled()) {
             return Ok(PreprocessorCacheLookup::Disabled);
         }
 
@@ -892,9 +890,7 @@ where
 
         // Set a maximum time limit for the cache to respond before we
         // forge ahead ourselves with a compilation.
-        let cache_read_timeout = service
-            .cache_read_timeout
-            .unwrap_or(Duration::from_secs(60));
+        let cache_read_timeout = service.cache_read_timeout;
 
         // A compiler binary may be a symlink to another and so has the same digest, but that means
         // the toolchain will not contain the correct path to invoke the compiler! Add the compiler
@@ -1115,7 +1111,7 @@ where
 fn use_preprocessor_cache_mode(
     parsed_args: &ParsedArguments,
     env_vars: &[(OsString, OsString)],
-    preprocessor_cache_mode_config: &PreprocessorCacheModeConfig,
+    preprocessor_cache_mode_enabled: bool,
 ) -> bool {
     let out_pretty = parsed_args.output_pretty();
 
@@ -1139,8 +1135,7 @@ fn use_preprocessor_cache_mode(
         );
     }
 
-    let can_use_preprocessor_cache_mode = preprocessor_cache_mode_config
-        .use_preprocessor_cache_mode
+    let can_use_preprocessor_cache_mode = preprocessor_cache_mode_enabled
         && parsed_args.too_hard_for_preprocessor_cache_mode.is_empty();
 
     // Allow overrides from the env
@@ -2581,7 +2576,7 @@ impl<'a> HashKeyParams<'a> {
 mod test {
     use crate::{
         cache::StorageKind,
-        config::{CacheConfigs, CacheModeConfig, Config, DiskCacheConfig},
+        config::{self, CacheMode, ClientConfig},
         test::utils::*,
     };
 
@@ -3075,23 +3070,27 @@ mod test {
         let cache_dir = tempdir.path().join("cache");
         fs::create_dir(&cache_dir).unwrap();
 
-        let make_config = |rw_mode| Config {
-            caches: CacheConfigs {
-                disk: Some(DiskCacheConfig {
+        let make_config = |rw_mode| ClientConfig {
+            cache: vec![
+                config::cache::Disk {
                     dir: cache_dir.clone(),
                     rw_mode,
-                    ..DiskCacheConfig::default()
-                }),
-                ..Default::default()
-            },
+                    ..config::cache::Disk::default()
+                }
+                .into(),
+            ]
+            .into(),
             ..Default::default()
         };
 
         // Test Read Write
         {
             runtime.block_on(async {
-                let config = make_config(CacheModeConfig::ReadWrite);
-                let storage = StorageKind::Preprocessor.create(&config).await.unwrap();
+                let config = make_config(CacheMode::ReadWrite);
+                let storage = StorageKind::Preprocessor
+                    .create(&config.cache, &[])
+                    .await
+                    .unwrap();
                 PreprocessorCacheEntry::default()
                     .put(storage.as_ref(), "test1")
                     .await
@@ -3102,8 +3101,11 @@ mod test {
         // Test Read-only
         {
             runtime.block_on(async {
-                let config = make_config(CacheModeConfig::ReadOnly);
-                let storage = StorageKind::Preprocessor.create(&config).await.unwrap();
+                let config = make_config(CacheMode::ReadOnly);
+                let storage = StorageKind::Preprocessor
+                    .create(&config.cache, &[])
+                    .await
+                    .unwrap();
                 assert_eq!(
                     PreprocessorCacheEntry::default()
                         .put(storage.as_ref(), "test1",)

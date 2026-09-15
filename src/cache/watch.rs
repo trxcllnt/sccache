@@ -19,8 +19,8 @@ use notify_debouncer_full::{
 use std::{ffi::OsString, future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
 use crate::{
-    cache::{Cache, CacheMode, Storage},
-    config::PreprocessorCacheModeConfig,
+    cache::{Cache, Storage},
+    config::CacheMode,
     errors::*,
 };
 
@@ -28,7 +28,6 @@ pub struct WatchStorage {
     basedirs: Vec<Vec<u8>>,
     cache_type_name: &'static str,
     storage: Arc<futures::lock::Mutex<Arc<dyn Storage>>>,
-    preprocessor_cache_mode_config: PreprocessorCacheModeConfig,
     #[allow(dead_code)]
     watcher: notify::Debouncer<RecommendedWatcher, RecommendedCache>,
 }
@@ -39,6 +38,9 @@ impl WatchStorage {
         T: Fn() -> Pin<Box<dyn Future<Output = Result<Arc<dyn Storage>>> + Send>> + Send + 'static,
     {
         let storage = create().await?;
+        if !storage.enabled() {
+            return Ok(storage);
+        }
         let paths = Self::dirs_and_paths(paths);
         if paths.is_empty() {
             trace!(
@@ -49,13 +51,11 @@ impl WatchStorage {
         }
         let basedirs = storage.basedirs().to_vec();
         let cache_type_name = storage.cache_type_name();
-        let preprocessor_cache_mode_config = storage.preprocessor_cache_mode_config();
         let storage = Arc::new(futures::lock::Mutex::new(storage));
         let watcher = Self::watch(create, storage.clone(), paths)?;
         Ok(Arc::new(Self {
             basedirs,
             cache_type_name,
-            preprocessor_cache_mode_config,
             storage,
             watcher,
         }))
@@ -268,9 +268,10 @@ impl Storage for WatchStorage {
         self.inner().await.max_size().await
     }
 
-    /// Return the config for preprocessor cache mode if applicable
-    fn preprocessor_cache_mode_config(&self) -> PreprocessorCacheModeConfig {
-        self.preprocessor_cache_mode_config.clone()
+    /// Return whether the storage is enabled.
+    /// Currently only NoStorage impl returns false.
+    fn enabled(&self) -> bool {
+        true
     }
 
     fn basedirs(&self) -> &[Vec<u8>] {

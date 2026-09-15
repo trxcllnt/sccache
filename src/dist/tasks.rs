@@ -24,7 +24,7 @@ use celery::{
 use std::{boxed::Box, sync::Arc};
 
 use crate::{
-    config::MessageBroker,
+    config::dist::MessageBroker,
     dist::{
         CompileCommand, SchedulerService, ServerService, StatusUpdate, Toolchain,
         scheduler_to_servers_queue, server_to_schedulers_queue, to_scheduler_queue,
@@ -151,8 +151,8 @@ impl Tasks {
             Ok(celery::CeleryBuilder::new(
                 id,
                 match message_broker {
-                    MessageBroker::AMQP(ref uri) => uri,
-                    MessageBroker::Redis(ref uri) => uri,
+                    MessageBroker::AMQP(ref uri) => &uri.addr,
+                    MessageBroker::Redis(ref uri) => &uri.addr,
                 },
             )
             // Indefinitely retry connecting to the broker

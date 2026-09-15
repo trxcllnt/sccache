@@ -1,6 +1,4 @@
-use std::env;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{env, sync::Arc, time::Duration};
 
 #[cfg_attr(target_os = "freebsd", path = "build_freebsd.rs")]
 mod build;
@@ -8,12 +6,13 @@ mod build;
 mod cmdline;
 use cmdline::Command;
 
+#[cfg(target_os = "freebsd")]
+use sccache::config::dist::server::PotBuilder;
+#[cfg(not(target_os = "freebsd"))]
+use sccache::config::dist::server::{DockerBuilder, OverlayBuilder};
 use sccache::{
-    cache::{StorageArgs, cache::StorageKind},
-    config::{
-        scheduler as scheduler_config,
-        server::{self as server_config, BuilderType},
-    },
+    cache::cache::StorageKind,
+    config::{self, CacheMode, dist::server::Builder},
     dist::{
         self, BuilderIncoming, ServerToolchains, env_info,
         metrics::Metrics,
@@ -98,10 +97,10 @@ fn run(command: Command) -> Result<()> {
         .build()?
         .block_on(async move {
             match command {
-                Command::Scheduler(scheduler_config::Config {
-                    client_auth,
+                Command::Scheduler(config::dist::scheduler::Config {
+                    auth: client_auth,
                     heartbeat_interval_ms,
-                    job_time_limit,
+                    job_time_limit_secs,
                     jobs,
                     keepalive,
                     max_body_size,
@@ -109,8 +108,8 @@ fn run(command: Command) -> Result<()> {
                     message_broker,
                     metrics,
                     public_addr,
-                    scheduler_id,
-                    shutdown_timeout,
+                    id,
+                    shutdown_timeout_secs,
                     toolchains,
                 }) => {
                     let metrics = Metrics::new(
@@ -118,55 +117,51 @@ fn run(command: Command) -> Result<()> {
                         [
                             ("env".into(), env_info()),
                             ("type".into(), "scheduler".into()),
-                            ("scheduler_id".into(), scheduler_id.clone()),
+                            ("scheduler_id".into(), id.clone()),
                         ]
                         .into(),
                     )?;
 
                     let jobs = StorageKind::Compilations
-                        .create(StorageArgs {
-                            caches: &jobs,
-                            basedirs: &[],
-                            skip_check: false,
-                        })
+                        .create(&jobs, &[])
                         .await
                         .context("Failed to initialize jobs storage")?;
 
                     // Verify read/write access to jobs storage
                     match jobs.check().await {
-                        Ok(sccache::cache::CacheMode::ReadWrite) => {}
+                        Ok(CacheMode::ReadWrite) => {}
                         _ => {
                             bail!("Scheduler jobs storage must be read/write")
                         }
                     }
 
                     let toolchains = StorageKind::Compilations
-                        .create(StorageArgs {
-                            caches: &toolchains,
-                            basedirs: &[],
-                            skip_check: false,
-                        })
+                        .create(&toolchains, &[])
                         .await
                         .context("Failed to initialize toolchain storage")?;
 
                     // Verify read/write access to toolchain storage
                     match toolchains.check().await {
-                        Ok(sccache::cache::CacheMode::ReadWrite) => {}
+                        Ok(CacheMode::ReadWrite) => {}
                         _ => {
                             bail!("Scheduler toolchain storage must be read/write")
                         }
                     }
 
                     // Create ClientAuthCheck and bail on Err before registering with Celery
+                    if client_auth.is_empty() {
+                        bail!("Scheduler must be configured to use at least one client authentication mechanism");
+                    }
+
                     let client_auth_check = futures::future::try_join_all(
                         client_auth.into_iter().map(new_client_auth_check),
                     )
                     .await?;
 
                     let tasks = tasks::Tasks::scheduler(
-                        &scheduler_id,
+                        &id,
                         100 * num_cpus as u16,
-                        job_time_limit,
+                        job_time_limit_secs,
                         message_broker,
                     )
                     .await?;
@@ -174,7 +169,7 @@ fn run(command: Command) -> Result<()> {
                     let scheduler = scheduler::Scheduler::new(
                         jobs,
                         SchedulerMetrics::new(metrics.clone()),
-                        &scheduler_id,
+                        &id,
                         tasks,
                         toolchains,
                     )?;
@@ -193,12 +188,12 @@ fn run(command: Command) -> Result<()> {
                             handle,
                             server,
                             Duration::from_millis(heartbeat_interval_ms),
-                            Duration::from_secs(shutdown_timeout),
+                            Duration::from_millis(shutdown_timeout_secs)
                         )
                         .await
                 }
 
-                Command::Server(server_config::Config {
+                Command::Server(config::dist::server::Config {
                     message_broker,
                     builder,
                     cache_dir,
@@ -208,8 +203,8 @@ fn run(command: Command) -> Result<()> {
                     max_per_core_load,
                     max_per_core_prefetch,
                     metrics,
-                    server_id,
-                    shutdown_timeout,
+                    id,
+                    shutdown_timeout_secs,
                     toolchain_cache_size,
                     toolchains,
                 }) => {
@@ -218,34 +213,26 @@ fn run(command: Command) -> Result<()> {
                         [
                             ("env".into(), env_info()),
                             ("type".into(), "server".into()),
-                            ("server_id".into(), server_id.clone()),
+                            ("server_id".into(), id.clone()),
                         ]
                         .into(),
                     )?;
 
                     let jobs = StorageKind::Compilations
-                        .create(StorageArgs {
-                            caches: &jobs,
-                            basedirs: &[],
-                            skip_check: false,
-                        })
+                        .create(&jobs, &[])
                         .await
                         .context("Failed to initialize jobs storage")?;
 
                     // Verify read/write access to jobs storage
                     match jobs.check().await {
-                        Ok(sccache::cache::CacheMode::ReadWrite) => {}
+                        Ok(CacheMode::ReadWrite) => {}
                         _ => {
                             bail!("Server jobs storage must be read/write")
                         }
                     }
 
                     let toolchains = StorageKind::Compilations
-                        .create(StorageArgs {
-                            caches: &toolchains,
-                            basedirs: &[],
-                            skip_check: false,
-                        })
+                        .create(&toolchains, &[])
                         .await
                         .context("Failed to initialize toolchain storage")?;
 
@@ -255,17 +242,19 @@ fn run(command: Command) -> Result<()> {
                         .await
                         .context("Failed to initialize toolchain storage")?;
 
-                    let occupancy = (num_cpus as f64 * max_per_core_load.max(0.0))
+                    let max_per_core_load: f64 = max_per_core_load.into();
+                    let occupancy = (num_cpus as f64 * max_per_core_load)
                         .floor()
                         .max(1.0) as usize;
 
-                    let pre_fetch = (num_cpus as f64 * max_per_core_prefetch.max(0.0))
+                    let max_per_core_prefetch: f64 = max_per_core_prefetch.into();
+                    let pre_fetch = (num_cpus as f64 * max_per_core_prefetch)
                         .floor()
                         .max(0.0) as usize;
 
                     let job_queue = Arc::new(tokio::sync::Semaphore::new(occupancy));
 
-                    let should_inflate_toolchains = !matches!(builder, BuilderType::Docker { .. });
+                    let should_inflate_toolchains = !matches!(builder, Builder::Docker { .. });
                     let builder = init_builder(builder, job_queue.clone()).await?;
 
                     let toolchains = Arc::new(ServerToolchains::new(
@@ -277,7 +266,7 @@ fn run(command: Command) -> Result<()> {
                     ));
 
                     let tasks = tasks::Tasks::server(
-                        &server_id,
+                        &id,
                         (occupancy as u16).saturating_add(pre_fetch as u16),
                         message_broker,
                     )
@@ -287,7 +276,7 @@ fn run(command: Command) -> Result<()> {
                         builder,
                         jobs,
                         server::ServerState {
-                            id: server_id.clone(),
+                            id: id.clone(),
                             queue: tasks.app().default_queue.clone(),
                             job_queue,
                             metrics: server::ServerMetrics::new(metrics.clone()),
@@ -304,7 +293,7 @@ fn run(command: Command) -> Result<()> {
                     server
                         .start(
                             Duration::from_millis(heartbeat_interval_ms),
-                            Duration::from_secs(shutdown_timeout),
+                            Duration::from_millis(shutdown_timeout_secs),
                             health_check_bind_addr,
                         )
                         .await
@@ -314,46 +303,46 @@ fn run(command: Command) -> Result<()> {
 }
 
 async fn init_builder(
-    config: BuilderType,
+    config: Builder,
     job_queue: Arc<tokio::sync::Semaphore>,
 ) -> Result<Arc<dyn BuilderIncoming>> {
     match config {
         #[cfg(not(target_os = "freebsd"))]
-        BuilderType::Docker {
+        Builder::Docker(DockerBuilder {
             image,
             run_cmd,
             exec_cmd,
-        } => Ok(Arc::new(
+        }) => Ok(Arc::new(
             build::DockerBuilder::new(image, run_cmd, exec_cmd, job_queue.clone())
                 .await
                 .context("Docker builder failed to start")?,
         ) as Arc<dyn BuilderIncoming>),
         #[cfg(not(target_os = "freebsd"))]
-        BuilderType::Overlay {
+        Builder::Overlay(OverlayBuilder {
             bwrap_path,
             build_dir,
             exec_cmd,
             lower_dirs,
-            overlay_env,
-        } => Ok(Arc::new(
+            env: overlay_env,
+        }) => Ok(Arc::new(
             build::OverlayBuilder::new(
                 bwrap_path,
                 build_dir,
-                exec_cmd.unwrap_or_default(),
-                lower_dirs.unwrap_or_default(),
-                overlay_env.unwrap_or_default(),
+                exec_cmd,
+                lower_dirs,
+                overlay_env,
                 job_queue.clone(),
             )
             .await
             .context("Overlay builder failed to start")?,
         ) as Arc<dyn BuilderIncoming>),
         #[cfg(target_os = "freebsd")]
-        BuilderType::Pot {
+        Builder::Pot(PotBuilder {
             pot_fs_root,
             clone_from,
             pot_cmd,
             pot_clone_args,
-        } => Ok(Arc::new(
+        }) => Ok(Arc::new(
             build::PotBuilder::new(
                 pot_fs_root,
                 clone_from,
