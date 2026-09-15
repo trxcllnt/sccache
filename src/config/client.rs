@@ -273,6 +273,8 @@ impl Loadable<Self> for Config {
                     "CACHE_SIZE" => "DISK_SIZE",
                     // SCCACHE_BUCKET -> SCCACHE_CACHE_S3_BUCKET
                     "BUCKET" => "S3_BUCKET",
+                    // SCCACHE_ENDPOINT -> SCCACHE_CACHE_S3_ENDPOINT
+                    "ENDPOINT" => "S3_ENDPOINT",
                     // SCCACHE_REGION -> SCCACHE_CACHE_S3_REGION
                     "REGION" => "S3_REGION",
                     // SCCACHE_REDIS -> SCCACHE_CACHE_REDIS_URL
