@@ -1968,7 +1968,6 @@ where
             // fallback to using the path directly
             metadata(path)
                 .map(|attr| FileTime::from_last_modification_time(&attr))
-                .ok()
                 .map(move |filetime| (path.to_owned(), filetime))
                 .context("Must contain sane data, otherwise mtime is not avail")?
         }

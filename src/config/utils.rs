@@ -18,7 +18,7 @@ use crate::{
 };
 
 use itertools::Itertools;
-use serde::{Deserialize, Serialize, de, ser};
+use serde::{Deserialize, de, ser};
 use std::{
     collections::HashMap,
     fmt,
@@ -26,63 +26,73 @@ use std::{
     str::FromStr,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HTTPUrl(reqwest::Url);
+#[cfg(any(feature = "dist-client", feature = "dist-server"))]
+pub use dist::*;
 
-impl HTTPUrl {
-    pub fn from_url(u: reqwest::Url) -> Self {
-        HTTPUrl(u)
-    }
-    pub fn to_url(&self) -> reqwest::Url {
-        self.0.clone()
-    }
-}
+#[cfg(any(feature = "dist-client", feature = "dist-server"))]
+mod dist {
 
-impl FromStr for HTTPUrl {
-    type Err = anyhow::Error;
-    fn from_str(url: &str) -> std::result::Result<Self, Self::Err> {
-        parse_http_url(url).map(Self)
-    }
-}
+    use super::*;
+    use serde::Serialize;
 
-impl Serialize for HTTPUrl {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: ser::Serializer,
-    {
-        serializer.serialize_str(self.0.as_str())
-    }
-}
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct HTTPUrl(reqwest::Url);
 
-impl<'a> Deserialize<'a> for HTTPUrl {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: de::Deserializer<'a>,
-    {
-        use serde::de::Error;
-        let helper = String::deserialize(deserializer)?;
-        let url = parse_http_url(helper).map_err(D::Error::custom)?;
-        Ok(HTTPUrl(url))
+    impl HTTPUrl {
+        pub fn from_url(u: reqwest::Url) -> Self {
+            HTTPUrl(u)
+        }
+        pub fn to_url(&self) -> reqwest::Url {
+            self.0.clone()
+        }
     }
-}
 
-fn parse_http_url<K: AsRef<str>>(str: K) -> Result<reqwest::Url> {
-    use std::net::SocketAddr;
-    let url = str.as_ref();
-    let url = if let Ok(sa) = url.parse::<SocketAddr>() {
-        warn!("Url {url} has no scheme, assuming http");
-        reqwest::Url::parse(&format!("http://{sa}"))
-    } else {
-        reqwest::Url::parse(url)
-    }?;
-    if url.scheme() != "http" && url.scheme() != "https" {
-        bail!("url not http or https")
+    impl FromStr for HTTPUrl {
+        type Err = anyhow::Error;
+        fn from_str(url: &str) -> std::result::Result<Self, Self::Err> {
+            parse_http_url(url).map(Self)
+        }
     }
-    // TODO: relative url handling just hasn't been implemented and tested
-    if url.path() != "/" {
-        bail!("url has a relative path (currently unsupported)")
+
+    impl Serialize for HTTPUrl {
+        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: ser::Serializer,
+        {
+            serializer.serialize_str(self.0.as_str())
+        }
     }
-    Ok(url)
+
+    impl<'a> Deserialize<'a> for HTTPUrl {
+        fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+        where
+            D: de::Deserializer<'a>,
+        {
+            use serde::de::Error;
+            let helper = String::deserialize(deserializer)?;
+            let url = parse_http_url(helper).map_err(D::Error::custom)?;
+            Ok(HTTPUrl(url))
+        }
+    }
+
+    fn parse_http_url<K: AsRef<str>>(str: K) -> Result<reqwest::Url> {
+        use std::net::SocketAddr;
+        let url = str.as_ref();
+        let url = if let Ok(sa) = url.parse::<SocketAddr>() {
+            warn!("Url {url} has no scheme, assuming http");
+            reqwest::Url::parse(&format!("http://{sa}"))
+        } else {
+            reqwest::Url::parse(url)
+        }?;
+        if url.scheme() != "http" && url.scheme() != "https" {
+            bail!("url not http or https")
+        }
+        // TODO: relative url handling just hasn't been implemented and tested
+        if url.path() != "/" {
+            bail!("url has a relative path (currently unsupported)")
+        }
+        Ok(url)
+    }
 }
 
 fn parse_size(val: &str) -> Option<u64> {
