@@ -234,17 +234,21 @@ impl Loadable<Self> for Config {
             .map(|(key, val)| -> Result<(S, S)> {
                 let key_str = os_str_to_str(key.as_ref())?;
 
-                if let Some(key) = key_str.strip_prefix(&prefix_)
-                    && let Some(key) = key.strip_suffix("USE_PREPROCESSOR_CACHE_MODE")
-                    && let Some(kind) = caches_.iter().find_map(|kind_| {
-                        if key.starts_with(kind_) {
-                            kind_.strip_suffix("_")
-                        } else {
-                            None
-                        }
-                    })
-                {
-                    cache_as_preprocessor_cache.insert(kind.to_owned());
+                // Only take vars that start with `SCCACHE_`
+                if let Some(key) = key_str.strip_prefix(&prefix_) {
+                    if key == "DIRECT" {
+                        cache_as_preprocessor_cache.insert("disk".to_owned());
+                    } else if let Some(key) = key.strip_suffix("USE_PREPROCESSOR_CACHE_MODE")
+                        && let Some(kind) = caches_.iter().find_map(|kind_| {
+                            if key.starts_with(kind_) {
+                                kind_.strip_suffix("_")
+                            } else {
+                                None
+                            }
+                        })
+                    {
+                        cache_as_preprocessor_cache.insert(kind.to_owned());
+                    }
                 }
 
                 Ok((key, val))
@@ -267,6 +271,8 @@ impl Loadable<Self> for Config {
                 let key = match key {
                     // SCCACHE_DIR -> SCCACHE_CACHE_DISK_DIR
                     "DIR" => "DISK_DIR",
+                    // SCCACHE_DIRECT -> SCCACHE_PREPROCESSOR_CACHE_DISK_ENABLED
+                    "DIRECT" => "PREPROCESSOR_CACHE_DISK_ENABLED",
                     // SCCACHE_LOCAL_RW_MODE -> SCCACHE_CACHE_DISK_RW_MODE
                     "LOCAL_RW_MODE" => "DISK_RW_MODE",
                     // SCCACHE_CACHE_SIZE -> SCCACHE_CACHE_DISK_SIZE
@@ -284,15 +290,19 @@ impl Loadable<Self> for Config {
                     _ => key,
                 };
 
-                let res = if key == "SKIP_CACHE_CHECK" {
+                if key == "SKIP_CACHE_CHECK" {
                     // SCCACHE_SKIP_CACHE_CHECK -> SCCACHE_CACHE_SKIP_CHECK
                     let key = "CACHE_SKIP_CHECK".to_owned();
-                    vec![(key, val.into_owned())]
-                } else if key == "SERVER_STARTUP_TIMEOUT" {
+                    return Ok(vec![(key, val.into_owned())]);
+                }
+
+                if key == "SERVER_STARTUP_TIMEOUT" {
                     // SCCACHE_SERVER_STARTUP_TIMEOUT -> SCCACHE_SERVER_STARTUP_TIMEOUT_SECS
                     let key = "SERVER_STARTUP_TIMEOUT_MS".to_owned();
-                    vec![(key, val.into_owned())]
-                } else if let Some(suf) = key.strip_prefix("DIST_") {
+                    return Ok(vec![(key, val.into_owned())]);
+                }
+
+                if let Some(suf) = key.strip_prefix("DIST_") {
                     if matches!(
                         suf,
                         "CONNECT_TIMEOUT"
@@ -305,19 +315,25 @@ impl Loadable<Self> for Config {
                         // SCCACHE_DIST_CONNECTION_POOL -> SCCACHE_DIST_NET_CONNECTION_POOL
                         // SCCACHE_DIST_MAX_CONNECTIONS -> SCCACHE_DIST_NET_MAX_CONNECTIONS
                         let key = format!("DIST_NET_{suf}");
-                        vec![(key, val.into_owned())]
-                    } else if let Some(key) = suf.strip_prefix("KEEPALIVE_") {
+                        return Ok(vec![(key, val.into_owned())]);
+                    }
+
+                    if let Some(key) = suf.strip_prefix("KEEPALIVE_") {
                         // SCCACHE_DIST_KEEPALIVE_ENABLED -> SCCACHE_DIST_NET_KEEPALIVE_ENABLED
                         let key = format!("DIST_NET_KEEPALIVE_{key}");
-                        vec![(key, val.into_owned())]
-                    } else if matches!(suf, "SCHEDULER_URL") {
+                        return Ok(vec![(key, val.into_owned())]);
+                    }
+
+                    if matches!(suf, "SCHEDULER_URL") {
                         // SCCACHE_DIST_SCHEDULER_URL -> SCCACHE_DIST_URL
                         let key = "DIST_URL".to_owned();
-                        vec![(key, val.into_owned())]
-                    } else {
-                        vec![(key.into(), val.into_owned())]
+                        return Ok(vec![(key, val.into_owned())]);
                     }
-                } else if matches!(
+
+                    return Ok(vec![(key.into(), val.into_owned())]);
+                }
+
+                if matches!(
                     key,
                     "CACHE_READ_TIMEOUT"
                         | "CACHE_WRITE_TIMEOUT"
@@ -327,8 +343,10 @@ impl Loadable<Self> for Config {
                     // SCCACHE_CACHE_READ_TIMEOUT -> SCCACHE_CACHE_READ_TIMEOUT_SECS
                     // SCCACHE_CACHE_WRITE_TIMEOUT -> SCCACHE_CACHE_WRITE_TIMEOUT_SECS
                     let key = format!("{key}_SECS");
-                    vec![(key, val.into_owned())]
-                } else if let Some((kind, mut key)) = caches_.iter().find_map(|kind_| {
+                    return Ok(vec![(key, val.into_owned())]);
+                }
+
+                if let Some((kind, mut key)) = caches_.iter().find_map(|kind_| {
                     if let Some(key) = key.strip_prefix(kind_) {
                         kind_.strip_suffix("_").map(|kind| (kind, key))
                     } else {
@@ -338,44 +356,43 @@ impl Loadable<Self> for Config {
                     if key == "USE_PREPROCESSOR_CACHE_MODE" {
                         // SCCACHE_S3_USE_PREPROCESSOR_CACHE_MODE -> SCCACHE_PREPROCESSOR_CACHE_S3_ENABLED
                         let key = format!("PREPROCESSOR_CACHE_{kind}_ENABLED");
-                        vec![(key, val.into_owned())]
-                    } else if key == "PREPROCESSOR_CACHE_KEY_PREFIX" {
+                        return Ok(vec![(key, val.into_owned())]);
+                    }
+
+                    if key == "PREPROCESSOR_CACHE_KEY_PREFIX" {
                         // SCCACHE_S3_PREPROCESSOR_CACHE_KEY_PREFIX -> SCCACHE_PREPROCESSOR_CACHE_S3_KEY_PREFIX
                         let key = format!("PREPROCESSOR_CACHE_{kind}_KEY_PREFIX");
-                        vec![(key, val.into_owned())]
-                    } else {
-                        if kind == "AZURE" && key == "BLOB_CONTAINER" {
-                            // SCCACHE_AZURE_BLOB_CONTAINER -> SCCACHE_AZURE_CONTAINER
-                            key = "CONTAINER";
-                        }
-
-                        if cache_as_preprocessor_cache.contains(kind) {
-                            // If SCCACHE_S3_USE_PREPROCESSOR_CACHE_MODE = true, duplicate the cache properties as
-                            // if they were also defined for the preprocessor cache:
-                            // SCCACHE_CACHE_S3_BUCKET -> "bucket"
-                            // SCCACHE_PREPROCESSOR_CACHE_S3_BUCKET -> "bucket"
-                            let key1 = format!("CACHE_{kind}_{key}");
-                            let key2 = format!("PREPROCESSOR_CACHE_{kind}_{key}");
-                            vec![
-                                (key1, val.clone().into_owned()),
-                                (key2, val.clone().into_owned()),
-                            ]
-                        } else {
-                            // SCCACHE_AZURE_CONNECTION_STRING -> SCCACHE_CACHE_AZURE_CONNECTION_STRING
-                            // SCCACHE_S3_KEY_PREFIX -> SCCACHE_CACHE_S3_KEY_PREFIX
-                            // SCCACHE_GCS_BUCKET -> SCCACHE_CACHE_GCS_BUCKET
-                            // SCCACHE_MULTILEVEL_CHAIN -> SCCACHE_CACHE_MULTILEVEL_CHAIN
-                            // etc.
-                            let key = format!("CACHE_{kind}_{key}");
-                            vec![(key, val.into_owned())]
-                        }
+                        return Ok(vec![(key, val.into_owned())]);
                     }
-                } else {
-                    let key = key.to_owned();
-                    vec![(key, val.into_owned())]
-                };
 
-                Ok(res)
+                    if kind == "AZURE" && key == "BLOB_CONTAINER" {
+                        // SCCACHE_AZURE_BLOB_CONTAINER -> SCCACHE_AZURE_CONTAINER
+                        key = "CONTAINER";
+                    }
+
+                    if kind == "DISK" || cache_as_preprocessor_cache.contains(kind) {
+                        // If SCCACHE_S3_USE_PREPROCESSOR_CACHE_MODE = true, duplicate the cache properties as
+                        // if they were also defined for the preprocessor cache:
+                        // SCCACHE_CACHE_S3_BUCKET -> "bucket"
+                        // SCCACHE_PREPROCESSOR_CACHE_S3_BUCKET -> "bucket"
+                        let key1 = format!("CACHE_{kind}_{key}");
+                        let key2 = format!("PREPROCESSOR_CACHE_{kind}_{key}");
+                        return Ok(vec![
+                            (key1, val.clone().into_owned()),
+                            (key2, val.clone().into_owned()),
+                        ]);
+                    }
+
+                    // SCCACHE_AZURE_CONNECTION_STRING -> SCCACHE_CACHE_AZURE_CONNECTION_STRING
+                    // SCCACHE_S3_KEY_PREFIX -> SCCACHE_CACHE_S3_KEY_PREFIX
+                    // SCCACHE_GCS_BUCKET -> SCCACHE_CACHE_GCS_BUCKET
+                    // SCCACHE_MULTILEVEL_CHAIN -> SCCACHE_CACHE_MULTILEVEL_CHAIN
+                    // etc.
+                    let key = format!("CACHE_{kind}_{key}");
+                    return Ok(vec![(key, val.into_owned())]);
+                }
+
+                Ok(vec![(key.into(), val.into_owned())])
             })
             .flatten_ok()
             .try_collect::<_, Vec<_>, _>()?;
@@ -1337,6 +1354,39 @@ mod test {
         merged_conf.cache.multilevel = env_conf.cache.multilevel.clone();
 
         assert_eq!((file_conf + env_conf)?, merged_conf);
+
+        Ok(())
+    }
+
+    #[test]
+    fn disk_cache_enables_preprocessor_cache() -> Result<()> {
+        drop(env_logger::try_init());
+
+        let config = Config::from_vars([("SCCACHE_DIR", "/cache/sccache")])?;
+
+        assert_eq!(
+            config.cache,
+            vec![
+                Disk {
+                    dir: "/cache/sccache".into(),
+                    ..Disk::default()
+                }
+                .into()
+            ]
+            .into()
+        );
+
+        assert_eq!(
+            config.preprocessor.cache,
+            vec![
+                Disk {
+                    dir: "/cache/sccache".into(),
+                    ..Disk::default()
+                }
+                .into()
+            ]
+            .into()
+        );
 
         Ok(())
     }
