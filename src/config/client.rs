@@ -553,6 +553,7 @@ impl TryFrom<Vec<PathBuf>> for Basedirs {
 
                 // Normalize basedir:
                 // remove double separators, cur_dirs, parent_dirs, trailing slashes
+                #[allow(unused_mut)]
                 let mut path = path.normalize().into_string().into_bytes();
 
                 // normalize windows paths: use slashes and lowercase
