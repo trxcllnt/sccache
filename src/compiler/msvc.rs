@@ -364,6 +364,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_take_arg!("Fo", PathBuf, Concatenated, Output),
     msvc_take_arg!("Fp", PathBuf, Concatenated, TooHardPath), // allows users to specify the name for a PCH (when using /Yu or /Yc), PCHs are not supported in sccache.
     msvc_take_arg!("Fr", PathBuf, Concatenated, TooHardPath),
+    msvc_take_arg!("Ft", PathBuf, Concatenated, TooHardPath), // #import include paths - not yet supported.
     msvc_flag!("Fx", TooHardFlag),
     msvc_flag!("GA", PassThrough),
     msvc_flag!("GF", PassThrough),
@@ -376,6 +377,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("GS-", PassThrough),
     msvc_flag!("GT", PassThrough),
     msvc_flag!("GX", PassThrough),
+    msvc_flag!("GX-", PassThrough),
     msvc_flag!("GZ", PassThrough),
     msvc_flag!("Gd", PassThrough),
     msvc_flag!("Ge", PassThrough),
@@ -384,6 +386,8 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("Gm-", PassThrough), // disable minimal rebuild; we prefer no minimal rebuild, so marking it as disabled is fine
     msvc_flag!("Gr", PassThrough),
     msvc_take_arg!("Gs", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_flag!("Gu", PassThrough),
+    msvc_flag!("Gu-", PassThrough),
     msvc_flag!("Gv", PassThrough),
     msvc_flag!("Gw", PassThrough),
     msvc_flag!("Gw-", PassThrough),
@@ -398,6 +402,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("JMC-", PassThrough),
     msvc_flag!("LD", PassThrough),
     msvc_flag!("LDd", PassThrough),
+    msvc_flag!("LN", PassThrough),
     msvc_flag!("MD", PassThrough),
     msvc_flag!("MDd", PassThrough),
     msvc_take_arg!("MP", OsString, Concatenated, TooHardIfFdIsPresentWithSuffix),
@@ -419,14 +424,19 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("Oy", PassThrough),
     msvc_flag!("Oy-", PassThrough),
     msvc_flag!("P", SuppressCompilation),
+    msvc_flag!("PD", PassThrough),
+    msvc_flag!("PH", PassThrough),
     msvc_flag!("QIfist", PassThrough),
     msvc_flag!("QIntel-jcc-erratum", PassThrough),
     msvc_flag!("Qfast_transcendentals", PassThrough),
     msvc_flag!("Qimprecise_fwaits", PassThrough),
     msvc_flag!("Qpar", PassThrough),
     msvc_flag!("Qpar-", PassThrough),
+    msvc_flag!("Qpar-report:1", PassThrough),
+    msvc_flag!("Qpar-report:2", PassThrough),
     msvc_flag!("Qsafe_fp_loads", PassThrough),
     msvc_flag!("Qspectre", PassThrough),
+    msvc_flag!("Qspectre-", PassThrough),
     msvc_flag!("Qspectre-load", PassThrough),
     msvc_flag!("Qspectre-load-cf", PassThrough),
     msvc_flag!("Qvec-report:1", PassThrough),
@@ -490,10 +500,14 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_take_arg!("deps", PathBuf, Concatenated, DepFile),
     msvc_take_arg!("diagnostics:", OsString, Concatenated, PassThroughWithSuffix),
     msvc_take_arg!("doc", PathBuf, Concatenated, TooHardPath), // Creates an .xdc file.
+    msvc_flag!("dynamicdeopt", TooHardFlag), // Dynamic deoptimization is not supported.
+    msvc_take_arg!("dynamicdeopt:suffix", OsString, Separated, TooHard), // Dynamic deoptimization is not supported.
+    msvc_flag!("dynamicdeopt:sync", TooHardFlag), // Dynamic deoptimization is not supported.
     msvc_take_arg!("errorReport:", OsString, Concatenated, PassThroughWithSuffix), // Deprecated.
     msvc_take_arg!("execution-charset:", OsString, Concatenated, PassThroughWithSuffix),
     msvc_flag!("experimental:deterministic", PassThrough),
     msvc_flag!("experimental:external", PassThrough),
+    msvc_take_arg!("experimental:log", PathBuf, Concatenated, TooHardPath), // SARIF logging is not supported.
     msvc_flag!("experimental:module", TooHardFlag),
     msvc_flag!("experimental:module-", PassThrough), // Explicitly disabled modules.
     msvc_take_arg!("experimental:preprocessor", OsString, Concatenated, PassThroughWithSuffix),
@@ -504,6 +518,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("external:W3", PassThrough),
     msvc_flag!("external:W4", PassThrough),
     msvc_flag!("external:anglebrackets", PassThrough),
+    msvc_flag!("external:templates-", PassThrough),
     msvc_flag!("fastfail", PassThrough),
     msvc_take_arg!("favor:", OsString, Concatenated, PassThroughWithSuffix),
     msvc_take_arg!("feature:", OsString, Concatenated, PassThroughWithSuffix),
@@ -511,7 +526,9 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("fno-sanitize-address-vcasan-lib", PassThrough),
     msvc_take_arg!("fno-sanitize-coverage", OsString, Concatenated(b'='), PassThroughWithSuffix),
     msvc_flag!("forceInterlockedFunctions", PassThrough),
+    msvc_flag!("forceInterlockedFunctions-", PassThrough),
     msvc_take_arg!("fp:", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("fpcvt:", OsString, Concatenated, PassThroughWithSuffix),
     msvc_flag!("fsanitize-address-asan-compat-lib", PassThrough),
     msvc_flag!("fsanitize-address-use-after-return", PassThrough),
     msvc_take_arg!("fsanitize-blacklist", PathBuf, Concatenated(b'='), ExtraHashFile),
@@ -519,6 +536,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_take_arg!("fsanitize=", OsString, Concatenated, PassThroughWithSuffix),
     msvc_flag!("fsyntax-only", SuppressCompilation),
     msvc_take_arg!("guard:cf", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("guard:ehcont", OsString, Concatenated, PassThroughWithSuffix),
     msvc_flag!("homeparams", PassThrough),
     msvc_flag!("hotpatch", PassThrough),
     // New: C++20 msvc modules flags.
@@ -531,6 +549,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_take_arg!("imsvc", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
     msvc_flag!("interface", TooHardFlag),
     msvc_flag!("internalPartition", TooHardFlag),
+    msvc_flag!("jumptablerdata", PassThrough),
     msvc_flag!("kernel", PassThrough),
     msvc_flag!("kernel-", PassThrough),
     msvc_flag!("nologo", PassThrough),
@@ -538,8 +557,10 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("openmp", PassThrough),
     msvc_flag!("openmp-", PassThrough),
     msvc_take_arg!("openmp:", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_flag!("options:strict", PassThrough),
     msvc_flag!("permissive", PassThrough),
     msvc_flag!("permissive-", PassThrough),
+    msvc_flag!("presetPadding", PassThrough),
     msvc_take_arg!("reference", OsString, Separated, TooHard),
     msvc_flag!("sdl", PassThrough),
     msvc_flag!("sdl-", PassThrough),
@@ -555,6 +576,8 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("vd0", PassThrough),
     msvc_flag!("vd1", PassThrough),
     msvc_flag!("vd2", PassThrough),
+    msvc_flag!("vlen", PassThrough),
+    msvc_take_arg!("vlen=", OsString, Concatenated, PassThroughWithSuffix),
     msvc_flag!("vmb", PassThrough),
     msvc_flag!("vmg", PassThrough),
     msvc_flag!("vmm", PassThrough),
@@ -562,6 +585,8 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("vmv", PassThrough),
     msvc_flag!("volatile:iso", PassThrough),
     msvc_flag!("volatile:ms", PassThrough),
+    msvc_flag!("volatileMetadata", PassThrough),
+    msvc_flag!("volatileMetadata-", PassThrough),
     msvc_flag!("w", PassThrough),
     msvc_take_arg!("w1", OsString, Concatenated, PassThroughWithSuffix),
     msvc_take_arg!("w2", OsString, Concatenated, PassThroughWithSuffix),
@@ -2859,6 +2884,145 @@ mod test {
                 "-Zf",
                 "-Fmdictionary-map"
             )
+        );
+    }
+
+    #[test]
+    fn test_parse_arguments_passthrough_additional() {
+        let args = ovec![
+            "-GX-",
+            "-Gu",
+            "-Gu-",
+            "-LN",
+            "-PD",
+            "-PH",
+            "-Qpar-report:1",
+            "-Qpar-report:2",
+            "-Qspectre-",
+            "-external:templates-",
+            "-forceInterlockedFunctions",
+            "-forceInterlockedFunctions-",
+            "-fpcvt:IA",
+            "/fpcvt:BC",
+            "-guard:ehcont",
+            "/guard:ehcont-",
+            "-jumptablerdata",
+            "-options:strict",
+            "-presetPadding",
+            "-vlen",
+            "-vlen=256",
+            "-volatileMetadata",
+            "-volatileMetadata-",
+            "-c",
+            "-Fofoo.obj",
+            "foo.c"
+        ];
+        let ParsedArguments {
+            input,
+            common_args,
+            dependency_args,
+            preprocessor_args,
+            ..
+        } = match parse_arguments(args) {
+            CompilerArguments::Ok(args) => args,
+            o => panic!("Got unexpected parse result: {:?}", o),
+        };
+        assert_eq!(Some("foo.c"), input.to_str());
+        assert!(preprocessor_args.is_empty());
+        assert!(dependency_args.is_empty());
+        assert_eq!(
+            common_args,
+            ovec!(
+                "-GX-",
+                "-Gu",
+                "-Gu-",
+                "-LN",
+                "-PD",
+                "-PH",
+                "-Qpar-report:1",
+                "-Qpar-report:2",
+                "-Qspectre-",
+                "-external:templates-",
+                "-forceInterlockedFunctions",
+                "-forceInterlockedFunctions-",
+                "-fpcvt:IA",
+                "/fpcvt:BC",
+                "-guard:ehcont",
+                "/guard:ehcont-",
+                "-jumptablerdata",
+                "-options:strict",
+                "-presetPadding",
+                "-vlen",
+                "-vlen=256",
+                "-volatileMetadata",
+                "-volatileMetadata-"
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_arguments_dynamicdeopt() {
+        assert_eq!(
+            CompilerArguments::CannotCache("-dynamicdeopt", None),
+            parse_arguments(ovec!["-c", "foo.c", "-Fofoo.obj", "-dynamicdeopt"])
+        );
+    }
+
+    #[test]
+    fn test_parse_arguments_dynamicdeopt_suffix() {
+        assert_eq!(
+            CompilerArguments::CannotCache("-dynamicdeopt:suffix", None),
+            parse_arguments(ovec![
+                "-c",
+                "foo.c",
+                "-Fofoo.obj",
+                "-dynamicdeopt:suffix",
+                "foo"
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_arguments_dynamicdeopt_sync() {
+        assert_eq!(
+            CompilerArguments::CannotCache("-dynamicdeopt:sync", None),
+            parse_arguments(ovec!["-c", "foo.c", "-Fofoo.obj", "-dynamicdeopt:sync"])
+        );
+    }
+
+    #[test]
+    fn test_parse_arguments_experimental_log_file() {
+        assert_eq!(
+            CompilerArguments::CannotCache("-experimental:log", None),
+            parse_arguments(ovec![
+                "-c",
+                "foo.c",
+                "-Fofoo.obj",
+                "-experimental:log",
+                "foo"
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_arguments_experimental_log_directory() {
+        assert_eq!(
+            CompilerArguments::CannotCache("-experimental:log", None),
+            parse_arguments(ovec![
+                "-c",
+                "foo.c",
+                "-Fofoo.obj",
+                "-experimental:log",
+                "foo\\"
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_arguments_ft() {
+        assert_eq!(
+            CompilerArguments::CannotCache("-Ft", None),
+            parse_arguments(ovec!["-c", "foo.c", "-Fofoo.obj", "-Ft/hello/world"])
         );
     }
 
