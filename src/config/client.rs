@@ -568,7 +568,7 @@ impl TryFrom<Vec<PathBuf>> for Basedirs {
                     path.push(b'/');
                 }
 
-                Ok((orig, path))
+                Ok((crate::util::bytes_to_path(&path)?.to_path_buf(), path))
             })
             // Only take unique paths
             .try_collect::<_, (BTreeSet<_>, BTreeSet<_>), _>()
