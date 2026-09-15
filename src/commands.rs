@@ -28,8 +28,12 @@ use crate::{
 use byteorder::{BigEndian, ByteOrder};
 use fs::{File, OpenOptions};
 use fs_err as fs;
+#[cfg(not(windows))]
+use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::{
     env,
     ffi::{OsStr, OsString},
@@ -811,12 +815,16 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             trace!("Command::InternalStartServer");
             if env::var("SCCACHE_ERROR_LOG").is_ok() {
                 let f = create_error_log()?;
+                #[cfg(not(windows))]
+                let preserve = [f.as_raw_fd()];
+                #[cfg(windows)]
+                let preserve = [f.as_raw_handle()];
                 // Can't report failure here, we're already daemonized.
-                daemonize()?;
+                daemonize(&preserve)?;
                 redirect_error_log(f)?;
             } else {
                 // We aren't asking for a log file
-                daemonize()?;
+                daemonize(&[])?;
             }
             info!(
                 "Starting {sccache} v{version} server",

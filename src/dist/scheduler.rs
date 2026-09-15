@@ -385,7 +385,7 @@ impl Scheduler {
 
         tracing::info!("Scheduler `{}` initialized", self.scheduler_id);
 
-        crate::util::daemonize()?;
+        crate::util::daemonize(&[])?;
 
         // Wait for celery and/or server shutdown
         let shutdown_server = tokio::try_join!(shutdown_celery, shutdown_server);
