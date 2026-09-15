@@ -29,6 +29,7 @@ use crate::{
     util::{
         Digest, HASH_BUFFER_SIZE, HashToDigest, hash_all, read_line_batches,
         remove_preprocessor_empty_newlines, remove_preprocessor_linemarkers, strip_basedirs,
+        strip_basedirs_from_arg,
     },
 };
 use async_trait::async_trait;
@@ -2448,6 +2449,20 @@ static CACHED_ENV_VARS: LazyLock<HashSet<&'static OsStr>> = LazyLock::new(|| {
     .collect()
 });
 
+/// Feed the compiler arguments into `m`, with the base directories stripped.
+///
+/// The arguments are hashed verbatim, so any that spell out an absolute path -
+/// `-ffile-prefix-map=/home/user/project=.` above all - would tie the cache
+/// entry to one checkout of the tree. See [`strip_basedirs_from_arg`].
+pub fn hash_arguments(m: &mut Digest, arguments: &[OsString], basedirs: &[Vec<u8>]) {
+    for arg in arguments {
+        // Same shape as OsString's own Hash impl: the bytes, then a separator
+        // that cannot occur in them.
+        m.update(&strip_basedirs_from_arg(arg.as_encoded_bytes(), basedirs));
+        m.update(&[0xff]);
+    }
+}
+
 /// Parameters for computing a hash key for C/C++ compilation caching.
 ///
 /// Construct with required fields via [`HashKeyParams::new`], then add optional
@@ -2560,12 +2575,9 @@ impl<'a> HashKeyParams<'a> {
         m.update(self.parsed_args.language.as_str().as_bytes());
 
         // Hash both common and arch args
-        for arg in &self.parsed_args.common_args[..] {
-            arg.hash(&mut HashToDigest { digest: &mut m });
-        }
-        for arg in &self.parsed_args.arch_args[..] {
-            arg.hash(&mut HashToDigest { digest: &mut m });
-        }
+        hash_arguments(&mut m, &self.parsed_args.common_args[..], self.basedirs);
+        hash_arguments(&mut m, &self.parsed_args.arch_args[..], self.basedirs);
+
         for hash in self.extra_hashes {
             m.update(hash.as_bytes());
         }

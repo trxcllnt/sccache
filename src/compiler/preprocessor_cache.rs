@@ -34,7 +34,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     cache::{Cache, Storage},
-    compiler::{ColorMode, c::ParsedArguments},
+    compiler::{
+        ColorMode,
+        c::{ParsedArguments, hash_arguments},
+    },
     errors::*,
     lru_disk_cache::{LruCache, lru_cache},
     util::{
@@ -457,11 +460,7 @@ pub async fn preprocessor_cache_entry_hash_key(
         &parsed_args.common_args[..],
         &parsed_args.arch_args[..],
     ] {
-        for arg in arguments {
-            arg.hash(&mut HashToDigest {
-                digest: &mut digest,
-            });
-        }
+        hash_arguments(&mut digest, arguments, basedirs);
     }
 
     for hash in extra_hashes {
