@@ -29,6 +29,8 @@ use {
     },
 };
 
+#[cfg(feature = "dist-client")]
+use crate::util::path_to_str;
 use crate::{
     cache::{FileObjectSource, Storage},
     compiler::args::*,
@@ -43,7 +45,7 @@ use crate::{
     server::SccacheService,
     util::{
         Digest, HashToDigest, OsStrExt, bytes_to_str, fmt_duration_as_secs, hash_all,
-        hash_all_archives, path_to_str, run_input_output,
+        hash_all_archives, run_input_output,
     },
 };
 use async_trait::async_trait;

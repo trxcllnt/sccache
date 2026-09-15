@@ -42,8 +42,8 @@ use std::os::android::net::SocketAddrExt;
 
 #[cfg(target_os = "linux")]
 use std::os::linux::net::SocketAddrExt;
-use std::sync::atomic::AtomicU64;
 
+use anyhow::Context as _;
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
@@ -54,7 +54,7 @@ use std::{
     marker::Unpin,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, atomic::AtomicU64},
     task::{Context, Poll, Waker},
     time::Duration,
 };
@@ -72,7 +72,6 @@ use unit_prefix::NumberPrefix;
 #[cfg(feature = "dist-client")]
 use {
     crate::config,
-    anyhow::Context as _,
     std::{mem, time::Instant},
 };
 

@@ -444,7 +444,7 @@ pub struct StorageBuilder {
 
 impl From<CacheType> for Result<StorageBuilder> {
     fn from(config: CacheType) -> Self {
-        #[allow(unreachable_patterns)]
+        #[allow(unreachable_patterns, unused)]
         match config {
             CacheType::Azure(cfg) => {
                 #[cfg(feature = "azure")]

@@ -382,16 +382,17 @@ mod dist_server {
                         }
                     }
 
-                    let prom = match type_.as_deref().unwrap_or("none") {
-                        "bind" if let Some(addr) = addr => Prometheus::ListenAddr {
+                    let type_ = type_.as_deref().unwrap_or("none");
+                    let prom = match type_ {
+                        "bind" => addr.map(|addr| Prometheus::ListenAddr {
                             addr,
                             idle_timeout_secs,
-                        },
-                        "path" if let Some(path) = path => Prometheus::ListenPath {
+                        }),
+                        "path" => path.map(|path| Prometheus::ListenPath {
                             path,
                             idle_timeout_secs,
-                        },
-                        "push" if let Some(endpoint) = endpoint => Prometheus::PushGateway {
+                        }),
+                        "push" => endpoint.map(|endpoint| Prometheus::PushGateway {
                             endpoint,
                             interval_ms: interval_ms
                                 .unwrap_or_else(defaults::default_prometheus_push_gateway_interval),
@@ -399,13 +400,14 @@ mod dist_server {
                             password,
                             http_method,
                             idle_timeout_secs,
-                        },
-                        type_ => {
-                            return Err(de::Error::unknown_variant(
-                                type_,
-                                &["bind", "path", "push"],
-                            ));
-                        }
+                        }),
+                        _ => None,
+                    };
+
+                    let prom = if let Some(prom) = prom {
+                        prom
+                    } else {
+                        return Err(de::Error::unknown_variant(type_, &["bind", "path", "push"]));
                     };
 
                     Ok(prom)

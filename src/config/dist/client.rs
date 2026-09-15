@@ -200,32 +200,38 @@ impl<'de> Deserialize<'de> for Auth {
                     type_.as_deref()
                 };
 
-                let auth = match type_ {
-                    Some("token") if let Some(token) = token => Auth::Token { token },
-                    Some("oauth2_code_grant_pkce")
+                let auth = match type_.unwrap_or("none") {
+                    "token" => token.map(|token| Auth::Token { token }),
+                    "oauth2_code_grant_pkce" => {
                         if let Some(ref client_id) = client_id
                             && let Some(ref auth_url) = auth_url
-                            && let Some(ref token_url) = token_url =>
-                    {
-                        Auth::Oauth2CodeGrantPKCE {
-                            client_id: client_id.into(),
-                            auth_url: auth_url.into(),
-                            token_url: token_url.into(),
+                            && let Some(ref token_url) = token_url
+                        {
+                            Some(Auth::Oauth2CodeGrantPKCE {
+                                client_id: client_id.into(),
+                                auth_url: auth_url.into(),
+                                token_url: token_url.into(),
+                            })
+                        } else {
+                            None
                         }
                     }
-                    Some("oauth2_implicit")
+                    "oauth2_implicit" => {
                         if let Some(ref client_id) = client_id
-                            && let Some(ref auth_url) = auth_url =>
-                    {
-                        Auth::Oauth2Implicit {
-                            client_id: client_id.into(),
-                            auth_url: auth_url.into(),
+                            && let Some(ref auth_url) = auth_url
+                        {
+                            Some(Auth::Oauth2Implicit {
+                                client_id: client_id.into(),
+                                auth_url: auth_url.into(),
+                            })
+                        } else {
+                            None
                         }
                     }
-                    _ => Auth::default(),
+                    _ => None,
                 };
 
-                Ok(auth)
+                Ok(auth.unwrap_or_default())
             }
         }
 

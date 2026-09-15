@@ -185,7 +185,7 @@ fn redirect_error_log(f: File) -> Result<()> {
 
 /// Re-execute the current executable as a background server.
 #[cfg(windows)]
-fn run_server_process(startup_timeout: Option<Duration>) -> Result<ServerStartup> {
+fn run_server_process(startup_timeout: Duration) -> Result<ServerStartup> {
     use futures::StreamExt;
     use std::mem;
     use std::os::windows::ffi::OsStrExt;
@@ -304,9 +304,8 @@ fn run_server_process(startup_timeout: Option<Duration>) -> Result<ServerStartup
         read_server_startup_status(socket?).await
     };
 
-    let timeout = startup_timeout.unwrap_or(SERVER_STARTUP_TIMEOUT);
     runtime.block_on(async move {
-        match tokio::time::timeout(timeout, startup).await {
+        match tokio::time::timeout(startup_timeout, startup).await {
             Ok(result) => result,
             Err(_elapsed) => Ok(ServerStartup::TimedOut),
         }

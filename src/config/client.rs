@@ -558,7 +558,7 @@ impl TryFrom<Vec<PathBuf>> for Basedirs {
 
                 // normalize windows paths: use slashes and lowercase
                 #[cfg(target_os = "windows")]
-                let mut path = crate::util::normalize_win_path(&orig);
+                let mut path = crate::util::normalize_win_path(&path);
 
                 // Always add a trailing `/` to basedirs to ensure we only match complete path
                 // components
@@ -1904,7 +1904,7 @@ mod test {
 
             // Test that env config is used when env is set but empty
             let env_conf = Config {
-                basedirs: Basedirs(vec![]),
+                basedirs: Basedirs::empty(),
                 ..Default::default()
             };
 
@@ -2328,6 +2328,7 @@ mod test {
                 // Should strip despite mixed slashes
                 let expected = b"# 1 \"src/main.c\"";
                 assert_eq!(&*output, expected);
+                assert!(matches!(output, Cow::Owned(_)));
 
                 Ok(())
             }
