@@ -354,6 +354,7 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("-aux-info", OsString, Separated, PassThrough),
     take_arg!("-b", OsString, Separated, PassThrough),
     flag!("-c", DoCompilation),
+    take_arg!("-fcallgraph-info", OsString, Concatenated(b'='), TooHard),
     take_arg!("-fdeps-file", PathBuf, Concatenated(b'='), StructuredDepArgumentPath),
     take_arg!("-fdeps-format", OsString, Concatenated(b'='), StructuredDepFormat),
     take_arg!("-fdeps-target", OsString, Concatenated(b'='), StructuredDepTarget),
@@ -365,11 +366,12 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     flag!("-fno-profile-generate", TooHardFlag),
     flag!("-fno-profile-use", TooHardFlag),
     flag!("-fno-working-directory", PreprocessorArgumentFlag),
-    flag!("-fplugin=libcc1plugin", TooHardFlag),
+    take_arg!("-fplugin", OsString, Concatenated(b'='), TooHard),
     flag!("-fprofile-arcs", ProfileGenerate),
     flag!("-fprofile-generate", ProfileGenerate),
     take_arg!("-fprofile-use", OsString, Concatenated, TooHard),
     flag!("-frepo", TooHardFlag),
+    flag!("-fstack-usage", TooHardFlag),
     flag!("-fsyntax-only", TooHardFlag),
     flag!("-ftest-coverage", TestCoverage),
     flag!("-fworking-directory", PreprocessorArgumentFlag),
@@ -2382,6 +2384,8 @@ mod test {
     #[test]
     fn test_parse_arguments_too_hard() {
         let too_hard_flags = stringvec![
+            "-fstack-usage",
+            "-fcallgraph-info",
             "-save-temps",
             "-save-temps=cwd",
             "-save-temps=obj",
@@ -2868,6 +2872,35 @@ mod test {
             CompilerArguments::NotCompilation,
             parse_arguments_(
                 stringvec!["-shared", "foo.o", "-o", "foo.so", "bar.o"],
+                false
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_arguments_fplugin() {
+        assert_eq!(
+            CompilerArguments::CannotCache("-fplugin", None),
+            parse_arguments_(
+                stringvec!["-c", "foo.c", "-fplugin=plugin.so", "-o", "foo.o"],
+                false
+            )
+        );
+        assert_eq!(
+            CompilerArguments::CannotCache("-fplugin", None),
+            parse_arguments_(
+                stringvec!["-c", "foo.c", "-fplugin=libcc1plugin", "-o", "foo.o"],
+                false
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_arguments_fcallgraph_info_with_markers() {
+        assert_eq!(
+            CompilerArguments::CannotCache("-fcallgraph-info", None),
+            parse_arguments_(
+                stringvec!["-c", "foo.c", "-fcallgraph-info=su,da", "-o", "foo.o"],
                 false
             )
         );
