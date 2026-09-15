@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(any(feature = "dist-client", feature = "dist-server"))]
 pub mod dist {
     pub use crate::config::dist::Keepalive;
     pub use crate::config::dist::client::*;
@@ -2911,8 +2910,7 @@ mod test {
                     .cache
                     .configs
                     .iter()
-                    .find(|(_, c)| matches!(c, Cache::S3(..)))
-                    .is_some()
+                    .any(|(_, c)| matches!(c, Cache::S3(..)))
             );
 
             Ok(())

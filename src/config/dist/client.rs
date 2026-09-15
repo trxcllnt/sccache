@@ -13,7 +13,7 @@
 // limitations under the License.
 use crate::config::{
     dist::Keepalive,
-    utils::{_Ignored, HTTPUrl, deserialize_bool, deserialize_size_from_str},
+    utils::{_Ignored, deserialize_bool, deserialize_size_from_str},
 };
 
 use serde::{
@@ -55,8 +55,13 @@ pub struct Config {
     #[serde(default, deserialize_with = "deserialize_bool")]
     pub rewrite_includes_only: bool,
 
+    #[cfg(any(feature = "dist-client", feature = "dist-server"))]
     #[serde(default, alias = "scheduler_url")]
-    pub url: Option<HTTPUrl>,
+    pub url: Option<crate::config::utils::HTTPUrl>,
+
+    #[cfg(not(any(feature = "dist-client", feature = "dist-server")))]
+    #[serde(default, alias = "scheduler_url")]
+    pub url: Option<String>,
 
     /// Custom toolchains
     #[serde(default)]

@@ -165,7 +165,7 @@ pub enum DistClientState {
 impl DistClientContainer {
     #[cfg(not(feature = "dist-client"))]
     fn new(config: &ClientConfig, _: &tokio::runtime::Handle) -> Self {
-        if config.dist.scheduler_url.is_some() {
+        if config.dist.url.is_some() {
             warn!(
                 "Scheduler address configured but dist feature disabled, disabling distributed sccache"
             )

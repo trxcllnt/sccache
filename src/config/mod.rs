@@ -25,8 +25,6 @@ pub mod utils;
 
 pub mod cache;
 pub mod client;
-
-#[cfg(any(feature = "dist-client", feature = "dist-server"))]
 pub mod dist;
 
 pub use cache::{
