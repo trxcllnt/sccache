@@ -2026,7 +2026,7 @@ mod test {
         fn env_basedirs_single() -> Result<()> {
             drop(env_logger::try_init());
             let config = Config::from_vars([("SCCACHE_BASEDIRS", "C:/home/user/project")])?;
-            assert_eq!(config.basedirs, vec![b"C:/home/user/project/".to_vec()]);
+            assert_eq!(config.basedirs, vec![b"c:/home/user/project/".to_vec()]);
             Ok(())
         }
 
