@@ -426,6 +426,7 @@ static CACHED_ENV_VARS: LazyLock<HashSet<&'static OsStr>> = LazyLock::new(|| {
 #[allow(clippy::too_many_arguments)]
 pub async fn preprocessor_cache_entry_hash_key(
     compiler_digest: &str,
+    assembler_digest: Option<&str>,
     parsed_args: &ParsedArguments,
     extra_hashes: &[&str],
     env_vars: &[(OsString, OsString)],
@@ -465,6 +466,12 @@ pub async fn preprocessor_cache_entry_hash_key(
 
     for hash in extra_hashes {
         digest.update(hash.as_bytes());
+    }
+    // A hit on a preprocessor cache entry hands back the object cache key that
+    // was stored in it, so everything the object key is made of has to be here
+    // too or the assembler would be forgotten on that path.
+    if let Some(assembler_digest) = assembler_digest {
+        digest.update(assembler_digest.as_bytes());
     }
 
     for (var, val) in env_vars.iter() {
@@ -1030,6 +1037,7 @@ mod test {
         // Test 1: With basedirs, hashes should be the same
         let hash1_with_basedirs = preprocessor_cache_entry_hash_key(
             "test_digest",
+            None,
             &args,
             &[],
             &[],
@@ -1044,6 +1052,7 @@ mod test {
 
         let hash2_with_basedirs = preprocessor_cache_entry_hash_key(
             "test_digest",
+            None,
             &args,
             &[],
             &[],
@@ -1064,6 +1073,7 @@ mod test {
         // Test 2: With basedir1 for first, and basedir2 for second, hashes should be the same
         let hash1_with_basedirs = preprocessor_cache_entry_hash_key(
             "test_digest",
+            None,
             &args,
             &[],
             &[],
@@ -1078,6 +1088,7 @@ mod test {
 
         let hash2_with_basedirs = preprocessor_cache_entry_hash_key(
             "test_digest",
+            None,
             &args,
             &[],
             &[],
@@ -1098,6 +1109,7 @@ mod test {
         // Test 3: Without basedirs, hashes should be different
         let hash1_no_basedirs = preprocessor_cache_entry_hash_key(
             "test_digest",
+            None,
             &args,
             &[],
             &[],
@@ -1112,6 +1124,7 @@ mod test {
 
         let hash2_no_basedirs = preprocessor_cache_entry_hash_key(
             "test_digest",
+            None,
             &args,
             &[],
             &[],

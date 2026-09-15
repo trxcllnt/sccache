@@ -200,6 +200,8 @@ pub struct ParsedArguments {
     pub extra_dist_files: Vec<PathBuf>,
     /// Extra files that need to have their contents hashed.
     pub extra_hash_files: Vec<PathBuf>,
+    /// Whether the compiler runs a separate assembler to produce the object file.
+    pub uses_external_assembler: bool,
     /// Whether or not the `-showIncludes` argument is passed on MSVC
     pub msvc_show_includes: bool,
     /// Whether the compilation is generating profiling or coverage data.
@@ -233,6 +235,7 @@ impl std::cmp::PartialEq for ParsedArguments {
             unhashed_args,
             extra_dist_files,
             extra_hash_files,
+            uses_external_assembler,
             msvc_show_includes,
             profile_generate,
             color_mode,
@@ -254,6 +257,7 @@ impl std::cmp::PartialEq for ParsedArguments {
             && unhashed_args == &other.unhashed_args
             && extra_dist_files == &other.extra_dist_files
             && extra_hash_files == &other.extra_hash_files
+            && uses_external_assembler == &other.uses_external_assembler
             && msvc_show_includes == &other.msvc_show_includes
             && profile_generate == &other.profile_generate
             && color_mode == &other.color_mode
@@ -437,6 +441,11 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
     /// Return paths to extra files that should be included in the dist toolchain.
     fn extra_dist_files(&self) -> impl Iterator<Item = PathBuf> {
         std::iter::empty()
+    }
+    /// Return the identity of the assembler the compiler would run, when it
+    /// runs one at all.
+    fn assembler_digest(&self) -> Option<String> {
+        None
     }
     /// Determine whether `arguments` are supported by this compiler.
     fn parse_arguments(&self, args: ParseArgs<'_>) -> CompilerArguments<ParsedArguments>;
@@ -674,8 +683,17 @@ where
             return Ok(PreprocessorCacheLookup::Disabled);
         }
 
+        // The assembler that turns the compiler's output into the object file is
+        // as much a part of the result as the compiler itself.
+        let assembler_digest = if self.parsed_args.uses_external_assembler {
+            compiler.assembler_digest()
+        } else {
+            None
+        };
+
         let preprocessor_key = preprocessor_cache_entry_hash_key(
             executable_digest,
+            assembler_digest.as_deref(),
             parsed_args,
             extra_hashes,
             env_vars,
@@ -1166,6 +1184,7 @@ struct Preprocess<'a, T: Send, I> {
     env_vars: &'a [(OsString, OsString)],
     exe: &'a Path,
     executable_digest: &'a str,
+    assembler_digest: Option<String>,
     extra_hashes: &'a [&'a str],
     might_dist_compile: bool,
     generate_dependencies: bool,
@@ -1200,6 +1219,11 @@ where
             generate_dependencies: false,
             include_line_numbers: false,
             rewrite_includes_only: false,
+            assembler_digest: if parsed_args.uses_external_assembler {
+                compiler.assembler_digest()
+            } else {
+                None
+            },
             executable_digest: "",
             extra_hashes: &[],
             basedirs: &[],
@@ -1394,6 +1418,7 @@ where
         .with_env_vars(self.env_vars)
         .with_plusplus(self.compiler.plusplus())
         .with_basedirs(self.basedirs)
+        .with_assembler_digest(self.assembler_digest.as_deref())
         // Include line numbers when `-fprofile-generate` is enabled to guarantee the
         // profile data embedded in the cached object matches the line numbers in this
         // source file.
@@ -2449,6 +2474,7 @@ pub struct HashKeyParams<'a> {
     plusplus: bool,
     basedirs: &'a [Vec<u8>],
     linemarkers: bool,
+    assembler_digest: Option<&'a str>,
 }
 
 impl<'a> HashKeyParams<'a> {
@@ -2474,6 +2500,7 @@ impl<'a> HashKeyParams<'a> {
             plusplus: false,
             basedirs: &[],
             linemarkers: true,
+            assembler_digest: None,
         }
     }
 
@@ -2507,6 +2534,12 @@ impl<'a> HashKeyParams<'a> {
         self
     }
 
+    /// Sets the identity of the assembler the compiler will run, if any.
+    pub fn with_assembler_digest(mut self, assembler_digest: Option<&'a str>) -> Self {
+        self.assembler_digest = assembler_digest;
+        self
+    }
+
     /// Computes the hash key based on the configured parameters.
     ///
     /// If `basedirs` are provided, paths in the preprocessor output will be normalized by
@@ -2535,6 +2568,9 @@ impl<'a> HashKeyParams<'a> {
         }
         for hash in self.extra_hashes {
             m.update(hash.as_bytes());
+        }
+        if let Some(assembler_digest) = self.assembler_digest {
+            m.update(assembler_digest.as_bytes());
         }
 
         for (var, val) in self.env_vars.iter() {
@@ -2628,6 +2664,42 @@ mod test {
             .wait()
             .unwrap();
         assert_neq!(h1, h2);
+    }
+
+    #[test]
+    fn test_assembler_digest_differs() {
+        let args = ParsedArguments {
+            common_args: ovec!["a", "b"],
+            arch_args: ovec!["c"],
+            language: Language::C,
+            ..Default::default()
+        };
+
+        const PREPROCESSED: &[u8] = b"hello world";
+        let h1 = HashKeyParams::new("abcd", &args, into_process_output_stream(PREPROCESSED))
+            .compute()
+            .wait()
+            .unwrap();
+        let h2 = HashKeyParams::new("abcd", &args, into_process_output_stream(PREPROCESSED))
+            .with_assembler_digest(Some("abcd"))
+            .compute()
+            .wait()
+            .unwrap();
+        let h3 = HashKeyParams::new("abcd", &args, into_process_output_stream(PREPROCESSED))
+            .with_assembler_digest(Some("efgh"))
+            .compute()
+            .wait()
+            .unwrap();
+        assert_neq!(h1, h2);
+        assert_neq!(h2, h3);
+        // Not knowing the assembler must keep the key the compiler alone would give,
+        // so that caches predating assembler tracking stay usable.
+        let h4 = HashKeyParams::new("abcd", &args, into_process_output_stream(PREPROCESSED))
+            .with_assembler_digest(None)
+            .compute()
+            .wait()
+            .unwrap();
+        assert_eq!(h1, h4);
     }
 
     #[test]

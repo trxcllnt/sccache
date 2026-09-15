@@ -49,6 +49,7 @@ use std::{
 pub struct Gcc {
     pub gplusplus: bool,
     pub version: Option<String>,
+    pub assembler_digest: Option<String>,
     pub native_archs: Option<(String, String)>,
     pub specfiles: Vec<PathBuf>,
 }
@@ -152,6 +153,9 @@ impl CCompilerImpl for Gcc {
     }
     fn extra_dist_files(&self) -> impl Iterator<Item = PathBuf> {
         self.specfiles.iter().cloned()
+    }
+    fn assembler_digest(&self) -> Option<String> {
+        self.assembler_digest.clone()
     }
     fn parse_arguments(
         &self,
@@ -310,6 +314,10 @@ ArgData! { pub
     // C++20 modules
     EnableModules,
     ModuleMapper(OsString),
+    // Only valid for clang, but this needs to be here since clang shares gcc's
+    // arg parsing.
+    IntegratedAs,
+    NoIntegratedAs,
 }
 
 use self::ArgData::*;
@@ -462,6 +470,9 @@ where
     }
     let mut need_explicit_dep_argument_path = DepArgumentRequirePath::NotNeeded;
     let mut language = None;
+    // Clang assembles in-process unless told otherwise; the other compilers
+    // parsed here always hand off to a separate assembler.
+    let mut integrated_assembler = kind == CCompilerKind::Clang;
     let mut compilation_flag = OsString::new();
     let mut profile_generate = false;
     let mut outputs_gcno = false;
@@ -528,6 +539,8 @@ where
                 outputs_gcno = true;
                 profile_generate = true;
             }
+            Some(IntegratedAs) => integrated_assembler = true,
+            Some(NoIntegratedAs) => integrated_assembler = false,
             Some(DiagnosticsColorFlag) => color_mode = ColorMode::On,
             Some(NoDiagnosticsColorFlag) => color_mode = ColorMode::Off,
             Some(DiagnosticsColor(value)) => {
@@ -638,6 +651,8 @@ where
             | Some(NoDiagnosticsColorFlag)
             | Some(PassThroughFlag)
             | Some(PassThrough(_))
+            | Some(IntegratedAs)
+            | Some(NoIntegratedAs)
             | Some(PassThroughPath(_))
             | Some(EnableModules)
             | Some(ModuleMapper(_))
@@ -747,6 +762,8 @@ where
             | Some(ClangModuleOutput(_))
             | Some(TooHardFlag)
             | Some(XClang(_))
+            | Some(IntegratedAs)
+            | Some(NoIntegratedAs)
             | Some(TooHard(_)) => cannot_cache!(
                 arg.flag_str()
                     .unwrap_or("Can't handle complex arguments through clang",)
@@ -958,6 +975,7 @@ where
         unhashed_args,
         extra_dist_files,
         extra_hash_files,
+        uses_external_assembler: !integrated_assembler,
         profile_generate,
         color_mode,
         suppress_rewrite_includes_only,
@@ -1801,6 +1819,17 @@ mod test {
         assert!(preprocessor_args.is_empty());
         assert!(common_args.is_empty());
         assert!(!msvc_show_includes);
+    }
+
+    #[test]
+    fn test_parse_arguments_external_assembler() {
+        // GCC has no integrated assembler, so `as` is always part of what
+        // produced the object file.
+        let args = stringvec!["-c", "foo.c", "-o", "foo.o"];
+        match parse_arguments_(args, false) {
+            CompilerArguments::Ok(args) => assert!(args.uses_external_assembler),
+            o => panic!("Got unexpected parse result: {:?}", o),
+        }
     }
 
     #[test]

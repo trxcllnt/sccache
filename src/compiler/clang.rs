@@ -40,14 +40,22 @@ pub struct Clang {
     pub clangplusplus: bool,
     /// String from __VERSION__ macro.
     pub version: Option<String>,
+    /// Identity of the assembler used with -fno-integrated-as.
+    pub assembler_digest: Option<String>,
     // true if clang is >= v14
     supports_fminimize_whitespace: bool,
 }
 
 impl Clang {
-    pub fn new(clangplusplus: bool, is_appleclang: bool, version: Option<String>) -> Self {
+    pub fn new(
+        clangplusplus: bool,
+        is_appleclang: bool,
+        version: Option<String>,
+        assembler_digest: Option<String>,
+    ) -> Self {
         Self {
             supports_fminimize_whitespace: is_minversion(is_appleclang, version.as_ref(), 14),
+            assembler_digest,
             clangplusplus,
             version,
         }
@@ -95,6 +103,9 @@ impl CCompilerImpl for Clang {
     }
     fn version(&self) -> Option<String> {
         self.version.clone()
+    }
+    fn assembler_digest(&self) -> Option<String> {
+        self.assembler_digest.clone()
     }
     fn parse_arguments(
         &self,
@@ -249,6 +260,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("-fexperimental-assignment-tracking", OsString, Concatenated(b'='), PassThrough),
     flag!("-fgpu-rdc", PassThroughFlag),
     flag!("-fimplicit-modules", TooHardFlag),
+    flag!("-fintegrated-as", IntegratedAs),
     flag!("-fmemory-profile", TooHardFlag),
     take_arg!("-fmemory-profile-use", PathBuf, Concatenated(b'='), ExtraHashFile),
     take_arg!("-fmemory-profile=", OsString, Concatenated, TooHard),
@@ -261,6 +273,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("-fmodules-user-build-path", OsString, Separated, TooHard),
     take_arg!("-fms-secure-hotpatch-functions-file", PathBuf, Concatenated(b'='), ExtraHashFile),
     flag!("-fno-color-diagnostics", NoDiagnosticsColorFlag),
+    flag!("-fno-integrated-as", NoIntegratedAs),
     flag!("-fno-pch-timestamp", PassThroughFlag),
     flag!("-fno-profile-instr-generate", TooHardFlag),
     flag!("-fno-profile-instr-use", TooHardFlag),
@@ -290,6 +303,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("-gcc-toolchain", OsString, Separated, PassThrough),
     flag!("-gcodeview", PassThroughFlag),
     take_arg!("-include-pch", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
+    flag!("-integrated-as", IntegratedAs),
     take_arg!("-ivfsoverlay", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
     take_arg!("-load", PathBuf, Separated, ExtraHashFile),
     flag!("-mconstructor-aliases", PassThroughFlag),
@@ -297,6 +311,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("-mmlir", OsString, Separated, PassThrough),
     take_arg!("-module-dependency-dir", OsString, Separated, TooHard),
     flag!("-mrelax-all", PassThroughFlag),
+    flag!("-no-integrated-as", NoIntegratedAs),
     flag!("-no-opaque-pointers", PreprocessorArgumentFlag),
     // Note: this is ROCm clang specific. Parallelism level shouldn't affect output.
     take_arg!("-parallel-jobs", OsString, Concatenated(b'='), Unhashed),
@@ -347,6 +362,7 @@ mod test {
             false, // clangplusplus
             false, // is_appleclang
             None,  // version
+            None,  // assembler_digest
         )
         .parse_arguments(ParseArgs {
             arguments: &arguments,
@@ -372,6 +388,7 @@ mod test {
                 false,                                       // clangplusplus
                 false,                                       // is_appleclang
                 Some("\"Ubuntu Clang 14.0.0\"".to_string()), // version
+                None,                                        // assembler_digest
             )
             .supports_fminimize_whitespace
         );
@@ -381,6 +398,7 @@ mod test {
                 false,                                       // clangplusplus
                 false,                                       // is_appleclang
                 Some("\"Ubuntu Clang 13.0.0\"".to_string()), // version
+                None,                                        // assembler_digest
             )
             .supports_fminimize_whitespace
         );
@@ -389,6 +407,7 @@ mod test {
             false, // clangplusplus
             false, // is_appleclang
             Some("\"FreeBSD Clang 14.0.5 (https://github.com/llvm/llvm-project.git llvmorg-14.0.5-0-gc12386ae247c)\"".to_string()), // version
+                None, // assembler_digest
         )
         .supports_fminimize_whitespace);
 
@@ -396,6 +415,7 @@ mod test {
             false, // clangplusplus
             false, // is_appleclang
             Some("\"FreeBSD Clang 13.0.0 (git@github.com:llvm/llvm-project.git llvmorg-13.0.0-0-gd7b669b3a303)\"".to_string()), // version
+                None, // assembler_digest
         )
         .supports_fminimize_whitespace);
 
@@ -404,6 +424,7 @@ mod test {
             false, // clangplusplus
             true, // is_appleclang
             Some("\"FreeBSD Clang 14.0.5 (https://github.com/llvm/llvm-project.git llvmorg-14.0.5-0-gc12386ae247c)\"".to_string()), // version
+                None, // assembler_digest
         )
         .supports_fminimize_whitespace);
     }
@@ -820,6 +841,33 @@ mod test {
                 assert_eq!(parsed.dependency_args, parsed_separated.dependency_args);
             }
         }
+    }
+
+    #[test]
+    fn test_parse_arguments_integrated_as() {
+        assert!(!parses!("-c", "foo.c", "-o", "foo.o").uses_external_assembler);
+        for flag in ["-fno-integrated-as", "-no-integrated-as"] {
+            let a = parses!("-c", "foo.c", "-o", "foo.o", flag);
+            assert!(a.uses_external_assembler);
+            assert_eq!(ovec![flag], a.common_args);
+        }
+        for flag in ["-fintegrated-as", "-integrated-as"] {
+            let a = parses!("-c", "foo.c", "-o", "foo.o", "-fno-integrated-as", flag);
+            assert!(!a.uses_external_assembler);
+            assert_eq!(ovec!["-fno-integrated-as", flag], a.common_args);
+        }
+        // We don't track what the flag does when it comes through -Xclang.
+        assert_eq!(
+            CompilerArguments::CannotCache("-no-integrated-as", None),
+            parse_arguments_(stringvec![
+                "-c",
+                "foo.c",
+                "-o",
+                "foo.o",
+                "-Xclang",
+                "-no-integrated-as"
+            ])
+        );
     }
 
     #[test]
