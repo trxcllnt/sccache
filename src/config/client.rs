@@ -549,20 +549,22 @@ impl TryFrom<Vec<PathBuf>> for Basedirs {
                 }
 
                 let path = crate::util::path_to_str(&orig)?;
-                let path = Utf8TypedPathBuf::from(path.as_ref());
-
                 // Normalize basedir:
                 // remove double separators, cur_dirs, parent_dirs, trailing slashes
-                #[allow(unused_mut)]
-                let mut path = path.normalize().into_string().into_bytes();
+                let path = Utf8TypedPathBuf::from(path.as_ref()).normalize();
 
-                // normalize windows paths: use slashes and lowercase
+                let path = path.as_str().as_bytes();
+
+                #[cfg(not(target_os = "windows"))]
+                let mut path = path.to_vec();
+
                 #[cfg(target_os = "windows")]
-                let mut path = crate::util::normalize_win_path(&path);
+                // normalize windows paths: use slashes and lowercase
+                let mut path = crate::util::normalize_win_path(path);
 
                 // Always add a trailing `/` to basedirs to ensure we only match complete path
                 // components
-                if path.last().filter(|&c| c == &b'/').is_none() {
+                if !matches!(path.last(), Some(b'/')) {
                     path.push(b'/');
                 }
 
@@ -692,15 +694,15 @@ pub mod defaults {
 #[cfg(test)]
 mod test {
     use super::*;
+    #[cfg(any(feature = "dist-client", feature = "dist-server"))]
+    use crate::config::utils::HTTPUrl;
     use crate::config::{
         WriteErrorPolicy,
         cache::{
             Azure, AzureAuth, COS, Cache, CacheMode, Disk, GCS, GHA, Memcached, MultiLevel, OSS,
             Redis, S3, Webdav,
         },
-        utils::HTTPUrl,
     };
-
     use serial_test::serial;
     use std::{collections::BTreeMap, ffi::OsString, str::FromStr};
 
@@ -708,11 +710,10 @@ mod test {
     fn config_from_vars() -> Result<()> {
         drop(env_logger::try_init());
 
-        #[cfg(target_os = "windows")]
-        let basedirs_delim = ';';
         #[cfg(not(target_os = "windows"))]
-        let basedirs_delim = ':';
-        let basedirs = ["/home/user/project", "/home/user/workspace"];
+        let (basedirs, dirs_delim) = { (["/home/user/project", "/home/user/workspace"], ":") };
+        #[cfg(target_os = "windows")]
+        let (basedirs, dirs_delim) = { (["C:/home/user/project", "C:/home/user/workspace"], ";") };
 
         let mut config = Config {
             basedirs: basedirs.into(),
@@ -775,7 +776,10 @@ mod test {
                     },
                 },
                 rewrite_includes_only: true,
+                #[cfg(any(feature = "dist-client", feature = "dist-server"))]
                 url: HTTPUrl::from_str("http://sccache.my-company.com").ok(),
+                #[cfg(not(any(feature = "dist-client", feature = "dist-server")))]
+                url: Some("http://sccache.my-company.com".into()),
                 toolchains: vec![],
                 toolchain_cache_size: 10_000,
             },
@@ -795,10 +799,7 @@ mod test {
 
         let vars = std::iter::empty()
             .chain([
-                (
-                    "SCCACHE_BASEDIRS",
-                    format!("{}{basedirs_delim}{}", basedirs[0], basedirs[1]).as_str(),
-                ),
+                ("SCCACHE_BASEDIRS", basedirs.join(dirs_delim).as_str()),
                 ("SCCACHE_SKIP_CACHE_CHECK", "true"),
                 ("SCCACHE_CACHE_READ_TIMEOUT_SECS", "120"),
                 ("SCCACHE_CACHE_WRITE_TIMEOUT_SECS", "300"),
@@ -1215,7 +1216,7 @@ mod test {
             chain = ["redis"]
 
             [dist]
-            scheduler_url = "http://scheduler.url/"
+            scheduler_url = "http://scheduler.url"
 
             [dist.net]
             connect_timeout = 100
