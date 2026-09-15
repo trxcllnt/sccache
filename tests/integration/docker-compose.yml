@@ -4,7 +4,7 @@ x-common-env: &common-env
   RUST_LOG: sccache=trace
   SCCACHE_SERVER_LOG: sccache=trace
   SCCACHE_PATH: ${SCCACHE_PATH:-/sccache/target/debug/sccache}
-  SCCACHE_DIR: /build/sccache
+  # SCCACHE_DIR: /build/sccache
   LLVM_PROFILE_FILE: ${LLVM_PROFILE_FILE:-}
 
 x-test-runner: &test-runner
