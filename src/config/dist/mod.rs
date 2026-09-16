@@ -213,21 +213,17 @@ mod dist_server {
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum Prometheus {
-        // #[serde(rename = "bind")]
         ListenAddr {
             addr: Option<std::net::SocketAddr>,
             idle_timeout_secs: Option<u64>,
         },
-        // #[serde(rename = "path")]
         ListenPath {
             path: Option<String>,
             idle_timeout_secs: Option<u64>,
         },
-        // #[serde(rename = "push")]
         PushGateway {
             endpoint: String,
             // Interval (in milliseconds) to push metrics to prometheus
-            // #[serde(default = "defaults::default_prometheus_push_gateway_interval")]
             interval_ms: u64,
             username: Option<String>,
             password: Option<String>,
