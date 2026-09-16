@@ -243,6 +243,50 @@ impl Storage for InMemoryStorage {
 }
 
 #[test]
+fn test_multilevel_raw_hit_reads_backend_once() {
+    let runtime = RuntimeBuilder::new_multi_thread()
+        .enable_all()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+
+    let l0 = Arc::new(InMemoryStorage::new());
+    let l1 = Arc::new(InMemoryStorage::new());
+
+    runtime.block_on(async {
+        let storage = MultiLevelStorage::new(vec![
+            l0.clone() as Arc<dyn Storage>,
+            l1.clone() as Arc<dyn Storage>,
+        ])
+        .await;
+
+        let entry = CacheWrite::default();
+        l1.put(
+            "single_read_key",
+            opendal::Buffer::from(entry.finish().unwrap()),
+        )
+        .await
+        .unwrap();
+
+        // Ignore setup writes and assert the lookup path itself.  A raw-capable
+        // level should be read once, then the same bytes should feed both
+        // parsing and the asynchronous backfill.
+        l0.get_access_log().lock().await.clear();
+        l1.get_access_log().lock().await.clear();
+
+        assert!(matches!(
+            storage.get("single_read_key").await.unwrap(),
+            Cache::Hit(_)
+        ));
+
+        assert_eq!(
+            l1.get_access_log().lock().await.as_slice(),
+            &["get:single_read_key"]
+        );
+    });
+}
+
+#[test]
 fn test_disk_plus_remote_to_remote_backfill() {
     let runtime = RuntimeBuilder::new_multi_thread()
         .enable_all()
@@ -1000,10 +1044,10 @@ fn test_sequential_read_order() {
         assert_eq!(l1_accesses.len(), 1, "L1 should be checked second");
         assert_eq!(l2_accesses.len(), 2, "L2: put (setup) + get (check)");
 
-        assert_eq!(l0_accesses[0], format!("get:{key}"));
-        assert_eq!(l1_accesses[0], format!("get:{key}"));
-        assert_eq!(l2_accesses[0], format!("put:{key}")); // from setup
-        assert_eq!(l2_accesses[1], format!("get:{key}")); // from sequential check
+        assert_eq!(l0_accesses[0], format!("get:{}", key));
+        assert_eq!(l1_accesses[0], format!("get:{}", key));
+        assert_eq!(l2_accesses[0], format!("put:{}", key)); // from setup
+        assert_eq!(l2_accesses[1], format!("get:{}", key)); // from sequential check
     });
 }
 
