@@ -246,6 +246,7 @@ start_sccache_server()
 
 test_sccache_dist_01()
 {
+    set -x
 	echo "#### running scache_dist test 01"
 	cd "$TEST_TMPDIR/buildtest"
     sccache -z
@@ -287,6 +288,7 @@ test_sccache_dist_01()
 
 test_sccache_dist_02()
 {
+    set -x
 	echo "#### running scache_dist test 02"
 	cd "$TEST_TMPDIR/buildtest"
 	sccache -z
