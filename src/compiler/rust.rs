@@ -1818,6 +1818,11 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
             env_vars: env_vars.to_owned(),
             executable: executable.to_owned(),
             out_pretty: crate_name.to_owned(),
+            // rustc reads `CARGO_MAKEFLAGS` and runs codegen on a thread pool
+            // sized by the jobserver. Without one, every concurrent rustc
+            // spawns as many threads as there are CPUs, which is the
+            // oversubscription sccache's own jobserver exists to prevent.
+            share_jobserver: true,
         };
 
         trace!("[{crate_name}]: compile command: {command}");

@@ -298,6 +298,7 @@ pub fn generate_compile_commands(
         env_vars: env_vars.to_owned(),
         executable: executable.to_owned(),
         out_pretty: out_pretty.to_string(),
+        share_jobserver: false,
     };
 
     trace!("[{out_pretty}]: {language} command: {command}");

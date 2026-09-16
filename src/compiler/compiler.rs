@@ -198,6 +198,14 @@ pub struct SingleCompileCommand {
     pub env_vars: Vec<(OsString, OsString)>,
     pub executable: PathBuf,
     pub out_pretty: String,
+    /// Whether this compiler participates in the GNU make jobserver.
+    ///
+    /// Deliberately a field rather than a defaulted builder method: the
+    /// compiler then makes every frontend answer, so a new one cannot
+    /// silently get this wrong. Getting it wrong in the `true` direction
+    /// costs a `fork` per compile; in the `false` direction it costs `rustc`
+    /// its parallelism limit, which is what the jobserver exists to enforce.
+    pub share_jobserver: bool,
 }
 
 impl fmt::Display for SingleCompileCommand {
@@ -243,6 +251,7 @@ impl CompileCommandImpl for SingleCompileCommand {
             env_vars,
             executable,
             out_pretty,
+            share_jobserver,
         } = self;
 
         trace!("[{out_pretty}]: Compiling locally");
@@ -253,6 +262,10 @@ impl CompileCommandImpl for SingleCompileCommand {
             .env_clear()
             .current_dir(cwd)
             .envs(env_vars.iter().map(|(k, v)| (k, v)));
+
+        if *share_jobserver {
+            cmd.share_jobserver();
+        }
 
         let child = cmd
             .stdin(Stdio::inherit())
