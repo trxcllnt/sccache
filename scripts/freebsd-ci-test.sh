@@ -168,7 +168,6 @@ prepare_zpool()
 
 prepare_pot()
 {
-    set -x
 	echo "#### preparing pot"
 	sudo sysrc -f /usr/local/etc/pot/pot.conf POT_ZFS_ROOT=potpool/pot
 	sudo sysrc -f /usr/local/etc/pot/pot.conf POT_EXTIF="$PUB_INTF"
@@ -179,7 +178,7 @@ prepare_pot()
 	sudo pot init -f ""
 	sudo pot version
 	sudo cp "$HOME"/.potcache/*.txz /var/cache/pot 2>/dev/null || true
-	sudo pot create -p sccache-template -N alias -i "lo0|127.0.0.2" \
+	sudo pot create -p sccache-template -N alias -i "lo0|127.0.0.2" -b 15.0 \
 	  -t single -b "$OS_VERSION"
 	sudo pot set-cmd -p sccache-template -c /usr/bin/true
 	sudo pot set-attr -p sccache-template -A no-rc-script -V YES
