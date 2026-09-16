@@ -168,6 +168,7 @@ prepare_zpool()
 
 prepare_pot()
 {
+    set -x
 	echo "#### preparing pot"
 	sudo sysrc -f /usr/local/etc/pot/pot.conf POT_ZFS_ROOT=potpool/pot
 	sudo sysrc -f /usr/local/etc/pot/pot.conf POT_EXTIF="$PUB_INTF"
