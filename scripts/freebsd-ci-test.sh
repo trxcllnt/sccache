@@ -38,6 +38,7 @@ set -eo pipefail
 
 init()
 {
+    set -x
 	base=$(realpath "$(dirname "$0")"/..)
 	OS_VERSION="$(freebsd-version | awk -F- '{print $1}')"
 	PUB_INTF="$(netstat -4rn | grep default | awk '{ print $4}')"
@@ -178,7 +179,7 @@ prepare_pot()
 	sudo pot init -f ""
 	sudo pot version
 	sudo cp "$HOME"/.potcache/*.txz /var/cache/pot 2>/dev/null || true
-	sudo pot create -p sccache-template -N alias -i "lo0|127.0.0.2" -b 15.0 \
+	sudo pot create -p sccache-template -N alias -i "lo0|127.0.0.2" \
 	  -t single -b "$OS_VERSION"
 	sudo pot set-cmd -p sccache-template -c /usr/bin/true
 	sudo pot set-attr -p sccache-template -A no-rc-script -V YES
