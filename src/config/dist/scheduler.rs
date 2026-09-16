@@ -17,14 +17,20 @@ use crate::{
         Loadable, Valid,
         cache::{Azure, AzureAuth, Cache, Caches},
         dist::{Keepalive, MessageBroker, Metrics},
-        utils::{deserialize_string_or_list, deserialize_string_or_seq_to_map},
+        utils::{
+            _Ignored, DeserializeListOfStrings, DeserializeMapOfStringsToStrings,
+            deserialize_string_or_list, deserialize_string_or_seq_to_map,
+        },
     },
     errors::*,
 };
 
 use itertools::Itertools;
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, ffi::OsStr, net::SocketAddr, path::Path};
+use serde::{
+    Deserialize, Serialize, de,
+    ser::{self, SerializeMap},
+};
+use std::{collections::HashMap, ffi::OsStr, fmt, net::SocketAddr, path::Path};
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Config {
@@ -307,16 +313,14 @@ impl Loadable<Self> for Config {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum Auth {
     #[default]
-    #[serde(rename = "DANGEROUSLY_INSECURE")]
     Insecure,
-    #[serde(rename = "token")]
-    Token { token: String },
-    #[serde(rename = "jwt", alias = "jwt_validate")]
+    Token {
+        token: String,
+    },
     Jwt(JWTDecode),
-    #[serde(rename = "proxy_token")]
     ProxyToken {
         url: String,
         cache_secs: Option<u64>,
@@ -326,26 +330,350 @@ pub enum Auth {
     },
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+impl Serialize for Auth {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: ser::Serializer,
+    {
+        match self {
+            Auth::Insecure => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("type", "DANGEROUSLY_INSECURE")?;
+                map.end()
+            }
+            Auth::Token { token } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("type", "token")?;
+                map.serialize_entry("token", token)?;
+                map.end()
+            }
+            Auth::Jwt(jwt) => {
+                let mut map = serializer.serialize_map(Some(6))?;
+                map.serialize_entry("type", "jwt")?;
+                map.serialize_entry("audience", &jwt.audience)?;
+                map.serialize_entry("issuer", &jwt.issuer)?;
+                map.serialize_entry("jwks_url", &jwt.jwks_url)?;
+                map.serialize_entry("claims", &jwt.claims)?;
+                map.serialize_entry("leeway", &jwt.leeway)?;
+                map.end()
+            }
+            Auth::ProxyToken {
+                url,
+                cache_secs,
+                decode,
+                rate_limit_on_error_count,
+                rate_limit_on_error_window_size_secs,
+            } => {
+                let mut map = serializer.serialize_map(Some(6))?;
+                map.serialize_entry("type", "proxy_token")?;
+                map.serialize_entry("url", url)?;
+                map.serialize_entry("cache_secs", cache_secs)?;
+                map.serialize_entry("decode", decode)?;
+                map.serialize_entry("rate_limit_on_error_count", rate_limit_on_error_count)?;
+                map.serialize_entry(
+                    "rate_limit_on_error_window_size_secs",
+                    rate_limit_on_error_window_size_secs,
+                )?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Auth {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        struct AuthVisitor;
+
+        impl<'de> de::Visitor<'de> for AuthVisitor {
+            type Value = Auth;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("sccache-dist authentication configuration")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> std::result::Result<Self::Value, M::Error>
+            where
+                M: de::MapAccess<'de>,
+            {
+                let mut type_ = None;
+                let mut token = None;
+                let mut audience = None;
+                let mut issuer = None;
+                let mut jwks_url = None;
+                let mut claims = None;
+                let mut leeway = None;
+                let mut url = None;
+                let mut cache_secs = None;
+                let mut decode = None;
+                let mut rate_limit_on_error_count = None;
+                let mut rate_limit_on_error_window_size_secs = None;
+
+                while let Ok(Some(name)) = map.next_key::<String>() {
+                    match name.as_str() {
+                        "type" => {
+                            type_ = Some(map.next_value::<String>()?);
+                        }
+                        "token" => {
+                            token = Some(map.next_value::<String>()?);
+                        }
+                        "audience" => {
+                            audience = Some(map.next_value::<DeserializeListOfStrings>()?.into());
+                        }
+                        "issuer" => {
+                            issuer = Some(map.next_value::<DeserializeListOfStrings>()?.into());
+                        }
+                        "jwks_url" => {
+                            jwks_url = Some(map.next_value::<DeserializeListOfStrings>()?.into());
+                        }
+                        "claims" => {
+                            claims =
+                                Some(map.next_value::<DeserializeMapOfStringsToStrings>()?.into());
+                        }
+                        "leeway" => {
+                            leeway = Some(map.next_value::<u64>()?);
+                        }
+                        "url" => {
+                            url = Some(map.next_value::<String>()?);
+                        }
+                        "cache_secs" => {
+                            cache_secs = Some(map.next_value::<u64>()?);
+                        }
+                        "decode" => {
+                            decode = Some(map.next_value::<ProxyTokenDecode>()?);
+                        }
+                        "rate_limit_on_error_count" => {
+                            rate_limit_on_error_count = Some(map.next_value::<usize>()?);
+                        }
+                        "rate_limit_on_error_window_size_secs" => {
+                            rate_limit_on_error_window_size_secs = Some(map.next_value::<u64>()?);
+                        }
+                        "jwks"
+                        | "cache"
+                        | "rate_limit"
+                        | "rate_limit_on"
+                        | "rate_limit_on_error"
+                        | "rate_limit_on_error_window"
+                        | "rate_limit_on_error_window_size" => {
+                            let _ = map.next_value::<_Ignored>();
+                        }
+                        name => {
+                            return Err(de::Error::unknown_field(
+                                name,
+                                &[
+                                    "type",
+                                    "token",
+                                    "audience",
+                                    "issuer",
+                                    "jwks_url",
+                                    "claims",
+                                    "leeway",
+                                    "url",
+                                    "cache_secs",
+                                    "decode",
+                                    "rate_limit_on_error_count",
+                                    "rate_limit_on_error_window_size_secs",
+                                ],
+                            ));
+                        }
+                    }
+                }
+
+                let type_ = if type_.is_none() {
+                    if audience.is_some() && issuer.is_some() && jwks_url.is_some() {
+                        Some("jwt")
+                    } else if url.is_some() {
+                        Some("proxy_token")
+                    } else if token.is_some() {
+                        Some("token")
+                    } else {
+                        Some("DANGEROUSLY_INSECURE")
+                    }
+                } else {
+                    type_.as_deref()
+                };
+
+                match type_.unwrap_or("DANGEROUSLY_INSECURE") {
+                    "token" => Ok(Auth::Token {
+                        token: token
+                            .map(Ok)
+                            .unwrap_or_else(|| Err(de::Error::missing_field("token")))?,
+                    }),
+                    "jwt" | "jwt_validate" => Ok(Auth::Jwt(JWTDecode {
+                        audience: audience
+                            .map(Ok)
+                            .unwrap_or_else(|| Err(de::Error::missing_field("audience")))?,
+                        issuer: issuer
+                            .map(Ok)
+                            .unwrap_or_else(|| Err(de::Error::missing_field("issuer")))?,
+                        jwks_url: jwks_url
+                            .map(Ok)
+                            .unwrap_or_else(|| Err(de::Error::missing_field("jwks_url")))?,
+                        claims: claims.unwrap_or_else(HashMap::new),
+                        leeway: leeway.unwrap_or_else(defaults::default_jwt_decode_leeway),
+                    })),
+                    "proxy_token" => Ok(Auth::ProxyToken {
+                        url: url
+                            .map(Ok)
+                            .unwrap_or_else(|| Err(de::Error::missing_field("url")))?,
+                        cache_secs: cache_secs.or(Some(300)),
+                        decode,
+                        rate_limit_on_error_count,
+                        rate_limit_on_error_window_size_secs,
+                    }),
+                    _ => Ok(Auth::default()),
+                }
+            }
+        }
+
+        deserializer.deserialize_map(AuthVisitor)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct JWTDecode {
-    #[serde(deserialize_with = "deserialize_string_or_list")]
+    #[serde(default, deserialize_with = "deserialize_string_or_list")]
     pub audience: Vec<String>,
-    #[serde(deserialize_with = "deserialize_string_or_list")]
+    #[serde(default, deserialize_with = "deserialize_string_or_list")]
     pub issuer: Vec<String>,
-    #[serde(deserialize_with = "deserialize_string_or_list")]
+    #[serde(default, deserialize_with = "deserialize_string_or_list")]
     pub jwks_url: Vec<String>,
-    #[serde(deserialize_with = "deserialize_string_or_seq_to_map")]
+    #[serde(default, deserialize_with = "deserialize_string_or_seq_to_map")]
     pub claims: HashMap<String, String>,
     #[serde(default = "defaults::default_jwt_decode_leeway")]
     pub leeway: u64,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+// Delegate Default to #[serde(default)]
+impl Default for JWTDecode {
+    fn default() -> Self {
+        serde_json::from_str("{}").unwrap()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum ProxyTokenDecode {
     #[default]
     None,
-    #[serde(rename = "jwt", alias = "jwt_decode")]
     Jwt(JWTDecode),
+}
+
+impl Serialize for ProxyTokenDecode {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: ser::Serializer,
+    {
+        match self {
+            ProxyTokenDecode::None => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("type", "none")?;
+                map.end()
+            }
+            ProxyTokenDecode::Jwt(jwt) => {
+                let mut map = serializer.serialize_map(Some(6))?;
+                map.serialize_entry("type", "jwt")?;
+                map.serialize_entry("audience", &jwt.audience)?;
+                map.serialize_entry("issuer", &jwt.issuer)?;
+                map.serialize_entry("jwks_url", &jwt.jwks_url)?;
+                map.serialize_entry("claims", &jwt.claims)?;
+                map.serialize_entry("leeway", &jwt.leeway)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ProxyTokenDecode {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        struct ProxyTokenDecodeVisitor;
+
+        impl<'de> de::Visitor<'de> for ProxyTokenDecodeVisitor {
+            type Value = ProxyTokenDecode;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("sccache-dist authentication configuration")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> std::result::Result<Self::Value, M::Error>
+            where
+                M: de::MapAccess<'de>,
+            {
+                let mut type_ = None;
+                let mut audience = None;
+                let mut issuer = None;
+                let mut jwks_url = None;
+                let mut claims = None;
+                let mut leeway = None;
+
+                while let Ok(Some(name)) = map.next_key::<String>() {
+                    match name.as_str() {
+                        "type" => {
+                            type_ = Some(map.next_value::<String>()?);
+                        }
+                        "audience" => {
+                            audience = Some(map.next_value::<DeserializeListOfStrings>()?.into());
+                        }
+                        "issuer" => {
+                            issuer = Some(map.next_value::<DeserializeListOfStrings>()?.into());
+                        }
+                        "jwks_url" => {
+                            jwks_url = Some(map.next_value::<DeserializeListOfStrings>()?.into());
+                        }
+                        "claims" => {
+                            claims =
+                                Some(map.next_value::<DeserializeMapOfStringsToStrings>()?.into());
+                        }
+                        "leeway" => {
+                            leeway = Some(map.next_value::<u64>()?);
+                        }
+                        "jwks" => {
+                            let _ = map.next_value::<_Ignored>();
+                        }
+                        name => {
+                            return Err(de::Error::unknown_field(
+                                name,
+                                &["type", "audience", "issuer", "jwks_url", "claims", "leeway"],
+                            ));
+                        }
+                    }
+                }
+
+                let type_ = if type_.is_none() {
+                    if audience.is_some() && issuer.is_some() && jwks_url.is_some() {
+                        Some("jwt")
+                    } else {
+                        Some("none")
+                    }
+                } else {
+                    type_.as_deref()
+                };
+
+                match type_.unwrap_or("none") {
+                    "jwt" | "jwt_validate" => Ok(ProxyTokenDecode::Jwt(JWTDecode {
+                        audience: audience
+                            .map(Ok)
+                            .unwrap_or_else(|| Err(de::Error::missing_field("audience")))?,
+                        issuer: issuer
+                            .map(Ok)
+                            .unwrap_or_else(|| Err(de::Error::missing_field("issuer")))?,
+                        jwks_url: jwks_url
+                            .map(Ok)
+                            .unwrap_or_else(|| Err(de::Error::missing_field("jwks_url")))?,
+                        claims: claims.unwrap_or_else(HashMap::new),
+                        leeway: leeway.unwrap_or_else(defaults::default_jwt_decode_leeway),
+                    })),
+                    _ => Ok(ProxyTokenDecode::default()),
+                }
+            }
+        }
+
+        deserializer.deserialize_map(ProxyTokenDecodeVisitor)
+    }
 }
 
 pub mod defaults {
@@ -512,6 +840,37 @@ mod test {
             # The address of the AMQP broker
             message_broker.amqp = "amqp://127.0.0.1:5672//"
 
+            [[client_auth]]
+            type = "token"
+            token = "secrettoken"
+
+            [[client_auth]]
+            type = "jwt_validate"
+            audience = "token.mycompany.com"
+            issuer = "https://token.mycompany.com"
+            jwks_url = "https://token.mycompany.com/.well-known/jwks"
+
+            [client_auth.claims]
+            enterprise_id = "12345"
+            actor = "*"
+            repository = "*"
+            workflow = "*"
+
+            [[client_auth]]
+            type = "proxy_token"
+            url = "https://token.mycompany.com/12345?audience=sts.amazonaws.com"
+            cache_secs = 300
+
+            [client_auth.decode]
+            type = "jwt"
+            audience = "sts.amazonaws.com"
+            issuer = "https://token.mycompany.com"
+            jwks_url = "https://token.mycompany.com/.well-known/jwks"
+
+            [client_auth.decode.claims]
+            actor = "*"
+            username = "*"
+
             [metrics.prometheus]
             type = "push"
             endpoint = "http://127.0.0.1:9091/metrics/job/scheduler-1"
@@ -540,6 +899,42 @@ mod test {
             config,
             Config {
                 id: "scheduler-1".into(),
+                auth: vec![
+                    Auth::Token {
+                        token: "secrettoken".into()
+                    },
+                    Auth::Jwt(JWTDecode {
+                        audience: vec!["token.mycompany.com".into()],
+                        issuer: vec!["https://token.mycompany.com".into()],
+                        jwks_url: vec!["https://token.mycompany.com/.well-known/jwks".into()],
+                        claims: [
+                            ("enterprise_id", "12345"),
+                            ("actor", "*"),
+                            ("repository", "*"),
+                            ("workflow", "*"),
+                        ]
+                        .into_iter()
+                        .map(|(k, v)| (k.into(), v.into()))
+                        .collect(),
+                        ..Default::default()
+                    }),
+                    Auth::ProxyToken {
+                        url: "https://token.mycompany.com/12345?audience=sts.amazonaws.com".into(),
+                        cache_secs: Some(300),
+                        decode: Some(ProxyTokenDecode::Jwt(JWTDecode {
+                            audience: vec!["sts.amazonaws.com".into()],
+                            issuer: vec!["https://token.mycompany.com".into()],
+                            jwks_url: vec!["https://token.mycompany.com/.well-known/jwks".into()],
+                            claims: [("actor", "*"), ("username", "*")]
+                                .into_iter()
+                                .map(|(k, v)| (k.into(), v.into()))
+                                .collect(),
+                            ..Default::default()
+                        })),
+                        rate_limit_on_error_count: None,
+                        rate_limit_on_error_window_size_secs: None,
+                    }
+                ],
                 public_addr: SocketAddr::from_str("127.0.0.1:10500").unwrap(),
                 job_time_limit_secs: 1200,
                 message_broker: Some(MessageBroker::AMQP("amqp://127.0.0.1:5672//".into())),

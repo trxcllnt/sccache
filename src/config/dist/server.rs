@@ -17,17 +17,24 @@ use crate::{
         Loadable, Valid,
         cache::{Azure, AzureAuth, Cache, Caches},
         dist::{MessageBroker, Metrics},
-        utils::{deserialize_command_or_list, deserialize_string_or_seq_to_map},
+        utils::{
+            _Ignored, DeserializeCommandList, DeserializeMapOfStringsToStrings,
+            deserialize_command_or_list, deserialize_string_or_seq_to_map,
+        },
     },
     errors::*,
 };
 
 use itertools::Itertools;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize, de,
+    ser::{self, SerializeMap},
+};
 use serde_with::{FromInto, serde_as};
 use std::{
     collections::HashMap,
     ffi::OsStr,
+    fmt,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -256,10 +263,6 @@ impl Loadable<Self> for Config {
                 } else if matches!(key, "SHUTDOWN_TIMEOUT") {
                     let key = format!("{key}_SECS");
                     vec![(key, val.into_owned())]
-                } else if matches!(key, "BUILDER_TYPE") {
-                    // SCCACHE_DIST_BUILDER_TYPE -> SCCACHE_DIST_BUILDER
-                    let key = "BUILDER".to_owned();
-                    vec![(key, val.into_owned())]
                 } else if let Some(key) = builders_.iter().find_map(|kind_| key.strip_prefix(kind_))
                 {
                     // SCCACHE_DIST_OVERLAY_BUILD_DIR -> SCCACHE_DIST_BUILDER_BUILD_DIR
@@ -347,8 +350,7 @@ impl From<f64> for Percent {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Builder {
     Docker(DockerBuilder),
     Overlay(OverlayBuilder),
@@ -365,6 +367,191 @@ impl Default for Builder {
         {
             Builder::Docker(DockerBuilder::default())
         }
+    }
+}
+
+impl Serialize for Builder {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: ser::Serializer,
+    {
+        match self {
+            Builder::Docker(builder) => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "docker")?;
+                map.serialize_entry("image", &builder.image)?;
+                map.serialize_entry("run_cmd", &builder.run_cmd)?;
+                map.serialize_entry("exec_cmd", &builder.exec_cmd)?;
+                map.end()
+            }
+            Builder::Overlay(builder) => {
+                let mut map = serializer.serialize_map(Some(6))?;
+                map.serialize_entry("type", "overlay")?;
+                map.serialize_entry("build_dir", &builder.build_dir)?;
+                map.serialize_entry("bwrap_path", &builder.bwrap_path)?;
+                map.serialize_entry("exec_cmd", &builder.exec_cmd)?;
+                map.serialize_entry("lower_dirs", &builder.lower_dirs)?;
+                map.serialize_entry("env", &builder.env)?;
+                map.end()
+            }
+            Builder::Pot(builder) => {
+                let mut map = serializer.serialize_map(Some(5))?;
+                map.serialize_entry("type", "pot")?;
+                map.serialize_entry("pot_fs_root", &builder.pot_fs_root)?;
+                map.serialize_entry("clone_from", &builder.clone_from)?;
+                map.serialize_entry("pot_cmd", &builder.pot_cmd)?;
+                map.serialize_entry("pot_clone_args", &builder.pot_clone_args)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Builder {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        struct BuilderVisitor;
+
+        impl<'de> de::Visitor<'de> for BuilderVisitor {
+            type Value = Builder;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("sccache-dist authentication configuration")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> std::result::Result<Self::Value, M::Error>
+            where
+                M: de::MapAccess<'de>,
+            {
+                let mut type_ = None;
+                let mut image = None;
+                let mut run_cmd = None;
+                let mut exec_cmd = None;
+                let mut build_dir = None;
+                let mut bwrap_path = None;
+                let mut lower_dirs = None;
+                let mut env = None;
+                let mut pot_fs_root = None;
+                let mut clone_from = None;
+                let mut pot_cmd = None;
+                let mut pot_clone_args = None;
+
+                while let Ok(Some(name)) = map.next_key::<String>() {
+                    match name.as_str() {
+                        "type" => {
+                            type_ = Some(map.next_value::<String>()?);
+                        }
+                        "image" => {
+                            image = Some(map.next_value::<String>()?);
+                        }
+                        "run_cmd" => {
+                            run_cmd = Some(map.next_value::<DeserializeCommandList>()?.into());
+                        }
+                        "exec_cmd" => {
+                            exec_cmd = Some(map.next_value::<DeserializeCommandList>()?.into());
+                        }
+                        "build_dir" => {
+                            build_dir = Some(map.next_value::<PathBuf>()?);
+                        }
+                        "bwrap_path" => {
+                            bwrap_path = Some(map.next_value::<PathBuf>()?);
+                        }
+                        "lower_dirs" => {
+                            lower_dirs = Some(map.next_value::<Vec<PathBuf>>()?);
+                        }
+                        "env" => {
+                            env =
+                                Some(map.next_value::<DeserializeMapOfStringsToStrings>()?.into());
+                        }
+                        "pot_fs_root" => {
+                            pot_fs_root = Some(map.next_value::<PathBuf>()?);
+                        }
+                        "clone_from" => {
+                            clone_from = Some(map.next_value::<String>()?);
+                        }
+                        "pot_cmd" => {
+                            pot_cmd = Some(map.next_value::<PathBuf>()?);
+                        }
+                        "pot_clone_args" => {
+                            pot_clone_args =
+                                Some(map.next_value::<DeserializeCommandList>()?.into());
+                        }
+                        "run" | "exec" | "build" | "bwrap" | "lower" | "pot" | "pot_fs"
+                        | "clone" | "pot_clone" => {
+                            let _ = map.next_value::<_Ignored>();
+                        }
+                        name => {
+                            return Err(de::Error::unknown_field(
+                                name,
+                                &[
+                                    "type",
+                                    "image",
+                                    "run_cmd",
+                                    "exec_cmd",
+                                    "build_dir",
+                                    "bwrap_path",
+                                    "exec_cmd",
+                                    "lower_dirs",
+                                    "env",
+                                    "pot_fs_root",
+                                    "clone_from",
+                                    "pot_cmd",
+                                    "pot_clone_args",
+                                ],
+                            ));
+                        }
+                    }
+                }
+
+                let type_ = if type_.is_none() {
+                    if build_dir.is_some() || bwrap_path.is_some() {
+                        Some("overlay")
+                    } else if pot_fs_root.is_some()
+                        || clone_from.is_some()
+                        || pot_cmd.is_some()
+                        || pot_clone_args.is_some()
+                    {
+                        Some("pot")
+                    } else {
+                        Some("docker")
+                    }
+                } else {
+                    type_.as_deref()
+                };
+
+                #[cfg(target_os = "freebsd")]
+                let type_ = type_.unwrap_or("pot");
+
+                #[cfg(not(target_os = "freebsd"))]
+                let type_ = type_.unwrap_or("docker");
+
+                match type_ {
+                    "pot" => Ok(Builder::Pot(PotBuilder {
+                        pot_fs_root: pot_fs_root.unwrap_or_else(defaults::default_pot_fs_root),
+                        clone_from: clone_from.unwrap_or_else(defaults::default_pot_clone_from),
+                        pot_cmd: pot_cmd.unwrap_or_else(defaults::default_pot_cmd),
+                        pot_clone_args: pot_clone_args
+                            .unwrap_or_else(defaults::default_pot_clone_args),
+                    })),
+                    "overlay" => Ok(Builder::Overlay(OverlayBuilder {
+                        build_dir: build_dir.unwrap_or_else(defaults::default_disk_cache_dir),
+                        bwrap_path: bwrap_path.unwrap_or_else(defaults::default_bwrap_path),
+                        exec_cmd: exec_cmd.unwrap_or_default(),
+                        lower_dirs: lower_dirs.unwrap_or_default(),
+                        env: env.unwrap_or_default(),
+                    })),
+                    _ => Ok(Builder::Docker(DockerBuilder {
+                        image: image.unwrap_or_else(defaults::default_docker_image),
+                        run_cmd: run_cmd.unwrap_or_else(defaults::default_docker_run_cmd),
+                        exec_cmd: exec_cmd.unwrap_or_else(defaults::default_docker_exec_cmd),
+                    })),
+                }
+            }
+        }
+
+        deserializer.deserialize_map(BuilderVisitor)
     }
 }
 
@@ -635,7 +822,8 @@ mod test {
             # If unspecified the default is 10GB.
             toolchain_cache_size = 10737418240
 
-            [builder.overlay]
+            [builder]
+            type = "overlay"
             # The directory under which a sandboxed filesystem will be created for builds.
             build_dir = "/tmp/build"
             # The path to the bubblewrap version 0.3.0+ `bwrap` binary.

@@ -1013,6 +1013,277 @@ mod test {
     }
 
     #[test]
+    fn config_from_toml() -> Result<()> {
+        drop(env_logger::try_init());
+
+        let config = Config::from_toml(
+            r#"
+            server_startup_timeout_ms = 10000
+
+            [cache.azure]
+            container = "azurecontainer"
+            key_prefix = "azureprefix"
+            storage_account = "azureaccount"
+
+            [cache.disk]
+            dir = "/tmp/.cache/sccache"
+            size = 7516192768 # 7 GiBytes
+
+            [cache.gcs]
+            rw_mode = "READ_ONLY"
+            # rw_mode = "READ_WRITE"
+            cred_path = "/psst/secret/cred"
+            bucket = "bucket"
+            key_prefix = "prefix"
+            service_account = "example_service_account"
+
+            [cache.gha]
+            enabled = true
+            version = "sccache"
+
+            [cache.memcached]
+            # Deprecated alias for `endpoint`
+            # url = "127.0.0.1:11211"
+            endpoint = "tcp://127.0.0.1:11211"
+            # Username and password for authentication
+            username = "user"
+            password = "passwd"
+            expiration = 90000
+            key_prefix = "/custom/prefix/if/need"
+
+            [cache.redis]
+            # Deprecated in favor of `endpoint`.
+            url = "redis://user:passwd@1.2.3.4:6379/?db=1"
+            endpoint = "redis://127.0.0.1:6379"
+            cluster_endpoints = "tcp://10.0.0.1:6379,redis://10.0.0.2:6379"
+            reader_endpoints = "tcp://10.0.0.1:6380,redis://10.0.0.2:6380"
+            username = "another_user"
+            password = "new_passwd"
+            db = 12
+            expiration = 86400
+            key_prefix = "/my/redis/cache"
+
+            [cache.s3]
+            bucket = "name"
+            region = "us-east-2"
+            endpoint = "s3-us-east-1.amazonaws.com"
+            use_ssl = true
+            key_prefix = "s3prefix"
+            no_credentials = false
+            server_side_encryption = false
+            rw_mode = "READ_WRITE"
+
+            [cache.webdav]
+            endpoint = "http://127.0.0.1:8080"
+            key_prefix = "webdavprefix"
+            username = "webdavusername"
+            password = "webdavpassword"
+            token = "webdavtoken"
+
+            [cache.oss]
+            bucket = "name"
+            endpoint = "oss-us-east-1.aliyuncs.com"
+            key_prefix = "ossprefix"
+            no_credentials = true
+            rw_mode = "READ_ONLY"
+
+            [cache.cos]
+            bucket = "name"
+            endpoint = "cos.na-siliconvalley.myqcloud.com"
+            key_prefix = "cosprefix"
+
+            [cache.cos-2]
+            type = "cos"
+            bucket = "name"
+            endpoint = "cos.na-siliconvalley.myqcloud.com"
+            key_prefix = "cosprefix"
+
+            [cache.configs.cos-3]
+            type = "cos"
+            bucket = "name"
+            endpoint = "cos.na-siliconvalley.myqcloud.com"
+            key_prefix = "cosprefix"
+
+            [cache.multilevel]
+            chain = ["disk", "s3", "redis", "memcached", "gcs", "gha", "azure", "webdav", "oss", "cos", "cos-2", "cos-3"]
+
+            [dist]
+            # where to find the scheduler
+            scheduler_url = "http://1.2.3.4:10600"
+            # the maximum size of the toolchain cache in bytes
+            toolchain_cache_size = 5368709120
+            cache_dir = "/home/user/.cache/sccache-dist-client"
+
+            [dist.auth]
+            type = "token"
+            token = "secrettoken"
+
+            # a set of prepackaged toolchains
+            [[dist.toolchains]]
+            type = "path_override"
+            archive = "/toolchains/cc.tar.gz"
+            compiler_executable = "/usr/bin/cc"
+            archive_compiler_executable = "/usr/bin/cc"
+
+            [[dist.toolchains]]
+            type = "path_override"
+            archive = "/toolchains/rust.tar.gz"
+            compiler_executable = "/usr/bin/rustc"
+            archive_compiler_executable = "/usr/bin/rustc"
+            "#,
+        )?;
+
+        let mut cache_configs = [
+            Azure {
+                auth: AzureAuth::StorageAccount {
+                    storage_account: "azureaccount".into(),
+                },
+                key_prefix: "azureprefix".into(),
+                ..Azure::from_container("azurecontainer")
+            }
+            .into(),
+            Disk {
+                dir: PathBuf::from("/tmp/.cache/sccache"),
+                size: 7 * 1024 * 1024 * 1024,
+                rw_mode: CacheMode::ReadWrite,
+                ..Default::default()
+            }
+            .into(),
+            GCS {
+                key_path: Some("/psst/secret/cred".into()),
+                service_account: Some("example_service_account".into()),
+                rw_mode: CacheMode::ReadOnly,
+                key_prefix: "prefix".into(),
+                credentials_url: None,
+                ..GCS::from_bucket("bucket")
+            }
+            .into(),
+            GHA::from_version("sccache").into(),
+            Redis {
+                endpoint: Some("redis://127.0.0.1:6379".into()),
+                cluster_endpoints: Some("tcp://10.0.0.1:6379,redis://10.0.0.2:6379".into()),
+                reader_endpoints: Some("tcp://10.0.0.1:6380,redis://10.0.0.2:6380".into()),
+                username: Some("another_user".into()),
+                password: Some("new_passwd".into()),
+                db: 12,
+                ttl: 24 * 3600,
+                key_prefix: "/my/redis/cache".into(),
+                ..Redis::from_url("redis://user:passwd@1.2.3.4:6379/?db=1")
+            }
+            .into(),
+            Memcached {
+                username: Some("user".into()),
+                password: Some("passwd".into()),
+                expiration: 25 * 3600,
+                key_prefix: "/custom/prefix/if/need".into(),
+                rw_mode: CacheMode::ReadWrite,
+                ..Memcached::from_url("tcp://127.0.0.1:11211")
+            }
+            .into(),
+            S3 {
+                region: Some("us-east-2".into()),
+                endpoint: Some("s3-us-east-1.amazonaws.com".into()),
+                use_ssl: Some(true),
+                key_prefix: "s3prefix".into(),
+                no_credentials: false,
+                server_side_encryption: Some(false),
+                ..S3::from_bucket("name")
+            }
+            .into(),
+            Webdav {
+                key_prefix: "webdavprefix".into(),
+                username: Some("webdavusername".into()),
+                password: Some("webdavpassword".into()),
+                token: Some("webdavtoken".into()),
+                ..Webdav::from_endpoint("http://127.0.0.1:8080")
+            }
+            .into(),
+            OSS {
+                endpoint: Some("oss-us-east-1.aliyuncs.com".into()),
+                key_prefix: "ossprefix".into(),
+                no_credentials: true,
+                rw_mode: CacheMode::ReadOnly,
+                ..OSS::from_bucket("name")
+            }
+            .into(),
+            COS {
+                endpoint: Some("cos.na-siliconvalley.myqcloud.com".into()),
+                key_prefix: "cosprefix".into(),
+                rw_mode: CacheMode::ReadWrite,
+                ..COS::from_bucket("name")
+            }
+            .into(),
+        ]
+        .into_iter()
+        .map(|(name, cache)| (name.to_owned(), cache))
+        .collect::<BTreeMap<String, Cache>>();
+
+        cache_configs.insert("cos-2".into(), cache_configs.get("cos").unwrap().clone());
+        cache_configs.insert("cos-3".into(), cache_configs.get("cos").unwrap().clone());
+
+        assert_eq!(
+            config,
+            Config {
+                cache: Caches {
+                    multilevel: MultiLevel {
+                        chain: Some(
+                            [
+                                "disk",
+                                "s3",
+                                "redis",
+                                "memcached",
+                                "gcs",
+                                "gha",
+                                "azure",
+                                "webdav",
+                                "oss",
+                                "cos",
+                                "cos-2",
+                                "cos-3"
+                            ]
+                            .into_iter()
+                            .map(Into::into)
+                            .collect()
+                        ),
+                        ..Default::default()
+                    },
+                    configs: cache_configs,
+                    ..Default::default()
+                },
+                dist: dist::Config {
+                    auth: dist::Auth::Token {
+                        token: "secrettoken".into()
+                    },
+                    cache_dir: PathBuf::from("/home/user/.cache/sccache-dist-client"),
+                    rewrite_includes_only: false,
+                    toolchains: vec![
+                        dist::Toolchain::PathOverride {
+                            archive: "/toolchains/cc.tar.gz".into(),
+                            compiler_executable: "/usr/bin/cc".into(),
+                            archive_compiler_executable: "/usr/bin/cc".into(),
+                        },
+                        dist::Toolchain::PathOverride {
+                            archive: "/toolchains/rust.tar.gz".into(),
+                            compiler_executable: "/usr/bin/rustc".into(),
+                            archive_compiler_executable: "/usr/bin/rustc".into(),
+                        }
+                    ],
+                    toolchain_cache_size: 5368709120,
+                    #[cfg(any(feature = "dist-client", feature = "dist-server"))]
+                    url: Some(HTTPUrl::from_str("http://1.2.3.4:10600")?),
+                    #[cfg(not(any(feature = "dist-client", feature = "dist-server")))]
+                    url: Some("http://1.2.3.4:10600".into()),
+                    ..Default::default()
+                },
+                server_startup_timeout_ms: 10000,
+                ..Default::default()
+            }
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn config_from_vars_aliases() -> Result<()> {
         drop(env_logger::try_init());
 
@@ -1554,255 +1825,6 @@ mod test {
                 client_id: "client_id".into(),
                 auth_url: "auth_url".into(),
                 token_url: "token_url".into(),
-            }
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn config_from_toml() -> Result<()> {
-        drop(env_logger::try_init());
-
-        let config = Config::from_toml(
-            r#"
-            server_startup_timeout_ms = 10000
-
-            [dist]
-            # where to find the scheduler
-            scheduler_url = "http://1.2.3.4:10600"
-            # a set of prepackaged toolchains
-            toolchains = []
-            # the maximum size of the toolchain cache in bytes
-            toolchain_cache_size = 5368709120
-            cache_dir = "/home/user/.cache/sccache-dist-client"
-
-            [dist.auth]
-            type = "token"
-            token = "secrettoken"
-
-            [cache.azure]
-            container = "azurecontainer"
-            key_prefix = "azureprefix"
-            storage_account = "azureaccount"
-
-            [cache.disk]
-            dir = "/tmp/.cache/sccache"
-            size = 7516192768 # 7 GiBytes
-
-            [cache.gcs]
-            rw_mode = "READ_ONLY"
-            # rw_mode = "READ_WRITE"
-            cred_path = "/psst/secret/cred"
-            bucket = "bucket"
-            key_prefix = "prefix"
-            service_account = "example_service_account"
-
-            [cache.gha]
-            enabled = true
-            version = "sccache"
-
-            [cache.memcached]
-            # Deprecated alias for `endpoint`
-            # url = "127.0.0.1:11211"
-            endpoint = "tcp://127.0.0.1:11211"
-            # Username and password for authentication
-            username = "user"
-            password = "passwd"
-            expiration = 90000
-            key_prefix = "/custom/prefix/if/need"
-
-            [cache.redis]
-            # Deprecated in favor of `endpoint`.
-            url = "redis://user:passwd@1.2.3.4:6379/?db=1"
-            endpoint = "redis://127.0.0.1:6379"
-            cluster_endpoints = "tcp://10.0.0.1:6379,redis://10.0.0.2:6379"
-            reader_endpoints = "tcp://10.0.0.1:6380,redis://10.0.0.2:6380"
-            username = "another_user"
-            password = "new_passwd"
-            db = 12
-            expiration = 86400
-            key_prefix = "/my/redis/cache"
-
-            [cache.s3]
-            bucket = "name"
-            region = "us-east-2"
-            endpoint = "s3-us-east-1.amazonaws.com"
-            use_ssl = true
-            key_prefix = "s3prefix"
-            no_credentials = false
-            server_side_encryption = false
-            rw_mode = "READ_WRITE"
-
-            [cache.webdav]
-            endpoint = "http://127.0.0.1:8080"
-            key_prefix = "webdavprefix"
-            username = "webdavusername"
-            password = "webdavpassword"
-            token = "webdavtoken"
-
-            [cache.oss]
-            bucket = "name"
-            endpoint = "oss-us-east-1.aliyuncs.com"
-            key_prefix = "ossprefix"
-            no_credentials = true
-            rw_mode = "READ_ONLY"
-
-            [cache.cos]
-            bucket = "name"
-            endpoint = "cos.na-siliconvalley.myqcloud.com"
-            key_prefix = "cosprefix"
-
-            [cache.cos-2]
-            type = "cos"
-            bucket = "name"
-            endpoint = "cos.na-siliconvalley.myqcloud.com"
-            key_prefix = "cosprefix"
-
-            [cache.configs.cos-3]
-            type = "cos"
-            bucket = "name"
-            endpoint = "cos.na-siliconvalley.myqcloud.com"
-            key_prefix = "cosprefix"
-
-            [cache.multilevel]
-            chain = ["disk", "s3", "redis", "memcached", "gcs", "gha", "azure", "webdav", "oss", "cos", "cos-2", "cos-3"]
-            "#,
-        )?;
-
-        let mut cache_configs = [
-            Azure {
-                auth: AzureAuth::StorageAccount {
-                    storage_account: "azureaccount".into(),
-                },
-                key_prefix: "azureprefix".into(),
-                ..Azure::from_container("azurecontainer")
-            }
-            .into(),
-            Disk {
-                dir: PathBuf::from("/tmp/.cache/sccache"),
-                size: 7 * 1024 * 1024 * 1024,
-                rw_mode: CacheMode::ReadWrite,
-                ..Default::default()
-            }
-            .into(),
-            GCS {
-                key_path: Some("/psst/secret/cred".into()),
-                service_account: Some("example_service_account".into()),
-                rw_mode: CacheMode::ReadOnly,
-                key_prefix: "prefix".into(),
-                credentials_url: None,
-                ..GCS::from_bucket("bucket")
-            }
-            .into(),
-            GHA::from_version("sccache").into(),
-            Redis {
-                endpoint: Some("redis://127.0.0.1:6379".into()),
-                cluster_endpoints: Some("tcp://10.0.0.1:6379,redis://10.0.0.2:6379".into()),
-                reader_endpoints: Some("tcp://10.0.0.1:6380,redis://10.0.0.2:6380".into()),
-                username: Some("another_user".into()),
-                password: Some("new_passwd".into()),
-                db: 12,
-                ttl: 24 * 3600,
-                key_prefix: "/my/redis/cache".into(),
-                ..Redis::from_url("redis://user:passwd@1.2.3.4:6379/?db=1")
-            }
-            .into(),
-            Memcached {
-                username: Some("user".into()),
-                password: Some("passwd".into()),
-                expiration: 25 * 3600,
-                key_prefix: "/custom/prefix/if/need".into(),
-                rw_mode: CacheMode::ReadWrite,
-                ..Memcached::from_url("tcp://127.0.0.1:11211")
-            }
-            .into(),
-            S3 {
-                region: Some("us-east-2".into()),
-                endpoint: Some("s3-us-east-1.amazonaws.com".into()),
-                use_ssl: Some(true),
-                key_prefix: "s3prefix".into(),
-                no_credentials: false,
-                server_side_encryption: Some(false),
-                ..S3::from_bucket("name")
-            }
-            .into(),
-            Webdav {
-                key_prefix: "webdavprefix".into(),
-                username: Some("webdavusername".into()),
-                password: Some("webdavpassword".into()),
-                token: Some("webdavtoken".into()),
-                ..Webdav::from_endpoint("http://127.0.0.1:8080")
-            }
-            .into(),
-            OSS {
-                endpoint: Some("oss-us-east-1.aliyuncs.com".into()),
-                key_prefix: "ossprefix".into(),
-                no_credentials: true,
-                rw_mode: CacheMode::ReadOnly,
-                ..OSS::from_bucket("name")
-            }
-            .into(),
-            COS {
-                endpoint: Some("cos.na-siliconvalley.myqcloud.com".into()),
-                key_prefix: "cosprefix".into(),
-                rw_mode: CacheMode::ReadWrite,
-                ..COS::from_bucket("name")
-            }
-            .into(),
-        ]
-        .into_iter()
-        .map(|(name, cache)| (name.to_owned(), cache))
-        .collect::<BTreeMap<String, Cache>>();
-
-        cache_configs.insert("cos-2".into(), cache_configs.get("cos").unwrap().clone());
-        cache_configs.insert("cos-3".into(), cache_configs.get("cos").unwrap().clone());
-
-        assert_eq!(
-            config,
-            Config {
-                cache: Caches {
-                    multilevel: MultiLevel {
-                        chain: Some(
-                            [
-                                "disk",
-                                "s3",
-                                "redis",
-                                "memcached",
-                                "gcs",
-                                "gha",
-                                "azure",
-                                "webdav",
-                                "oss",
-                                "cos",
-                                "cos-2",
-                                "cos-3"
-                            ]
-                            .into_iter()
-                            .map(Into::into)
-                            .collect()
-                        ),
-                        ..Default::default()
-                    },
-                    configs: cache_configs,
-                    ..Default::default()
-                },
-                dist: dist::Config {
-                    auth: dist::Auth::Token {
-                        token: "secrettoken".into()
-                    },
-                    cache_dir: PathBuf::from("/home/user/.cache/sccache-dist-client"),
-                    rewrite_includes_only: false,
-                    toolchains: vec![],
-                    toolchain_cache_size: 5368709120,
-                    #[cfg(any(feature = "dist-client", feature = "dist-server"))]
-                    url: Some(HTTPUrl::from_str("http://1.2.3.4:10600")?),
-                    #[cfg(not(any(feature = "dist-client", feature = "dist-server")))]
-                    url: Some("http://1.2.3.4:10600".into()),
-                    ..Default::default()
-                },
-                server_startup_timeout_ms: 10000,
-                ..Default::default()
             }
         );
 

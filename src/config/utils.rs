@@ -367,6 +367,27 @@ where
     deserializer.deserialize_any(StringOrU64Visitor)
 }
 
+pub struct DeserializeListOfStrings {
+    value: Vec<String>,
+}
+
+impl From<DeserializeListOfStrings> for Vec<String> {
+    fn from(value: DeserializeListOfStrings) -> Self {
+        value.value
+    }
+}
+
+impl<'de> de::Deserialize<'de> for DeserializeListOfStrings {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        Ok(DeserializeListOfStrings {
+            value: deserialize_string_or_list(deserializer)?,
+        })
+    }
+}
+
 pub fn deserialize_string_or_list<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Vec<String>, D::Error>
@@ -402,6 +423,27 @@ where
     }
 
     deserializer.deserialize_any(StringOrList)
+}
+
+pub struct DeserializeCommandList {
+    value: Vec<String>,
+}
+
+impl From<DeserializeCommandList> for Vec<String> {
+    fn from(value: DeserializeCommandList) -> Self {
+        value.value
+    }
+}
+
+impl<'de> de::Deserialize<'de> for DeserializeCommandList {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        Ok(DeserializeCommandList {
+            value: deserialize_command_or_list(deserializer)?,
+        })
+    }
 }
 
 pub fn deserialize_command_or_list<'de, D>(
@@ -443,6 +485,27 @@ where
     }
 
     deserializer.deserialize_any(StringOrList)
+}
+
+pub struct DeserializeMapOfStringsToStrings {
+    value: HashMap<String, String>,
+}
+
+impl From<DeserializeMapOfStringsToStrings> for HashMap<String, String> {
+    fn from(value: DeserializeMapOfStringsToStrings) -> Self {
+        value.value
+    }
+}
+
+impl<'de> de::Deserialize<'de> for DeserializeMapOfStringsToStrings {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        Ok(DeserializeMapOfStringsToStrings {
+            value: deserialize_string_or_seq_to_map(deserializer)?,
+        })
+    }
 }
 
 pub fn deserialize_string_or_seq_to_map<'de, D>(

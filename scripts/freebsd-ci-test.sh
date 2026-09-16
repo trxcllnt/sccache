@@ -107,7 +107,7 @@ prepare_sccache_dist()
 	# create scheduler.conf
 	cat >"$TEST_TMPDIR"/scheduler.conf <<-EOF
 	public_addr = "127.0.0.1:10600"
-	[client_auth]
+	[[client_auth]]
 	type = "token"
 	token = "$CLIENT_TOKEN"
 	EOF
