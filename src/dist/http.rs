@@ -139,10 +139,6 @@ pub mod urls {
     pub fn scheduler_run_job(scheduler_url: &reqwest::Url, job_id: &str) -> reqwest::Url {
         scheduler_url
             .join(&format!("/api/v2/job/{job_id}"))
-            .map(|mut url| {
-                url.set_query(Some("v=2"));
-                url
-            })
             .expect("failed to create run job url")
     }
     pub fn scheduler_del_job(scheduler_url: &reqwest::Url, job_id: &str) -> reqwest::Url {
@@ -1048,7 +1044,7 @@ mod client {
     use crate::{
         config,
         dist::{
-            self, CompileCommand, NewJobResponse, RunJobRequestV2, RunJobResponse, SchedulerStatus,
+            self, CompileCommand, NewJobResponse, RunJobRequest, RunJobResponse, SchedulerStatus,
             SubmitToolchainResult, Toolchain,
             pkg::{PackagedToolchain, ToolchainPackager},
         },
@@ -1290,14 +1286,10 @@ mod client {
                     .header(http::header::ACCEPT, "application/octet-stream")
                     .bearer_auth(self.auth_token.clone())
                     .timeout(timeout)
-                    .bincode(&RunJobRequestV2 {
+                    .bincode(&RunJobRequest {
                         command,
                         outputs,
                         toolchain,
-                        // TODO:
-                        // Decide if there's any interesting client details worth
-                        // sending to the server to include in metrics dimensions
-                        labels: None,
                     })?,
             )
             .await
