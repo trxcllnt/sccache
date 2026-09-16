@@ -246,8 +246,7 @@ start_sccache_server()
 
 test_sccache_dist_01()
 {
-    set -x
-	echo "#### running scache_dist test 01"
+    echo "#### running scache_dist test 01"
 	cd "$TEST_TMPDIR/buildtest"
     sccache -z
 	cargo clean --target-dir /tmp/buildtest
@@ -256,7 +255,7 @@ test_sccache_dist_01()
 	echo "Statistics of first buildtest"
 	echo "$STATS"
 	CACHE_HITS="$(echo "$STATS" | \
-	  grep "Cache hits" | grep -vE '(rate|Rust)' | awk '{ print $3 }')"
+	  grep "Cache hits" | grep -vE '(rate|rust)' | awk '{ print $3 }')"
 	FAILED_DIST="$(echo "$STATS" | \
 	  grep "Failed distributed compilations" | awk '{ print $4 }')"
 	SUCCEEDED_DIST="$(echo "$STATS" | \
@@ -288,8 +287,7 @@ test_sccache_dist_01()
 
 test_sccache_dist_02()
 {
-    set -x
-	echo "#### running scache_dist test 02"
+    echo "#### running scache_dist test 02"
 	cd "$TEST_TMPDIR/buildtest"
 	sccache -z
 	cargo clean --target-dir /tmp/buildtest
@@ -298,7 +296,7 @@ test_sccache_dist_02()
 	echo "Statistics of second buildtest"
 	echo "$STATS"
 	CACHE_HITS="$(echo "$STATS" | \
-	  grep "Cache hits" | grep -vE '(rate|Rust)' | awk '{ print $3 }')"
+	  grep "Cache hits" | grep -vE '(rate|rust)' | awk '{ print $3 }')"
 	FAILED_DIST="$(echo "$STATS" | \
 	  grep "Failed distributed compilations" | awk '{ print $4 }')"
 	SUCCEEDED_DIST="$(echo "$STATS" | \
