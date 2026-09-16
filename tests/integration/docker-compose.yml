@@ -268,6 +268,7 @@ services:
     environment:
       <<: *common-env
       SCCACHE_DIR: /build/sccache
+      SCCACHE_ERROR_LOG: /tmp/sccache-file-prefix-map.log
     profiles:
       - test
       - file-prefix-map
