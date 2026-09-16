@@ -254,7 +254,7 @@ impl Digest {
                 break;
             }
             each(&buffer[..count]);
-            self.inner.update(&buffer[..count]);
+            self.update(&buffer[..count]);
         }
         Ok(self)
     }
@@ -275,7 +275,7 @@ impl Digest {
                 break;
             }
             each(&buffer[..count]);
-            self.inner.update(&buffer[..count]);
+            self.update(&buffer[..count]);
         }
         Ok(self)
     }

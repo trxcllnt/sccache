@@ -791,7 +791,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             let runtime = Runtime::new()?;
             runtime.block_on(async {
                 let storage = StorageKind::Preprocessor
-                    .create(&config.preprocessor.cache, &[])
+                    .create(&config.preprocessor.cache, &config.basedirs)
                     .await?;
                 match crate::compiler::PreprocessorCacheEntry::get(storage.as_ref(), &key).await {
                     Err(err) => {

@@ -454,9 +454,11 @@ pub fn start_server<C: AsRef<ClientConfig>>(
     let init_storage = || -> Result<(Arc<dyn Storage>, Arc<dyn Storage>)> {
         runtime.block_on(async {
             Ok((
-                StorageKind::Compilations.create(&config.cache, &[]).await?,
+                StorageKind::Compilations
+                    .create(&config.cache, &config.basedirs)
+                    .await?,
                 StorageKind::Preprocessor
-                    .create(&config.preprocessor.cache, &[])
+                    .create(&config.preprocessor.cache, &config.basedirs)
                     .await?,
             ))
         })
