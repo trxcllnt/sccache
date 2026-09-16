@@ -1092,20 +1092,18 @@ mod test {
             endpoint = "cos.na-siliconvalley.myqcloud.com"
             key_prefix = "cosprefix"
 
-            [cache.cos-2]
-            type = "cos"
+            [cache.custom-1.cos]
             bucket = "name"
             endpoint = "cos.na-siliconvalley.myqcloud.com"
             key_prefix = "cosprefix"
 
-            [cache.configs.cos-3]
-            type = "cos"
+            [cache.configs.custom-2.cos]
             bucket = "name"
             endpoint = "cos.na-siliconvalley.myqcloud.com"
             key_prefix = "cosprefix"
 
             [cache.multilevel]
-            chain = ["disk", "s3", "redis", "memcached", "gcs", "gha", "azure", "webdav", "oss", "cos", "cos-2", "cos-3"]
+            chain = ["disk", "s3", "redis", "memcached", "gcs", "gha", "azure", "webdav", "oss", "cos", "custom-1", "custom-2"]
 
             [dist]
             # where to find the scheduler
@@ -1218,8 +1216,8 @@ mod test {
         .map(|(name, cache)| (name.to_owned(), cache))
         .collect::<BTreeMap<String, Cache>>();
 
-        cache_configs.insert("cos-2".into(), cache_configs.get("cos").unwrap().clone());
-        cache_configs.insert("cos-3".into(), cache_configs.get("cos").unwrap().clone());
+        cache_configs.insert("custom-1".into(), cache_configs.get("cos").unwrap().clone());
+        cache_configs.insert("custom-2".into(), cache_configs.get("cos").unwrap().clone());
 
         assert_eq!(
             config,
@@ -1238,8 +1236,8 @@ mod test {
                                 "webdav",
                                 "oss",
                                 "cos",
-                                "cos-2",
-                                "cos-3"
+                                "custom-1",
+                                "custom-2"
                             ]
                             .into_iter()
                             .map(Into::into)
@@ -2485,6 +2483,39 @@ mod test {
                             .into()
                         ]
                         .into()
+                    },
+                    ..Default::default()
+                }
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn config_from_env_custom_name() -> Result<()> {
+            drop(env_logger::try_init());
+
+            let config = Config::from_vars([
+                ("SCCACHE_CACHE_CUSTOM_S3_CACHE", "s3"),
+                ("SCCACHE_CACHE_CUSTOM_S3_CACHE_BUCKET", "my-bucket"),
+            ])
+            .and_then(|config| config.validate_vars())?;
+
+            assert_eq!(
+                config,
+                Config {
+                    cache: Caches {
+                        configs: [(
+                            "custom_s3_cache".into(),
+                            Cache::S3(S3::from_bucket("my-bucket"))
+                        )]
+                        .into_iter()
+                        .collect(),
+                        multilevel: MultiLevel {
+                            chain: vec!["custom_s3_cache".into()].into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
                     },
                     ..Default::default()
                 }

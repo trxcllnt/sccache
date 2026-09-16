@@ -182,18 +182,16 @@ impl<'de> de::Visitor<'de> for CachesVisitor {
                 //
                 // ```toml
                 // # Can be multiple S3 caches, e.g. for geographic locality
-                // [cache.s3-west]
-                // type = "s3"
+                // [cache.primary.s3]
                 // bucket = "my-bucket-us-west-2"
                 // region = "us-west-2"
                 //
-                // [cache.s3-east]
-                // type = "s3"
+                // [cache.secondary.s3]
                 // bucket = "my-bucket-us-east-2"
                 // region = "us-east-2"
                 //
                 // [cache.multilevel]
-                // chain = ["s3-west", "s3-east"]
+                // chain = ["primary", "secondary"]
                 // ```
                 //
                 // But to support users with config files in the old format,
@@ -257,7 +255,7 @@ impl<'de> de::Visitor<'de> for CachesVisitor {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum Cache {
     Azure(Azure),
     Disk(Disk),
