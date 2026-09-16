@@ -38,7 +38,6 @@ set -eo pipefail
 
 init()
 {
-    set -x
 	base=$(realpath "$(dirname "$0")"/..)
 	OS_VERSION="$(freebsd-version | awk -F- '{print $1}')"
 	PUB_INTF="$(netstat -4rn | grep default | awk '{ print $4}')"
