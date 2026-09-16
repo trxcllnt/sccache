@@ -657,7 +657,11 @@ impl Server {
             self.state.pre_fetch,
         );
 
-        crate::util::daemonize(&[])?;
+        crate::util::daemonize(
+            crate::util::get_process_fds(|_| false)
+                .as_deref()
+                .unwrap_or_default(),
+        )?;
 
         // Start celery
         let celery = async {

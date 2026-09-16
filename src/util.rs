@@ -31,6 +31,8 @@ use object::read::{
     macho::{FatArch, MachOFatFile32, MachOFatFile64},
 };
 use serde::{Deserialize, Serialize};
+#[cfg(not(windows))]
+use std::os::unix::io::RawFd;
 use std::{
     borrow::Cow,
     cell::Cell,
@@ -1473,23 +1475,32 @@ pub fn temppath() -> Result<tempfile::TempPath> {
     tempfile().map(|p| p.into_temp_path())
 }
 
+#[cfg(not(windows))]
+pub fn get_process_fds<F>(keep: F) -> Option<Vec<RawFd>>
+where
+    F: Fn(RawFd) -> bool,
+{
+    // macOS/BSD: /dev/fd
+    std::fs::read_dir("/dev/fd")
+        // Linux: /proc/self/fd
+        .or_else(|_| std::fs::read_dir("/proc/self/fd"))
+        .ok()
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| e.file_name().to_str()?.parse::<RawFd>().ok())
+                .filter(|fd| !keep(*fd))
+                .collect()
+        })
+}
+
 /// Close every file descriptor we inherited from whoever spawned us, keeping
 /// stdin/out/err and anything in `preserve`.
 #[cfg(not(windows))]
-fn close_inherited_fds(preserve: &[std::os::unix::io::RawFd]) {
-    use std::os::unix::io::RawFd;
-
+fn close_inherited_fds(preserve: &[RawFd]) {
     let keep = |fd: RawFd| fd <= libc::STDERR_FILENO || preserve.contains(&fd);
 
-    // macOS/BSD: /dev/fd; Linux: /proc/self/fd
-    let listing = std::fs::read_dir("/dev/fd").or_else(|_| std::fs::read_dir("/proc/self/fd"));
-    let victims: Option<Vec<RawFd>> = listing.ok().map(|entries| {
-        entries
-            .flatten()
-            .filter_map(|e| e.file_name().to_str()?.parse::<RawFd>().ok())
-            .filter(|fd| !keep(*fd))
-            .collect()
-    });
+    let victims = get_process_fds(keep);
 
     match victims {
         Some(fds) => {

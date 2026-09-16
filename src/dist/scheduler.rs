@@ -311,12 +311,6 @@ impl Scheduler {
         heartbeat_interval: Duration,
         shutdown_timeout: Duration,
     ) -> Result<()> {
-        self.tasks.app().display_pretty().await;
-
-        tracing::info!("Scheduler `{}` initialized", self.scheduler_id);
-
-        crate::util::daemonize(&[])?;
-
         // Start celery
         let celery = async {
             let res = self
@@ -387,6 +381,16 @@ impl Scheduler {
 
         // Wait for axum shutdown
         let shutdown_server = async move { server.await.context("Server error") };
+
+        self.tasks.app().display_pretty().await;
+
+        tracing::info!("Scheduler `{}` initialized", self.scheduler_id);
+
+        crate::util::daemonize(
+            crate::util::get_process_fds(|_| false)
+                .as_deref()
+                .unwrap_or_default(),
+        )?;
 
         // Wait for celery and/or server shutdown
         let shutdown_server = tokio::try_join!(shutdown_celery, shutdown_server);
