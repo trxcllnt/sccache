@@ -2103,15 +2103,12 @@ fn fold_env_vars_or_split_into_exe_and_args(
         // Preprocess to a file instead of stdout
         let line = line.replace(" -E ", " -P ");
         // Unwrap double quoted commands that contain envvars
-        // if line.starts_with(r#""""#) {
-        //     Some(line.as_str())
-        //         .and_then(|line| line.strip_prefix(r#"""#))
-        //         .and_then(|line| line.strip_suffix(r#"""#))
-        //         .map(|line| line.to_owned())
-        //         .unwrap_or(line)
-        // Replace two double quotes with a single double quote :/
-        if line.contains(r#""""#) {
-            line.replace(r#""""#, r#"""#)
+        if line.starts_with(r#""""#) {
+            Some(line.as_str())
+                .and_then(|line| line.strip_prefix(r#"""#))
+                .and_then(|line| line.strip_suffix(r#"""#))
+                .map(|line| line.to_owned())
+                .unwrap_or(line)
         } else {
             line
         }
