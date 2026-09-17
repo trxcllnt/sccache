@@ -1167,7 +1167,7 @@ impl<'a> CacheLookup<'a> {
                     "[{out_pretty}]: Cache hit in {}",
                     fmt_duration_as_secs(&duration)
                 );
-                let mut entry = CacheRead::from(std::io::Cursor::new(entry.to_bytes()))?;
+                let mut entry = CacheRead::try_from(entry)?;
                 let stdout = entry.get_stdout();
                 let stderr = entry.get_stderr();
                 match entry.extract_objects(outputs.clone(), runtime).await {

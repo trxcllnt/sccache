@@ -104,6 +104,14 @@ impl std::fmt::Display for UnexpectedFileSize {
 
 impl std::error::Error for UnexpectedFileSize {}
 
+impl TryFrom<opendal::Buffer> for CacheRead {
+    type Error = anyhow::Error;
+
+    fn try_from(entry: opendal::Buffer) -> Result<Self> {
+        CacheRead::from(OpendalBufferCursor::new(entry))
+    }
+}
+
 impl CacheRead {
     /// Create a cache entry from `reader`.
     pub fn from<R>(reader: R) -> Result<CacheRead>
@@ -363,6 +371,67 @@ impl CacheWrite {
 impl Default for CacheWrite {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+struct OpendalBufferCursor {
+    data: opendal::Buffer,
+    view: opendal::Buffer,
+    pos: u64,
+}
+
+impl OpendalBufferCursor {
+    pub fn new(buffer: opendal::Buffer) -> Self {
+        Self {
+            view: buffer.slice(..),
+            data: buffer,
+            pos: 0,
+        }
+    }
+}
+
+impl io::Read for OpendalBufferCursor {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let size = self.view.read(buf)?;
+        self.seek(io::SeekFrom::Current(size as i64))?;
+        Ok(size)
+    }
+}
+
+impl io::BufRead for OpendalBufferCursor {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.view.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.pos += amount as u64;
+    }
+}
+
+impl Seek for OpendalBufferCursor {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        let end = self.data.len() as u64;
+        match pos {
+            io::SeekFrom::Start(pos) => {
+                self.pos = pos.min(end);
+            }
+            io::SeekFrom::Current(pos) => {
+                if pos.is_negative() {
+                    self.pos = self.pos.saturating_sub(pos.unsigned_abs());
+                } else {
+                    self.pos = self.pos.saturating_add(pos as u64).min(end);
+                }
+            }
+            io::SeekFrom::End(pos) => {
+                if pos.is_negative() {
+                    self.pos = end.saturating_sub(pos.unsigned_abs());
+                } else {
+                    self.pos = end.saturating_add(pos as u64).min(end);
+                }
+            }
+        }
+        self.view = self.data.slice(self.pos as usize..);
+        Ok(self.pos)
     }
 }
 
