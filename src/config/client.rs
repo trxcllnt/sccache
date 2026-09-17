@@ -2939,17 +2939,43 @@ mod test {
         fn credentials_require_bucket_from_env() -> Result<()> {
             drop(env_logger::try_init());
 
-            let err_str = Config::from_vars([
+            let config = Config::from_vars([
                 ("SCCACHE_DIR", "/tmp/disk"),
                 ("SCCACHE_GCS_KEY_PATH", "foo.json"),
             ])
-            .unwrap_err()
-            .to_string();
+            .and_then(|config| config.validate_vars())?;
 
             assert_eq!(
-                err_str,
-                "If setting GCS credentials, SCCACHE_CACHE_GCS_BUCKET and an auth mechanism need to be set."
+                config,
+                Config {
+                    cache: vec![
+                        Disk {
+                            dir: "/tmp/disk".into(),
+                            ..Default::default()
+                        }
+                        .into(),
+                        GCS {
+                            enabled: false,
+                            key_path: Some("foo.json".into()),
+                            ..GCS::from_bucket("")
+                        }
+                        .into()
+                    ]
+                    .into(),
+                    preprocessor: PreprocessorCaches {
+                        cache: vec![
+                            Disk {
+                                dir: "/tmp/disk".into(),
+                                ..Default::default()
+                            }
+                            .into()
+                        ]
+                        .into(),
+                    },
+                    ..Default::default()
+                }
             );
+
             Ok(())
         }
 
@@ -2957,7 +2983,7 @@ mod test {
         fn credentials_require_bucket_from_toml() -> Result<()> {
             drop(env_logger::try_init());
 
-            let err_str = Config::from_toml(
+            let config = Config::from_toml(
                 r#"
                 [cache.disk]
                 dir = "/tmp/disk"
@@ -2967,12 +2993,29 @@ mod test {
                 key_path = "foo.json"
                 "#,
             )
-            .unwrap_err()
-            .to_string();
+            .and_then(|config| config.validate_vars())?;
 
-            assert!(err_str.contains(
-                "If setting GCS credentials, cache.gcs.bucket and an auth mechanism need to be set."
-            ));
+            assert_eq!(
+                config,
+                Config {
+                    cache: vec![
+                        Disk {
+                            dir: "/tmp/disk".into(),
+                            size: 1024,
+                            ..Default::default()
+                        }
+                        .into(),
+                        GCS {
+                            enabled: false,
+                            key_path: Some("foo.json".into()),
+                            ..GCS::from_bucket("")
+                        }
+                        .into()
+                    ]
+                    .into(),
+                    ..Default::default()
+                }
+            );
             Ok(())
         }
     }

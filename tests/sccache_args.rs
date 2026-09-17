@@ -31,8 +31,8 @@ fn test_gcp_arg_check() -> Result<()> {
         .env("SCCACHE_LOG", "sccache=debug")
         .env("SCCACHE_GCS_KEY_PATH", "foo.json");
 
-    cmd.assert().failure().stderr(predicate::str::contains(
-        "If setting GCS credentials, SCCACHE_CACHE_GCS_BUCKET",
+    cmd.assert().success().stderr(predicate::str::contains(
+        "If setting GCS credentials, `bucket` and an auth mechanism need to be set.",
     ));
 
     stop_sccache()?;
@@ -43,9 +43,9 @@ fn test_gcp_arg_check() -> Result<()> {
         .env("SCCACHE_LOG", "sccache=debug")
         .env("SCCACHE_GCS_OAUTH_URL", "http://127.0.0.1");
 
-    cmd.assert().failure().stderr(predicate::str::contains(
-        "SCCACHE_CACHE_GCS_OAUTH_URL has been deprecated",
-    ));
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("`oauth_url` has been deprecated"));
 
     stop_sccache()?;
     let mut cmd = Command::new(SCCACHE_BIN.as_os_str());
