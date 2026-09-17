@@ -407,6 +407,20 @@ impl From<COS> for (&'static str, Cache) {
 }
 
 impl Cache {
+    pub fn enabled(&self) -> bool {
+        match self {
+            Self::Azure(cfg) => cfg.enabled,
+            Self::Disk(cfg) => cfg.enabled,
+            Self::GCS(cfg) => cfg.enabled,
+            Self::GHA(cfg) => cfg.enabled,
+            Self::Memcached(cfg) => cfg.enabled,
+            Self::Redis(cfg) => cfg.enabled,
+            Self::S3(cfg) => cfg.enabled,
+            Self::Webdav(cfg) => cfg.enabled,
+            Self::OSS(cfg) => cfg.enabled,
+            Self::COS(cfg) => cfg.enabled,
+        }
+    }
     pub fn get_order(&self) -> u64 {
         match self {
             Self::Azure(_) => DefaultCacheOrder::Azure as u64,
@@ -555,12 +569,14 @@ impl<'de> de::Visitor<'de> for AzureVisitor {
             }
         }
 
+        let mut enabled = enabled.unwrap_or(true);
+
         let container = if let Some(container) = container {
             container
         } else {
-            return Err(de::Error::custom(
-                "Azure config missing required field {{container}}",
-            ));
+            warn!("Azure config missing required field `container`.");
+            enabled = false;
+            String::new()
         };
 
         let has_entra_source = storage_account.is_some() || endpoint.is_some();
@@ -569,11 +585,14 @@ impl<'de> de::Visitor<'de> for AzureVisitor {
             auth
         } else if let Some(shared_key) = shared_key {
             if has_entra_source {
-                return Err(de::Error::custom(
-                    "Set either {{connection_string}} (shared key) or {{storage_account}} / {{endpoint}} (Entra ID), not both.",
-                ));
+                warn!(
+                    "Set either `connection_string` (shared key) or `storage_account` / `endpoint` (Entra ID), not both.",
+                );
+                enabled = false;
+                AzureAuth::None
+            } else {
+                shared_key
             }
-            shared_key
         } else if let Some(endpoint) = endpoint {
             endpoint
         } else if let Some(storage_account) = storage_account {
@@ -590,13 +609,17 @@ impl<'de> de::Visitor<'de> for AzureVisitor {
             // (AzureBlobCache::build -> resolve_blob_endpoint), because a config
             // file — unlike an ambient env var — is an unambiguous opt-in.
             warn!(
-                "`container` is set but no Azure auth source was provided (`connection_string`, `storage_account` or `endpoint`); the Azure cache backend is disabled."
+                "`container` is set but no Azure auth source was provided (`connection_string`, `storage_account` or `endpoint`)."
             );
             AzureAuth::None
         };
 
+        if !enabled {
+            warn!("Azure storage disabled, see above messages.");
+        }
+
         Ok(Azure {
-            enabled: enabled.unwrap_or(true),
+            enabled,
             container,
             auth,
             key_prefix: key_prefix.unwrap_or_default(),
@@ -773,20 +796,25 @@ impl<'de> de::Visitor<'de> for GCSVisitor {
             }
         }
 
+        let mut enabled = enabled.unwrap_or(true);
+
         if oauth_url.is_some() {
-            return Err(de::Error::custom(
-                "{{oauth_url}} has been deprecated. If you intend to use vm metadata for auth, please set {{service_account}} instead.",
-            ));
+            warn!(
+                "`oauth_url` has been deprecated. If you intend to use vm metadata for auth, please set `service_account` instead."
+            );
         }
 
         if bucket.is_none() && (credentials_url.is_some() || key_path.is_some()) {
-            return Err(de::Error::custom(
-                "If setting GCS credentials, {{bucket}} and an auth mechanism need to be set.",
-            ));
+            warn!("If setting GCS credentials, `bucket` and an auth mechanism need to be set.");
+            enabled = false;
+        }
+
+        if !enabled {
+            warn!("GCS storage disabled, see above messages.");
         }
 
         Ok(GCS {
-            enabled: enabled.unwrap_or(true),
+            enabled,
             bucket: bucket.unwrap_or_default(),
             key_prefix: key_prefix.unwrap_or_default(),
             key_path,
@@ -1112,15 +1140,18 @@ impl<'de> de::Visitor<'de> for S3Visitor {
             }
         }
 
+        let mut enabled = enabled.unwrap_or(true);
+
         let bucket = if let Some(bucket) = bucket {
             bucket
         } else {
-            return Err(de::Error::custom(
-                "S3 config missing required field {{bucket}}",
-            ));
+            warn!("S3 config missing required field `bucket`.");
+            enabled = false;
+            String::new()
         };
 
-        if no_credentials.unwrap_or_default()
+        if enabled
+            && no_credentials.unwrap_or_default()
             && (std::env::var_os("AWS_ACCESS_KEY_ID").is_some()
                 || std::env::var_os("AWS_SECRET_ACCESS_KEY").is_some())
         {
@@ -1129,8 +1160,12 @@ impl<'de> de::Visitor<'de> for S3Visitor {
             ));
         }
 
+        if !enabled {
+            warn!("S3 storage disabled, see above messages.");
+        }
+
         Ok(S3 {
-            enabled: enabled.unwrap_or(true),
+            enabled,
             bucket,
             region,
             key_prefix: key_prefix.unwrap_or_default(),

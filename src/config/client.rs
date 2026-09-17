@@ -170,16 +170,38 @@ impl Loadable<Self> for Config {
         let mut conf = Self::from_vars_impl(vars)?;
 
         // Remove Azure configs that don't have an auth mechanism
-        conf.cache.configs.retain(|_, cache| match cache {
-            Cache::Azure(Azure { auth, .. }) => !matches!(auth, AzureAuth::None),
+        conf.cache.configs.retain(|name, cache| match cache {
+            Cache::Azure(Azure { auth, .. }) => {
+                if matches!(auth, AzureAuth::None) {
+                    if let Some(chain) = conf.cache.multilevel.chain.as_mut()
+                        && let Ok(idx) = chain.binary_search(name)
+                    {
+                        chain.remove(idx);
+                    }
+                    false
+                } else {
+                    true
+                }
+            }
             _ => true,
         });
 
         conf.preprocessor
             .cache
             .configs
-            .retain(|_, cache| match cache {
-                Cache::Azure(Azure { auth, .. }) => !matches!(auth, AzureAuth::None),
+            .retain(|name, cache| match cache {
+                Cache::Azure(Azure { auth, .. }) => {
+                    if matches!(auth, AzureAuth::None) {
+                        if let Some(chain) = conf.cache.multilevel.chain.as_mut()
+                            && let Ok(idx) = chain.binary_search(name)
+                        {
+                            chain.remove(idx);
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                }
                 _ => true,
             });
 
@@ -2743,18 +2765,14 @@ mod test {
         fn conflicting_auth_sources() -> Result<()> {
             drop(env_logger::try_init());
 
-            let err_str = Config::from_vars([
+            let config = Config::from_vars([
                 ("SCCACHE_AZURE_BLOB_CONTAINER", "my-container"),
                 ("SCCACHE_AZURE_CONNECTION_STRING", "some-connection-string"),
                 ("SCCACHE_AZURE_STORAGE_ACCOUNT", "mystorageacct"),
             ])
-            .unwrap_err()
-            .to_string();
+            .and_then(|config| config.validate_vars())?;
 
-            assert_eq!(
-                err_str,
-                "Set either SCCACHE_CACHE_AZURE_CONNECTION_STRING (shared key) or SCCACHE_CACHE_AZURE_STORAGE_ACCOUNT / SCCACHE_CACHE_AZURE_ENDPOINT (Entra ID), not both.",
-            );
+            assert_eq!(config, Default::default());
 
             Ok(())
         }
@@ -2765,7 +2783,7 @@ mod test {
 
             // The other operand of the mutual-exclusivity check: connection string paired
             // with an endpoint (rather than a storage account) must also be rejected.
-            let err_str = Config::from_vars([
+            let config = Config::from_vars([
                 ("SCCACHE_AZURE_BLOB_CONTAINER", "my-container"),
                 ("SCCACHE_AZURE_CONNECTION_STRING", "some-connection-string"),
                 (
@@ -2773,13 +2791,9 @@ mod test {
                     "https://acct.blob.core.windows.net",
                 ),
             ])
-            .unwrap_err()
-            .to_string();
+            .and_then(|config| config.validate_vars())?;
 
-            assert_eq!(
-                err_str,
-                "Set either SCCACHE_CACHE_AZURE_CONNECTION_STRING (shared key) or SCCACHE_CACHE_AZURE_STORAGE_ACCOUNT / SCCACHE_CACHE_AZURE_ENDPOINT (Entra ID), not both.",
-            );
+            assert_eq!(config, Default::default());
 
             Ok(())
         }

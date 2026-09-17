@@ -1159,6 +1159,22 @@ impl StorageKind {
             );
         }
 
+        // Filter out disabled caches
+        if !caches.is_empty() {
+            // * Remove any disabled compilation caches
+            // * Or if any preprocessor caches are enabled, remove the disabled ones
+            if matches!(self, StorageKind::Compilations) || caches.iter().any(|c| c.enabled()) {
+                // If any caches are enabled, remove the disabled ones
+                caches.retain(|c| c.enabled());
+            } else {
+                // If all preprocessor caches are disabled, don't clear this list.
+                // That will cause the code below to create a fallback Disk cache,
+                // but that's not what we want since we allow the user to disable
+                // preprocessor cache mode. Instead, return a NoStorage instance.
+                caches = vec![caches[0].clone()];
+            }
+        }
+
         let storage = if caches.len() == 1 {
             caches[0].clone()
         } else if caches.len() > 1 {
