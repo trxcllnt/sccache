@@ -439,16 +439,17 @@ impl<'de> Deserialize<'de> for Auth {
                             url = Some(map.next_value::<String>()?);
                         }
                         "cache_secs" => {
-                            cache_secs = Some(map.next_value::<u64>()?);
+                            cache_secs = map.next_value::<Option<u64>>()?;
                         }
                         "decode" => {
-                            decode = Some(map.next_value::<ProxyTokenDecode>()?);
+                            decode = map.next_value::<Option<ProxyTokenDecode>>()?;
                         }
                         "rate_limit_on_error_count" => {
-                            rate_limit_on_error_count = Some(map.next_value::<usize>()?);
+                            rate_limit_on_error_count = map.next_value::<Option<usize>>()?;
                         }
                         "rate_limit_on_error_window_size_secs" => {
-                            rate_limit_on_error_window_size_secs = Some(map.next_value::<u64>()?);
+                            rate_limit_on_error_window_size_secs =
+                                map.next_value::<Option<u64>>()?;
                         }
                         "jwks"
                         | "cache"
