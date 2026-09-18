@@ -609,9 +609,6 @@ impl BuilderIncoming for OverlayBuilder {
         )
         .await;
 
-        // Clean up the build resources
-        self.finish_build(job_id).await;
-
         tracing::debug!("[run_build({job_id})]: Returning result");
 
         res
@@ -1040,9 +1037,6 @@ impl BuilderIncoming for DockerBuilder {
             self.job_queue.as_ref(),
         )
         .await;
-
-        // Clean up the build resources
-        self.finish_build(job_id).await;
 
         tracing::debug!("[run_build({job_id})]: Returning result");
 

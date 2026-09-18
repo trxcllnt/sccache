@@ -600,9 +600,6 @@ impl BuilderIncoming for PotBuilder {
         )
         .await;
 
-        // Clean up the build resources
-        self.finish_build(job_id).await;
-
         tracing::debug!("[run_build({job_id})]: Returning result");
 
         res
