@@ -613,7 +613,7 @@ impl fmt::Debug for BuildError {
             Self::KillChildProcess(e) => write!(f, "Failed to kill build process: {e:?}"),
             Self::ReadBuildResult(p, e) => write!(f, "Failed to read build result {p:?}: {e:?}"),
             Self::Cancelled => write!(f, "Build cancelled"),
-            Self::Unknown(e) => write!(f, "Build error: {e:?}"),
+            Self::Unknown(e) => write!(f, "Unknown build error: {e:?}"),
         }
     }
 }
@@ -636,17 +636,13 @@ impl fmt::Display for BuildError {
             Self::KillChildProcess(e) => write!(f, "Failed to kill build process: {e}"),
             Self::ReadBuildResult(p, e) => write!(f, "Failed to read build result {p:?}: {e}"),
             Self::Cancelled => write!(f, "Build cancelled"),
-            Self::Unknown(e) => write!(f, "Build error: {e:?}"),
+            Self::Unknown(e) => write!(f, "Unknown build error: {e:?}"),
         }
     }
 }
 
 #[cfg(feature = "dist-server")]
-impl From<BuildError> for anyhow::Error {
-    fn from(err: BuildError) -> Self {
-        anyhow!(err)
-    }
-}
+impl std::error::Error for BuildError {}
 
 // CompileCommand
 
