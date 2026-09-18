@@ -959,50 +959,31 @@ impl ServerService for Server {
             .map(|(_, res)| res)
     }
 
-    async fn on_failure(&self, job_id: &str, reply_to: &str, job_err: RunJobError) -> Result<()> {
-        // Clean up the build resources
-        self.builder.finish_build(job_id).await;
-        // Remove job and increment the job_finished counter
-        if self.state.jobs.lock().unwrap().remove(job_id).is_some() {
-            let server_id = self.state.id.clone();
-
-            let job_res = match job_err {
-                // Unrecoverable errors
-                RunJobError::Fatal(e) => RunJobResponse::FatalError {
-                    message: format!("{e:#}"),
-                    server_id,
-                },
-                // Retryable errors
-                RunJobError::Retryable(e) => RunJobResponse::RetryableError {
-                    message: format!("{e:#}"),
-                    server_id,
-                },
-                RunJobError::MissingJobInputs => RunJobResponse::MissingJobInputs { server_id },
-                RunJobError::MissingJobResult => RunJobResponse::MissingJobResult { server_id },
-                RunJobError::MissingToolchain => RunJobResponse::MissingToolchain { server_id },
-            };
-
-            tracing::warn!("[on_failure({job_id})]: {job_res:?}");
-
-            // Store the job result and notify the interested scheduler
-            self.job_finished(job_id, reply_to, &job_res).await
-        } else {
-            Ok(())
-        }
+    async fn notify_run_job_err(&self, job_id: &str, err: &RunJobError) -> Result<()> {
+        self.notify_run_job_res(
+            job_id,
+            &RunJobResponse::from_run_job_error(&self.state.id, err),
+        )
+        .await
     }
 
-    async fn on_success(
-        &self,
-        job_id: &str,
-        reply_to: &str,
-        job_res: &RunJobResponse,
-    ) -> Result<()> {
-        // Clean up the build resources
-        self.builder.finish_build(job_id).await;
+    async fn notify_run_job_res(&self, job_id: &str, res: &RunJobResponse) -> Result<()> {
         // Remove job and increment the job_finished counter
-        if self.state.jobs.lock().unwrap().remove(job_id).is_some() {
+        let job = self.state.jobs.lock().unwrap().remove(job_id);
+        if let Some(job) = job {
+            if matches!(res, RunJobResponse::Complete { .. }) {
+                tracing::debug!("[run_job_success({job_id})]: {res:?}");
+            } else {
+                tracing::debug!("[run_job_failure({job_id})]: {res:?}");
+            }
+
             // Store the job result and notify the interested scheduler
-            self.job_finished(job_id, reply_to, job_res).await
+            let res = self.job_finished(job_id, &job.reply_to, res).await;
+
+            // Clean up the build resources
+            self.builder.finish_build(job_id).await;
+
+            res
         } else {
             Ok(())
         }

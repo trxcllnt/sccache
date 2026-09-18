@@ -337,8 +337,8 @@ mod task_impls {
 
     #[celery::task(
         acks_late = true,
-        on_failure = on_run_job_failure,
-        on_success = on_run_job_success,
+        on_failure = run_job_on_failure,
+        on_success = run_job_on_success,
     )]
     pub async fn run_job(
         job_id: String,
@@ -374,9 +374,8 @@ mod task_impls {
             })
     }
 
-    async fn on_run_job_failure(task: &run_job, err: &TaskError) {
+    async fn run_job_on_failure(task: &run_job, err: &TaskError) {
         let job_id = &task.request().params.job_id;
-        let reply_to = &task.request().params.reply_to;
 
         let err = match err {
             // The client can choose to retry these or compile locally.
@@ -401,7 +400,7 @@ mod task_impls {
         };
 
         if let Err(err) = server_service()
-            .map(|svc| svc.on_failure(job_id, reply_to, err).boxed())
+            .map(|svc| svc.notify_run_job_err(job_id, &err).boxed())
             .unwrap_or_else(|err| futures::future::err(err).boxed())
             .await
         {
@@ -409,12 +408,11 @@ mod task_impls {
         }
     }
 
-    async fn on_run_job_success(task: &run_job, res: &RunJobResponse) {
+    async fn run_job_on_success(task: &run_job, res: &RunJobResponse) {
         let job_id = &task.request().params.job_id;
-        let reply_to = &task.request().params.reply_to;
 
         if let Err(err) = server_service()
-            .map(|svc| svc.on_success(job_id, reply_to, res).boxed())
+            .map(|svc| svc.notify_run_job_res(job_id, res).boxed())
             .unwrap_or_else(|err| futures::future::err(err).boxed())
             .await
         {

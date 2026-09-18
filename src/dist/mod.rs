@@ -774,6 +774,29 @@ pub enum RunJobResponse {
 }
 
 impl RunJobResponse {
+    pub fn from_run_job_error(server_id: &str, err: &RunJobError) -> Self {
+        match err {
+            // Unrecoverable errors
+            RunJobError::Fatal(e) => RunJobResponse::FatalError {
+                message: format!("{e:#}"),
+                server_id: server_id.into(),
+            },
+            // Retryable errors
+            RunJobError::Retryable(e) => RunJobResponse::RetryableError {
+                message: format!("{e:#}"),
+                server_id: server_id.into(),
+            },
+            RunJobError::MissingJobInputs => RunJobResponse::MissingJobInputs {
+                server_id: server_id.into(),
+            },
+            RunJobError::MissingJobResult => RunJobResponse::MissingJobResult {
+                server_id: server_id.into(),
+            },
+            RunJobError::MissingToolchain => RunJobResponse::MissingToolchain {
+                server_id: server_id.into(),
+            },
+        }
+    }
     pub fn build_process_killed(server_id: &str) -> Self {
         RunJobResponse::RetryableError {
             message: "Build process killed".into(),
@@ -934,8 +957,8 @@ pub trait ServerService: Send + Sync {
         outputs: Vec<String>,
     ) -> Result<RunJobResponse>;
 
-    async fn on_failure(&self, job_id: &str, reply_to: &str, err: RunJobError) -> Result<()>;
-    async fn on_success(&self, job_id: &str, reply_to: &str, res: &RunJobResponse) -> Result<()>;
+    async fn notify_run_job_err(&self, job_id: &str, err: &RunJobError) -> Result<()>;
+    async fn notify_run_job_res(&self, job_id: &str, res: &RunJobResponse) -> Result<()>;
 
     async fn update_scheduler_status(&self, status: StatusUpdate) -> Result<()>;
 }
