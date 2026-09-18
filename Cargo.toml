@@ -135,7 +135,7 @@ reqwest = { version = "0.13", features = [
 rustls-native-certs = { version = "0.8", optional = true }
 semver = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-serde-env = { version = "0.3" }
+serde-env = { git = "https://github.com/trxcllnt/serde-env.git", branch = "revert/remove-logging" }
 # Or use this to debug serde-env deserialization behavior
 # serde-env = { git = "https://github.com/trxcllnt/serde-env.git", branch = "revert/remove-logging", features = ["log"] }
 serde-patch = { version = "0.2" }

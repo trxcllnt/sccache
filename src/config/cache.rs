@@ -255,7 +255,7 @@ impl<'de> de::Visitor<'de> for CachesVisitor {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum Cache {
     Azure(Azure),
     Disk(Disk),
@@ -629,6 +629,7 @@ impl<'de> de::Visitor<'de> for AzureVisitor {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum AzureAuth {
     #[default]
     None,
@@ -1103,7 +1104,8 @@ impl<'de> de::Visitor<'de> for S3Visitor {
                     use_ssl = map.next_value::<DeserializeBool>()?.into();
                 }
                 "server_side_encryption" => {
-                    server_side_encryption = map.next_value::<DeserializeBool>()?.into();
+                    server_side_encryption =
+                        map.next_value::<DeserializeBool>().ok().map(Into::into);
                 }
                 "server_side_encryption_aws_kms" => {
                     server_side_encryption_aws_kms = map.next_value::<DeserializeBool>()?.into();
@@ -1180,6 +1182,7 @@ impl<'de> de::Visitor<'de> for S3Visitor {
         })
     }
 }
+
 impl S3 {
     pub fn from_bucket<S: Into<String>>(bucket: S) -> Self {
         Self {

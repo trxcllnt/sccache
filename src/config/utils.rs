@@ -204,6 +204,20 @@ where
             Ok(Some(v))
         }
 
+        fn visit_i8<E>(self, v: i8) -> std::prelude::v1::Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(v == 1))
+        }
+
+        fn visit_f32<E>(self, v: f32) -> std::prelude::v1::Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(v == 1.0))
+        }
+
         fn visit_str<E>(self, v: &str) -> std::result::Result<Self::Value, E>
         where
             E: de::Error,

@@ -13,15 +13,12 @@
 // limitations under the License.
 use crate::config::{
     dist::Keepalive,
-    utils::{_Ignored, deserialize_bool, deserialize_size_from_str},
+    utils::{deserialize_bool, deserialize_size_from_str},
 };
 
-use serde::{
-    Deserialize, Serialize, de,
-    ser::{self, SerializeMap},
-};
+use serde::{Deserialize, Serialize};
 use serde_with::{TryFromInto, serde_as};
-use std::{fmt, path::PathBuf};
+use std::path::PathBuf;
 
 #[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -81,22 +78,22 @@ impl Default for Config {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum Auth {
-    Token {
-        token: String,
-    },
+    #[serde(rename = "token")]
+    Token { token: String },
+    #[serde(rename = "oauth2_code_grant_pkce")]
     Oauth2CodeGrantPKCE {
         client_id: String,
         auth_url: String,
         token_url: String,
     },
-    Oauth2Implicit {
-        client_id: String,
-        auth_url: String,
-    },
+    #[serde(rename = "oauth2_implicit")]
+    Oauth2Implicit { client_id: String, auth_url: String },
 }
 
+/*
 impl Serialize for Auth {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -238,6 +235,7 @@ impl<'de> Deserialize<'de> for Auth {
         deserializer.deserialize_map(AuthVisitor)
     }
 }
+*/
 
 impl Default for Auth {
     fn default() -> Self {
@@ -308,153 +306,17 @@ impl Default for Networking {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum Toolchain {
-    NoDist {
-        compiler_executable: PathBuf,
-    },
+    #[serde(rename = "no_dist")]
+    NoDist { compiler_executable: PathBuf },
+    #[serde(rename = "path_override")]
     PathOverride {
         compiler_executable: PathBuf,
         archive: PathBuf,
         archive_compiler_executable: String,
     },
-}
-
-impl Serialize for Toolchain {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: ser::Serializer,
-    {
-        match self {
-            Toolchain::NoDist {
-                compiler_executable,
-            } => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("type", "no_dist")?;
-                map.serialize_entry("compiler_executable", compiler_executable)?;
-                map.end()
-            }
-            Toolchain::PathOverride {
-                compiler_executable,
-                archive,
-                archive_compiler_executable,
-            } => {
-                let mut map = serializer.serialize_map(Some(4))?;
-                map.serialize_entry("type", "path_override")?;
-                map.serialize_entry("compiler_executable", compiler_executable)?;
-                map.serialize_entry("archive", archive)?;
-                map.serialize_entry("archive_compiler_executable", archive_compiler_executable)?;
-                map.end()
-            }
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Toolchain {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: de::Deserializer<'de>,
-    {
-        struct ToolchainVisitor;
-
-        impl<'de> de::Visitor<'de> for ToolchainVisitor {
-            type Value = Toolchain;
-
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("dist-client authentication configuration")
-            }
-
-            fn visit_map<M>(self, mut map: M) -> std::result::Result<Self::Value, M::Error>
-            where
-                M: de::MapAccess<'de>,
-            {
-                let mut type_ = None;
-                let mut archive = None;
-                let mut compiler_executable = None;
-                let mut archive_compiler_executable = None;
-
-                while let Ok(Some(name)) = map.next_key::<String>() {
-                    match name.as_str() {
-                        "type" => {
-                            type_ = Some(map.next_value::<String>()?);
-                        }
-                        "archive" => {
-                            archive = Some(map.next_value::<PathBuf>()?);
-                        }
-                        "compiler" => {
-                            let _ = map.next_value::<_Ignored>();
-                        }
-                        "compiler_executable" => {
-                            compiler_executable = Some(map.next_value::<PathBuf>()?);
-                        }
-                        "archive_compiler" => {
-                            let _ = map.next_value::<_Ignored>();
-                        }
-                        "archive_compiler_executable" => {
-                            archive_compiler_executable = Some(map.next_value::<String>()?);
-                        }
-                        name => {
-                            return Err(de::Error::unknown_field(
-                                name,
-                                &[
-                                    "type",
-                                    "compiler_executable",
-                                    "archive",
-                                    "archive_compiler_executable",
-                                ],
-                            ));
-                        }
-                    }
-                }
-
-                let type_ = if type_.is_none() {
-                    if compiler_executable.is_some()
-                        && archive.is_some()
-                        && archive_compiler_executable.is_some()
-                    {
-                        Some("path_override")
-                    } else if compiler_executable.is_some() {
-                        Some("no_dist")
-                    } else {
-                        None
-                    }
-                } else {
-                    type_.as_deref()
-                };
-
-                match type_.unwrap_or("none") {
-                    "no_dist" => {
-                        return Ok(Toolchain::NoDist {
-                            compiler_executable: compiler_executable.map(Ok).unwrap_or_else(
-                                || Err(de::Error::missing_field("compiler_executable")),
-                            )?,
-                        });
-                    }
-                    "path_override" => {
-                        return Ok(Toolchain::PathOverride {
-                            archive: archive
-                                .map(Ok)
-                                .unwrap_or_else(|| Err(de::Error::missing_field("archive")))?,
-                            compiler_executable: compiler_executable.map(Ok).unwrap_or_else(
-                                || Err(de::Error::missing_field("compiler_executable")),
-                            )?,
-                            archive_compiler_executable: archive_compiler_executable
-                                .map(Ok)
-                                .unwrap_or_else(|| {
-                                    Err(de::Error::missing_field("archive_compiler_executable"))
-                                })?,
-                        });
-                    }
-                    name => Err(de::Error::unknown_variant(
-                        name,
-                        &["no_dist", "path_override"],
-                    )),
-                }
-            }
-        }
-
-        deserializer.deserialize_map(ToolchainVisitor)
-    }
 }
 
 pub mod defaults {

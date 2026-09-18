@@ -17,20 +17,14 @@ use crate::{
         Loadable, Valid,
         cache::{Azure, AzureAuth, Cache, Caches},
         dist::{Keepalive, MessageBroker, Metrics},
-        utils::{
-            _Ignored, DeserializeListOfStrings, DeserializeMapOfStringsToStrings,
-            deserialize_string_or_list, deserialize_string_or_seq_to_map,
-        },
+        utils::{deserialize_string_or_list, deserialize_string_or_seq_to_map},
     },
     errors::*,
 };
 
 use itertools::Itertools;
-use serde::{
-    Deserialize, Serialize, de,
-    ser::{self, SerializeMap},
-};
-use std::{collections::HashMap, ffi::OsStr, fmt, net::SocketAddr, path::Path};
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, ffi::OsStr, net::SocketAddr, path::Path};
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Config {
@@ -251,10 +245,6 @@ impl Loadable<Self> for Config {
                 } else if matches!(key, "JOB_TIME_LIMIT" | "SHUTDOWN_TIMEOUT") {
                     let key = format!("{key}_SECS");
                     vec![(key, val.into_owned())]
-                } else if matches!(key, "AUTH_TYPE") {
-                    // SCCACHE_DIST_AUTH_TYPE -> SCCACHE_DIST_AUTH
-                    let key = "AUTH".into();
-                    vec![(key, val.into_owned())]
                 } else if matches!(key, "METRICS_TYPE") {
                     // SCCACHE_DIST_METRICS_TYPE -> SCCACHE_DIST_METRICS
                     let key = "METRICS".to_owned();
@@ -267,26 +257,30 @@ impl Loadable<Self> for Config {
                     }
                 }) {
                     if kind == "PROMETHEUS" {
-                        // SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT -> SCCACHE_DIST_METRICS_ENDPOINT
-                        // SCCACHE_DIST_PROMETHEUS_PUSH_INTERVAL -> SCCACHE_DIST_METRICS_INTERVAL
-                        // SCCACHE_DIST_PROMETHEUS_PUSH_USERNAME -> SCCACHE_DIST_METRICS_USERNAME
-                        // SCCACHE_DIST_PROMETHEUS_PUSH_PASSWORD -> SCCACHE_DIST_METRICS_PASSWORD
+                        // SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT -> SCCACHE_DIST_METRICS_PROMETHEUS_ENDPOINT
+                        // SCCACHE_DIST_PROMETHEUS_PUSH_INTERVAL -> SCCACHE_DIST_METRICS_PROMETHEUS_INTERVAL
+                        // SCCACHE_DIST_PROMETHEUS_PUSH_USERNAME -> SCCACHE_DIST_METRICS_PROMETHEUS_USERNAME
+                        // SCCACHE_DIST_PROMETHEUS_PUSH_PASSWORD -> SCCACHE_DIST_METRICS_PROMETHEUS_PASSWORD
                         // SCCACHE_DIST_PROMETHEUS_PUSH_HTTP_METHOD -> SCCACHE_DIST_METRICS_HTTP_METHOD
                         if let Some(k) = key.strip_prefix("PUSH_") {
                             key = k;
                         }
-                        // SCCACHE_DIST_PROMETHEUS_LISTEN_ADDR -> SCCACHE_DIST_METRICS_ADDR
+                        // SCCACHE_DIST_PROMETHEUS_BIND_ADDR -> SCCACHE_DIST_METRICS_PROMETHEUS_ADDR
+                        else if let Some(k) = key.strip_prefix("BIND_") {
+                            key = k;
+                        }
+                        // SCCACHE_DIST_PROMETHEUS_LISTEN_ADDR -> SCCACHE_DIST_METRICS_PROMETHEUS_ADDR
                         else if let Some(k) = key.strip_prefix("LISTEN_") {
                             key = k;
                         }
                     }
 
-                    // SCCACHE_DIST_DOGSTATSD_ADDR -> SCCACHE_DIST_METRICS_ADDR
-                    // SCCACHE_DIST_PROMETHEUS_TYPE -> SCCACHE_DIST_METRICS_TYPE
-                    // SCCACHE_DIST_PROMETHEUS_ADDR -> SCCACHE_DIST_METRICS_ADDR
-                    // SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS -> SCCACHE_DIST_METRICS_IDLE_TIMEOUT_SECS
+                    // SCCACHE_DIST_DOGSTATSD_ADDR -> SCCACHE_DIST_METRICS_DOGSTATSD_ADDR
+                    // SCCACHE_DIST_PROMETHEUS_TYPE -> SCCACHE_DIST_METRICS_PROMETHEUS_TYPE
+                    // SCCACHE_DIST_PROMETHEUS_ADDR -> SCCACHE_DIST_METRICS_PROMETHEUS_ADDR
+                    // SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS -> SCCACHE_DIST_METRICS_PROMETHEUS_IDLE_TIMEOUT_SECS
                     // etc.
-                    let key = format!("METRICS_{key}");
+                    let key = format!("METRICS_{kind}_{key}");
                     vec![(key, val.into_owned())]
                 } else {
                     let key = key.to_owned();
@@ -313,14 +307,18 @@ impl Loadable<Self> for Config {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum Auth {
     #[default]
+    #[serde(rename = "DANGEROUSLY_INSECURE")]
     Insecure,
     Token {
         token: String,
     },
+    #[serde(alias = "jwt_validate")]
     Jwt(JWTDecode),
+    #[serde(rename = "proxy_token")]
     ProxyToken {
         url: String,
         cache_secs: Option<u64>,
@@ -330,210 +328,7 @@ pub enum Auth {
     },
 }
 
-impl Serialize for Auth {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: ser::Serializer,
-    {
-        match self {
-            Auth::Insecure => {
-                let mut map = serializer.serialize_map(Some(1))?;
-                map.serialize_entry("type", "DANGEROUSLY_INSECURE")?;
-                map.end()
-            }
-            Auth::Token { token } => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("type", "token")?;
-                map.serialize_entry("token", token)?;
-                map.end()
-            }
-            Auth::Jwt(jwt) => {
-                let mut map = serializer.serialize_map(Some(6))?;
-                map.serialize_entry("type", "jwt")?;
-                map.serialize_entry("audience", &jwt.audience)?;
-                map.serialize_entry("issuer", &jwt.issuer)?;
-                map.serialize_entry("jwks_url", &jwt.jwks_url)?;
-                map.serialize_entry("claims", &jwt.claims)?;
-                map.serialize_entry("leeway", &jwt.leeway)?;
-                map.end()
-            }
-            Auth::ProxyToken {
-                url,
-                cache_secs,
-                decode,
-                rate_limit_on_error_count,
-                rate_limit_on_error_window_size_secs,
-            } => {
-                let mut map = serializer.serialize_map(Some(6))?;
-                map.serialize_entry("type", "proxy_token")?;
-                map.serialize_entry("url", url)?;
-                map.serialize_entry("cache_secs", cache_secs)?;
-                map.serialize_entry("decode", decode)?;
-                map.serialize_entry("rate_limit_on_error_count", rate_limit_on_error_count)?;
-                map.serialize_entry(
-                    "rate_limit_on_error_window_size_secs",
-                    rate_limit_on_error_window_size_secs,
-                )?;
-                map.end()
-            }
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Auth {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: de::Deserializer<'de>,
-    {
-        struct AuthVisitor;
-
-        impl<'de> de::Visitor<'de> for AuthVisitor {
-            type Value = Auth;
-
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("sccache-dist authentication configuration")
-            }
-
-            fn visit_map<M>(self, mut map: M) -> std::result::Result<Self::Value, M::Error>
-            where
-                M: de::MapAccess<'de>,
-            {
-                let mut type_ = None;
-                let mut token = None;
-                let mut audience = None;
-                let mut issuer = None;
-                let mut jwks_url = None;
-                let mut claims = None;
-                let mut leeway = None;
-                let mut url = None;
-                let mut cache_secs = None;
-                let mut decode = None;
-                let mut rate_limit_on_error_count = None;
-                let mut rate_limit_on_error_window_size_secs = None;
-
-                while let Ok(Some(name)) = map.next_key::<String>() {
-                    match name.as_str() {
-                        "type" => {
-                            type_ = Some(map.next_value::<String>()?);
-                        }
-                        "token" => {
-                            token = Some(map.next_value::<String>()?);
-                        }
-                        "audience" => {
-                            audience = Some(map.next_value::<DeserializeListOfStrings>()?.into());
-                        }
-                        "issuer" => {
-                            issuer = Some(map.next_value::<DeserializeListOfStrings>()?.into());
-                        }
-                        "jwks_url" => {
-                            jwks_url = Some(map.next_value::<DeserializeListOfStrings>()?.into());
-                        }
-                        "claims" => {
-                            claims =
-                                Some(map.next_value::<DeserializeMapOfStringsToStrings>()?.into());
-                        }
-                        "leeway" => {
-                            leeway = Some(map.next_value::<u64>()?);
-                        }
-                        "url" => {
-                            url = Some(map.next_value::<String>()?);
-                        }
-                        "cache_secs" => {
-                            cache_secs = map.next_value::<Option<u64>>()?;
-                        }
-                        "decode" => {
-                            decode = map.next_value::<Option<ProxyTokenDecode>>()?;
-                        }
-                        "rate_limit_on_error_count" => {
-                            rate_limit_on_error_count = map.next_value::<Option<usize>>()?;
-                        }
-                        "rate_limit_on_error_window_size_secs" => {
-                            rate_limit_on_error_window_size_secs =
-                                map.next_value::<Option<u64>>()?;
-                        }
-                        "jwks"
-                        | "cache"
-                        | "rate_limit"
-                        | "rate_limit_on"
-                        | "rate_limit_on_error"
-                        | "rate_limit_on_error_window"
-                        | "rate_limit_on_error_window_size" => {
-                            let _ = map.next_value::<_Ignored>();
-                        }
-                        name => {
-                            return Err(de::Error::unknown_field(
-                                name,
-                                &[
-                                    "type",
-                                    "token",
-                                    "audience",
-                                    "issuer",
-                                    "jwks_url",
-                                    "claims",
-                                    "leeway",
-                                    "url",
-                                    "cache_secs",
-                                    "decode",
-                                    "rate_limit_on_error_count",
-                                    "rate_limit_on_error_window_size_secs",
-                                ],
-                            ));
-                        }
-                    }
-                }
-
-                let type_ = if type_.is_none() {
-                    if audience.is_some() && issuer.is_some() && jwks_url.is_some() {
-                        Some("jwt")
-                    } else if url.is_some() {
-                        Some("proxy_token")
-                    } else if token.is_some() {
-                        Some("token")
-                    } else {
-                        Some("DANGEROUSLY_INSECURE")
-                    }
-                } else {
-                    type_.as_deref()
-                };
-
-                match type_.unwrap_or("DANGEROUSLY_INSECURE") {
-                    "token" => Ok(Auth::Token {
-                        token: token
-                            .map(Ok)
-                            .unwrap_or_else(|| Err(de::Error::missing_field("token")))?,
-                    }),
-                    "jwt" | "jwt_validate" => Ok(Auth::Jwt(JWTDecode {
-                        audience: audience
-                            .map(Ok)
-                            .unwrap_or_else(|| Err(de::Error::missing_field("audience")))?,
-                        issuer: issuer
-                            .map(Ok)
-                            .unwrap_or_else(|| Err(de::Error::missing_field("issuer")))?,
-                        jwks_url: jwks_url
-                            .map(Ok)
-                            .unwrap_or_else(|| Err(de::Error::missing_field("jwks_url")))?,
-                        claims: claims.unwrap_or_else(HashMap::new),
-                        leeway: leeway.unwrap_or_else(defaults::default_jwt_decode_leeway),
-                    })),
-                    "proxy_token" => Ok(Auth::ProxyToken {
-                        url: url
-                            .map(Ok)
-                            .unwrap_or_else(|| Err(de::Error::missing_field("url")))?,
-                        cache_secs: cache_secs.or(Some(300)),
-                        decode,
-                        rate_limit_on_error_count,
-                        rate_limit_on_error_window_size_secs,
-                    }),
-                    _ => Ok(Auth::default()),
-                }
-            }
-        }
-
-        deserializer.deserialize_map(AuthVisitor)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct JWTDecode {
     #[serde(default, deserialize_with = "deserialize_string_or_list")]
     pub audience: Vec<String>,
@@ -554,13 +349,15 @@ impl Default for JWTDecode {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum ProxyTokenDecode {
     #[default]
     None,
     Jwt(JWTDecode),
 }
 
+/*
 impl Serialize for ProxyTokenDecode {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
@@ -676,6 +473,7 @@ impl<'de> Deserialize<'de> for ProxyTokenDecode {
         deserializer.deserialize_map(ProxyTokenDecodeVisitor)
     }
 }
+*/
 
 pub mod defaults {
     use super::*;
@@ -756,17 +554,17 @@ mod test {
                 ("SCCACHE_DIST_SCHEDULER_ID", "scheduler-1"),
                 ("SCCACHE_DIST_PUBLIC_ADDR", "127.0.0.1:10500"),
                 ("SCCACHE_DIST_JOB_TIME_LIMIT_SECS", "1200"),
-                ("SCCACHE_DIST_METRICS_TYPE", "prometheus"),
-                ("SCCACHE_DIST_PROMETHEUS_TYPE", "push"),
+                ("SCCACHE_DIST_METRICS", "prometheus"),
+                ("SCCACHE_DIST_METRICS_PROMETHEUS_TYPE", "push"),
                 (
-                    "SCCACHE_DIST_PROMETHEUS_ENDPOINT",
+                    "SCCACHE_DIST_METRICS_PROMETHEUS_ENDPOINT",
                     "http://127.0.0.1:9091/metrics/job/scheduler-1"
                 ),
-                ("SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS", "10"),
-                ("SCCACHE_DIST_PROMETHEUS_PUSH_INTERVAL_MS", "1000"),
-                ("SCCACHE_DIST_PROMETHEUS_PUSH_USERNAME", "sccache"),
-                ("SCCACHE_DIST_PROMETHEUS_PUSH_PASSWORD", "sccache"),
-                ("SCCACHE_DIST_PROMETHEUS_PUSH_HTTP_METHOD", "post"),
+                ("SCCACHE_DIST_METRICS_PROMETHEUS_IDLE_TIMEOUT_SECS", "10"),
+                ("SCCACHE_DIST_METRICS_PROMETHEUS_INTERVAL_MS", "1000"),
+                ("SCCACHE_DIST_METRICS_PROMETHEUS_USERNAME", "sccache"),
+                ("SCCACHE_DIST_METRICS_PROMETHEUS_PASSWORD", "sccache"),
+                ("SCCACHE_DIST_METRICS_PROMETHEUS_HTTP_METHOD", "post"),
                 ("SCCACHE_DIST_JOBS_REDIS_URL", "redis://127.0.0.1:6379"),
                 ("SCCACHE_DIST_JOBS_REDIS_TTL", "3600"),
                 ("SCCACHE_DIST_JOBS_REDIS_KEY_PREFIX", "/sccache-dist-jobs"),
@@ -846,7 +644,7 @@ mod test {
             token = "secrettoken"
 
             [[client_auth]]
-            type = "jwt_validate"
+            type = "jwt"
             audience = "token.mycompany.com"
             issuer = "https://token.mycompany.com"
             jwks_url = "https://token.mycompany.com/.well-known/jwks"
@@ -902,7 +700,7 @@ mod test {
                 id: "scheduler-1".into(),
                 auth: vec![
                     Auth::Token {
-                        token: "secrettoken".into()
+                        token: "secrettoken".into(),
                     },
                     Auth::Jwt(JWTDecode {
                         audience: vec!["token.mycompany.com".into()],
@@ -934,7 +732,7 @@ mod test {
                         })),
                         rate_limit_on_error_count: None,
                         rate_limit_on_error_window_size_secs: None,
-                    }
+                    },
                 ],
                 public_addr: SocketAddr::from_str("127.0.0.1:10500").unwrap(),
                 job_time_limit_secs: 1200,
@@ -945,7 +743,7 @@ mod test {
                     username: Some("sccache".into()),
                     password: Some("sccache".into()),
                     http_method: Some("post".into()),
-                    idle_timeout_secs: Some(10)
+                    idle_timeout_secs: Some(10),
                 }),
                 jobs: vec![
                     Redis {
@@ -953,7 +751,7 @@ mod test {
                         key_prefix: "/sccache-dist-jobs".into(),
                         ..Redis::from_url("redis://127.0.0.1:6379")
                     }
-                    .into()
+                    .into(),
                 ]
                 .into(),
                 toolchains: vec![
@@ -965,7 +763,7 @@ mod test {
                         key_prefix: "sccache-dist-toolchains".into(),
                         ..S3::from_bucket("sccache")
                     }
-                    .into()
+                    .into(),
                 ]
                 .into(),
                 ..Default::default()

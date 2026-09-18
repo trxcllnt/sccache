@@ -1114,12 +1114,14 @@ mod test {
             endpoint = "cos.na-siliconvalley.myqcloud.com"
             key_prefix = "cosprefix"
 
-            [cache.custom-1.cos]
+            [cache.custom-1]
+            type = "cos"
             bucket = "name"
             endpoint = "cos.na-siliconvalley.myqcloud.com"
             key_prefix = "cosprefix"
 
-            [cache.configs.custom-2.cos]
+            [cache.configs.custom-2]
+            type = "cos"
             bucket = "name"
             endpoint = "cos.na-siliconvalley.myqcloud.com"
             key_prefix = "cosprefix"
@@ -2518,7 +2520,7 @@ mod test {
             drop(env_logger::try_init());
 
             let config = Config::from_vars([
-                ("SCCACHE_CACHE_CUSTOM_S3_CACHE", "s3"),
+                ("SCCACHE_CACHE_CUSTOM_S3_CACHE_TYPE", "s3"),
                 ("SCCACHE_CACHE_CUSTOM_S3_CACHE_BUCKET", "my-bucket"),
             ])
             .and_then(|config| config.validate_vars())?;

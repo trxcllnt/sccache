@@ -17,24 +17,17 @@ use crate::{
         Loadable, Valid,
         cache::{Azure, AzureAuth, Cache, Caches},
         dist::{MessageBroker, Metrics},
-        utils::{
-            _Ignored, DeserializeCommandList, DeserializeMapOfStringsToStrings,
-            deserialize_command_or_list, deserialize_string_or_seq_to_map,
-        },
+        utils::{deserialize_command_or_list, deserialize_string_or_seq_to_map},
     },
     errors::*,
 };
 
 use itertools::Itertools;
-use serde::{
-    Deserialize, Serialize, de,
-    ser::{self, SerializeMap},
-};
-use serde_with::{FromInto, serde_as};
+use serde::{Deserialize, Serialize};
+use serde_with::{FromInto, PickFirst, StringWithSeparator, formats::ColonSeparator, serde_as};
 use std::{
     collections::HashMap,
     ffi::OsStr,
-    fmt,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -283,26 +276,30 @@ impl Loadable<Self> for Config {
                     }
                 }) {
                     if kind == "PROMETHEUS" {
-                        // SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT -> SCCACHE_DIST_METRICS_ENDPOINT
-                        // SCCACHE_DIST_PROMETHEUS_PUSH_INTERVAL -> SCCACHE_DIST_METRICS_INTERVAL
-                        // SCCACHE_DIST_PROMETHEUS_PUSH_USERNAME -> SCCACHE_DIST_METRICS_USERNAME
-                        // SCCACHE_DIST_PROMETHEUS_PUSH_PASSWORD -> SCCACHE_DIST_METRICS_PASSWORD
+                        // SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT -> SCCACHE_DIST_METRICS_PROMETHEUS_ENDPOINT
+                        // SCCACHE_DIST_PROMETHEUS_PUSH_INTERVAL -> SCCACHE_DIST_METRICS_PROMETHEUS_INTERVAL
+                        // SCCACHE_DIST_PROMETHEUS_PUSH_USERNAME -> SCCACHE_DIST_METRICS_PROMETHEUS_USERNAME
+                        // SCCACHE_DIST_PROMETHEUS_PUSH_PASSWORD -> SCCACHE_DIST_METRICS_PROMETHEUS_PASSWORD
                         // SCCACHE_DIST_PROMETHEUS_PUSH_HTTP_METHOD -> SCCACHE_DIST_METRICS_HTTP_METHOD
                         if let Some(k) = key.strip_prefix("PUSH_") {
                             key = k;
                         }
-                        // SCCACHE_DIST_PROMETHEUS_LISTEN_ADDR -> SCCACHE_DIST_METRICS_ADDR
+                        // SCCACHE_DIST_PROMETHEUS_BIND_ADDR -> SCCACHE_DIST_METRICS_PROMETHEUS_ADDR
+                        else if let Some(k) = key.strip_prefix("BIND_") {
+                            key = k;
+                        }
+                        // SCCACHE_DIST_PROMETHEUS_LISTEN_ADDR -> SCCACHE_DIST_METRICS_PROMETHEUS_ADDR
                         else if let Some(k) = key.strip_prefix("LISTEN_") {
                             key = k;
                         }
                     }
 
-                    // SCCACHE_DIST_DOGSTATSD_ADDR -> SCCACHE_DIST_METRICS_ADDR
-                    // SCCACHE_DIST_PROMETHEUS_TYPE -> SCCACHE_DIST_METRICS_TYPE
-                    // SCCACHE_DIST_PROMETHEUS_ADDR -> SCCACHE_DIST_METRICS_ADDR
-                    // SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS -> SCCACHE_DIST_METRICS_IDLE_TIMEOUT_SECS
+                    // SCCACHE_DIST_DOGSTATSD_ADDR -> SCCACHE_DIST_METRICS_DOGSTATSD_ADDR
+                    // SCCACHE_DIST_PROMETHEUS_TYPE -> SCCACHE_DIST_METRICS_PROMETHEUS_TYPE
+                    // SCCACHE_DIST_PROMETHEUS_ADDR -> SCCACHE_DIST_METRICS_PROMETHEUS_ADDR
+                    // SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS -> SCCACHE_DIST_METRICS_PROMETHEUS_IDLE_TIMEOUT_SECS
                     // etc.
-                    let key = format!("METRICS_{key}");
+                    let key = format!("METRICS_{kind}_{key}");
                     vec![(key, val.into_owned())]
                 } else {
                     let key = key.to_owned();
@@ -350,7 +347,8 @@ impl From<f64> for Percent {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum Builder {
     Docker(DockerBuilder),
     Overlay(OverlayBuilder),
@@ -367,191 +365,6 @@ impl Default for Builder {
         {
             Builder::Docker(DockerBuilder::default())
         }
-    }
-}
-
-impl Serialize for Builder {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: ser::Serializer,
-    {
-        match self {
-            Builder::Docker(builder) => {
-                let mut map = serializer.serialize_map(Some(4))?;
-                map.serialize_entry("type", "docker")?;
-                map.serialize_entry("image", &builder.image)?;
-                map.serialize_entry("run_cmd", &builder.run_cmd)?;
-                map.serialize_entry("exec_cmd", &builder.exec_cmd)?;
-                map.end()
-            }
-            Builder::Overlay(builder) => {
-                let mut map = serializer.serialize_map(Some(6))?;
-                map.serialize_entry("type", "overlay")?;
-                map.serialize_entry("build_dir", &builder.build_dir)?;
-                map.serialize_entry("bwrap_path", &builder.bwrap_path)?;
-                map.serialize_entry("exec_cmd", &builder.exec_cmd)?;
-                map.serialize_entry("lower_dirs", &builder.lower_dirs)?;
-                map.serialize_entry("env", &builder.env)?;
-                map.end()
-            }
-            Builder::Pot(builder) => {
-                let mut map = serializer.serialize_map(Some(5))?;
-                map.serialize_entry("type", "pot")?;
-                map.serialize_entry("pot_fs_root", &builder.pot_fs_root)?;
-                map.serialize_entry("clone_from", &builder.clone_from)?;
-                map.serialize_entry("pot_cmd", &builder.pot_cmd)?;
-                map.serialize_entry("pot_clone_args", &builder.pot_clone_args)?;
-                map.end()
-            }
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Builder {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: de::Deserializer<'de>,
-    {
-        struct BuilderVisitor;
-
-        impl<'de> de::Visitor<'de> for BuilderVisitor {
-            type Value = Builder;
-
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("sccache-dist authentication configuration")
-            }
-
-            fn visit_map<M>(self, mut map: M) -> std::result::Result<Self::Value, M::Error>
-            where
-                M: de::MapAccess<'de>,
-            {
-                let mut type_ = None;
-                let mut image = None;
-                let mut run_cmd = None;
-                let mut exec_cmd = None;
-                let mut build_dir = None;
-                let mut bwrap_path = None;
-                let mut lower_dirs = None;
-                let mut env = None;
-                let mut pot_fs_root = None;
-                let mut clone_from = None;
-                let mut pot_cmd = None;
-                let mut pot_clone_args = None;
-
-                while let Ok(Some(name)) = map.next_key::<String>() {
-                    match name.as_str() {
-                        "type" => {
-                            type_ = Some(map.next_value::<String>()?);
-                        }
-                        "image" => {
-                            image = Some(map.next_value::<String>()?);
-                        }
-                        "run_cmd" => {
-                            run_cmd = Some(map.next_value::<DeserializeCommandList>()?.into());
-                        }
-                        "exec_cmd" => {
-                            exec_cmd = Some(map.next_value::<DeserializeCommandList>()?.into());
-                        }
-                        "build_dir" => {
-                            build_dir = Some(map.next_value::<PathBuf>()?);
-                        }
-                        "bwrap_path" => {
-                            bwrap_path = Some(map.next_value::<PathBuf>()?);
-                        }
-                        "lower_dirs" => {
-                            lower_dirs = Some(map.next_value::<Vec<PathBuf>>()?);
-                        }
-                        "env" => {
-                            env =
-                                Some(map.next_value::<DeserializeMapOfStringsToStrings>()?.into());
-                        }
-                        "pot_fs_root" => {
-                            pot_fs_root = Some(map.next_value::<PathBuf>()?);
-                        }
-                        "clone_from" => {
-                            clone_from = Some(map.next_value::<String>()?);
-                        }
-                        "pot_cmd" => {
-                            pot_cmd = Some(map.next_value::<PathBuf>()?);
-                        }
-                        "pot_clone_args" => {
-                            pot_clone_args =
-                                Some(map.next_value::<DeserializeCommandList>()?.into());
-                        }
-                        "run" | "exec" | "build" | "bwrap" | "lower" | "pot" | "pot_fs"
-                        | "clone" | "pot_clone" => {
-                            let _ = map.next_value::<_Ignored>();
-                        }
-                        name => {
-                            return Err(de::Error::unknown_field(
-                                name,
-                                &[
-                                    "type",
-                                    "image",
-                                    "run_cmd",
-                                    "exec_cmd",
-                                    "build_dir",
-                                    "bwrap_path",
-                                    "exec_cmd",
-                                    "lower_dirs",
-                                    "env",
-                                    "pot_fs_root",
-                                    "clone_from",
-                                    "pot_cmd",
-                                    "pot_clone_args",
-                                ],
-                            ));
-                        }
-                    }
-                }
-
-                let type_ = if type_.is_none() {
-                    if build_dir.is_some() || bwrap_path.is_some() {
-                        Some("overlay")
-                    } else if pot_fs_root.is_some()
-                        || clone_from.is_some()
-                        || pot_cmd.is_some()
-                        || pot_clone_args.is_some()
-                    {
-                        Some("pot")
-                    } else {
-                        Some("docker")
-                    }
-                } else {
-                    type_.as_deref()
-                };
-
-                #[cfg(target_os = "freebsd")]
-                let type_ = type_.unwrap_or("pot");
-
-                #[cfg(not(target_os = "freebsd"))]
-                let type_ = type_.unwrap_or("docker");
-
-                match type_ {
-                    "pot" => Ok(Builder::Pot(PotBuilder {
-                        pot_fs_root: pot_fs_root.unwrap_or_else(defaults::default_pot_fs_root),
-                        clone_from: clone_from.unwrap_or_else(defaults::default_pot_clone_from),
-                        pot_cmd: pot_cmd.unwrap_or_else(defaults::default_pot_cmd),
-                        pot_clone_args: pot_clone_args
-                            .unwrap_or_else(defaults::default_pot_clone_args),
-                    })),
-                    "overlay" => Ok(Builder::Overlay(OverlayBuilder {
-                        build_dir: build_dir.unwrap_or_else(defaults::default_disk_cache_dir),
-                        bwrap_path: bwrap_path.unwrap_or_else(defaults::default_bwrap_path),
-                        exec_cmd: exec_cmd.unwrap_or_default(),
-                        lower_dirs: lower_dirs.unwrap_or_default(),
-                        env: env.unwrap_or_default(),
-                    })),
-                    _ => Ok(Builder::Docker(DockerBuilder {
-                        image: image.unwrap_or_else(defaults::default_docker_image),
-                        run_cmd: run_cmd.unwrap_or_else(defaults::default_docker_run_cmd),
-                        exec_cmd: exec_cmd.unwrap_or_else(defaults::default_docker_exec_cmd),
-                    })),
-                }
-            }
-        }
-
-        deserializer.deserialize_map(BuilderVisitor)
     }
 }
 
@@ -581,6 +394,7 @@ impl Default for DockerBuilder {
     }
 }
 
+#[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct OverlayBuilder {
     #[serde(default = "defaults::default_disk_cache_dir")]
@@ -589,6 +403,7 @@ pub struct OverlayBuilder {
     pub bwrap_path: PathBuf,
     #[serde(default, deserialize_with = "deserialize_command_or_list")]
     pub exec_cmd: Vec<String>,
+    #[serde_as(as = "PickFirst<(Vec<_>, StringWithSeparator<ColonSeparator, PathBuf>)>")]
     #[serde(default)]
     pub lower_dirs: Vec<PathBuf>,
     #[serde(default, deserialize_with = "deserialize_string_or_seq_to_map")]
@@ -726,20 +541,21 @@ mod test {
                 ("SCCACHE_DIST_BUILDER_TYPE", "overlay"),
                 ("SCCACHE_DIST_OVERLAY_BUILD_DIR", "/tmp/build"),
                 ("SCCACHE_DIST_OVERLAY_BWRAP_PATH", "/usr/bin/bwrap"),
+                ("SCCACHE_DIST_BUILDER_LOWER_DIRS", "/foo:/bar"),
                 ("SCCACHE_DIST_CACHE_DIR", "/tmp/toolchains"),
                 ("SCCACHE_DIST_MAX_PER_CORE_LOAD", "1.25"),
                 ("SCCACHE_DIST_MAX_PER_CORE_PREFETCH", "1.0"),
-                ("SCCACHE_DIST_METRICS_TYPE", "prometheus"),
-                ("SCCACHE_DIST_PROMETHEUS_TYPE", "push"),
+                ("SCCACHE_DIST_METRICS", "prometheus"),
+                ("SCCACHE_DIST_METRICS_PROMETHEUS_TYPE", "push"),
                 (
-                    "SCCACHE_DIST_PROMETHEUS_ENDPOINT",
+                    "SCCACHE_DIST_METRICS_PROMETHEUS_ENDPOINT",
                     "http://127.0.0.1:9091/metrics/job/server-1"
                 ),
-                ("SCCACHE_DIST_PROMETHEUS_IDLE_TIMEOUT_SECS", "10"),
-                ("SCCACHE_DIST_PROMETHEUS_PUSH_INTERVAL_MS", "1000"),
-                ("SCCACHE_DIST_PROMETHEUS_PUSH_USERNAME", "sccache"),
-                ("SCCACHE_DIST_PROMETHEUS_PUSH_PASSWORD", "sccache"),
-                ("SCCACHE_DIST_PROMETHEUS_PUSH_HTTP_METHOD", "post"),
+                ("SCCACHE_DIST_METRICS_PROMETHEUS_IDLE_TIMEOUT_SECS", "10"),
+                ("SCCACHE_DIST_METRICS_PROMETHEUS_INTERVAL_MS", "1000"),
+                ("SCCACHE_DIST_METRICS_PROMETHEUS_USERNAME", "sccache"),
+                ("SCCACHE_DIST_METRICS_PROMETHEUS_PASSWORD", "sccache"),
+                ("SCCACHE_DIST_METRICS_PROMETHEUS_HTTP_METHOD", "post"),
                 ("SCCACHE_DIST_JOBS_REDIS_URL", "redis://127.0.0.1:6379"),
                 ("SCCACHE_DIST_JOBS_REDIS_TTL", "3600"),
                 ("SCCACHE_DIST_JOBS_REDIS_KEY_PREFIX", "/sccache-dist-jobs"),
@@ -758,6 +574,100 @@ mod test {
                 builder: Builder::Overlay(OverlayBuilder {
                     build_dir: PathBuf::from("/tmp/build"),
                     bwrap_path: PathBuf::from("/usr/bin/bwrap"),
+                    lower_dirs: vec!["/foo".into(), "/bar".into()],
+                    ..Default::default()
+                }),
+                cache_dir: PathBuf::from("/tmp/toolchains"),
+                max_per_core_load: 1.25.into(),
+                max_per_core_prefetch: 1.0.into(),
+                message_broker: Some(MessageBroker::AMQP("amqp://127.0.0.1:5672//".into())),
+                metrics: Metrics::Prometheus(Prometheus::PushGateway {
+                    endpoint: "http://127.0.0.1:9091/metrics/job/server-1".into(),
+                    interval_ms: 1000,
+                    username: Some("sccache".into()),
+                    password: Some("sccache".into()),
+                    http_method: Some("post".into()),
+                    idle_timeout_secs: Some(10)
+                }),
+                jobs: vec![
+                    Redis {
+                        ttl: 3600,
+                        key_prefix: "/sccache-dist-jobs".into(),
+                        ..Redis::from_url("redis://127.0.0.1:6379")
+                    }
+                    .into()
+                ]
+                .into(),
+                toolchains: vec![
+                    S3 {
+                        region: Some("auto".into()),
+                        endpoint: Some("192.168.1.69:9000".into()),
+                        use_ssl: Some(false),
+                        no_credentials: false,
+                        key_prefix: "sccache-dist-toolchains".into(),
+                        ..S3::from_bucket("sccache")
+                    }
+                    .into()
+                ]
+                .into(),
+                toolchain_cache_size: 10737418240,
+                ..Default::default()
+            }
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn config_from_vars_aliases() -> Result<()> {
+        drop(env_logger::try_init());
+
+        assert_eq!(
+            Config::from_vars([
+                ("SCCACHE_DIST_MESSAGE_BROKER", "amqp"),
+                (
+                    "SCCACHE_DIST_MESSAGE_BROKER_ADDR",
+                    "amqp://127.0.0.1:5672//"
+                ),
+                ("SCCACHE_DIST_SERVER_ID", "server-1"),
+                ("SCCACHE_DIST_BUILDER_TYPE", "overlay"),
+                ("SCCACHE_DIST_OVERLAY_BUILD_DIR", "/tmp/build"),
+                ("SCCACHE_DIST_OVERLAY_BWRAP_PATH", "/usr/bin/bwrap"),
+                ("SCCACHE_DIST_BUILDER_LOWER_DIRS", "/foo:/bar"),
+                ("SCCACHE_DIST_CACHE_DIR", "/tmp/toolchains"),
+                ("SCCACHE_DIST_MAX_PER_CORE_LOAD", "1.25"),
+                ("SCCACHE_DIST_MAX_PER_CORE_PREFETCH", "1.0"),
+                ("SCCACHE_DIST_METRICS_TYPE", "prometheus"),
+                ("SCCACHE_DIST_PROMETHEUS_TYPE", "push"),
+                (
+                    "SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT",
+                    "http://127.0.0.1:9091/metrics/job/server-1"
+                ),
+                ("SCCACHE_DIST_PROMETHEUS_PUSH_IDLE_TIMEOUT_SECS", "10"),
+                ("SCCACHE_DIST_PROMETHEUS_PUSH_INTERVAL_MS", "1000"),
+                ("SCCACHE_DIST_PROMETHEUS_PUSH_USERNAME", "sccache"),
+                ("SCCACHE_DIST_PROMETHEUS_PUSH_PASSWORD", "sccache"),
+                ("SCCACHE_DIST_PROMETHEUS_PUSH_HTTP_METHOD", "post"),
+                //
+                ("SCCACHE_DIST_JOBS_REDIS_URL", "redis://127.0.0.1:6379"),
+                ("SCCACHE_DIST_JOBS_REDIS_TTL", "3600"),
+                ("SCCACHE_DIST_JOBS_REDIS_KEY_PREFIX", "/sccache-dist-jobs"),
+                ("SCCACHE_DIST_TOOLCHAINS_S3_BUCKET", "sccache"),
+                ("SCCACHE_DIST_TOOLCHAINS_S3_REGION", "auto"),
+                ("SCCACHE_DIST_TOOLCHAINS_S3_ENDPOINT", "192.168.1.69:9000"),
+                ("SCCACHE_DIST_TOOLCHAINS_S3_USE_SSL", "false"),
+                ("SCCACHE_DIST_TOOLCHAINS_S3_NO_CREDENTIALS", "false"),
+                (
+                    "SCCACHE_DIST_TOOLCHAINS_S3_KEY_PREFIX",
+                    "sccache-dist-toolchains"
+                ),
+            ])?,
+            Config {
+                id: "server-1".into(),
+                builder: Builder::Overlay(OverlayBuilder {
+                    build_dir: PathBuf::from("/tmp/build"),
+                    bwrap_path: PathBuf::from("/usr/bin/bwrap"),
+                    lower_dirs: vec!["/foo".into(), "/bar".into()],
                     ..Default::default()
                 }),
                 cache_dir: PathBuf::from("/tmp/toolchains"),
