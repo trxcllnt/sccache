@@ -24,8 +24,10 @@ use crate::{
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
+use serde_with::{OneOrMany, formats::PreferMany, serde_as};
 use std::{collections::HashMap, ffi::OsStr, net::SocketAddr, path::Path};
 
+#[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
@@ -34,6 +36,7 @@ pub struct Config {
     #[serde(default)]
     pub toolchains: Caches,
 
+    #[serde_as(as = "OneOrMany<_, PreferMany>")]
     #[serde(default = "defaults::default_auth", alias = "client_auth")]
     pub auth: Vec<Auth>,
 

@@ -203,7 +203,10 @@ mod dist_server {
         PushGateway {
             endpoint: String,
             // Interval (in milliseconds) to push metrics to prometheus
-            #[serde(default = "defaults::default_prometheus_push_gateway_interval")]
+            #[serde(
+                alias = "interval",
+                default = "defaults::default_prometheus_push_gateway_interval"
+            )]
             interval_ms: u64,
             username: Option<String>,
             password: Option<String>,
