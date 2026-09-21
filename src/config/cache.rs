@@ -657,6 +657,8 @@ pub struct Disk {
     pub enabled: bool,
     #[serde(default = "defaults::default_disk_cache_dir")]
     pub dir: PathBuf,
+    #[serde(default)]
+    pub key_prefix: String,
     #[serde(default = "defaults::default_disk_cache_size")]
     #[serde(deserialize_with = "deserialize_size_from_str")]
     pub size: u64,

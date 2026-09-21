@@ -20,7 +20,7 @@ pub mod dist {
 use crate::{
     config::{
         Loadable, Valid,
-        cache::{Azure, AzureAuth, Cache, Caches},
+        cache::{Azure, AzureAuth, Cache, Caches, MultiLevel},
         utils::{deserialize_basedirs, deserialize_bool, serialize_basedirs},
     },
     errors::*,
@@ -79,6 +79,31 @@ impl Config {
     {
         Self::from_envs_and_path::<I, S, _, PathBuf>(vars, None)
     }
+
+    fn enable_preprocessor_cache_mode_for_default_disk_cache(mut self) -> Result<Self> {
+        if self.preprocessor.cache.configs.is_empty()
+            && self.cache.configs.iter().any(|(_, cache)| match cache {
+                Cache::Disk(crate::config::cache::Disk { enabled, .. }) => *enabled,
+                _ => false,
+            })
+        {
+            self.preprocessor.cache.configs = self
+                .cache
+                .configs
+                .iter()
+                .filter_map(|(name, cache)| match cache {
+                    Cache::Disk(..) => Some((name.clone(), cache.clone())),
+                    _ => None,
+                })
+                .collect();
+
+            self.preprocessor.cache.multilevel.chain = Some(MultiLevel::chain_from_configs(
+                &self.preprocessor.cache.configs,
+            ));
+        }
+
+        Ok(self)
+    }
 }
 
 impl_add_for_config! { Config }
@@ -131,7 +156,7 @@ impl Valid for Config {
             },
         )?;
 
-        Ok(self)
+        self.enable_preprocessor_cache_mode_for_default_disk_cache()
     }
 
     fn validate_file(self) -> Result<Self> {
@@ -142,7 +167,7 @@ impl Valid for Config {
             .cache
             .validate_storage_levels("preprocessor.cache.multilevel.chain")?;
 
-        Ok(self)
+        self.enable_preprocessor_cache_mode_for_default_disk_cache()
     }
 
     fn validate_vars(self) -> Result<Self> {
@@ -153,7 +178,7 @@ impl Valid for Config {
             .cache
             .validate_storage_levels("SCCACHE_PREPROCESSOR_CACHE_MULTILEVEL_CHAIN")?;
 
-        Ok(self)
+        self.enable_preprocessor_cache_mode_for_default_disk_cache()
     }
 }
 
@@ -250,6 +275,7 @@ impl Loadable<Self> for Config {
         ];
 
         let mut cache_as_preprocessor_cache = BTreeSet::new();
+        cache_as_preprocessor_cache.insert("DISK".to_owned());
 
         let vars = vars
             .into_iter()
@@ -257,20 +283,17 @@ impl Loadable<Self> for Config {
                 let key_str = os_str_to_str(key.as_ref())?;
 
                 // Only take vars that start with `SCCACHE_`
-                if let Some(key) = key_str.strip_prefix(&prefix_) {
-                    if key == "DIRECT" {
-                        cache_as_preprocessor_cache.insert("disk".to_owned());
-                    } else if let Some(key) = key.strip_suffix("USE_PREPROCESSOR_CACHE_MODE")
-                        && let Some(kind) = caches_.iter().find_map(|kind_| {
-                            if key.starts_with(kind_) {
-                                kind_.strip_suffix("_")
-                            } else {
-                                None
-                            }
-                        })
-                    {
-                        cache_as_preprocessor_cache.insert(kind.to_owned());
-                    }
+                if let Some(key) = key_str.strip_prefix(&prefix_)
+                    && let Some(key) = key.strip_suffix("USE_PREPROCESSOR_CACHE_MODE")
+                    && let Some(kind) = caches_.iter().find_map(|kind_| {
+                        if key.starts_with(kind_) {
+                            kind_.strip_suffix("_")
+                        } else {
+                            None
+                        }
+                    })
+                {
+                    cache_as_preprocessor_cache.insert(kind.to_owned());
                 }
 
                 Ok((key, val))
@@ -1272,6 +1295,18 @@ mod test {
                     configs: cache_configs,
                     ..Default::default()
                 },
+                preprocessor: PreprocessorCaches {
+                    cache: vec![
+                        Disk {
+                            dir: PathBuf::from("/tmp/.cache/sccache"),
+                            size: 7 * 1024 * 1024 * 1024,
+                            rw_mode: CacheMode::ReadWrite,
+                            ..Default::default()
+                        }
+                        .into()
+                    ]
+                    .into(),
+                },
                 dist: dist::Config {
                     auth: dist::Auth::Token {
                         token: "secrettoken".into()
@@ -1645,6 +1680,15 @@ mod test {
         };
 
         merged_conf.cache.multilevel = env_conf.cache.multilevel.clone();
+        merged_conf.preprocessor.cache = vec![
+            Disk {
+                dir: "/env-cache".into(),
+                rw_mode: CacheMode::ReadWrite,
+                ..Default::default()
+            }
+            .into(),
+        ]
+        .into();
 
         assert_eq!((file_conf + env_conf)?, merged_conf);
 
@@ -1878,6 +1922,16 @@ mod test {
                     .into()
                 ]
                 .into(),
+                preprocessor: PreprocessorCaches {
+                    cache: vec![
+                        Disk {
+                            size: 7 * 1024 * 1024 * 1024,
+                            ..Default::default()
+                        }
+                        .into()
+                    ]
+                    .into()
+                },
                 dist: dist::Config {
                     toolchain_cache_size: 5 * 1024 * 1024 * 1024,
                     ..Default::default()
@@ -2477,7 +2531,8 @@ mod test {
                 ("SCCACHE_S3_RW_MODE", "ReAd_ONly"),
                 ("SCCACHE_S3_USE_PREPROCESSOR_CACHE_MODE", "true"),
                 ("SCCACHE_S3_PREPROCESSOR_CACHE_KEY_PREFIX", "preprocessor"),
-            ])?;
+            ])
+            .and_then(|config| config.validate_vars())?;
 
             assert_eq!(
                 config,
@@ -2586,7 +2641,8 @@ mod test {
             let config = Config::from_vars([
                 ("SCCACHE_S3_NO_CREDENTIALS", "yes"),
                 ("SCCACHE_BUCKET", "my-bucket"),
-            ]);
+            ])
+            .and_then(|config| config.validate_vars());
 
             assert_eq!(
                 "SCCACHE_CACHE_S3_NO_CREDENTIALS: invalid value: 'yes', expected 'true', 'on', '1', 'false', 'off' or '0'",
@@ -2604,7 +2660,8 @@ mod test {
             let config = Config::from_vars([
                 ("SCCACHE_S3_NO_CREDENTIALS", "true"),
                 ("SCCACHE_BUCKET", "my-bucket"),
-            ])?;
+            ])
+            .and_then(|config| config.validate_vars())?;
 
             assert_eq!(
                 config.cache,
@@ -2628,7 +2685,8 @@ mod test {
             let config = Config::from_vars([
                 ("SCCACHE_S3_NO_CREDENTIALS", "false"),
                 ("SCCACHE_BUCKET", "my-bucket"),
-            ])?;
+            ])
+            .and_then(|config| config.validate_vars())?;
 
             assert_eq!(
                 config.cache,
@@ -2656,7 +2714,8 @@ mod test {
                     "SCCACHE_S3_SERVER_SIDE_ENCRYPTION_KMS_KEY_ID",
                     "arn:aws:kms:us-east-1:111:key/abc",
                 ),
-            ])?;
+            ])
+            .and_then(|config| config.validate_vars())?;
 
             assert_eq!(
                 config.cache,
@@ -2689,7 +2748,8 @@ mod test {
                 ("SCCACHE_AZURE_RW_MODE", "READ_WRITE"),
                 ("SCCACHE_AZURE_BLOB_CONTAINER", "my-container"),
                 ("SCCACHE_AZURE_STORAGE_ACCOUNT", "mystorageacct"),
-            ])?;
+            ])
+            .and_then(|config| config.validate_vars())?;
 
             assert_eq!(
                 config.cache,
@@ -2718,7 +2778,8 @@ mod test {
                     "SCCACHE_AZURE_ENDPOINT",
                     "https://acct.blob.core.usgovcloudapi.net",
                 ),
-            ])?;
+            ])
+            .and_then(|config| config.validate_vars())?;
 
             assert_eq!(
                 config.cache,
@@ -2744,7 +2805,8 @@ mod test {
             let config = Config::from_vars([
                 ("SCCACHE_AZURE_BLOB_CONTAINER", "my-container"),
                 ("SCCACHE_AZURE_CONNECTION_STRING", "some-connection-string"),
-            ])?;
+            ])
+            .and_then(|config| config.validate_vars())?;
 
             assert_eq!(
                 config.cache,
@@ -2805,7 +2867,8 @@ mod test {
         fn no_auth_source_disables_backend() -> Result<()> {
             drop(env_logger::try_init());
 
-            let config = Config::from_vars([("SCCACHE_AZURE_BLOB_CONTAINER", "my-container")])?;
+            let config = Config::from_vars([("SCCACHE_AZURE_BLOB_CONTAINER", "my-container")])
+                .and_then(|config| config.validate_vars())?;
             // A container with no auth source disables Azure (backwards compatible)
             // rather than failing the whole config load.
             assert!(config.cache.configs.is_empty());
@@ -2919,7 +2982,8 @@ mod test {
                 ("SCCACHE_GCS_BUCKET", "my-bucket"),
                 ("SCCACHE_GCS_SERVICE_ACCOUNT", "my@example.com"),
                 ("SCCACHE_GCS_RW_MODE", "READ_WRITE"),
-            ])?;
+            ])
+            .and_then(|config| config.validate_vars())?;
 
             assert_eq!(
                 config.cache,
@@ -3015,6 +3079,17 @@ mod test {
                         .into()
                     ]
                     .into(),
+                    preprocessor: PreprocessorCaches {
+                        cache: vec![
+                            Disk {
+                                dir: "/tmp/disk".into(),
+                                size: 1024,
+                                ..Default::default()
+                            }
+                            .into(),
+                        ]
+                        .into()
+                    },
                     ..Default::default()
                 }
             );

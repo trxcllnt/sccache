@@ -621,6 +621,7 @@ impl From<config::cache::Disk> for StorageBuilder {
         let config::cache::Disk {
             enabled,
             dir,
+            key_prefix,
             size,
             rw_mode,
             ..
@@ -631,7 +632,7 @@ impl From<config::cache::Disk> for StorageBuilder {
             .rw_mode(Some(rw_mode))
             .create_storage(
                 move |storage_kind, basedirs| {
-                    let dir = dir.join(storage_kind.key_prefix(""));
+                    let dir = dir.join(storage_kind.key_prefix(&key_prefix));
 
                     debug!("Init disk {storage_kind} cache with dir={dir:?}, size={size}, rw_mode={rw_mode:?}, basedirs={:?})", basedirs.iter().map(|b| String::from_utf8_lossy(b)).collect::<Vec<_>>());
 
