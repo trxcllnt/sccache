@@ -171,7 +171,6 @@ mod test {
         cache::readonly::ReadOnlyStorage,
         test::{mock_storage::MockStorage, *},
     };
-    use std::assert_matches;
 
     #[test]
     fn test_rate_limit_storage() -> Result<()> {
@@ -205,7 +204,7 @@ mod test {
             tokio::time::sleep(Duration::from_secs(2)).await;
 
             // Ensure we can get the key seeded to MockStorage at the start
-            assert_matches!(storage.get("key").await.unwrap(), Cache::Hit(..));
+            assert!(matches!(storage.get("key").await.unwrap(), Cache::Hit(..)));
 
             Ok::<_, anyhow::Error>(())
         })?;
@@ -279,7 +278,7 @@ mod test {
             tokio::time::sleep(Duration::from_secs(5)).await;
 
             // Ensure we can get the key seeded to MockStorage at the start
-            assert_matches!(storage.get("key").await.unwrap(), Cache::Hit(..));
+            assert!(matches!(storage.get("key").await.unwrap(), Cache::Hit(..)));
 
             Ok::<_, anyhow::Error>(())
         })?;
