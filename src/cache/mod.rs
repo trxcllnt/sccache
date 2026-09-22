@@ -32,6 +32,7 @@ pub mod memcached;
 pub mod multilevel;
 #[cfg(feature = "oss")]
 pub mod oss;
+pub mod rate_limit;
 pub mod readonly;
 #[cfg(feature = "redis")]
 pub mod redis;

@@ -827,7 +827,7 @@ mod test {
                 },
                 cache_dir: "/home/user/.cache/sccache/dist".into(),
                 fallback_to_local_compile: false,
-                max_retries: 5f64.into(),
+                max_retries: f64::INFINITY.into(),
                 net: dist::Networking {
                     connect_timeout: 60,
                     request_timeout: 1200,
@@ -855,6 +855,8 @@ mod test {
         config.cache.write_timeout_secs = Some(300);
         config.cache.skip_check = true;
         config.cache.multilevel.write_error_policy = WriteErrorPolicy::All;
+        config.cache.rate_limit.on_error_count = Some(5);
+        config.cache.rate_limit.on_error_window_size_secs = Some(5);
 
         config.preprocessor.cache.read_timeout_secs = 120;
         config.preprocessor.cache.write_timeout_secs = Some(300);
@@ -867,6 +869,8 @@ mod test {
                 ("SCCACHE_SKIP_CACHE_CHECK", "true"),
                 ("SCCACHE_CACHE_READ_TIMEOUT_SECS", "120"),
                 ("SCCACHE_CACHE_WRITE_TIMEOUT_SECS", "300"),
+                ("SCCACHE_CACHE_RATE_LIMIT_ON_ERROR_COUNT", "5"),
+                ("SCCACHE_CACHE_RATE_LIMIT_ON_ERROR_WINDOW_SIZE_SECS", "5"),
                 ("SCCACHE_PREPROCESSOR_CACHE_READ_TIMEOUT", "120"),
                 ("SCCACHE_PREPROCESSOR_CACHE_WRITE_TIMEOUT", "300"),
                 (
@@ -995,7 +999,7 @@ mod test {
                         .as_str(),
                 ),
                 ("SCCACHE_DIST_FALLBACK_TO_LOCAL_COMPILE", "false"),
-                ("SCCACHE_DIST_MAX_RETRIES", "5"),
+                ("SCCACHE_DIST_MAX_RETRIES", "inf"),
                 ("SCCACHE_DIST_CONNECT_TIMEOUT", "60"),
                 ("SCCACHE_DIST_REQUEST_TIMEOUT", "1200"),
                 ("SCCACHE_DIST_CONNECTION_POOL", "false"),

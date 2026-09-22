@@ -17,10 +17,11 @@ use crate::{
         self,
         disk::DiskCache,
         multilevel::{MultiLevelStats, MultiLevelStorage},
+        rate_limit::RateLimitStorage,
         readonly::ReadOnlyStorage,
         utils::normalize_key,
     },
-    config::{self, CacheMode, CacheType, Caches, WriteErrorPolicy},
+    config::{self, CacheMode, CacheType, Caches, WriteErrorPolicy, cache::RateLimits},
     errors::*,
 };
 use async_trait::async_trait;
@@ -1069,6 +1070,9 @@ where
 {
     pub builders: I,
     pub skip_check: bool,
+    pub rate_limit: RateLimits,
+    pub read_timeout: Duration,
+    pub write_timeout: Option<Duration>,
     pub write_policy: WriteErrorPolicy,
 }
 
@@ -1123,6 +1127,9 @@ impl<'a> From<&'a Caches> for StorageArgs<StorageBuilderFromCacheTypeIter<CacheT
                     .unwrap_or_default(),
             ),
             skip_check: caches.skip_check,
+            rate_limit: caches.rate_limit.clone(),
+            read_timeout: Duration::from_secs(caches.read_timeout_secs),
+            write_timeout: caches.write_timeout_secs.map(Duration::from_secs),
             write_policy: caches.multilevel.write_error_policy,
         }
     }
@@ -1141,6 +1148,9 @@ impl StorageKind {
         let StorageArgs {
             builders,
             skip_check,
+            rate_limit,
+            read_timeout,
+            write_timeout,
             write_policy,
         } = args.into();
 
@@ -1192,6 +1202,18 @@ impl StorageKind {
         };
 
         info!("Configured {kind} storage");
+
+        let storage = if let Some(on_error_count) = rate_limit.on_error_count {
+            RateLimitStorage::create(
+                storage,
+                read_timeout,
+                write_timeout,
+                on_error_count,
+                Duration::from_secs(rate_limit.on_error_window_size_secs.unwrap_or(60)),
+            )
+        } else {
+            storage
+        };
 
         Ok(storage)
     }
@@ -1362,6 +1384,9 @@ mod test {
                     StorageArgs {
                         builders: [Ok(NoCheckStorage.into())].into_iter(),
                         skip_check: true,
+                        rate_limit: Default::default(),
+                        read_timeout: Duration::from_secs(60),
+                        write_timeout: None,
                         write_policy: Default::default(),
                     },
                     &[],
@@ -1385,6 +1410,9 @@ mod test {
                         builders: [Ok(NoCheckStorage.into()), Ok(NoCheckStorage.into())]
                             .into_iter(),
                         skip_check: true,
+                        rate_limit: Default::default(),
+                        read_timeout: Duration::from_secs(60),
+                        write_timeout: None,
                         write_policy: Default::default(),
                     },
                     &[],

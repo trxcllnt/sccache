@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::utils::{_Ignored, DeserializeBool, deserialize_bool, deserialize_size_from_str};
-use crate::errors::*;
+use crate::{
+    config::utils::{_Ignored, DeserializeBool, deserialize_bool, deserialize_size_from_str},
+    errors::*,
+};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize, de};
 use serde_with::{PickFirst, StringWithSeparator, formats::CommaSeparator, serde_as};
@@ -33,6 +35,8 @@ pub struct Caches {
     /// Timeout for cache writes (default: None)
     pub write_timeout_secs: Option<u64>,
     pub skip_check: bool,
+    /// Temporarily disable caching if errors occur too frequently within a time window
+    pub rate_limit: RateLimits,
 }
 
 impl Caches {
@@ -101,6 +105,7 @@ impl<'de> de::Visitor<'de> for CachesVisitor {
         let mut read_timeout = None;
         let mut write_timeout = None;
         let mut skip_check = None;
+        let mut rate_limit = None;
 
         let to_ignore = [
             "configs",
@@ -108,6 +113,7 @@ impl<'de> de::Visitor<'de> for CachesVisitor {
             "read_timeout_secs",
             "write_timeout_secs",
             "skip_check",
+            "rate_limit",
         ]
         .into_iter()
         .map(|name| name.split_once('_').map(|(p, _)| p).unwrap_or(name))
@@ -163,6 +169,9 @@ impl<'de> de::Visitor<'de> for CachesVisitor {
                 }
                 "skip_check" => {
                     skip_check = Some(map.next_value::<DeserializeBool>()?.into());
+                }
+                "rate_limit" => {
+                    rate_limit = map.next_value()?;
                 }
                 // Legacy: Before supporting multiple configs for the same
                 // storage backend, the type was denoted by field name, i.e.
@@ -250,6 +259,7 @@ impl<'de> de::Visitor<'de> for CachesVisitor {
             read_timeout_secs: read_timeout.unwrap_or_else(defaults::default_read_timeout),
             write_timeout_secs: write_timeout,
             skip_check: skip_check.unwrap_or_default(),
+            rate_limit: rate_limit.unwrap_or_default(),
         })
     }
 }
@@ -1287,6 +1297,12 @@ impl MultiLevel {
             .map(|(name, _)| name.clone())
             .collect()
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct RateLimits {
+    pub on_error_count: Option<usize>,
+    pub on_error_window_size_secs: Option<u64>,
 }
 
 /// CacheMode is used to represent which mode we are using.
