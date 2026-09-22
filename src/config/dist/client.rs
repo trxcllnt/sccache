@@ -17,7 +17,7 @@ use crate::config::{
 };
 
 use serde::{Deserialize, Serialize};
-use serde_with::{TryFromInto, serde_as};
+use serde_with::{PickFirst, TryFromInto, serde_as};
 use std::path::PathBuf;
 
 #[serde_as]
@@ -41,8 +41,8 @@ pub struct Config {
     // `max_retries = 0` = never retry failed dist-compiles
     // `max_retries = 1` = retry failed dist-compiles once
     // `max_retries = inf` = retry all failed dist-compiles (never compile locally)
-    #[serde(default)]
-    #[serde_as(as = "TryFromInto<f64>")]
+    #[serde_as(as = "PickFirst<(TryFromInto<String>, TryFromInto<f64>)>")]
+    #[serde(default = "defaults::default_max_retries")]
     pub max_retries: MaxRetries,
 
     // Configuration for the dist reqwest client
@@ -114,6 +114,23 @@ impl Default for MaxRetries {
     }
 }
 
+impl TryFrom<String> for MaxRetries {
+    type Error = anyhow::Error;
+
+    fn try_from(count: String) -> Result<Self, Self::Error> {
+        count.parse::<f64>().map(Into::into).map_err(Into::into)
+    }
+}
+
+impl From<MaxRetries> for String {
+    fn from(max_retries: MaxRetries) -> Self {
+        match max_retries {
+            MaxRetries::Inf => "inf".into(),
+            MaxRetries::Count(c) => c.to_string(),
+        }
+    }
+}
+
 impl From<f64> for MaxRetries {
     fn from(count: f64) -> Self {
         if count.is_infinite() {
@@ -176,7 +193,13 @@ pub enum Toolchain {
 }
 
 pub mod defaults {
+    use super::MaxRetries;
+
     pub use crate::config::defaults::{
         default_disk_cache_size, default_dist_cache_dir, default_true,
     };
+
+    pub fn default_max_retries() -> MaxRetries {
+        MaxRetries::Count(0)
+    }
 }
