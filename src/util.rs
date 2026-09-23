@@ -1668,6 +1668,7 @@ where
             .timeout(request_timeout)
             .connect_timeout(connect_timeout)
             // Keepalive
+            .http2_keep_alive_while_idle(keepalive)
             .http2_keep_alive_timeout(keepalive_timeout)
             .tcp_keepalive_retries(keepalive.then_some(3))
             .tcp_keepalive(keepalive.then_some(keepalive_timeout))

@@ -23,21 +23,22 @@ pub mod scheduler;
 pub mod server;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
 pub struct Keepalive {
-    #[serde(default, deserialize_with = "deserialize_bool")]
+    #[serde(
+        default = "defaults::default_true",
+        deserialize_with = "deserialize_bool"
+    )]
     pub enabled: bool,
-    pub timeout: u64,
+    #[serde(default = "defaults::default_keepalive_interval")]
     pub interval: u64,
+    #[serde(default = "defaults::default_keepalive_timeout")]
+    pub timeout: u64,
 }
 
+// Delegate Default to #[serde(default)]
 impl Default for Keepalive {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            interval: 20,
-            timeout: 600,
-        }
+        serde_json::from_str("{}").unwrap()
     }
 }
 
@@ -215,6 +216,16 @@ mod dist_server {
 
 pub mod defaults {
     use super::*;
+
+    pub use crate::config::defaults::default_true;
+
+    pub fn default_keepalive_interval() -> u64 {
+        20
+    }
+
+    pub fn default_keepalive_timeout() -> u64 {
+        600
+    }
 
     // Default to 15s
     pub fn default_heartbeat_interval() -> u64 {
