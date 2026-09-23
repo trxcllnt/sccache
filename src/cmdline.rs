@@ -23,6 +23,34 @@ use which::which_in;
 const ENV_VAR_INTERNAL_START_SERVER: &str = "SCCACHE_START_SERVER";
 
 #[derive(Debug, Clone, ValueEnum, Default)]
+pub enum ConfigFormat {
+    #[default]
+    Toml,
+    Json,
+}
+
+impl ConfigFormat {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Toml => "toml",
+            Self::Json => "json",
+        }
+    }
+}
+
+impl FromStr for ConfigFormat {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "toml" => Ok(Self::Toml),
+            "json" => Ok(Self::Json),
+            _ => bail!("Unrecognized stats format: {s:?}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, ValueEnum, Default)]
 pub enum StatsFormat {
     #[default]
     Text,
@@ -52,6 +80,8 @@ impl FromStr for StatsFormat {
 
 /// A specific command to run.
 pub enum Command {
+    /// Show cache statistics and exit.
+    ShowConfig(ConfigFormat),
     /// Show cache statistics and exit.
     ShowStats(StatsFormat, bool),
     /// Run background server.
@@ -126,6 +156,9 @@ fn get_clap_command() -> clap::Command {
             "\n"
         ))
         .args(&[
+            flag_infer_long("show-config")
+                .help("show sccache config")
+                .action(ArgAction::SetTrue),
             flag_infer_long_and_short("show-stats")
                 .help("show cache statistics")
                 .action(ArgAction::SetTrue),
@@ -157,6 +190,11 @@ fn get_clap_command() -> clap::Command {
                 .value_parser(clap::value_parser!(PathBuf))
                 .num_args(2)
                 .value_names(["EXE", "OUT"]),
+            flag_infer_long("config-format")
+                .help("set output format of config")
+                .value_name("FMT")
+                .value_parser(clap::value_parser!(ConfigFormat))
+                .default_value(ConfigFormat::default().as_str()),
             flag_infer_long("stats-format")
                 .help("set output format of statistics")
                 .value_name("FMT")
@@ -173,6 +211,7 @@ fn get_clap_command() -> clap::Command {
                     "dist-auth",
                     "debug-preprocessor-cache",
                     "dist-status",
+                    "show-config",
                     "show-stats",
                     "show-adv-stats",
                     "start-server",
@@ -261,7 +300,13 @@ pub fn try_parse() -> Result<Command> {
             bail!("`{ENV_VAR_INTERNAL_START_SERVER}=1` can't be used with other commands");
         }
         (false, Ok(matches)) => {
-            if matches.get_flag("show-stats") {
+            if matches.get_flag("show-config") {
+                let fmt = matches
+                    .get_one("config-format")
+                    .cloned()
+                    .expect("There is a default value");
+                Ok(Command::ShowConfig(fmt))
+            } else if matches.get_flag("show-stats") {
                 let fmt = matches
                     .get_one("stats-format")
                     .cloned()

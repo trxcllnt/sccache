@@ -15,7 +15,7 @@
 use crate::{
     cache::{IpcStorage, StorageKind},
     client::{ServerConnection, connect_to_server, connect_with_retry},
-    cmdline::{Command, StatsFormat},
+    cmdline::{Command, ConfigFormat, StatsFormat},
     compiler::ColorMode,
     config::ClientConfig,
     errors::*,
@@ -756,6 +756,16 @@ where
 /// Run `cmd` and return the process exit status.
 pub fn run_command(cmd: Command) -> Result<i32> {
     match cmd {
+        Command::ShowConfig(fmt) => {
+            let config = ClientConfig::load()?;
+            println!(
+                "{}",
+                match fmt {
+                    ConfigFormat::Toml => toml::to_string_pretty(&config)?,
+                    ConfigFormat::Json => serde_json::to_string_pretty(&config)?,
+                }
+            );
+        }
         Command::ShowStats(fmt, advanced) => {
             trace!("Command::ShowStats({fmt:?})");
             let config = ClientConfig::load()?;
