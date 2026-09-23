@@ -539,9 +539,14 @@ mod test {
                 ),
                 ("SCCACHE_DIST_SERVER_ID", "server-1"),
                 ("SCCACHE_DIST_BUILDER_TYPE", "overlay"),
-                ("SCCACHE_DIST_OVERLAY_BUILD_DIR", "/tmp/build"),
-                ("SCCACHE_DIST_OVERLAY_BWRAP_PATH", "/usr/bin/bwrap"),
+                ("SCCACHE_DIST_BUILDER_BUILD_DIR", "/tmp/build"),
+                ("SCCACHE_DIST_BUILDER_BWRAP_PATH", "/usr/bin/bwrap"),
+                ("SCCACHE_DIST_BUILDER_EXEC_CMD", "/usr/bin/wine"),
                 ("SCCACHE_DIST_BUILDER_LOWER_DIRS", "/foo:/bar"),
+                (
+                    "SCCACHE_DIST_BUILDER_ENV",
+                    "WINEPREFIX=/prefix WINEARCH=win64 WINEDEBUG=-all XDG_RUNTIME_DIR=/tmp/run/user/0"
+                ),
                 ("SCCACHE_DIST_CACHE_DIR", "/tmp/toolchains"),
                 ("SCCACHE_DIST_MAX_PER_CORE_LOAD", "1.25"),
                 ("SCCACHE_DIST_MAX_PER_CORE_PREFETCH", "1.0"),
@@ -574,8 +579,14 @@ mod test {
                 builder: Builder::Overlay(OverlayBuilder {
                     build_dir: PathBuf::from("/tmp/build"),
                     bwrap_path: PathBuf::from("/usr/bin/bwrap"),
+                    exec_cmd: vec!["/usr/bin/wine".into()],
                     lower_dirs: vec!["/foo".into(), "/bar".into()],
-                    ..Default::default()
+                    env: HashMap::from_iter([
+                        ("WINEPREFIX".into(), "/prefix".into()),
+                        ("WINEARCH".into(), "win64".into()),
+                        ("WINEDEBUG".into(), "-all".into()),
+                        ("XDG_RUNTIME_DIR".into(), "/tmp/run/user/0".into()),
+                    ]),
                 }),
                 cache_dir: PathBuf::from("/tmp/toolchains"),
                 max_per_core_load: 1.25.into(),
@@ -633,7 +644,12 @@ mod test {
                 ("SCCACHE_DIST_BUILDER_TYPE", "overlay"),
                 ("SCCACHE_DIST_OVERLAY_BUILD_DIR", "/tmp/build"),
                 ("SCCACHE_DIST_OVERLAY_BWRAP_PATH", "/usr/bin/bwrap"),
-                ("SCCACHE_DIST_BUILDER_LOWER_DIRS", "/foo:/bar"),
+                ("SCCACHE_DIST_OVERLAY_EXEC_CMD", "/usr/bin/wine"),
+                ("SCCACHE_DIST_OVERLAY_LOWER_DIRS", "/foo:/bar"),
+                (
+                    "SCCACHE_DIST_OVERLAY_ENV",
+                    "WINEPREFIX=/prefix WINEARCH=win64 WINEDEBUG=-all XDG_RUNTIME_DIR=/tmp/run/user/0"
+                ),
                 ("SCCACHE_DIST_CACHE_DIR", "/tmp/toolchains"),
                 ("SCCACHE_DIST_MAX_PER_CORE_LOAD", "1.25"),
                 ("SCCACHE_DIST_MAX_PER_CORE_PREFETCH", "1.0"),
@@ -667,8 +683,14 @@ mod test {
                 builder: Builder::Overlay(OverlayBuilder {
                     build_dir: PathBuf::from("/tmp/build"),
                     bwrap_path: PathBuf::from("/usr/bin/bwrap"),
+                    exec_cmd: vec!["/usr/bin/wine".into()],
                     lower_dirs: vec!["/foo".into(), "/bar".into()],
-                    ..Default::default()
+                    env: HashMap::from_iter([
+                        ("WINEPREFIX".into(), "/prefix".into()),
+                        ("WINEARCH".into(), "win64".into()),
+                        ("WINEDEBUG".into(), "-all".into()),
+                        ("XDG_RUNTIME_DIR".into(), "/tmp/run/user/0".into()),
+                    ]),
                 }),
                 cache_dir: PathBuf::from("/tmp/toolchains"),
                 max_per_core_load: 1.25.into(),
@@ -738,6 +760,17 @@ mod test {
             build_dir = "/tmp/build"
             # The path to the bubblewrap version 0.3.0+ `bwrap` binary.
             bwrap_path = "/usr/bin/bwrap"
+            exec_cmd = "/usr/bin/wine"
+            lower_dirs = [
+                "/foo",
+                "/bar"
+            ]
+
+            [builder.env]
+            WINEPREFIX = "/prefix"
+            WINEARCH = "win64"
+            WINEDEBUG = "-all"
+            XDG_RUNTIME_DIR = "/tmp/run/user/0"
 
             [message_broker]
             amqp = "amqp://127.0.0.1:5672//"
@@ -773,7 +806,14 @@ mod test {
                 builder: Builder::Overlay(OverlayBuilder {
                     build_dir: PathBuf::from("/tmp/build"),
                     bwrap_path: PathBuf::from("/usr/bin/bwrap"),
-                    ..Default::default()
+                    exec_cmd: vec!["/usr/bin/wine".into()],
+                    lower_dirs: vec!["/foo".into(), "/bar".into()],
+                    env: HashMap::from_iter([
+                        ("WINEPREFIX".into(), "/prefix".into()),
+                        ("WINEARCH".into(), "win64".into()),
+                        ("WINEDEBUG".into(), "-all".into()),
+                        ("XDG_RUNTIME_DIR".into(), "/tmp/run/user/0".into()),
+                    ]),
                 }),
                 cache_dir: PathBuf::from("/tmp/toolchains"),
                 max_per_core_load: 1.25.into(),
