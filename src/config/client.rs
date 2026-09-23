@@ -80,7 +80,27 @@ impl Config {
         Self::from_envs_and_path::<I, S, _, PathBuf>(vars, None)
     }
 
-    fn enable_preprocessor_cache_mode_for_default_disk_cache(mut self) -> Result<Self> {
+    fn ensure_default_disk_cache(mut self) -> Result<Self> {
+        if !self.cache.configs.iter().any(|(_, c)| c.enabled()) {
+            if let Some((disk_cache_name, disk_cache)) =
+                self.cache
+                    .configs
+                    .iter_mut()
+                    .find_map(|(name, cache)| match cache {
+                        Cache::Disk(cache) => Some((name, cache)),
+                        _ => None,
+                    })
+            {
+                disk_cache.enabled = true;
+                self.cache.multilevel.chain = Some(vec![disk_cache_name.clone()]);
+            } else {
+                self.cache
+                    .configs
+                    .insert("disk".into(), crate::config::cache::Disk::default().into());
+                self.cache.multilevel.chain = Some(vec!["disk".into()]);
+            }
+        }
+
         if self.preprocessor.cache.configs.is_empty()
             && self.cache.configs.iter().any(|(_, cache)| match cache {
                 Cache::Disk(crate::config::cache::Disk { enabled, .. }) => *enabled,
@@ -156,7 +176,7 @@ impl Valid for Config {
             },
         )?;
 
-        self.enable_preprocessor_cache_mode_for_default_disk_cache()
+        self.ensure_default_disk_cache()
     }
 
     fn validate_file(self) -> Result<Self> {
@@ -167,7 +187,7 @@ impl Valid for Config {
             .cache
             .validate_storage_levels("preprocessor.cache.multilevel.chain")?;
 
-        self.enable_preprocessor_cache_mode_for_default_disk_cache()
+        self.ensure_default_disk_cache()
     }
 
     fn validate_vars(self) -> Result<Self> {
@@ -178,7 +198,7 @@ impl Valid for Config {
             .cache
             .validate_storage_levels("SCCACHE_PREPROCESSOR_CACHE_MULTILEVEL_CHAIN")?;
 
-        self.enable_preprocessor_cache_mode_for_default_disk_cache()
+        self.ensure_default_disk_cache()
     }
 }
 
@@ -1599,7 +1619,7 @@ mod test {
             ..Default::default()
         };
 
-        let b = Config::from_vars([("SCCACHE_SKIP_CACHE_CHECK", "true")])?;
+        let b = Config::from_vars([("SCCACHE_SKIP_CACHE_CHECK", "true")]).and_then(|config| config.validate_vars())?;
 
         let c = (&a + &b)?;
 
@@ -2840,7 +2860,7 @@ mod test {
             ])
             .and_then(|config| config.validate_vars())?;
 
-            assert_eq!(config, Default::default());
+            assert_eq!(config, Config::default().validate_vars()?);
 
             Ok(())
         }
@@ -2861,7 +2881,7 @@ mod test {
             ])
             .and_then(|config| config.validate_vars())?;
 
-            assert_eq!(config, Default::default());
+            assert_eq!(config, Config::default().validate_vars()?);
 
             Ok(())
         }
@@ -2871,8 +2891,7 @@ mod test {
         fn no_auth_source_disables_backend() -> Result<()> {
             drop(env_logger::try_init());
 
-            let config = Config::from_vars([("SCCACHE_AZURE_BLOB_CONTAINER", "my-container")])
-                .and_then(|config| config.validate_vars())?;
+            let config = Config::from_vars([("SCCACHE_AZURE_BLOB_CONTAINER", "my-container")])?;
             // A container with no auth source disables Azure (backwards compatible)
             // rather than failing the whole config load.
             assert!(config.cache.configs.is_empty());
