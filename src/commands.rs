@@ -38,7 +38,7 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     io::{self, IsTerminal, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process,
     sync::Arc,
     time::Duration,
@@ -121,7 +121,7 @@ fn run_server_process(startup_timeout: Duration) -> Result<ServerStartup> {
         .env_remove("SCCACHE_CLIENT_SIDE");
 
     // Don't output colorized logs if redirecting to a file.
-    if env::var("SCCACHE_ERROR_LOG").is_ok() {
+    if get_error_log_path().is_some() {
         cmd.env("RUST_LOG_STYLE", "never");
     }
 
@@ -161,23 +161,39 @@ fn redirect_stderr(f: File) {
     }
 }
 
+fn get_error_log_path() -> Option<PathBuf> {
+    match env::var_os("SCCACHE_ERROR_LOG") {
+        Some(path) if !path.is_empty() => Some(Path::new(&path).to_owned()),
+        _ => None,
+    }
+}
+
 /// Create the log file and return an error if cannot be created
-fn create_error_log() -> Result<File> {
-    trace!("Create the log file");
-    let name = match env::var("SCCACHE_ERROR_LOG") {
-        Ok(filename) if !filename.is_empty() => filename,
+fn create_error_log() -> Option<Result<File>> {
+    let path = match get_error_log_path() {
+        Some(path) => path,
         _ => {
-            bail!("Cannot read variable 'SCCACHE_ERROR_LOG'");
+            info!("Cannot read variable 'SCCACHE_ERROR_LOG'");
+            return None;
         }
     };
 
-    let f = match OpenOptions::new().create(true).append(true).open(&name) {
-        Ok(f) => f,
-        Err(_) => {
-            bail!("Cannot open/write log file '{}'", name);
-        }
-    };
-    Ok(f)
+    if let Some(parent) = path.parent()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return Some(Err(anyhow!(
+            "Cannot open/write log file '{}'",
+            path.display()
+        )));
+    }
+
+    match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(f) => Some(Ok(f)),
+        Err(_) => Some(Err(anyhow!(
+            "Cannot open/write log file '{}'",
+            path.display()
+        ))),
+    }
 }
 
 /// If `SCCACHE_ERROR_LOG` is set, redirect stderr to it.
@@ -823,18 +839,25 @@ pub fn run_command(cmd: Command) -> Result<i32> {
         }
         Command::InternalStartServer => {
             trace!("Command::InternalStartServer");
-            if env::var("SCCACHE_ERROR_LOG").is_ok() {
-                let f = create_error_log()?;
-                #[cfg(not(windows))]
-                let preserve = [f.as_raw_fd()];
-                #[cfg(windows)]
-                let preserve = [f.as_raw_handle()];
-                // Can't report failure here, we're already daemonized.
-                daemonize(&preserve)?;
-                redirect_error_log(f)?;
-            } else {
-                // We aren't asking for a log file
-                daemonize(&[])?;
+            match create_error_log() {
+                Some(Ok(f)) => {
+                    trace!("Created the log file");
+                    #[cfg(not(windows))]
+                    let preserve = [f.as_raw_fd()];
+                    #[cfg(windows)]
+                    let preserve = [f.as_raw_handle()];
+                    // Can't report failure here, we're already daemonized.
+                    daemonize(&preserve)?;
+                    redirect_error_log(f)?;
+                }
+                Some(Err(err)) => {
+                    // Failed to create the logfile
+                    return Err(err);
+                }
+                None => {
+                    // We aren't asking for a log file (or SCCACHE_ERROR_LOG is an empty string)
+                    daemonize(&[])?;
+                }
             }
             info!(
                 "Starting {sccache} v{version} server",
