@@ -46,6 +46,4 @@ EOF
 EORUN
 
 ENV CARGO_BUILD_TARGET="$CARGO_BUILD_TARGET"
-ENV SCCACHE_DIR="/opt/sccache/.devcontainer/.cache/sccache"
 ENV SCCACHE_REPO="/opt/sccache"
-ENV SCCACHE_SERVER_PORT="4225"
