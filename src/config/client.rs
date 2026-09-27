@@ -1619,7 +1619,8 @@ mod test {
             ..Default::default()
         };
 
-        let b = Config::from_vars([("SCCACHE_SKIP_CACHE_CHECK", "true")]).and_then(|config| config.validate_vars())?;
+        let b = Config::from_vars([("SCCACHE_SKIP_CACHE_CHECK", "true")])
+            .and_then(|config| config.validate_vars())?;
 
         let c = (&a + &b)?;
 
