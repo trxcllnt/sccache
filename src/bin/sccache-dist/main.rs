@@ -45,22 +45,10 @@ fn main() {
 ))]
 fn main() {
     dist::init_logging();
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .unwrap();
-
-    let incr_env_strs = ["CARGO_BUILD_INCREMENTAL", "CARGO_INCREMENTAL"];
-    incr_env_strs
-        .iter()
-        .for_each(|incr_str| match env::var(incr_str) {
-            Ok(incr_val) if incr_val == "1" => {
-                println!(
-                    "sccache: incremental compilation is prohibited: Unset {incr_str} to continue."
-                );
-                std::process::exit(1);
-            }
-            _ => (),
-        });
 
     let command = match cmdline::try_parse_from(env::args()) {
         Ok(cmd) => cmd,
