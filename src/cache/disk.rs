@@ -107,7 +107,7 @@ impl DiskCache {
             .lock()
             .await
             .get_or_init()?
-            .commit_dir(res.as_ref().map(|_| &tmp).map_err(|_| &tmp))
+            .commit_dir(res.as_ref().map(|size| (*size, &tmp)).map_err(|_| &tmp))
             .await
             .or_else(|err| {
                 if let LruError::FileNotInCache = err {
@@ -127,6 +127,7 @@ impl DiskCache {
 #[async_trait]
 impl Storage for DiskCache {
     async fn get(&self, key: &str) -> Result<Cache<opendal::Buffer>> {
+        trace!("DiskCache::get({key})");
         match self.file(key).await {
             Ok(file) => Ok(Cache::Hit(
                 Bytes::from_owner(unsafe { Mmap::map(&file) }?).into(),
@@ -139,6 +140,7 @@ impl Storage for DiskCache {
     }
 
     async fn del(&self, key: &str) -> Result<()> {
+        trace!("DiskCache::del({key})");
         if self.rw_mode == CacheMode::ReadOnly {
             return Err(anyhow!("Cannot write to read-only storage"));
         }
@@ -153,6 +155,7 @@ impl Storage for DiskCache {
     }
 
     async fn has(&self, key: &str) -> bool {
+        trace!("DiskCache::has({key})");
         self.size(key).await.is_ok()
     }
 

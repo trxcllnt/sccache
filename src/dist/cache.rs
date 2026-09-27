@@ -727,11 +727,34 @@ mod server {
                         tokio::task::spawn_blocking(move || {
                             // Ensure the inflated dir exists first
                             fs::create_dir_all(&inflated_path)?;
+
                             let deflated_file = fs::File::open(&deflated_path)?;
+
                             // Unpack the tgz into the inflated dir
-                            tar::Archive::new(GzipDecoder::new(BufReader::new(deflated_file)))
-                                .unpack(&inflated_path)
-                                .map(|_| deflated_size)
+                            // Manually implement `tar::Archive::unpack` in order to compute the inflated size
+                            let mut archive =
+                                tar::Archive::new(GzipDecoder::new(BufReader::new(deflated_file)));
+
+                            let mut inflated_size = 0;
+                            let mut dirs = Vec::new();
+                            let dst = &inflated_path.canonicalize().unwrap_or(inflated_path);
+
+                            for entry in archive.entries()? {
+                                let mut entry = entry?;
+                                inflated_size += entry.size();
+                                if entry.header().entry_type() == tar::EntryType::Directory {
+                                    dirs.push(entry);
+                                } else {
+                                    entry.unpack_in(dst)?;
+                                }
+                            }
+
+                            dirs.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
+                            for mut dir in dirs {
+                                dir.unpack_in(dst)?;
+                            }
+
+                            Ok(inflated_size)
                         })
                         .await?
                     }

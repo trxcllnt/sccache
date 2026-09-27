@@ -523,20 +523,19 @@ impl LruDiskCache {
     /// Commit an entry coming from `LruDiskCache::prepare_dir`.
     pub async fn commit_dir(
         &mut self,
-        entry: Result<&LruDiskCacheDirEntry, &LruDiskCacheDirEntry>,
+        entry: Result<(u64, &LruDiskCacheDirEntry), &LruDiskCacheDirEntry>,
     ) -> Result<(PathBuf, u64)> {
         match entry {
             Err(entry) => {
                 self.cleanup_pending(&entry.key, entry.size);
                 Err(Error::FileNotInCache)
             }
-            Ok(entry) => {
+            Ok((real_size, entry)) => {
                 self.cleanup_pending(&entry.key, entry.size);
                 let abs_path = self.rel_to_abs_path(&entry.key);
                 if let Some(parent) = abs_path.parent() {
                     tokio::fs::create_dir_all(parent).await?;
                 }
-                let real_size = get_entry_size(&abs_path);
                 // If the dir is larger than the size that had been advertized, ensure
                 // we have enough space for it.
                 self.make_space_async(real_size.saturating_sub(entry.size))
