@@ -200,21 +200,11 @@ impl Loadable<Self> for Config {
                 let key = os_str_to_str(key.as_ref())?;
                 let val = os_str_to_str(val.as_ref())?;
 
-                if key == "AMQP_ADDR" {
-                    return Ok(vec![
-                        ("MESSAGE_BROKER".into(), "amqp".into()),
-                        ("MESSAGE_BROKER_ADDR".into(), val.into_owned()),
-                    ]);
-                } else if key == "REDIS_ADDR" {
-                    return Ok(vec![
-                        ("MESSAGE_BROKER".into(), "redis".into()),
-                        ("MESSAGE_BROKER_ADDR".into(), val.into_owned()),
-                    ]);
-                }
-
                 // Only take vars that start with `SCCACHE_DIST_`
                 let key = if let Some(key) = key.strip_prefix(&prefix_) {
                     key
+                } else if matches!(key.as_ref(), "AMQP_ADDR" | "REDIS_ADDR") {
+                    return Ok(vec![("MESSAGE_BROKER_ADDR".into(), val.into_owned())]);
                 } else {
                     return Ok(vec![]);
                 };
@@ -406,8 +396,15 @@ mod test {
         drop(env_logger::try_init());
 
         assert_eq!(
-            Config::from_vars([("AMQP_ADDR", "amqp://127.0.0.1:5672//"),])?.message_broker,
-            Some(MessageBroker::AMQP("amqp://127.0.0.1:5672//".into()))
+            Config::from_vars([
+                ("AMQP_ADDR", "amqp://127.0.0.1:5672//"),
+                ("SCCACHE_DIST_MESSAGE_BROKER_MAX_RETRIES", "2")
+            ])?
+            .message_broker,
+            Some(MessageBroker {
+                addr: "amqp://127.0.0.1:5672//".into(),
+                max_retries: 2,
+            })
         );
 
         Ok(())
@@ -418,8 +415,15 @@ mod test {
         drop(env_logger::try_init());
 
         assert_eq!(
-            Config::from_vars([("REDIS_ADDR", "redis://127.0.0.1:6379"),])?.message_broker,
-            Some(MessageBroker::Redis("redis://127.0.0.1:6379".into()))
+            Config::from_vars([
+                ("REDIS_ADDR", "redis://127.0.0.1:6379"),
+                ("SCCACHE_DIST_MESSAGE_BROKER_MAX_RETRIES", "2")
+            ])?
+            .message_broker,
+            Some(MessageBroker {
+                addr: "redis://127.0.0.1:6379".into(),
+                max_retries: 2,
+            })
         );
 
         Ok(())
@@ -431,7 +435,6 @@ mod test {
 
         assert_eq!(
             Config::from_vars([
-                ("SCCACHE_DIST_MESSAGE_BROKER", "amqp"),
                 (
                     "SCCACHE_DIST_MESSAGE_BROKER_ADDR",
                     "amqp://127.0.0.1:5672//"
@@ -467,7 +470,7 @@ mod test {
                 id: "scheduler-1".into(),
                 public_addr: SocketAddr::from_str("127.0.0.1:10500").unwrap(),
                 job_time_limit_secs: 1200,
-                message_broker: Some(MessageBroker::AMQP("amqp://127.0.0.1:5672//".into())),
+                message_broker: Some("amqp://127.0.0.1:5672//".into()),
                 metrics: Metrics::Prometheus(Prometheus::PushGateway {
                     endpoint: "http://127.0.0.1:9091/metrics/job/scheduler-1".into(),
                     interval_ms: 1000,
@@ -522,7 +525,8 @@ mod test {
             job_time_limit_secs = 1200
 
             # The address of the AMQP broker
-            message_broker.amqp = "amqp://127.0.0.1:5672//"
+            [message_broker]
+            addr = "amqp://127.0.0.1:5672//"
 
             [[client_auth]]
             type = "token"
@@ -621,7 +625,7 @@ mod test {
                 ],
                 public_addr: SocketAddr::from_str("127.0.0.1:10500").unwrap(),
                 job_time_limit_secs: 1200,
-                message_broker: Some(MessageBroker::AMQP("amqp://127.0.0.1:5672//".into())),
+                message_broker: Some("amqp://127.0.0.1:5672//".into()),
                 metrics: Metrics::Prometheus(Prometheus::PushGateway {
                     endpoint: "http://127.0.0.1:9091/metrics/job/scheduler-1".into(),
                     interval_ms: 1000,

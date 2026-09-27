@@ -11,13 +11,10 @@ use sccache::config::dist::server::PotBuilder;
 #[cfg(not(target_os = "freebsd"))]
 use sccache::config::dist::server::{DockerBuilder, OverlayBuilder};
 use sccache::{
-    cache::cache::StorageKind,
+    cache::{StorageKind, disk::DiskCache},
     config::{self, CacheMode, dist::server::Builder},
     dist::{
-        self, BuilderIncoming, ServerToolchains, env_info,
-        metrics::Metrics,
-        scheduler::{self, SchedulerMetrics},
-        server, tasks,
+        self, BuilderIncoming, env_info, metrics::Metrics, scheduler, server, tasks,
         token_check::new_client_auth_check,
     },
     errors::*,
@@ -96,7 +93,7 @@ fn run(command: Command) -> Result<()> {
                     message_broker,
                     metrics,
                     public_addr,
-                    id,
+                    id: scheduler_id,
                     shutdown_timeout_secs,
                     toolchains,
                 }) => {
@@ -105,7 +102,7 @@ fn run(command: Command) -> Result<()> {
                         [
                             ("env".into(), env_info()),
                             ("type".into(), "scheduler".into()),
-                            ("scheduler_id".into(), id.clone()),
+                            ("scheduler_id".into(), scheduler_id.clone()),
                         ]
                         .into(),
                     )?;
@@ -147,20 +144,20 @@ fn run(command: Command) -> Result<()> {
                     .await?;
 
                     let tasks = tasks::Tasks::scheduler(
-                        &id,
-                        100 * num_cpus as u16,
+                        &scheduler_id,
+                        u16::MAX,
                         job_time_limit_secs,
                         message_broker,
                     )
                     .await?;
 
-                    let scheduler = scheduler::Scheduler::new(
-                        jobs,
-                        SchedulerMetrics::new(metrics.clone()),
-                        &id,
-                        tasks,
-                        toolchains,
-                    )?;
+                    let scheduler = scheduler::Scheduler::builder()
+                        .with_scheduler_id(scheduler_id)
+                        .with_jobs_storage(jobs)
+                        .with_metrics(metrics.clone())
+                        .with_tasks(tasks)
+                        .with_toolchains_storage(toolchains)
+                        .build()?;
 
                     let (handle, server) =
                         dist::http::Scheduler::new(scheduler.clone(), client_auth_check).serve(
@@ -176,7 +173,7 @@ fn run(command: Command) -> Result<()> {
                             handle,
                             server,
                             Duration::from_millis(heartbeat_interval_ms),
-                            Duration::from_millis(shutdown_timeout_secs)
+                            Duration::from_secs(shutdown_timeout_secs)
                         )
                         .await
                 }
@@ -191,7 +188,7 @@ fn run(command: Command) -> Result<()> {
                     max_per_core_load,
                     max_per_core_prefetch,
                     metrics,
-                    id,
+                    id: server_id,
                     shutdown_timeout_secs,
                     toolchain_cache_size,
                     toolchains,
@@ -201,7 +198,7 @@ fn run(command: Command) -> Result<()> {
                         [
                             ("env".into(), env_info()),
                             ("type".into(), "server".into()),
-                            ("server_id".into(), id.clone()),
+                            ("server_id".into(), server_id.clone()),
                         ]
                         .into(),
                     )?;
@@ -230,13 +227,11 @@ fn run(command: Command) -> Result<()> {
                         .await
                         .context("Failed to initialize toolchain storage")?;
 
-                    let max_per_core_load: f64 = max_per_core_load.into();
-                    let occupancy = (num_cpus as f64 * max_per_core_load)
+                    let occupancy = (num_cpus as f64 * f64::from(max_per_core_load))
                         .floor()
                         .max(1.0) as usize;
 
-                    let max_per_core_prefetch: f64 = max_per_core_prefetch.into();
-                    let pre_fetch = (num_cpus as f64 * max_per_core_prefetch)
+                    let pre_fetch = (num_cpus as f64 * f64::from(max_per_core_prefetch))
                         .floor()
                         .max(0.0) as usize;
 
@@ -245,43 +240,36 @@ fn run(command: Command) -> Result<()> {
                     let should_inflate_toolchains = !matches!(builder, Builder::Docker { .. });
                     let builder = init_builder(builder, job_queue.clone()).await?;
 
-                    let toolchains = Arc::new(ServerToolchains::new(
-                        cache_dir.join("tc"),
-                        toolchain_cache_size,
-                        toolchains,
-                        metrics.clone(),
-                        should_inflate_toolchains,
-                    ));
-
                     let tasks = tasks::Tasks::server(
-                        &id,
+                        &server_id,
                         (occupancy as u16).saturating_add(pre_fetch as u16),
                         message_broker,
                     )
                     .await?;
 
-                    let server = server::Server::new(
-                        builder,
-                        jobs,
-                        server::ServerState {
-                            id: id.clone(),
-                            queue: tasks.app().default_queue.clone(),
-                            job_queue,
-                            metrics: server::ServerMetrics::new(metrics.clone()),
-                            num_cpus,
-                            occupancy,
-                            pre_fetch,
-                            ..Default::default()
-                        },
-                        tasks,
-                        toolchains,
-                    )?;
-
-                    // Report status every `heartbeat_interval_ms` milliseconds
-                    server
+                    server::Server::builder()
+                        .with_builder(builder)
+                        .with_job_queue(job_queue)
+                        .with_jobs_storage(jobs)
+                        .with_metrics(metrics)
+                        .with_num_cpus(num_cpus)
+                        .with_occupancy(occupancy)
+                        .with_pre_fetch(pre_fetch)
+                        .with_server_id(server_id)
+                        .with_tasks(tasks)
+                        .with_toolchains_storage(toolchains)
+                        .with_toolchains_cache(Arc::new(DiskCache::new(
+                            cache_dir.join("tc"), // root
+                            toolchain_cache_size, // max_size,
+                            crate::config::CacheMode::ReadWrite,
+                            vec![],
+                        )))
+                        .with_should_inflate_toolchains(should_inflate_toolchains)
+                        .build()?
                         .start(
+                            // Report status every `heartbeat_interval_ms` milliseconds
                             Duration::from_millis(heartbeat_interval_ms),
-                            Duration::from_millis(shutdown_timeout_secs),
+                            Duration::from_secs(shutdown_timeout_secs),
                             health_check_bind_addr,
                         )
                         .await

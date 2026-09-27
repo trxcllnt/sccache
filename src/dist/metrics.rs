@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     io,
     net::SocketAddr,
@@ -251,6 +252,14 @@ impl Metrics {
             labels: self.scoped_labels(),
         }
     }
+
+    pub fn increment_counter<S: Into<SharedString>>(&self, name: S, value: u64) {
+        if let Some(labels) = self.scoped_labels().as_ref() {
+            metrics::counter!(name, labels.as_ref()).increment(value);
+        } else {
+            metrics::counter!(name).increment(value);
+        }
+    }
 }
 
 trait MetricsInner: Send + Sync {
@@ -438,5 +447,686 @@ impl MetricsInner for PrometheusMetrics {
     }
     fn listen_path(&self) -> Option<String> {
         self.listen_path.clone()
+    }
+}
+
+const HAS_JOB_INPUTS_TIME: &str = "has_job_inputs_time";
+const HAS_JOB_RESULT_TIME: &str = "has_job_result_time";
+const HAS_JOB_STATUS_TIME: &str = "has_job_status_time";
+
+const DEL_JOB_INPUTS_TIME: &str = "del_job_inputs_time";
+const DEL_JOB_RESULT_TIME: &str = "del_job_result_time";
+const DEL_JOB_STATUS_TIME: &str = "del_job_status_time";
+
+const GET_JOB_INPUTS_TIME: &str = "get_job_inputs_time";
+const GET_JOB_RESULT_TIME: &str = "get_job_result_time";
+const GET_JOB_STATUS_TIME: &str = "get_job_status_time";
+
+const PUT_JOB_INPUTS_TIME: &str = "put_job_inputs_time";
+const PUT_JOB_RESULT_TIME: &str = "put_job_result_time";
+const PUT_JOB_STATUS_TIME: &str = "put_job_status_time";
+
+const DEL_JOB_INPUTS_ERROR_COUNT: &str = "del_job_inputs_error_count";
+const DEL_JOB_RESULT_ERROR_COUNT: &str = "del_job_result_error_count";
+const DEL_JOB_STATUS_ERROR_COUNT: &str = "del_job_status_error_count";
+
+const GET_JOB_INPUTS_ERROR_COUNT: &str = "get_job_inputs_error_count";
+const GET_JOB_RESULT_ERROR_COUNT: &str = "get_job_result_error_count";
+const GET_JOB_STATUS_ERROR_COUNT: &str = "get_job_status_error_count";
+
+const PUT_JOB_INPUTS_ERROR_COUNT: &str = "put_job_inputs_error_count";
+const PUT_JOB_RESULT_ERROR_COUNT: &str = "put_job_result_error_count";
+const PUT_JOB_STATUS_ERROR_COUNT: &str = "put_job_status_error_count";
+
+#[derive(Clone)]
+pub struct JobsMetrics {
+    metrics: Metrics,
+    m_names: BTreeMap<&'static str, Cow<'static, str>>,
+}
+
+impl JobsMetrics {
+    pub fn new(prefix: &str, metrics: Metrics) -> Self {
+        use metrics::Unit::{Count, Seconds};
+        let m_names = [
+            (
+                HAS_JOB_INPUTS_TIME,
+                Seconds,
+                "The time to check if each job's inputs exists.",
+            ),
+            (
+                HAS_JOB_RESULT_TIME,
+                Seconds,
+                "The time to check if each job's result exists.",
+            ),
+            (
+                HAS_JOB_STATUS_TIME,
+                Seconds,
+                "The time to check if each job's status exists.",
+            ),
+            (
+                GET_JOB_INPUTS_TIME,
+                Seconds,
+                "The time to load each job's inputs.",
+            ),
+            (
+                GET_JOB_RESULT_TIME,
+                Seconds,
+                "The time to load each job's result.",
+            ),
+            (
+                GET_JOB_STATUS_TIME,
+                Seconds,
+                "The time to load each job's status.",
+            ),
+            (
+                DEL_JOB_INPUTS_TIME,
+                Seconds,
+                "The time to delete each job's inputs.",
+            ),
+            (
+                DEL_JOB_RESULT_TIME,
+                Seconds,
+                "The time to delete each job's result.",
+            ),
+            (
+                DEL_JOB_STATUS_TIME,
+                Seconds,
+                "The time to delete each job's status.",
+            ),
+            (
+                PUT_JOB_INPUTS_TIME,
+                Seconds,
+                "The time to store each job's inputs.",
+            ),
+            (
+                PUT_JOB_RESULT_TIME,
+                Seconds,
+                "The time to store each job's result.",
+            ),
+            (
+                PUT_JOB_STATUS_TIME,
+                Seconds,
+                "The time to store each job's status.",
+            ),
+            (
+                DEL_JOB_INPUTS_ERROR_COUNT,
+                Count,
+                "The number of errors raised deleting job inputs.",
+            ),
+            (
+                DEL_JOB_RESULT_ERROR_COUNT,
+                Count,
+                "The number of errors raised deleting job results.",
+            ),
+            (
+                DEL_JOB_STATUS_ERROR_COUNT,
+                Count,
+                "The number of errors raised deleting job statuses.",
+            ),
+            (
+                GET_JOB_INPUTS_ERROR_COUNT,
+                Count,
+                "The number of errors raised while loading job inputs.",
+            ),
+            (
+                GET_JOB_RESULT_ERROR_COUNT,
+                Count,
+                "The number of errors raised while loading job results.",
+            ),
+            (
+                GET_JOB_STATUS_ERROR_COUNT,
+                Count,
+                "The number of errors raised while loading job statuses.",
+            ),
+            (
+                PUT_JOB_INPUTS_ERROR_COUNT,
+                Count,
+                "The number of errors raised storing job inputs.",
+            ),
+            (
+                PUT_JOB_RESULT_ERROR_COUNT,
+                Count,
+                "The number of errors raised storing job results.",
+            ),
+            (
+                PUT_JOB_STATUS_ERROR_COUNT,
+                Count,
+                "The number of errors raised storing job statuses.",
+            ),
+        ]
+        .into_iter()
+        .map(|(name, unit, desc)| {
+            let metric_name = Cow::<'static, str>::Owned(format!("{prefix}::{name}"));
+            if matches!(unit, Count) {
+                metrics::describe_counter!(metric_name.clone(), unit, desc);
+            } else {
+                metrics::describe_histogram!(metric_name.clone(), unit, desc);
+            }
+            (name, metric_name)
+        })
+        .collect::<BTreeMap<&'static str, Cow<'static, str>>>();
+
+        Self { metrics, m_names }
+    }
+
+    fn m_name(&self, name: &str) -> Cow<'static, str> {
+        self.m_names.get(name).unwrap().clone()
+    }
+
+    pub fn has_job_inputs_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(HAS_JOB_INPUTS_TIME))
+    }
+
+    pub fn has_job_result_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(HAS_JOB_RESULT_TIME))
+    }
+
+    pub fn has_job_status_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(HAS_JOB_STATUS_TIME))
+    }
+
+    pub fn get_job_inputs_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(GET_JOB_INPUTS_TIME))
+    }
+
+    pub fn get_job_result_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(GET_JOB_RESULT_TIME))
+    }
+
+    pub fn get_job_status_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(GET_JOB_STATUS_TIME))
+    }
+
+    pub fn del_job_inputs_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(DEL_JOB_INPUTS_TIME))
+    }
+
+    pub fn del_job_result_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(DEL_JOB_RESULT_TIME))
+    }
+
+    pub fn del_job_status_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(DEL_JOB_STATUS_TIME))
+    }
+
+    pub fn put_job_inputs_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(PUT_JOB_INPUTS_TIME))
+    }
+
+    pub fn put_job_result_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(PUT_JOB_RESULT_TIME))
+    }
+
+    pub fn put_job_status_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(PUT_JOB_STATUS_TIME))
+    }
+
+    pub fn inc_del_job_inputs_error_count(&self) -> CountRecorder {
+        self.metrics.count(self.m_name(DEL_JOB_INPUTS_ERROR_COUNT))
+    }
+
+    pub fn inc_del_job_result_error_count(&self) -> CountRecorder {
+        self.metrics.count(self.m_name(DEL_JOB_RESULT_ERROR_COUNT))
+    }
+
+    pub fn inc_del_job_status_error_count(&self) -> CountRecorder {
+        self.metrics.count(self.m_name(DEL_JOB_STATUS_ERROR_COUNT))
+    }
+
+    pub fn inc_get_job_inputs_error_count(&self) -> CountRecorder {
+        self.metrics.count(self.m_name(GET_JOB_INPUTS_ERROR_COUNT))
+    }
+
+    pub fn inc_get_job_result_error_count(&self) -> CountRecorder {
+        self.metrics.count(self.m_name(GET_JOB_RESULT_ERROR_COUNT))
+    }
+
+    pub fn inc_get_job_status_error_count(&self) -> CountRecorder {
+        self.metrics.count(self.m_name(GET_JOB_STATUS_ERROR_COUNT))
+    }
+
+    pub fn inc_put_job_inputs_error_count(&self) -> CountRecorder {
+        self.metrics.count(self.m_name(PUT_JOB_INPUTS_ERROR_COUNT))
+    }
+
+    pub fn inc_put_job_result_error_count(&self) -> CountRecorder {
+        self.metrics.count(self.m_name(PUT_JOB_RESULT_ERROR_COUNT))
+    }
+
+    pub fn inc_put_job_status_error_count(&self) -> CountRecorder {
+        self.metrics.count(self.m_name(PUT_JOB_STATUS_ERROR_COUNT))
+    }
+}
+
+const HAS_TOOLCHAIN_TIME: &str = "has_toolchain_time";
+const DEL_TOOLCHAIN_TIME: &str = "del_toolchain_time";
+const GET_TOOLCHAIN_TIME: &str = "get_toolchain_time";
+const PUT_TOOLCHAIN_TIME: &str = "put_toolchain_time";
+const DEL_TOOLCHAIN_ERROR_COUNT: &str = "del_toolchain_error_count";
+const GET_TOOLCHAIN_ERROR_COUNT: &str = "get_toolchain_error_count";
+const PUT_TOOLCHAIN_ERROR_COUNT: &str = "put_toolchain_error_count";
+
+const TOOLCHAIN_LOAD_TIME: &str = "toolchain::load_time";
+const TOOLCHAIN_LOAD_INFLATED_TIME: &str = "toolchain::load_inflated_time";
+const TOOLCHAIN_LOAD_DEFLATED_TIME: &str = "toolchain::load_deflated_time";
+const TOOLCHAIN_LOAD_INFLATED_SIZE_TIME: &str = "toolchain::load_inflated_size_time";
+const TOOLCHAIN_UNPACK_INFLATED_TIME: &str = "toolchain::unpack_inflated_time";
+
+#[derive(Clone)]
+pub struct ToolchainsMetrics {
+    metrics: Metrics,
+    m_names: BTreeMap<&'static str, Cow<'static, str>>,
+}
+
+impl ToolchainsMetrics {
+    pub fn new(prefix: &str, metrics: Metrics) -> Self {
+        use metrics::Unit::{Count, Seconds};
+        let m_names = [
+            (
+                HAS_TOOLCHAIN_TIME,
+                Seconds,
+                "The time to check if a toolchain exists.",
+            ),
+            (
+                DEL_TOOLCHAIN_TIME,
+                Seconds,
+                "The time to delete each toolchain.",
+            ),
+            (
+                GET_TOOLCHAIN_TIME,
+                Seconds,
+                "The time to load each toolchain.",
+            ),
+            (
+                PUT_TOOLCHAIN_TIME,
+                Seconds,
+                "The time to store each toolchain.",
+            ),
+            (
+                DEL_TOOLCHAIN_ERROR_COUNT,
+                Count,
+                "The number of errors raised deleting toolchains.",
+            ),
+            (
+                GET_TOOLCHAIN_ERROR_COUNT,
+                Count,
+                "The number of errors raised loading toolchains.",
+            ),
+            (
+                PUT_TOOLCHAIN_ERROR_COUNT,
+                Count,
+                "The number of errors raised storing toolchains.",
+            ),
+            (
+                TOOLCHAIN_LOAD_TIME,
+                Seconds,
+                "The time to load a toolchain", //
+            ),
+            (
+                TOOLCHAIN_LOAD_INFLATED_TIME,
+                Seconds,
+                "The time to load, inflate, and unpack a toolchain",
+            ),
+            (
+                TOOLCHAIN_LOAD_DEFLATED_TIME,
+                Seconds,
+                "The time to load a deflated toolchain",
+            ),
+            (
+                TOOLCHAIN_LOAD_INFLATED_SIZE_TIME,
+                Seconds,
+                "The time to calculate the inflated size of a toolchain",
+            ),
+            (
+                TOOLCHAIN_UNPACK_INFLATED_TIME,
+                Seconds,
+                "The time to inflate and unpack a toolchain",
+            ),
+        ]
+        .into_iter()
+        .map(|(name, unit, desc)| {
+            let metric_name = Cow::<'static, str>::Owned(format!("{prefix}::{name}"));
+            if matches!(unit, Count) {
+                metrics::describe_counter!(metric_name.clone(), unit, desc);
+            } else {
+                metrics::describe_histogram!(metric_name.clone(), unit, desc);
+            }
+            (name, metric_name)
+        })
+        .collect::<BTreeMap<&'static str, Cow<'static, str>>>();
+
+        Self { metrics, m_names }
+    }
+
+    fn m_name(&self, name: &str) -> Cow<'static, str> {
+        self.m_names.get(name).unwrap().clone()
+    }
+
+    pub fn has_toolchain_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(HAS_TOOLCHAIN_TIME))
+    }
+
+    pub fn get_toolchain_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(GET_TOOLCHAIN_TIME))
+    }
+
+    pub fn del_toolchain_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(DEL_TOOLCHAIN_TIME))
+    }
+
+    pub fn put_toolchain_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(PUT_TOOLCHAIN_TIME))
+    }
+
+    pub fn inc_del_toolchain_error_count(&self) -> CountRecorder {
+        self.metrics.count(self.m_name(DEL_TOOLCHAIN_ERROR_COUNT))
+    }
+
+    pub fn inc_get_toolchain_error_count(&self) -> CountRecorder {
+        self.metrics.count(self.m_name(GET_TOOLCHAIN_ERROR_COUNT))
+    }
+
+    pub fn inc_put_toolchain_error_count(&self) -> CountRecorder {
+        self.metrics.count(self.m_name(PUT_TOOLCHAIN_ERROR_COUNT))
+    }
+
+    pub fn load_toolchain_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(TOOLCHAIN_LOAD_TIME))
+    }
+
+    pub fn load_inflated_toolchain_timer(&self) -> TimeRecorder {
+        self.metrics
+            .timer(self.m_name(TOOLCHAIN_LOAD_INFLATED_TIME))
+    }
+
+    pub fn load_deflated_toolchain_timer(&self) -> TimeRecorder {
+        self.metrics
+            .timer(self.m_name(TOOLCHAIN_LOAD_DEFLATED_TIME))
+    }
+
+    pub fn unpack_inflated_toolchain_timer(&self) -> TimeRecorder {
+        self.metrics
+            .timer(self.m_name(TOOLCHAIN_UNPACK_INFLATED_TIME))
+    }
+}
+
+const NUM_CPUS: &str = "num_cpus";
+const CPU_USAGE_RATIO: &str = "cpu_usage_ratio";
+const MEM_AVAIL_BYTES: &str = "mem_avail_bytes";
+const MEM_TOTAL_BYTES: &str = "mem_total_bytes";
+const MEM_USED_BYTES: &str = "mem_used_bytes";
+
+#[derive(Clone)]
+pub struct SysinfoMetrics {
+    m_names: BTreeMap<&'static str, Cow<'static, str>>,
+    metrics: Metrics,
+    num_cpus: usize,
+    sysinfo: Arc<std::sync::Mutex<sysinfo::System>>,
+}
+
+impl SysinfoMetrics {
+    pub fn new(prefix: &str, metrics: Metrics, num_cpus: Option<usize>) -> Self {
+        use metrics::Unit::{Bytes, Count, Percent};
+        let m_names = [
+            (
+                NUM_CPUS,
+                Count,
+                "The total number of CPUs.", //
+            ),
+            (
+                CPU_USAGE_RATIO,
+                Percent,
+                "The current system CPU usage percent (0-100).",
+            ),
+            (
+                MEM_AVAIL_BYTES,
+                Bytes,
+                "The amount of free system memory.", //
+            ),
+            (
+                MEM_TOTAL_BYTES,
+                Bytes,
+                "The total amount of system memory.", //
+            ),
+            (
+                MEM_USED_BYTES,
+                Bytes,
+                "The amount of used system memory.", //
+            ),
+        ]
+        .into_iter()
+        .map(|(name, unit, desc)| {
+            let metric_name = Cow::<'static, str>::Owned(format!("{prefix}::{name}"));
+            if matches!(unit, Count) {
+                metrics::describe_counter!(metric_name.clone(), unit, desc);
+            } else {
+                metrics::describe_histogram!(metric_name.clone(), unit, desc);
+            }
+            (name, metric_name)
+        })
+        .collect::<BTreeMap<&'static str, Cow<'static, str>>>();
+
+        let sysinfo = sysinfo::System::new_with_specifics(
+            sysinfo::RefreshKind::nothing()
+                .with_cpu(sysinfo::CpuRefreshKind::nothing().with_cpu_usage())
+                .with_memory(sysinfo::MemoryRefreshKind::nothing().with_ram()),
+        );
+
+        let num_cpus = num_cpus
+            .or_else(|| sysinfo.physical_core_count())
+            .unwrap_or_default();
+
+        metrics.increment_counter(m_names.get(NUM_CPUS).unwrap().clone(), num_cpus as u64);
+
+        Self {
+            metrics,
+            m_names,
+            num_cpus,
+            sysinfo: Arc::new(std::sync::Mutex::new(sysinfo)),
+        }
+    }
+
+    fn m_name(&self, name: &str) -> Cow<'static, str> {
+        self.m_names.get(name).unwrap().clone()
+    }
+
+    pub fn system_metrics(&self) -> (usize, f32, u64, u64) {
+        let mut sys = self.sysinfo.lock().unwrap();
+        sys.refresh_cpu_specifics(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
+        sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+        let cpu_usage = sys.global_cpu_usage();
+        let mem_avail = sys.available_memory();
+        let mem_total = sys.total_memory();
+        self.metrics.histo(self.m_name(CPU_USAGE_RATIO), cpu_usage);
+        self.metrics
+            .histo(self.m_name(MEM_AVAIL_BYTES), mem_avail as f64);
+        self.metrics
+            .histo(self.m_name(MEM_TOTAL_BYTES), mem_total as f64);
+        self.metrics.histo(
+            self.m_name(MEM_USED_BYTES),
+            mem_total.saturating_sub(mem_avail) as f64,
+        );
+        (self.num_cpus, cpu_usage, mem_avail, mem_total)
+    }
+}
+
+#[derive(Clone)]
+pub struct SchedulerMetrics {
+    #[allow(unused)]
+    metrics: Metrics,
+    sysinfo: SysinfoMetrics,
+}
+
+impl SchedulerMetrics {
+    pub fn new(prefix: &str, metrics: Metrics) -> Self {
+        let sysinfo = SysinfoMetrics::new(prefix, metrics.clone(), None);
+
+        Self { metrics, sysinfo }
+    }
+
+    pub fn system_metrics(&self) -> (usize, f32, u64, u64) {
+        self.sysinfo.system_metrics()
+    }
+}
+
+const JOB_BUILD_ERROR_COUNT: &str = "job_build_error_count";
+const JOB_ACCEPTED_COUNT: &str = "job_accepted_count";
+const JOB_LOADED_COUNT: &str = "job_loaded_count";
+const JOB_FINISHED_COUNT: &str = "job_finished_count";
+const JOB_PENDING_COUNT: &str = "job_pending_count";
+const JOB_LOADING_COUNT: &str = "job_loading_count";
+const LOAD_JOB_TIME: &str = "load_job_time";
+const RUN_BUILD_TIME: &str = "run_build_time";
+const RUN_JOB_TIME: &str = "run_job_time";
+
+#[derive(Clone)]
+pub struct ServerMetrics {
+    pub jobs_accepted: Arc<AtomicU64>,
+    pub jobs_loaded: Arc<AtomicU64>,
+    pub jobs_finished: Arc<AtomicU64>,
+    pub jobs_cancelled: Arc<AtomicU64>,
+    pub jobs_pending: Arc<GaugeRecorder>,
+    pub jobs_loading: Arc<GaugeRecorder>,
+    metrics: Metrics,
+    m_names: BTreeMap<&'static str, Cow<'static, str>>,
+    sysinfo: SysinfoMetrics,
+}
+
+impl ServerMetrics {
+    pub fn new(prefix: &str, metrics: Metrics, num_cpus: usize) -> Self {
+        use metrics::Unit::{Count, Seconds};
+        let m_names = [
+            (
+                JOB_LOADING_COUNT,
+                "gauge",
+                Count,
+                "The number of accepted jobs for which this server is loading inputs and toolchains."
+            ),
+            (
+                JOB_PENDING_COUNT,
+                "gauge",
+                Count,
+                "The number of accepted jobs that are fully loaded and queued to run/are currently running."
+            ),
+            (
+                JOB_BUILD_ERROR_COUNT,
+                "counter",
+                Count,
+                "The number of errors raised while running job builds."
+            ),
+            (
+                JOB_ACCEPTED_COUNT,
+                "counter",
+                Count,
+                "The total number of jobs accepted by this server (but not yet loaded or run)."
+            ),
+            (
+                JOB_LOADED_COUNT,
+                "counter",
+                Count,
+                "The total number of jobs loaded by this server (but not yet run)."
+            ),
+            (
+                JOB_FINISHED_COUNT,
+                "counter",
+                Count,
+                "The total number of jobs accepted, loaded, and run by this server."
+            ),
+            (
+                LOAD_JOB_TIME,
+                "histogram",
+                Seconds,
+                "The time to load each job's inputs and toolchains."
+            ),
+            (
+                RUN_BUILD_TIME,
+                "histogram",
+                Seconds,
+                "The time to run each job's build."
+            ),
+            (
+                RUN_JOB_TIME,
+                "histogram",
+                Seconds,
+                "The time to load and build each job."
+            ),
+        ]
+        .into_iter()
+        .map(|(name, kind, unit, desc)| {
+            let metric_name = Cow::<'static, str>::Owned(format!("{prefix}::{name}"));
+            match kind {
+                "counter" => {
+                }
+                "gauge" => {
+                },
+                _ => {
+                }
+            }
+            if matches!(unit, Count) {
+                metrics::describe_counter!(metric_name.clone(), unit, desc);
+            } else {
+                metrics::describe_histogram!(metric_name.clone(), unit, desc);
+            }
+            (name, metric_name)
+        })
+        .collect::<BTreeMap<&'static str, Cow<'static, str>>>();
+
+        let jobs_pending = Arc::new(metrics.gauge(JOB_PENDING_COUNT));
+        let jobs_loading = Arc::new(metrics.gauge(JOB_LOADING_COUNT));
+        let sysinfo = SysinfoMetrics::new(prefix, metrics.clone(), num_cpus.into());
+
+        Self {
+            m_names,
+            metrics,
+            jobs_pending,
+            jobs_loading,
+            jobs_accepted: Default::default(),
+            jobs_loaded: Default::default(),
+            jobs_finished: Default::default(),
+            jobs_cancelled: Default::default(),
+            sysinfo,
+        }
+    }
+
+    fn m_name(&self, name: &str) -> Cow<'static, str> {
+        self.m_names.get(name).unwrap().clone()
+    }
+
+    pub fn system_metrics(&self) -> (usize, f32, u64, u64) {
+        self.sysinfo.system_metrics()
+    }
+
+    pub fn inc_job_build_error_count(&self) -> CountRecorder {
+        self.metrics.count(self.m_name(JOB_BUILD_ERROR_COUNT))
+    }
+
+    pub fn inc_job_accepted_count(&self) -> CountRecorder {
+        self.jobs_accepted
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.metrics.count(self.m_name(JOB_ACCEPTED_COUNT))
+    }
+
+    pub fn inc_job_loaded_count(&self) -> CountRecorder {
+        self.jobs_loaded
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.metrics.count(self.m_name(JOB_LOADED_COUNT))
+    }
+
+    pub fn inc_job_finished_count(&self) -> CountRecorder {
+        self.jobs_finished
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.metrics.count(self.m_name(JOB_FINISHED_COUNT))
+    }
+
+    pub fn load_job_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(LOAD_JOB_TIME))
+    }
+
+    pub fn run_build_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(RUN_BUILD_TIME))
+    }
+
+    pub fn run_job_timer(&self) -> TimeRecorder {
+        self.metrics.timer(self.m_name(RUN_JOB_TIME))
     }
 }

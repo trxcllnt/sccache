@@ -376,7 +376,8 @@ impl DistSystemGlobals {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct DistMessageBroker {
-    url: String,
+    addr: String,
+    kind: String,
     host_port: u16,
     container_port: u16,
     config: MessageBroker,
@@ -388,24 +389,26 @@ impl DistMessageBroker {
         match message_broker {
             "rabbitmq" => {
                 let host_port = RABBITMQ_PORT.fetch_add(1, Ordering::SeqCst);
-                let path = format!("amqp://127.0.0.1:{host_port}//");
+                let addr = format!("amqp://127.0.0.1:{host_port}//");
                 Self {
-                    config: MessageBroker::AMQP(path.clone().into()),
+                    kind: "rabbitmq".into(),
+                    config: addr.clone().into(),
                     image: "rabbitmq:latest".into(),
                     container_port: 5672,
                     host_port,
-                    url: path,
+                    addr,
                 }
             }
             "redis" => {
                 let host_port = REDIS_PORT.fetch_add(1, Ordering::SeqCst);
-                let path = format!("redis://127.0.0.1:{host_port}/");
+                let addr = format!("redis://127.0.0.1:{host_port}/");
                 Self {
-                    config: MessageBroker::Redis(path.clone().into()),
+                    kind: "redis".into(),
+                    config: addr.clone().into(),
                     image: "redis:7".into(),
                     container_port: 6379,
                     host_port,
-                    url: path,
+                    addr,
                 }
             }
             _ => unreachable!(""),
@@ -413,15 +416,15 @@ impl DistMessageBroker {
     }
 
     pub fn is_amqp(&self) -> bool {
-        matches!(self.config, MessageBroker::AMQP { .. })
+        matches!(self.kind.as_str(), "rabbitmq")
     }
 
     pub fn is_redis(&self) -> bool {
-        matches!(self.config, MessageBroker::Redis { .. })
+        matches!(self.kind.as_str(), "redis")
     }
 
-    pub fn url(&self) -> HTTPUrl {
-        HTTPUrl::from_url(reqwest::Url::parse(&self.url).unwrap())
+    pub fn addr(&self) -> HTTPUrl {
+        HTTPUrl::from_url(reqwest::Url::parse(&self.addr).unwrap())
     }
 }
 
@@ -804,7 +807,7 @@ impl DistSystemBuilder {
         let message_broker = self.message_broker.as_ref().expect("Message broker exists");
 
         fn storage_cfg(redis: &DistMessageBroker) -> sccache::config::Caches {
-            vec![config::cache::Redis::from_url(redis.url().to_url()).into()].into()
+            vec![config::cache::Redis::from_url(redis.addr().to_url()).into()].into()
         }
 
         for i in 0..self.scheduler_count {

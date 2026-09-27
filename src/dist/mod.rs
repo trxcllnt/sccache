@@ -37,6 +37,8 @@ pub mod client_auth;
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 pub mod http;
 #[cfg(feature = "dist-server")]
+pub mod io;
+#[cfg(feature = "dist-server")]
 pub mod metrics;
 #[cfg(feature = "dist-server")]
 pub mod scheduler;
@@ -53,6 +55,11 @@ pub use crate::{cache::BufReadSeek, dist::cache::ServerToolchains};
 #[cfg(feature = "dist-server")]
 pub(crate) fn job_inputs_key(job_id: &str) -> String {
     format!("{job_id}-inputs")
+}
+
+#[cfg(feature = "dist-server")]
+pub fn job_status_key(job_id: &str) -> String {
+    format!("{job_id}-status")
 }
 
 #[cfg(feature = "dist-server")]
@@ -731,16 +738,22 @@ impl fmt::Display for RunJobError {
     }
 }
 
-impl From<anyhow::Error> for RunJobError {
-    fn from(err: anyhow::Error) -> Self {
-        RunJobError::Retryable(err)
+impl RunJobError {
+    pub fn job_cancelled() -> Self {
+        Self::Retryable(anyhow!("Job cancelled"))
+    }
+    pub fn server_terminated() -> Self {
+        Self::Retryable(anyhow!("Server terminated"))
     }
 }
 
-impl RunJobError {
-    pub fn server_terminated() -> Self {
-        anyhow!("Server terminated").into()
-    }
+impl std::error::Error for RunJobError {}
+
+#[cfg(feature = "dist-server")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum RunJobStatus {
+    Active { schedulers: Vec<String> },
+    Cancelled,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -793,17 +806,20 @@ impl RunJobResponse {
             },
         }
     }
+
     pub fn build_process_killed(server_id: &str) -> Self {
         RunJobResponse::RetryableError {
             message: "Build process killed".into(),
             server_id: server_id.to_owned(),
         }
     }
+
+    pub fn job_cancelled(server_id: &str) -> Self {
+        Self::from_run_job_error(server_id, &RunJobError::job_cancelled())
+    }
+
     pub fn server_terminated(server_id: &str) -> Self {
-        RunJobResponse::RetryableError {
-            message: "Server terminated".into(),
-            server_id: server_id.to_owned(),
-        }
+        Self::from_run_job_error(server_id, &RunJobError::server_terminated())
     }
 }
 
@@ -816,6 +832,26 @@ impl RunJobResponse {
 #[serde(deny_unknown_fields)]
 pub struct Toolchain {
     pub archive_id: String,
+}
+
+impl fmt::Display for Toolchain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.archive_id)
+    }
+}
+
+impl AsRef<str> for Toolchain {
+    fn as_ref(&self) -> &str {
+        self.archive_id.as_str()
+    }
+}
+
+impl std::ops::Deref for Toolchain {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.archive_id.as_str()
+    }
 }
 
 // Status
@@ -918,11 +954,10 @@ pub trait SchedulerService: Send + Sync {
         &self,
         toolchain: &Toolchain,
         toolchain_archive: opendal::Buffer,
-    ) -> Result<SubmitToolchainResult>;
+    ) -> Result<()>;
 
     async fn del_toolchain(&self, toolchain: &Toolchain) -> Result<()>;
 
-    async fn has_job(&self, job_id: &str) -> bool;
     async fn new_job(
         &self,
         toolchain: Toolchain,
@@ -932,7 +967,7 @@ pub trait SchedulerService: Send + Sync {
     async fn put_job(&self, job_id: &str, inputs: opendal::Buffer) -> Result<()>;
     async fn del_job(&self, job_id: &str) -> Result<()>;
 
-    async fn job_finished(&self, job_id: &str, server: StatusUpdate) -> Result<()>;
+    async fn job_finished(&self, job_id: &str, server: Option<StatusUpdate>) -> Result<()>;
 
     async fn update_server_status(
         &self,
@@ -953,7 +988,7 @@ pub trait ServerService: Send + Sync {
         outputs: Vec<String>,
     ) -> Result<RunJobResponse>;
 
-    async fn notify_run_job_err(&self, job_id: &str, err: &RunJobError) -> Result<()>;
+    async fn notify_run_job_err(&self, job_id: &str, err: RunJobError) -> Result<()>;
     async fn notify_run_job_res(&self, job_id: &str, res: &RunJobResponse) -> Result<()>;
 
     async fn update_scheduler_status(&self, status: StatusUpdate) -> Result<()>;
@@ -962,7 +997,7 @@ pub trait ServerService: Send + Sync {
 #[cfg(feature = "dist-server")]
 #[async_trait]
 pub trait ToolchainService: Send + Sync {
-    async fn load_toolchain(&self, tc: &Toolchain) -> Result<PathBuf>;
+    async fn get_toolchain(&self, toolchain: &Toolchain) -> Result<PathBuf>;
 }
 
 #[cfg(feature = "dist-server")]

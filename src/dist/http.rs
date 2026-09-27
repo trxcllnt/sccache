@@ -205,7 +205,7 @@ mod scheduler {
     use crate::{
         config,
         dist::{
-            RunJobRequest, RunJobRequestV2, SchedulerService, Toolchain,
+            RunJobRequest, RunJobRequestV2, SchedulerService, SubmitToolchainResult, Toolchain,
             http::{bincode_deserialize, bincode_serialize},
             metrics::{GaugeRecorder, Metrics},
         },
@@ -772,6 +772,12 @@ mod scheduler {
                                     .map_err(|_| AppError(anyhow!("")).into_response())?;
                                 service
                                     .put_toolchain(&Toolchain { archive_id }, toolchain.into())
+                                    .map_ok(|_| SubmitToolchainResult::Success)
+                                    .or_else(|err| {
+                                        futures::future::ok(SubmitToolchainResult::Error {
+                                            message: err.to_string(),
+                                        })
+                                    })
                                     .and_then(|res| mime.serialize(res))
                                     .map_err(|e| AppError(e).into_response())
                                     .await

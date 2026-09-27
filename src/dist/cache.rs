@@ -535,93 +535,32 @@ mod client {
 
 #[cfg(feature = "dist-server")]
 mod server {
+    use crate::{
+        cache::{Storage, disk::DiskCache},
+        dist::{Toolchain, ToolchainService, io::Toolchains, metrics::ToolchainsMetrics},
+        errors::*,
+    };
     use async_trait::async_trait;
     use flate2::bufread::MultiGzDecoder as GzipDecoder;
     use fs_err as fs;
-
     use std::{
-        ffi::OsStr,
         io::BufReader,
         path::{Path, PathBuf},
         sync::Arc,
     };
 
-    use crate::cache::disk::DiskCache;
-    use crate::cache::{Cache, Storage, cache};
-    use crate::dist::metrics::{Metrics, TimeRecorder};
-    use crate::dist::{Toolchain, ToolchainService};
-    use crate::errors::*;
-
-    const TC_LOAD: &str = "sccache::server::toolchain::load_time";
-    const TC_LOAD_INFLATED: &str = "sccache::server::toolchain::load_inflated_time";
-    const TC_LOAD_DEFLATED: &str = "sccache::server::toolchain::load_deflated_time";
-    const TC_LOAD_INFLATED_SIZE: &str = "sccache::server::toolchain::load_inflated_size_time";
-    const TC_UNPACK_INFLATED: &str = "sccache::server::toolchain::unpack_inflated_time";
-
-    #[derive(Clone, Default)]
-    pub struct ServerToolchainsMetrics {
-        metrics: Metrics,
-    }
-
-    impl ServerToolchainsMetrics {
-        pub fn new(metrics: Metrics) -> Self {
-            metrics::describe_histogram!(
-                TC_LOAD,
-                metrics::Unit::Seconds,
-                "The time to load a toolchain"
-            );
-            metrics::describe_histogram!(
-                TC_LOAD_INFLATED,
-                metrics::Unit::Seconds,
-                "The time to load, inflate, and unpack a toolchain"
-            );
-            metrics::describe_histogram!(
-                TC_LOAD_DEFLATED,
-                metrics::Unit::Seconds,
-                "The time to load a deflated toolchain"
-            );
-            metrics::describe_histogram!(
-                TC_LOAD_INFLATED_SIZE,
-                metrics::Unit::Seconds,
-                "The time to calculate the inflated size of a toolchain"
-            );
-            metrics::describe_histogram!(
-                TC_UNPACK_INFLATED,
-                metrics::Unit::Seconds,
-                "The time to inflate and unpack a toolchain"
-            );
-            Self { metrics }
-        }
-
-        pub fn load_timer(&self) -> TimeRecorder {
-            self.metrics.timer(TC_LOAD)
-        }
-
-        pub fn load_inflated_timer(&self) -> TimeRecorder {
-            self.metrics.timer(TC_LOAD_INFLATED)
-        }
-
-        pub fn load_deflated_timer(&self) -> TimeRecorder {
-            self.metrics.timer(TC_LOAD_DEFLATED)
-        }
-
-        pub fn unpack_inflated_timer(&self) -> TimeRecorder {
-            self.metrics.timer(TC_UNPACK_INFLATED)
-        }
-    }
-
     #[derive(Clone)]
     pub struct ServerToolchains {
         cache: Arc<DiskCache>,
-        store: Arc<dyn cache::Storage>,
-        metrics: ServerToolchainsMetrics,
+        toolchains: Toolchains,
+        metrics: ToolchainsMetrics,
         should_inflate_toolchains: bool,
     }
 
     #[async_trait]
     impl ToolchainService for ServerToolchains {
-        async fn load_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
-            self.load(tc).await
+        async fn get_toolchain(&self, toolchain: &Toolchain) -> Result<PathBuf> {
+            self.load(toolchain).await
         }
     }
 
@@ -639,38 +578,29 @@ mod server {
     }
 
     impl ServerToolchains {
-        pub fn new<P: AsRef<OsStr>>(
-            root: P,
-            max_size: u64,
-            store: Arc<dyn cache::Storage>,
-            metrics: Metrics,
+        pub fn new(
+            cache: Arc<DiskCache>,
+            toolchains: Toolchains,
+            metrics: ToolchainsMetrics,
             should_inflate_toolchains: bool,
         ) -> Self {
             Self {
-                cache: Arc::new(DiskCache::new(
-                    root,
-                    max_size,
-                    crate::config::CacheMode::ReadWrite,
-                    vec![],
-                )),
-                store,
-                metrics: ServerToolchainsMetrics::new(metrics),
+                cache,
+                toolchains,
+                metrics,
                 should_inflate_toolchains,
             }
         }
 
         async fn load(&self, tc: &Toolchain) -> Result<PathBuf> {
             // Record toolchain load time after retrying
-            let _timer = self.metrics.load_timer();
+            let _timer = self.metrics.load_toolchain_timer();
             // Load and cache the deflated toolchain.
             // Inflate, unpack, and cache it in a directory.
             // Return the path to the unpacked toolchain dir.
             self.load_toolchain(tc).await.map_err(|err| {
                 if !is_special_tokio_shutdown_io_error(&err) {
-                    tracing::error!(
-                        "[ServerToolchains({})]: Error loading toolchain: {err:?}",
-                        &tc.archive_id
-                    );
+                    tracing::error!("[ServerToolchains({tc})]: Error loading toolchain: {err:?}");
                 }
                 err
             })
@@ -678,7 +608,7 @@ mod server {
 
         async fn load_toolchain(&self, tc: &Toolchain) -> Result<PathBuf> {
             // Record toolchain load_inflated time
-            let _timer = self.metrics.load_inflated_timer();
+            let _timer = self.metrics.load_inflated_toolchain_timer();
             if let Ok((inflated_path, _)) = self.cache.entry(&tc.archive_id).await {
                 // Return early if the toolchain is already loaded and unpacked
                 Ok(inflated_path)
@@ -697,15 +627,12 @@ mod server {
             }
         }
 
-        async fn load_deflated_toolchain(&self, tc: &Toolchain) -> Result<(PathBuf, u64)> {
+        async fn load_deflated_toolchain(&self, toolchain: &Toolchain) -> Result<(PathBuf, u64)> {
             // Record toolchain load_deflated time
-            let _timer = self.metrics.load_deflated_timer();
-            let deflated_key = format!("{}.tgz", tc.archive_id);
+            let _timer = self.metrics.load_deflated_toolchain_timer();
+            let deflated_key = format!("{toolchain}.tgz");
             if !self.cache.has(&deflated_key).await {
-                let entry = match self.store.get(&tc.archive_id).await? {
-                    Cache::Hit(reader) => reader,
-                    Cache::Miss => return Err(anyhow!("Missing toolchain")),
-                };
+                let entry = self.toolchains.get_toolchain(toolchain).await?;
                 self.cache.put(&deflated_key, entry).await?;
             }
             self.cache.entry(&deflated_key).await
@@ -718,7 +645,7 @@ mod server {
             inflated_key: &str,
         ) -> Result<PathBuf> {
             // Record toolchain unpack_inflated time
-            let _timer = self.metrics.unpack_inflated_timer();
+            let _timer = self.metrics.unpack_inflated_toolchain_timer();
             self.cache
                 .insert_with(inflated_key, deflated_size, |inflated_path: &Path| {
                     let deflated_path = deflated_path.to_owned();

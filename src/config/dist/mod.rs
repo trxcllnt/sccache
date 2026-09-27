@@ -48,88 +48,42 @@ pub use dist_server::*;
 #[cfg(feature = "dist-server")]
 mod dist_server {
     use super::*;
-    use serde::de;
-    use std::fmt;
 
     #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-    #[serde(rename_all = "lowercase")]
-    pub enum MessageBroker {
-        AMQP(MessageBrokerAddr),
-        Redis(MessageBrokerAddr),
-    }
-
-    #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-    pub struct MessageBrokerAddr {
+    pub struct MessageBroker {
+        #[serde(default)]
         pub addr: String,
+        #[serde(default = "defaults::default_broker_max_retries")]
+        pub max_retries: u32,
     }
 
-    impl<'de> Deserialize<'de> for MessageBrokerAddr {
-        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: de::Deserializer<'de>,
-        {
-            struct MessageBrokerAddrVisitor;
-
-            impl<'de> de::Visitor<'de> for MessageBrokerAddrVisitor {
-                type Value = MessageBrokerAddr;
-
-                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                    f.write_str("sccache-dist message broker address")
-                }
-
-                fn visit_str<E>(self, addr: &str) -> Result<Self::Value, E>
-                where
-                    E: de::Error,
-                {
-                    Ok(MessageBrokerAddr {
-                        addr: addr.to_owned(),
-                    })
-                }
-
-                fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-                where
-                    A: de::MapAccess<'de>,
-                {
-                    let mut addr = None;
-
-                    while let Some(name) = map.next_key::<String>()? {
-                        match name.as_str() {
-                            "addr" => {
-                                addr = Some(map.next_value()?);
-                            }
-                            name => {
-                                return Err(de::Error::unknown_field(name, &["addr"]));
-                            }
-                        }
-                    }
-
-                    if let Some(addr) = addr {
-                        Ok(MessageBrokerAddr { addr })
-                    } else {
-                        Err(de::Error::missing_field("addr"))
-                    }
-                }
-            }
-
-            deserializer.deserialize_map(MessageBrokerAddrVisitor)
+    impl Default for MessageBroker {
+        fn default() -> Self {
+            serde_json::from_str("{}").unwrap()
         }
     }
 
-    impl From<MessageBrokerAddr> for String {
-        fn from(MessageBrokerAddr { addr }: MessageBrokerAddr) -> Self {
+    impl From<MessageBroker> for String {
+        fn from(MessageBroker { addr, .. }: MessageBroker) -> Self {
             addr
         }
     }
 
-    impl From<String> for MessageBrokerAddr {
+    impl From<String> for MessageBroker {
         fn from(addr: String) -> Self {
-            Self { addr }
+            Self {
+                addr,
+                ..Default::default()
+            }
         }
     }
 
-    impl<'a> From<&'a str> for MessageBrokerAddr {
+    impl<'a> From<&'a str> for MessageBroker {
         fn from(addr: &'a str) -> Self {
-            Self { addr: addr.into() }
+            Self {
+                addr: addr.into(),
+                ..Default::default()
+            }
         }
     }
 
@@ -219,17 +173,21 @@ pub mod defaults {
 
     pub use crate::config::defaults::default_true;
 
+    pub fn default_broker_max_retries() -> u32 {
+        0
+    }
+
     pub fn default_keepalive_interval() -> u64 {
-        20
+        Duration::from_secs(20).as_secs()
     }
 
     pub fn default_keepalive_timeout() -> u64 {
-        600
+        Duration::from_secs(600).as_secs()
     }
 
     // Default to 15s
     pub fn default_heartbeat_interval() -> u64 {
-        Duration::from_secs(1500).as_secs()
+        Duration::from_secs(15).as_millis() as u64
     }
 
     pub fn default_shutdown_timeout() -> u64 {

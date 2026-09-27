@@ -148,34 +148,24 @@ impl Tasks {
         if let Some(message_broker) = message_broker {
             let scheduler_to_servers = scheduler_to_servers_queue();
             let server_to_schedulers = server_to_schedulers_queue();
-            Ok(celery::CeleryBuilder::new(
-                id,
-                match message_broker {
-                    MessageBroker::AMQP(ref uri) => &uri.addr,
-                    MessageBroker::Redis(ref uri) => &uri.addr,
-                },
-            )
-            // Indefinitely retry connecting to the broker
-            .broker_connection_max_retries(u32::MAX)
-            // Queues with no consumers should be deleted after 60s
-            .broker_set_queue_expire_time(&scheduler_to_servers, 60 * 1000)
-            .broker_set_queue_expire_time(&server_to_schedulers, 60 * 1000)
-            // Undelivered messages should be discarded after 60s
-            .broker_set_queue_message_ttl(&scheduler_to_servers, 60 * 1000)
-            .broker_set_queue_message_ttl(&server_to_schedulers, 60 * 1000)
-            // These tasks are sent to these queues
-            .task_route(task_impls::run_job::NAME, &scheduler_to_servers)
-            // MessagePack is faster than JSON/Yaml/pickle etc.
-            .task_content_type(MessageContentType::MsgPack)
-            // Prefetch messages
-            .prefetch_count(prefetch_count)
-            // Don't retry failed tasks
-            .task_max_retries(0)
-            // Don't delay retrying failed tasks
-            .task_min_retry_delay(0)
-            .task_max_retry_delay(0)
-            // Don't retry tasks that fail with unexpected errors
-            .task_retry_for_unexpected(false))
+            Ok(celery::CeleryBuilder::new(id, &message_broker.addr)
+                // Indefinitely retry connecting to the broker
+                .broker_connection_max_retries(u32::MAX)
+                // Queues with no consumers should be deleted after 60s
+                .broker_set_queue_expire_time(&scheduler_to_servers, 60 * 1000)
+                .broker_set_queue_expire_time(&server_to_schedulers, 60 * 1000)
+                // Prefetch messages
+                .prefetch_count(prefetch_count)
+                // These tasks are sent to these queues
+                .task_route(task_impls::run_job::NAME, &scheduler_to_servers)
+                // MessagePack is faster than JSON/Yaml/pickle etc.
+                .task_content_type(MessageContentType::MsgPack)
+                .task_max_retries(message_broker.max_retries)
+                // Don't delay retrying failed tasks
+                .task_min_retry_delay(0)
+                .task_max_retry_delay(0)
+                // Don't retry tasks that fail with unexpected errors
+                .task_retry_for_unexpected(false))
         } else {
             bail!("Missing required message broker configuration!\n\n{MESSAGE_BROKER_ERROR_TEXT}")
         }
@@ -279,14 +269,14 @@ pub trait ServerTasks: AppTasks + Send + Sync {
 
     async fn update_status(
         &self,
-        status: StatusUpdate,
+        server_status: StatusUpdate,
         send_to: Option<&str>,
     ) -> std::result::Result<AsyncResult, CeleryError> {
         self.app()
             .send_task(if let Some(send_to) = send_to {
-                task_impls::server_status::new(status).with_queue(send_to)
+                task_impls::server_status::new(server_status).with_queue(send_to)
             } else {
-                task_impls::server_status::new(status)
+                task_impls::server_status::new(server_status)
             })
             .await
     }
@@ -295,10 +285,12 @@ pub trait ServerTasks: AppTasks + Send + Sync {
         &self,
         job_id: &str,
         send_to: &str,
-        server: StatusUpdate,
+        server_status: StatusUpdate,
     ) -> std::result::Result<AsyncResult, CeleryError> {
         self.app()
-            .send_task(task_impls::job_finished::new(job_id.to_owned(), server).with_queue(send_to))
+            .send_task(
+                task_impls::job_finished::new(job_id.to_owned(), server_status).with_queue(send_to),
+            )
             .await
     }
 }
@@ -400,7 +392,7 @@ mod task_impls {
         };
 
         if let Err(err) = server_service()
-            .map(|svc| svc.notify_run_job_err(job_id, &err).boxed())
+            .map(|svc| svc.notify_run_job_err(job_id, err).boxed())
             .unwrap_or_else(|err| futures::future::err(err).boxed())
             .await
         {
@@ -420,12 +412,12 @@ mod task_impls {
         }
     }
 
-    #[celery::task]
+    #[celery::task(max_retries = 0)]
     pub async fn job_finished(job_id: String, status: StatusUpdate) -> TaskResult<()> {
         tracing::trace!("[job_finished({job_id}, {status:?})]");
 
         scheduler_service()
-            .map(|svc| svc.job_finished(&job_id, status))
+            .map(|svc| svc.job_finished(&job_id, Some(status)))
             .unwrap_or_else(|err| futures::future::err(err).boxed())
             .await
             .map_err(|e| {
@@ -436,7 +428,7 @@ mod task_impls {
             })
     }
 
-    #[celery::task]
+    #[celery::task(max_retries = 0)]
     pub async fn server_status(status: StatusUpdate) -> TaskResult<()> {
         let id = status.id.clone();
 
@@ -452,7 +444,7 @@ mod task_impls {
             })
     }
 
-    #[celery::task]
+    #[celery::task(max_retries = 0)]
     pub async fn scheduler_status(status: StatusUpdate) -> TaskResult<()> {
         let id = status.id.clone();
 

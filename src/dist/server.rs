@@ -13,633 +13,234 @@
 // limitations under the License.
 
 use crate::{
-    cache::{Cache, Storage},
+    cache::{Storage, disk::DiskCache},
     dist::{
         self, BuildError, BuildResult, BuilderIncoming, CompileCommand, RunJobError,
-        RunJobResponse, ServerService, StatusUpdate, Toolchain, ToolchainService, job_inputs_key,
-        job_result_key,
-        metrics::{CountRecorder, GaugeRecorder, Metrics, TimeRecorder},
+        RunJobResponse, RunJobStatus, ServerService, ServerToolchains, StatusUpdate, Toolchain,
+        ToolchainService,
+        io::{Jobs, Toolchains},
+        metrics::{JobsMetrics, Metrics, ServerMetrics, ToolchainsMetrics},
     },
     errors::*,
     util::{self, AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
 };
 use async_trait::async_trait;
-use futures::future::FutureExt;
+use futures::{future::FutureExt, lock::Mutex};
+use itertools::Itertools;
 use std::{
     collections::HashMap,
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, atomic::AtomicU64},
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const NUM_CPUS_HISTO: &str = "sccache::server::num_cpus";
-const CPU_USAGE_RATIO: &str = "sccache::server::cpu_usage_ratio";
-const MEM_AVAIL_BYTES: &str = "sccache::server::mem_avail_bytes";
-const MEM_TOTAL_BYTES: &str = "sccache::server::mem_total_bytes";
-const MEM_USED_BYTES: &str = "sccache::server::mem_used_bytes";
-const TOOLCHAIN_ERROR_COUNT: &str = "sccache::server::toolchain_error_count";
-const GET_JOB_INPUTS_ERROR_COUNT: &str = "sccache::server::get_job_inputs_error_count";
-const JOB_BUILD_ERROR_COUNT: &str = "sccache::server::job_build_error_count";
-const PUT_JOB_RESULT_ERROR_COUNT: &str = "sccache::server::put_job_result_error_count";
-const JOB_ACCEPTED_COUNT: &str = "sccache::server::job_accepted_count";
-const JOB_LOADED_COUNT: &str = "sccache::server::job_loaded_count";
-const JOB_FINISHED_COUNT: &str = "sccache::server::job_finished_count";
-const JOB_PENDING_COUNT: &str = "sccache::server::job_pending_count";
-const JOB_LOADING_COUNT: &str = "sccache::server::job_loading_count";
-const GET_JOB_INPUTS_TIME: &str = "sccache::server::get_job_inputs_time";
-const PUT_JOB_RESULT_TIME: &str = "sccache::server::put_job_result_time";
-const GET_TOOLCHAIN_TIME: &str = "sccache::server::get_toolchain_time";
-const LOAD_JOB_TIME: &str = "sccache::server::load_job_time";
-const RUN_BUILD_TIME: &str = "sccache::server::run_build_time";
-const RUN_JOB_TIME: &str = "sccache::server::run_job_time";
-
-#[derive(Clone)]
-pub struct ServerMetrics {
-    jobs_accepted: Arc<AtomicU64>,
-    jobs_loaded: Arc<AtomicU64>,
-    jobs_finished: Arc<AtomicU64>,
-    jobs_pending: Arc<GaugeRecorder>,
-    jobs_loading: Arc<GaugeRecorder>,
-    metrics: Metrics,
-    sysinfo: Arc<std::sync::Mutex<sysinfo::System>>,
+#[derive(Default)]
+pub struct ServerBuilder {
+    builder: Option<Arc<dyn BuilderIncoming>>,
+    job_queue: Option<Arc<tokio::sync::Semaphore>>,
+    jobs_storage: Option<Arc<dyn Storage>>,
+    metrics: Option<Metrics>,
+    num_cpus: Option<usize>,
+    occupancy: Option<usize>,
+    pre_fetch: Option<usize>,
+    server_id: Option<String>,
+    should_inflate_toolchains: Option<bool>,
+    tasks: Option<Arc<dyn dist::tasks::ServerTasks>>,
+    toolchains_cache: Option<Arc<DiskCache>>,
+    toolchains_storage: Option<Arc<dyn Storage>>,
 }
 
-impl ServerMetrics {
-    pub fn new(metrics: Metrics) -> Self {
-        metrics::describe_gauge!(
-            JOB_LOADING_COUNT,
-            metrics::Unit::Count,
-            "The number of accepted jobs for which this server is loading inputs and toolchains."
-        );
-        metrics::describe_gauge!(
-            JOB_PENDING_COUNT,
-            metrics::Unit::Count,
-            "The number of accepted jobs that are fully loaded and queued to run/are currently running."
-        );
-        metrics::describe_histogram!(
-            NUM_CPUS_HISTO,
-            metrics::Unit::Count,
-            "The total number of CPUs"
-        );
-        metrics::describe_histogram!(
-            CPU_USAGE_RATIO,
-            metrics::Unit::Percent,
-            "The current system CPU usage percent (0-100)"
-        );
-        metrics::describe_histogram!(
-            MEM_AVAIL_BYTES,
-            metrics::Unit::Bytes,
-            "The amount of free system memory"
-        );
-        metrics::describe_histogram!(
-            MEM_TOTAL_BYTES,
-            metrics::Unit::Bytes,
-            "The total amount of system memory"
-        );
-        metrics::describe_histogram!(
-            MEM_USED_BYTES,
-            metrics::Unit::Bytes,
-            "The amount of used system memory"
-        );
-        metrics::describe_counter!(
-            TOOLCHAIN_ERROR_COUNT,
-            metrics::Unit::Count,
-            "The number of errors raised while loading toolchains."
-        );
-        metrics::describe_counter!(
-            GET_JOB_INPUTS_ERROR_COUNT,
-            metrics::Unit::Count,
-            "The number of errors raised while loading job inputs."
-        );
-        metrics::describe_counter!(
-            JOB_BUILD_ERROR_COUNT,
-            metrics::Unit::Count,
-            "The number of errors raised while running job builds."
-        );
-        metrics::describe_counter!(
-            PUT_JOB_RESULT_ERROR_COUNT,
-            metrics::Unit::Count,
-            "The number of errors raised storing job results."
-        );
-        metrics::describe_counter!(
-            JOB_ACCEPTED_COUNT,
-            metrics::Unit::Count,
-            "The total number of jobs accepted by this server (but not yet loaded or run)."
-        );
-        metrics::describe_counter!(
-            JOB_LOADED_COUNT,
-            metrics::Unit::Count,
-            "The total number of jobs loaded by this server (but not yet run)."
-        );
-        metrics::describe_counter!(
-            JOB_FINISHED_COUNT,
-            metrics::Unit::Count,
-            "The total number of jobs accepted, loaded, and run by this server."
-        );
-        metrics::describe_histogram!(
-            GET_JOB_INPUTS_TIME,
-            metrics::Unit::Seconds,
-            "The time to load each job's inputs"
-        );
-        metrics::describe_histogram!(
-            GET_TOOLCHAIN_TIME,
-            metrics::Unit::Seconds,
-            "The time to load each job's toolchain"
-        );
-        metrics::describe_histogram!(
-            LOAD_JOB_TIME,
-            metrics::Unit::Seconds,
-            "The time to load each job's inputs and toolchains"
-        );
-        metrics::describe_histogram!(
-            RUN_BUILD_TIME,
-            metrics::Unit::Seconds,
-            "The time to run each job's build"
-        );
-        metrics::describe_histogram!(
-            PUT_JOB_RESULT_TIME,
-            metrics::Unit::Seconds,
-            "The time to store each job's results"
-        );
-        metrics::describe_histogram!(
-            RUN_JOB_TIME,
-            metrics::Unit::Seconds,
-            "The time to load and build each job"
-        );
-
-        let jobs_pending = Arc::new(metrics.gauge(JOB_PENDING_COUNT));
-        let jobs_loading = Arc::new(metrics.gauge(JOB_LOADING_COUNT));
+impl ServerBuilder {
+    pub fn with_builder(self, builder: Arc<dyn BuilderIncoming>) -> Self {
         Self {
+            builder: Some(builder),
+            ..self
+        }
+    }
+    pub fn with_job_queue(self, job_queue: Arc<tokio::sync::Semaphore>) -> Self {
+        Self {
+            job_queue: Some(job_queue),
+            ..self
+        }
+    }
+    pub fn with_jobs_storage(self, jobs_storage: Arc<dyn Storage>) -> Self {
+        Self {
+            jobs_storage: Some(jobs_storage),
+            ..self
+        }
+    }
+    pub fn with_metrics(self, metrics: Metrics) -> Self {
+        Self {
+            metrics: Some(metrics),
+            ..self
+        }
+    }
+    pub fn with_num_cpus(self, num_cpus: usize) -> Self {
+        Self {
+            num_cpus: Some(num_cpus),
+            ..self
+        }
+    }
+    pub fn with_occupancy(self, occupancy: usize) -> Self {
+        Self {
+            occupancy: Some(occupancy),
+            ..self
+        }
+    }
+    pub fn with_pre_fetch(self, pre_fetch: usize) -> Self {
+        Self {
+            pre_fetch: Some(pre_fetch),
+            ..self
+        }
+    }
+    pub fn with_server_id(self, server_id: String) -> Self {
+        Self {
+            server_id: Some(server_id),
+            ..self
+        }
+    }
+    pub fn with_should_inflate_toolchains(self, should_inflate_toolchains: bool) -> Self {
+        Self {
+            should_inflate_toolchains: Some(should_inflate_toolchains),
+            ..self
+        }
+    }
+    pub fn with_tasks(self, tasks: Arc<dyn dist::tasks::ServerTasks>) -> Self {
+        Self {
+            tasks: Some(tasks),
+            ..self
+        }
+    }
+    pub fn with_toolchains_cache(self, toolchains_cache: Arc<DiskCache>) -> Self {
+        Self {
+            toolchains_cache: Some(toolchains_cache),
+            ..self
+        }
+    }
+    pub fn with_toolchains_storage(self, toolchains_storage: Arc<dyn Storage>) -> Self {
+        Self {
+            toolchains_storage: Some(toolchains_storage),
+            ..self
+        }
+    }
+
+    pub fn build(self) -> Result<Arc<Server>> {
+        let ServerBuilder {
+            builder,
+            job_queue,
+            jobs_storage,
             metrics,
-            jobs_pending,
-            jobs_loading,
-            ..Default::default()
-        }
-    }
+            num_cpus,
+            occupancy,
+            pre_fetch,
+            server_id,
+            should_inflate_toolchains,
+            tasks,
+            toolchains_cache,
+            toolchains_storage,
+        } = self;
 
-    pub fn system_metrics(&self) -> (f32, u64, u64) {
-        let mut sys = self.sysinfo.lock().unwrap();
-        sys.refresh_cpu_specifics(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
-        sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
-        let cpu_usage = sys.global_cpu_usage();
-        let mem_avail = sys.available_memory();
-        let mem_total = sys.total_memory();
-        self.metrics.histo(CPU_USAGE_RATIO, cpu_usage);
-        self.metrics.histo(MEM_AVAIL_BYTES, mem_avail as f64);
-        self.metrics.histo(MEM_TOTAL_BYTES, mem_total as f64);
-        self.metrics
-            .histo(MEM_USED_BYTES, mem_total.saturating_sub(mem_avail) as f64);
-        (cpu_usage, mem_avail, mem_total)
-    }
+        let server_id = server_id
+            .map(Ok)
+            .unwrap_or_else(|| bail!("Missing required field `server_id`"))?;
+        let job_queue = job_queue
+            .map(Ok)
+            .unwrap_or_else(|| bail!("Missing required field `job_queue`"))?;
+        let builder = builder
+            .map(Ok)
+            .unwrap_or_else(|| bail!("Missing required field `builder`"))?;
+        let jobs_storage = jobs_storage
+            .map(Ok)
+            .unwrap_or_else(|| bail!("Missing required field `jobs_storage`"))?;
+        let metrics = metrics
+            .map(Ok)
+            .unwrap_or_else(|| bail!("Missing required field `metrics`"))?;
+        let tasks = tasks
+            .map(Ok)
+            .unwrap_or_else(|| bail!("Missing required field `tasks`"))?;
+        let toolchains_storage = toolchains_storage
+            .map(Ok)
+            .unwrap_or_else(|| bail!("Missing required field `toolchains_storage`"))?;
+        let toolchains_cache = toolchains_cache
+            .map(Ok)
+            .unwrap_or_else(|| bail!("Missing required field `toolchains_cache`"))?;
+        let should_inflate_toolchains = should_inflate_toolchains
+            .map(Ok)
+            .unwrap_or_else(|| bail!("Missing required field `should_inflate_toolchains`"))?;
+        let num_cpus = num_cpus
+            .map(Ok)
+            .unwrap_or_else(|| bail!("Missing required field `num_cpus`"))?;
+        let occupancy = occupancy
+            .map(Ok)
+            .unwrap_or_else(|| bail!("Missing required field `occupancy`"))?;
+        let pre_fetch = pre_fetch
+            .map(Ok)
+            .unwrap_or_else(|| bail!("Missing required field `pre_fetch`"))?;
 
-    pub fn inc_toolchain_error_count(&self) -> CountRecorder {
-        self.metrics.count(TOOLCHAIN_ERROR_COUNT)
-    }
+        let (lifetime, _) = tokio::sync::watch::channel(true);
 
-    pub fn inc_get_job_inputs_error_count(&self) -> CountRecorder {
-        self.metrics.count(GET_JOB_INPUTS_ERROR_COUNT)
-    }
+        let lifetime = Arc::new(lifetime);
 
-    pub fn inc_job_build_error_count(&self) -> CountRecorder {
-        self.metrics.count(JOB_BUILD_ERROR_COUNT)
-    }
-
-    pub fn inc_put_job_result_error_count(&self) -> CountRecorder {
-        self.metrics.count(PUT_JOB_RESULT_ERROR_COUNT)
-    }
-
-    pub fn inc_job_accepted_count(&self) -> CountRecorder {
-        self.jobs_accepted
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.metrics.count(JOB_ACCEPTED_COUNT)
-    }
-
-    pub fn inc_job_loaded_count(&self) -> CountRecorder {
-        self.jobs_loaded
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.metrics.count(JOB_LOADED_COUNT)
-    }
-
-    pub fn inc_job_finished_count(&self) -> CountRecorder {
-        self.jobs_finished
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.metrics.count(JOB_FINISHED_COUNT)
-    }
-
-    pub fn get_job_inputs_timer(&self) -> TimeRecorder {
-        self.metrics.timer(GET_JOB_INPUTS_TIME)
-    }
-
-    pub fn get_toolchain_timer(&self) -> TimeRecorder {
-        self.metrics.timer(GET_TOOLCHAIN_TIME)
-    }
-
-    pub fn load_job_timer(&self) -> TimeRecorder {
-        self.metrics.timer(LOAD_JOB_TIME)
-    }
-
-    pub fn run_build_timer(&self) -> TimeRecorder {
-        self.metrics.timer(RUN_BUILD_TIME)
-    }
-
-    pub fn put_job_result_timer(&self) -> TimeRecorder {
-        self.metrics.timer(PUT_JOB_RESULT_TIME)
-    }
-
-    pub fn run_job_timer(&self) -> TimeRecorder {
-        self.metrics.timer(RUN_JOB_TIME)
-    }
-}
-
-impl Default for ServerMetrics {
-    fn default() -> Self {
-        use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
-
-        Self {
-            jobs_accepted: Default::default(),
-            jobs_loaded: Default::default(),
-            jobs_finished: Default::default(),
-            jobs_loading: Default::default(),
-            jobs_pending: Default::default(),
-            metrics: Metrics::default(),
-            sysinfo: Arc::new(std::sync::Mutex::new(System::new_with_specifics(
-                RefreshKind::nothing()
-                    .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
-                    .with_memory(MemoryRefreshKind::nothing().with_ram()),
-            ))),
-        }
-    }
-}
-
-pub struct JobInfo {
-    created_at: Instant,
-    reply_to: String,
-}
-
-#[derive(Clone)]
-pub struct ServerState {
-    pub alive: Arc<tokio::sync::watch::Sender<bool>>,
-    pub id: String,
-    pub queue: String,
-    pub jobs: Arc<std::sync::Mutex<HashMap<String, JobInfo>>>,
-    pub job_queue: Arc<tokio::sync::Semaphore>,
-    pub metrics: ServerMetrics,
-    pub num_cpus: usize,
-    pub occupancy: usize,
-    pub pre_fetch: usize,
-}
-
-impl ServerState {
-    pub fn is_alive(&self) -> bool {
-        *self.alive.borrow()
-    }
-}
-
-impl Default for ServerState {
-    fn default() -> Self {
-        let (alive, _) = tokio::sync::watch::channel(true);
-        Self {
-            alive: Arc::new(alive),
-            id: Default::default(),
-            queue: Default::default(),
-            job_queue: Arc::new(tokio::sync::Semaphore::new(1)),
-            jobs: Default::default(),
-            metrics: Default::default(),
-            num_cpus: 1,
-            occupancy: 1,
-            pre_fetch: 0,
-        }
-    }
-}
-
-impl From<&ServerState> for StatusUpdate {
-    fn from(state: &ServerState) -> Self {
-        let (cpu_usage, mem_avail, mem_total) = state.metrics.system_metrics();
-
-        state
-            .metrics
-            .metrics
-            .histo(NUM_CPUS_HISTO, state.num_cpus as f64);
-
-        let running = state
-            .occupancy
-            .saturating_sub(state.job_queue.available_permits()) as u64;
-
-        let loading = state.metrics.jobs_loading.value();
-        let pending = state.metrics.jobs_pending.value().saturating_sub(running);
-        let accepted = state
-            .metrics
-            .jobs_accepted
-            .load(std::sync::atomic::Ordering::SeqCst);
-        let finished = state
-            .metrics
-            .jobs_finished
-            .load(std::sync::atomic::Ordering::SeqCst);
-
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::from_secs(0))
-            .as_micros();
-
-        let max_job_age = {
-            let jobs = state.jobs.lock().unwrap();
-            let now = Instant::now();
-            jobs.values()
-                .map(|j| now.duration_since(j.created_at).as_micros())
-                .max()
-                .unwrap_or(0)
-        };
-
-        StatusUpdate {
-            id: state.id.clone(),
-            queue: state.queue.clone(),
-            info: dist::SysStats {
-                cpu_usage,
-                mem_avail,
-                mem_total,
-                num_cpus: state.num_cpus,
-                occupancy: state.occupancy,
-                pre_fetch: state.pre_fetch,
-            },
-            jobs: dist::JobStats {
-                loading,
-                pending,
-                running,
-                accepted,
-                finished,
-            },
-            // Work around serde missing u128 type...
-            // u128 works fine if I use rusty-celery's macros,
-            // but not if I implement the Task trait directly.
-            // The only difference I see is they use `celery::export::Deserialize`
-            // instead of `serde::Deserialize`, but that does not solve the issue.
-            timestamp: (
-                // microseconds as seconds
-                timestamp.saturating_div(1_000_000) as u64,
-                // remainder microseconds as nanoseconds
-                (timestamp % 1_000_000).saturating_mul(1_000) as u32,
-            ),
-            max_job_age: (
-                // microseconds as seconds
-                max_job_age.saturating_div(1_000_000) as u64,
-                // remainder microseconds as nanoseconds
-                (max_job_age % 1_000_000).saturating_mul(1_000) as u32,
-            ),
-        }
-    }
-}
-
-impl AsyncMulticastArgs for Toolchain {
-    type Key = String;
-    fn hash(&self) -> Self::Key {
-        self.archive_id.clone()
-    }
-}
-
-struct LoadToolchainFn {
-    toolchains: Arc<dyn ToolchainService>,
-}
-
-#[async_trait]
-impl AsyncMulticastFunc<Toolchain, PathBuf> for LoadToolchainFn {
-    async fn call(&self, tc: &Toolchain) -> Result<PathBuf> {
-        self.toolchains.load_toolchain(tc).await
-    }
-}
-
-#[derive(Clone)]
-struct RunJobArgs {
-    job_id: String,
-    reply_to: String,
-    toolchain: Toolchain,
-    command: CompileCommand,
-    outputs: Vec<String>,
-}
-
-impl AsyncMulticastArgs for RunJobArgs {
-    type Key = String;
-    fn hash(&self) -> Self::Key {
-        self.job_id.clone()
-    }
-}
-
-struct RunJobFunc {
-    builder: Arc<dyn BuilderIncoming>,
-    jobs_storage: Arc<dyn Storage>,
-    state: ServerState,
-    toolchains: AsyncMulticast<Toolchain, PathBuf>,
-}
-
-impl RunJobFunc {
-    async fn get_toolchain_dir(&self, job_id: &str, toolchain: Toolchain) -> Result<PathBuf> {
-        let _timer = self.state.metrics.get_toolchain_timer();
-        // ServerToolchains retries internally, so no need to retry here
-        self.toolchains
-            .call(toolchain)
-            .await
-            .map(|(_, res)| res)
-            .map_err(|err| {
-                // Record toolchain errors
-                if self.state.is_alive() {
-                    self.state.metrics.inc_toolchain_error_count();
-                    tracing::warn!("[run_job({job_id})]: Error loading toolchain: {err:?}");
-                }
-                err
-            })
-    }
-
-    async fn get_job_inputs(&self, job_id: &str) -> Result<opendal::Buffer> {
-        // Record get_job_inputs time
-        let _timer = self.state.metrics.get_job_inputs_timer();
-        self.jobs_storage
-            .get(&job_inputs_key(job_id))
-            .await
-            .and_then(|res| match res {
-                Cache::Hit(reader) => Ok(reader),
-                _ => Err(anyhow!("Missing job inputs")),
-            })
-            .map_err(|err| {
-                // Record get_job_inputs errors after retrying
-                if self.state.is_alive() {
-                    self.state.metrics.inc_get_job_inputs_error_count();
-                    tracing::warn!("[run_job({job_id})]: Error retrieving job inputs: {err:?}");
-                }
-                err
-            })
-    }
-
-    async fn run_build(
-        &self,
-        job_id: &str,
-        toolchain_dir: PathBuf,
-        inputs: opendal::Buffer,
-        command: CompileCommand,
-        outputs: Vec<String>,
-    ) -> std::result::Result<BuildResult, BuildError> {
-        // Record build time
-        let _timer = self.state.metrics.run_build_timer();
-        self.builder
-            .run_build(job_id, &toolchain_dir, inputs, command, outputs)
-            .await
-            .map_err(|err| {
-                // Record run_build errors
-                if self.state.is_alive() {
-                    self.state.metrics.inc_job_build_error_count();
-                    tracing::warn!("[run_job({job_id})]: Build error: {err:?}");
-                }
-                err
-            })
-    }
-
-    async fn load_job(
-        &self,
-        job_id: &str,
-        toolchain: Toolchain,
-    ) -> std::result::Result<(PathBuf, opendal::Buffer), RunJobError> {
-        // Record load_job time
-        let _timer = self.state.metrics.load_job_timer();
-        let _loading = self.state.metrics.jobs_loading.increment();
-
-        // Load and unpack the toolchain
-        let toolchain_dir = self
-            .get_toolchain_dir(job_id, toolchain)
-            .await
-            .map_err(|_| RunJobError::MissingToolchain)?;
-
-        // Load job inputs into memory
-        let inputs = self
-            .get_job_inputs(job_id)
-            .await
-            .map_err(|_| RunJobError::MissingJobInputs)?;
-
-        Ok((toolchain_dir, inputs))
-    }
-
-    async fn load_job_and_run_build(
-        &self,
-        job_id: &str,
-        reply_to: &str,
-        toolchain: Toolchain,
-        command: CompileCommand,
-        outputs: Vec<String>,
-    ) -> std::result::Result<RunJobResponse, RunJobError> {
-        // Record total run_job time
-        let _timer = self.state.metrics.run_job_timer();
-
-        // Add job
-        self.state.jobs.lock().unwrap().insert(
-            job_id.to_owned(),
-            JobInfo {
-                created_at: Instant::now(),
-                reply_to: reply_to.to_owned(),
-            },
+        let jobs_io = Jobs::new(
+            jobs_storage,
+            JobsMetrics::new("sccache::server", metrics.clone()),
         );
 
-        // Increment the job_started counter
-        self.state.metrics.inc_job_accepted_count();
+        let toolchains_metrics = ToolchainsMetrics::new("sccache::server", metrics.clone());
+        let toolchains = Toolchains::new(toolchains_storage, toolchains_metrics.clone());
 
-        // Load the job toolchain and inputs
-        let (toolchain_dir, inputs) = self.load_job(job_id, toolchain).await?;
+        let load_toolchain = AsyncMulticast::new(LoadToolchainFn {
+            toolchains: Arc::new(ServerToolchains::new(
+                toolchains_cache,
+                toolchains,
+                toolchains_metrics,
+                should_inflate_toolchains,
+            )),
+        });
 
-        // Increment the job_loaded counter
-        self.state.metrics.inc_job_loaded_count();
+        let metrics = ServerMetrics::new("sccache::server", metrics, num_cpus);
 
-        // Increment the jobs_pending gauge
-        let _pending = self.state.metrics.jobs_pending.increment();
+        let server = Arc::new(Server {
+            builder,
+            job_queue,
+            jobs_io,
+            jobs: Default::default(),
+            lifetime,
+            metrics,
+            occupancy,
+            pre_fetch,
+            schedulers: Default::default(),
+            server_id,
+            tasks,
+            load_toolchain,
+        });
 
-        // Run the build
-        self.run_build(job_id, toolchain_dir, inputs, command, outputs)
-            .await
-            .map(|result| {
-                // If the build failed because the server was terminated,
-                // report it as a server termination, not a failed build.
-                if !self.state.is_alive() {
-                    return RunJobResponse::server_terminated(&self.state.id);
-                }
-                if !result.output.success() && !result.output.exit() {
-                    return RunJobResponse::build_process_killed(&self.state.id);
-                }
-                RunJobResponse::Complete {
-                    result,
-                    server_id: self.state.id.clone(),
-                }
-            })
-            .map_err(|e| {
-                if self.state.is_alive() {
-                    if let BuildError::UnpackInputs(_) = e {
-                        RunJobError::MissingJobInputs
-                    } else {
-                        RunJobError::Retryable(e.into())
-                    }
-                } else {
-                    RunJobError::server_terminated()
-                }
-            })
-    }
-}
+        server.tasks.set_service(server.clone())?;
 
-#[async_trait]
-impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFunc {
-    async fn call(&self, args: &RunJobArgs) -> Result<RunJobResponse> {
-        let RunJobArgs {
-            job_id,
-            reply_to,
-            toolchain,
-            command,
-            outputs,
-        } = args;
-        if self.state.is_alive() {
-            self.load_job_and_run_build(
-                job_id,
-                reply_to,
-                toolchain.clone(),
-                command.clone(),
-                outputs.clone(),
-            )
-            .await
-        } else {
-            Err(RunJobError::server_terminated())
-        }
-        .map_err(|err| anyhow!(err))
+        Ok(server)
     }
 }
 
 #[derive(Clone)]
 pub struct Server {
     builder: Arc<dyn BuilderIncoming>,
-    jobs_storage: Arc<dyn Storage>,
-    state: ServerState,
+    job_queue: Arc<tokio::sync::Semaphore>,
+    jobs_io: Jobs,
+    jobs: Arc<Mutex<HashMap<String, Instant>>>,
+    lifetime: Arc<tokio::sync::watch::Sender<bool>>,
+    metrics: ServerMetrics,
+    occupancy: usize,
+    pre_fetch: usize,
+    schedulers: Arc<Mutex<HashMap<String, Instant>>>,
+    server_id: String,
     tasks: Arc<dyn dist::tasks::ServerTasks>,
-    jobs: AsyncMulticast<RunJobArgs, RunJobResponse>,
-    schedulers: Arc<futures::lock::Mutex<HashMap<String, Instant>>>,
+    load_toolchain: AsyncMulticast<Toolchain, PathBuf>,
 }
 
 impl Server {
-    pub fn new(
-        builder: Arc<dyn BuilderIncoming>,
-        jobs_storage: Arc<dyn Storage>,
-        state: ServerState,
-        tasks: Arc<dyn dist::tasks::ServerTasks>,
-        toolchains: Arc<dyn ToolchainService>,
-    ) -> Result<Arc<Self>> {
-        let this = Arc::new(Self {
-            builder: builder.clone(),
-            jobs_storage: jobs_storage.clone(),
-            state: state.clone(),
-            tasks: tasks.clone(),
-            jobs: AsyncMulticast::new(RunJobFunc {
-                builder,
-                jobs_storage,
-                state,
-                toolchains: AsyncMulticast::new(LoadToolchainFn { toolchains }),
-            }),
-            schedulers: Default::default(),
-        });
-
-        this.tasks.set_service(this.clone())?;
-
-        Ok(this)
+    pub fn builder() -> ServerBuilder {
+        ServerBuilder::default()
     }
 
     pub async fn start(
@@ -652,16 +253,10 @@ impl Server {
 
         tracing::info!(
             "Server `{}` initialized to run {} parallel build job(s) and prefetch up to {} job(s) in the background",
-            self.state.id,
-            self.state.occupancy,
-            self.state.pre_fetch,
+            self.server_id,
+            self.occupancy,
+            self.pre_fetch,
         );
-
-        crate::util::daemonize(
-            crate::util::get_process_fds(|_| false)
-                .as_deref()
-                .unwrap_or_default(),
-        )?;
 
         // Start celery
         let celery = async {
@@ -704,7 +299,12 @@ impl Server {
             let this = self.clone();
             async move {
                 loop {
-                    let _ = this.send_heartbeat().await;
+                    let _ = futures::future::join(
+                        this.poll_for_cancelled_jobs(),     //
+                        this.broadcast_server_status(None), //
+                    )
+                    .await;
+
                     tokio::time::sleep(heartbeat_interval).await;
                 }
             }
@@ -729,13 +329,8 @@ impl Server {
             _ = status => Ok(()),
         };
 
-        // Drain the jobs map before broadcasting the shutdown signal.
-        // This ensures the "Server terminated" response is written for all
-        // jobs active when SIGINT was received.
-        let jobs = self.state.jobs.lock().unwrap().drain().collect::<Vec<_>>();
-
-        // Broadcast server is now shutting down.
-        self.state.alive.send_replace(false);
+        // Broadcast the server is shutting down.
+        self.lifetime.send_replace(false);
 
         tracing::info!(
             "Waiting {}s for graceful shutdown",
@@ -743,45 +338,30 @@ impl Server {
         );
 
         let shutdown_jobs = tokio::time::timeout(shutdown_timeout, async {
-            let jobs_label = if jobs.len() == 1 {
-                format!("{} pending job", jobs.len())
+            let num_jobs = self.jobs.lock().await.len();
+
+            let jobs_label = if num_jobs == 1 {
+                format!("{} pending job", num_jobs)
             } else {
-                format!("{} pending jobs", jobs.len())
+                format!("{} pending jobs", num_jobs)
             };
 
             tracing::info!("Cancelling {jobs_label}");
 
             // Kill build processes, remove containers, overlayfs dirs, etc.
-            let builder = async {
-                self.builder.shutdown().await;
-                tracing::info!("Cancelled {jobs_label}");
-                Ok(())
-            };
+            self.builder.shutdown().await;
 
-            // Write "Server terminated" job responses and send the `job_finished` tasks
-            // back to each interested scheduler.
-            let replies = async {
-                let replies =
-                    jobs.into_iter()
-                        .map(|(job_id, JobInfo { reply_to, .. })| async move {
-                            tracing::info!(
-                                "Sending server terminated response for job {job_id} to {reply_to}"
-                            );
-                            self.job_finished(
-                                &job_id,
-                                &reply_to,
-                                &RunJobResponse::server_terminated(&self.state.id),
-                            )
-                            .await
-                        });
-                futures::future::try_join_all(replies)
-                    .await
-                    .inspect(|_res| {
-                        tracing::info!("Reported server terminated for {jobs_label}");
-                    })
-            };
+            // Wait until all jobs are cancelled. When the build processes are
+            // cancelled, they should error with `BuildError::Cancelled`, which is
+            // translated into a `RunJobResponse::Retryable("Server terminated")`
+            // response written in `job_finished`
+            while !self.jobs.lock().await.is_empty() {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
 
-            tokio::try_join!(builder, replies)
+            tracing::info!("Cancelled {jobs_label}");
+
+            Ok(())
         })
         .await
         .unwrap_or_else(|e| Err(e.into()));
@@ -793,30 +373,129 @@ impl Server {
         shutdown_celery
             .and(shutdown_jobs)
             .and(shutdown_broker)
-            .map(|_| tracing::info!("Server shutdown gracefully"))
+            .inspect(|_| tracing::info!("Server shutdown gracefully"))
+            .inspect_err(|err| tracing::warn!("Server did not shutdown gracefully: {err:?}"))
     }
 
-    async fn send_heartbeat(&self) -> Result<()> {
-        // Prune schedulers we haven't seen in 90s
-        let now = Instant::now();
-        let timeout = Duration::from_secs(90);
-        let schedulers = {
+    async fn status_update(&self) -> StatusUpdate {
+        let (num_cpus, cpu_usage, mem_avail, mem_total) = self.metrics.system_metrics();
+
+        let running = self
+            .occupancy
+            .saturating_sub(self.job_queue.available_permits()) as u64;
+
+        let loading = self.metrics.jobs_loading.value();
+        let pending = self.metrics.jobs_pending.value().saturating_sub(running);
+        let accepted = self
+            .metrics
+            .jobs_accepted
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let finished = self
+            .metrics
+            .jobs_finished
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_micros();
+
+        let max_job_age = {
+            let jobs = self.jobs.lock().await;
+            let now = Instant::now();
+            jobs.values()
+                .map(|created_at| now.duration_since(*created_at).as_micros())
+                .max()
+                .unwrap_or(0)
+        };
+
+        StatusUpdate {
+            id: self.server_id.clone(),
+            queue: self.tasks.app().default_queue.clone(),
+            info: dist::SysStats {
+                cpu_usage,
+                mem_avail,
+                mem_total,
+                num_cpus,
+                occupancy: self.occupancy,
+                pre_fetch: self.pre_fetch,
+            },
+            jobs: dist::JobStats {
+                loading,
+                pending,
+                running,
+                accepted,
+                finished,
+            },
+            // Work around serde missing u128 type...
+            // u128 works fine if I use rusty-celery's macros,
+            // but not if I implement the Task trait directly.
+            // The only difference I see is they use `celery::export::Deserialize`
+            // instead of `serde::Deserialize`, but that does not solve the issue.
+            timestamp: (
+                // microseconds as seconds
+                timestamp.saturating_div(1_000_000) as u64,
+                // remainder microseconds as nanoseconds
+                (timestamp % 1_000_000).saturating_mul(1_000) as u32,
+            ),
+            max_job_age: (
+                // microseconds as seconds
+                max_job_age.saturating_div(1_000_000) as u64,
+                // remainder microseconds as nanoseconds
+                (max_job_age % 1_000_000).saturating_mul(1_000) as u32,
+            ),
+        }
+    }
+
+    async fn poll_for_cancelled_jobs(&self) -> Result<()> {
+        let cancelled_jobs =
+            futures::future::join_all(self.jobs.lock().await.keys().map(|job_id| async move {
+                (job_id.clone(), self.jobs_io.get_job_status(job_id).await)
+            }))
+            .await
+            .into_iter()
+            .filter_map(|(job_id, status)| {
+                status.ok().and_then(|status| {
+                    if matches!(status, Some(RunJobStatus::Cancelled)) {
+                        Some(job_id)
+                    } else {
+                        None
+                    }
+                })
+            });
+
+        let _ = futures::future::join_all(cancelled_jobs.map(|job_id| async move {
+            // Kill the running build
+            self.builder.finish_build(&job_id).await;
+        }))
+        .await;
+
+        Ok(())
+    }
+
+    async fn broadcast_server_status(&self, schedulers: Option<Vec<String>>) {
+        let schedulers = if let Some(schedulers) = schedulers {
+            schedulers
+        } else {
+            // Prune schedulers we haven't seen in 90s
+            let now = Instant::now();
+            let timeout = Duration::from_secs(90);
             let mut schedulers = self.schedulers.lock().await;
             schedulers.retain(|_, last_seen| now.duration_since(*last_seen) <= timeout);
             schedulers.keys().cloned().collect::<Vec<_>>()
         };
-        let status: StatusUpdate = (&self.state).into();
 
-        futures::future::try_join_all(
+        let status = self.status_update().await;
+
+        // Notify interested schedulers
+        let _ = futures::future::join_all(
             std::iter::once(self.tasks.update_status(status.clone(), None)).chain(
                 schedulers
                     .iter()
                     .map(|send_to| self.tasks.update_status(status.clone(), Some(send_to))),
             ),
         )
-        .await
-        .map_err(anyhow::Error::new)
-        .map(|_| ())
+        .await;
     }
 
     async fn health_check_listener(&self, health_check_bind_addr: SocketAddr) -> () {
@@ -884,38 +563,174 @@ impl Server {
         let _ = tokio::join!(outer, inners);
     }
 
-    async fn put_job_result(&self, job_id: &str, result: &RunJobResponse) -> Result<()> {
-        // Record put_job_result load time after retrying
-        let _timer = self.state.metrics.put_job_result_timer();
-        let result = bincode::serialize(result).map_err(|err| {
-            tracing::warn!("[put_job_result({job_id})]: Error serializing result: {err:?}");
-            err
-        })?;
-        self.jobs_storage
-            .put(&job_result_key(job_id), result.into())
+    async fn load_job_and_run_build(
+        &self,
+        job_id: &str,
+        toolchain: Toolchain,
+        command: CompileCommand,
+        outputs: Vec<String>,
+    ) -> std::result::Result<RunJobResponse, RunJobError> {
+        // Record total run_job time
+        let _timer = self.metrics.run_job_timer();
+
+        // Add job
+        {
+            let mut jobs = self.jobs.lock().await;
+            if !jobs.contains_key(job_id) {
+                jobs.insert(job_id.to_owned(), Instant::now());
+            }
+        }
+
+        // Increment the job_started counter
+        self.metrics.inc_job_accepted_count();
+
+        // Load the job toolchain and inputs
+        let (toolchain_dir, inputs) = self.load_job(job_id, toolchain).await?;
+
+        // Increment the job_loaded counter
+        self.metrics.inc_job_loaded_count();
+
+        // Increment the jobs_pending gauge
+        let _pending = self.metrics.jobs_pending.increment();
+
+        // Run the build
+        self.run_build(job_id, toolchain_dir, inputs, command, outputs)
             .await
-            .map(|_| ())
-            .map_err(|err| {
-                // Record put_job_result errors after retrying
-                if self.state.is_alive() {
-                    self.state.metrics.inc_put_job_result_error_count();
-                    tracing::warn!("[run_job({job_id})]: Error storing job result: {err:?}");
+            .map(|result| {
+                if !result.output.success() && !result.output.exit() {
+                    return RunJobResponse::build_process_killed(&self.server_id);
                 }
+                RunJobResponse::Complete {
+                    result,
+                    server_id: self.server_id.clone(),
+                }
+            })
+            .map_err(|err| {
+                if let BuildError::UnpackInputs(_) = err {
+                    RunJobError::MissingJobInputs
+                } else {
+                    RunJobError::Retryable(err.into())
+                }
+            })
+    }
+
+    async fn load_job(
+        &self,
+        job_id: &str,
+        toolchain: Toolchain,
+    ) -> std::result::Result<(PathBuf, opendal::Buffer), RunJobError> {
+        // Record load_job time
+        let _timer = self.metrics.load_job_timer();
+        let _loading = self.metrics.jobs_loading.increment();
+
+        // Load and unpack the toolchain
+        let toolchain_dir = self
+            .load_toolchain
+            .call(toolchain)
+            .await
+            .map(|(_, res)| res)
+            .map_err(|_| RunJobError::MissingToolchain)?;
+
+        // Load job inputs into memory
+        let inputs = self
+            .jobs_io
+            .get_job_inputs(job_id)
+            .await
+            .map_err(|_| RunJobError::MissingJobInputs)?;
+
+        Ok((toolchain_dir, inputs))
+    }
+
+    async fn run_build(
+        &self,
+        job_id: &str,
+        toolchain_dir: PathBuf,
+        inputs: opendal::Buffer,
+        command: CompileCommand,
+        outputs: Vec<String>,
+    ) -> std::result::Result<BuildResult, BuildError> {
+        // Record build time
+        let _timer = self.metrics.run_build_timer();
+        self.builder
+            .run_build(job_id, &toolchain_dir, inputs, command, outputs)
+            .await
+            .map_err(|err| {
+                // Record run_build errors
+                self.metrics.inc_job_build_error_count();
+                tracing::warn!("[run_job({job_id})]: Build error: {err:?}");
                 err
             })
     }
 
-    async fn job_finished(&self, job_id: &str, reply_to: &str, res: &RunJobResponse) -> Result<()> {
-        self.state.metrics.inc_job_finished_count();
-
+    async fn job_finished(&self, job_id: &str, res: &RunJobResponse) -> Result<()> {
         // Store the job result for retrieval by a scheduler
-        let _ = self.put_job_result(job_id, res).await;
+        let _ = self.jobs_io.put_job_result(job_id, res).await;
 
-        self.tasks
-            .job_finished(job_id, reply_to, From::from(&self.state))
-            .await
-            .map_err(anyhow::Error::new)
-            .map(|_| ())
+        // Delete the status for the now finished job
+        let schedulers = self.del_finished_job_status(job_id).await?;
+
+        match res {
+            RunJobResponse::RetryableError { message, .. } if message == "Server terminated" => {
+                tracing::info!(
+                    "Sending server terminated response for job {job_id} to {schedulers:?}"
+                );
+            }
+            _ => {}
+        }
+
+        let status = self.status_update().await;
+
+        // Notify interested schedulers
+        futures::future::try_join_all(schedulers.iter().map(|reply_to| async {
+            self.tasks
+                .job_finished(job_id, reply_to, status.clone())
+                .await
+                .map_err(anyhow::Error::new)
+                .map(|_| ())
+        }))
+        .await?;
+
+        Ok(())
+    }
+
+    async fn check_if_job_cancelled(&self, job_id: &str, reply_to: &str) -> Result<RunJobStatus> {
+        loop {
+            let mut status = self
+                .jobs_io
+                .get_job_status(job_id)
+                .await?
+                .unwrap_or_else(|| RunJobStatus::Active {
+                    schedulers: Vec::with_capacity(1),
+                });
+
+            match &mut status {
+                RunJobStatus::Active { schedulers } => {
+                    if schedulers.iter().map(|s| s.as_str()).contains(reply_to) {
+                        break Ok(status);
+                    }
+                    schedulers.push(reply_to.into());
+                    self.jobs_io.put_job_status(job_id, &status).await?;
+                }
+                RunJobStatus::Cancelled => break Ok(status),
+            }
+        }
+    }
+
+    async fn del_finished_job_status(&self, job_id: &str) -> Result<Vec<String>> {
+        let mut result = None;
+        loop {
+            let status = self.jobs_io.get_job_status(job_id).await?;
+
+            if let Some(status) = status {
+                match status {
+                    RunJobStatus::Active { schedulers } => result = Some(schedulers),
+                    RunJobStatus::Cancelled => result = None,
+                }
+                self.jobs_io.del_job_status(job_id).await?;
+            } else {
+                break Ok(result.unwrap_or_default());
+            }
+        }
     }
 }
 
@@ -929,64 +744,69 @@ impl ServerService for Server {
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> Result<RunJobResponse> {
-        let reply_to = reply_to.to_owned();
+        if *self.lifetime.borrow() {
+            self.schedulers
+                .lock()
+                .await
+                .entry(reply_to.into())
+                .and_modify(|last_seen| {
+                    *last_seen = Instant::now();
+                })
+                .or_insert_with(Instant::now);
 
-        self.schedulers
-            .lock()
-            .await
-            .entry(reply_to.clone())
-            .and_modify(|last_seen| {
-                *last_seen = Instant::now();
-            })
-            .or_insert_with(Instant::now);
-
-        // Broadcast status after accepting the job
-        self.tasks
-            .update_status((&self.state).into(), Some(&reply_to))
-            .await
-            .map_err(anyhow::Error::new)
-            .map(|_| ())?;
-
-        self.jobs
-            .call(RunJobArgs {
-                job_id: job_id.to_owned(),
-                reply_to,
-                toolchain,
-                command,
-                outputs,
-            })
-            .await
-            .map(|(_, res)| res)
+            match self.check_if_job_cancelled(job_id, reply_to).await? {
+                RunJobStatus::Cancelled => {
+                    // Broadcast status after accepting the job
+                    self.broadcast_server_status(None).await;
+                    Err(RunJobError::job_cancelled())
+                }
+                RunJobStatus::Active { schedulers } => {
+                    // Broadcast status after accepting the job
+                    self.broadcast_server_status(Some(schedulers)).await;
+                    // Load and run the job
+                    self.load_job_and_run_build(job_id, toolchain, command, outputs)
+                        .await
+                }
+            }
+        } else {
+            Err(RunJobError::server_terminated())
+        }
+        .map_err(anyhow::Error::new)
     }
 
-    async fn notify_run_job_err(&self, job_id: &str, err: &RunJobError) -> Result<()> {
+    async fn notify_run_job_err(&self, job_id: &str, err: RunJobError) -> Result<()> {
+        // If the build failed because the server was terminated,
+        // report it as a server termination, not a failed build.
+        let err = if *self.lifetime.borrow() {
+            err
+        } else {
+            RunJobError::server_terminated()
+        };
         self.notify_run_job_res(
             job_id,
-            &RunJobResponse::from_run_job_error(&self.state.id, err),
+            &RunJobResponse::from_run_job_error(&self.server_id, &err),
         )
         .await
     }
 
     async fn notify_run_job_res(&self, job_id: &str, res: &RunJobResponse) -> Result<()> {
-        // Remove job and increment the job_finished counter
-        let job = self.state.jobs.lock().unwrap().remove(job_id);
-        if let Some(job) = job {
-            if matches!(res, RunJobResponse::Complete { .. }) {
-                tracing::debug!("[run_job_success({job_id})]: {res:?}");
-            } else {
-                tracing::debug!("[run_job_failure({job_id})]: {res:?}");
-            }
-
-            // Store the job result and notify the interested scheduler
-            let res = self.job_finished(job_id, &job.reply_to, res).await;
-
-            // Clean up the build resources
-            self.builder.finish_build(job_id).await;
-
-            res
+        if matches!(res, RunJobResponse::Complete { .. }) {
+            tracing::debug!("[run_job_success({job_id})]: {res:?}");
         } else {
-            Ok(())
+            tracing::debug!("[run_job_failure({job_id})]: {res:?}");
         }
+
+        // Remove the job
+        self.jobs.lock().await.remove(job_id);
+
+        // Increment the job_finished counter
+        self.metrics.inc_job_finished_count();
+
+        // Clean up the build resources
+        self.builder.finish_build(job_id).await;
+
+        // Store the job result and notify the interested schedulers
+        self.job_finished(job_id, res).await
     }
 
     async fn update_scheduler_status(&self, status: StatusUpdate) -> Result<()> {
@@ -999,5 +819,23 @@ impl ServerService for Server {
             })
             .or_insert_with(Instant::now);
         Ok(())
+    }
+}
+
+impl AsyncMulticastArgs for Toolchain {
+    type Key = String;
+    fn hash(&self) -> Self::Key {
+        self.archive_id.clone()
+    }
+}
+
+struct LoadToolchainFn {
+    toolchains: Arc<dyn ToolchainService>,
+}
+
+#[async_trait]
+impl AsyncMulticastFunc<Toolchain, PathBuf> for LoadToolchainFn {
+    async fn call(&self, tc: &Toolchain) -> Result<PathBuf> {
+        self.toolchains.get_toolchain(tc).await
     }
 }
