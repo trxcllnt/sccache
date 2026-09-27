@@ -1071,8 +1071,8 @@ impl ServerMetrics {
         })
         .collect::<BTreeMap<&'static str, Cow<'static, str>>>();
 
-        let jobs_pending = Arc::new(metrics.gauge(JOB_PENDING_COUNT));
-        let jobs_loading = Arc::new(metrics.gauge(JOB_LOADING_COUNT));
+        let jobs_pending = Arc::new(metrics.gauge(m_names.get(JOB_PENDING_COUNT).unwrap().clone()));
+        let jobs_loading = Arc::new(metrics.gauge(m_names.get(JOB_LOADING_COUNT).unwrap().clone()));
         let sysinfo = SysinfoMetrics::new(prefix, metrics.clone(), num_cpus.into());
 
         Self {
