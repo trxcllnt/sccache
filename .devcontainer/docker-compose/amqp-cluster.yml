@@ -19,4 +19,4 @@ services:
     image: haproxy:1.7
     ports: ["5672:5672", "15672:15672"]
     depends_on: [rabbitmq1, rabbitmq2, rabbitmq3]
-    volumes: ["./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro"]
+    volumes: ["./amqp-cluster-haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro"]
