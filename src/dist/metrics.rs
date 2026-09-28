@@ -916,8 +916,6 @@ impl SysinfoMetrics {
             .or_else(|| sysinfo.physical_core_count())
             .unwrap_or_default();
 
-        metrics.increment_counter(m_names.get(NUM_CPUS).unwrap().clone(), num_cpus as u64);
-
         Self {
             metrics,
             m_names,
@@ -937,6 +935,8 @@ impl SysinfoMetrics {
         let cpu_usage = sys.global_cpu_usage();
         let mem_avail = sys.available_memory();
         let mem_total = sys.total_memory();
+        self.metrics
+            .histo(self.m_name(NUM_CPUS), self.num_cpus as f64);
         self.metrics.histo(self.m_name(CPU_USAGE_RATIO), cpu_usage);
         self.metrics
             .histo(self.m_name(MEM_AVAIL_BYTES), mem_avail as f64);
