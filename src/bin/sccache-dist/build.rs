@@ -246,7 +246,7 @@ impl OverlayBuilder {
         inputs: opendal::Buffer,
         output_paths: Vec<String>,
         overlay: OverlaySpec,
-        job_queue: &tokio::sync::Semaphore,
+        job_queue: Arc<tokio::sync::Semaphore>,
         children: &OverlayChildren,
     ) -> BuildResult {
         tracing::trace!("[perform_build({job_id})]: Compile environment: {env_vars:?}");
@@ -262,6 +262,7 @@ impl OverlayBuilder {
 
         let build_in_overlay =
             move |runtime: &tokio::runtime::Handle,
+                  job_queue: &tokio::sync::Semaphore,
                   cancelled_tx: tokio::sync::oneshot::Sender<()>,
                   cancelled_rx: tokio::sync::oneshot::Receiver<()>| {
                 let job_id = job_id_1.clone();
@@ -403,10 +404,17 @@ impl OverlayBuilder {
                 cmd.stderr(Stdio::piped());
                 cmd.kill_on_drop(true);
 
-                tracing::trace!("[perform_build({job_id})]: performing compile");
-                tracing::trace!("[perform_build({job_id})]: bubblewrap command: {:?}", cmd);
-
                 let output = runtime.block_on(async move {
+                    // Guard compiling until we get a token from the job queue
+                    let _job_slot = job_queue
+                        .acquire()
+                        .await
+                        .map_err(|e| BuildError::Unknown(e.into()))
+                        .ok()?;
+
+                    tracing::trace!("[perform_build({job_id_1})]: performing compile");
+                    tracing::trace!("[perform_build({job_id_1})]: bubblewrap command: {cmd:?}");
+
                     let mut child = match cmd.spawn() {
                         Ok(child) => child,
                         Err(e) => return Some(Err(BuildError::SpawnChildProcess(e))),
@@ -523,19 +531,18 @@ impl OverlayBuilder {
             .insert(job_id.to_owned(), (overlay, cancel_job_tx, cancelled_rx));
 
         {
-            // Guard compiling until we get a token from the job queue
-            let _job_slot = job_queue
-                .acquire()
-                .await
-                .map_err(|e| BuildError::Unknown(e.into()))?;
-
             // Explicitly launch a new thread outside tokio's thread pool,
             // so that our overlayfs and tmpfs are unmounted when it dies.
             //
             // Keeping the handle alive for the lifetime of the oneshot channel
             // to ensure it's only dropped if the Future is cancelled.
             let handle = std::thread::spawn(move || {
-                completed_tx.send(build_in_overlay(&runtime, cancelled_tx, cancel_job_rx))
+                completed_tx.send(build_in_overlay(
+                    &runtime,
+                    job_queue.as_ref(),
+                    cancelled_tx,
+                    cancel_job_rx,
+                ))
             });
 
             // Asynchronously wait till the build thread is done so we don't block the tokio worker thread.
@@ -604,7 +611,7 @@ impl BuilderIncoming for OverlayBuilder {
             inputs,
             outputs,
             overlay.clone(),
-            self.job_queue.as_ref(),
+            self.job_queue.clone(),
             self.children.as_ref(),
         )
         .await;
