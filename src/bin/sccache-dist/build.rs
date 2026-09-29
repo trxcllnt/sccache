@@ -404,16 +404,18 @@ impl OverlayBuilder {
                 cmd.stderr(Stdio::piped());
                 cmd.kill_on_drop(true);
 
-                let output = runtime.block_on(async move {
-                    // Guard compiling until we get a token from the job queue
-                    let _job_slot = job_queue
+                // Guard compiling until we get a token from the job queue
+                let _job_slot = runtime.block_on(async move {
+                    job_queue
                         .acquire()
                         .await
                         .map_err(|e| BuildError::Unknown(e.into()))
-                        .ok()?;
+                })?;
 
-                    tracing::trace!("[perform_build({job_id_1})]: performing compile");
-                    tracing::trace!("[perform_build({job_id_1})]: bubblewrap command: {cmd:?}");
+                tracing::trace!("[perform_build({job_id})]: performing compile");
+                tracing::trace!("[perform_build({job_id})]: bubblewrap command: {cmd:?}");
+
+                let output = runtime.block_on(async move {
 
                     let mut child = match cmd.spawn() {
                         Ok(child) => child,
@@ -850,49 +852,54 @@ impl DockerBuilder {
                 .map_err(BuildError::Unknown)?;
         }
 
-        let output: ProcessOutput = {
-            // Bail early if job_queue is closed while this job is running
-            if job_queue.is_closed() {
-                return Err(BuildError::Cancelled);
-            }
+        // Bail early if job_queue is closed while this job is running
+        if job_queue.is_closed() {
+            return Err(BuildError::Cancelled);
+        }
 
-            tracing::trace!("[perform_build({job_id})]: creating compile command");
+        tracing::trace!("[perform_build({job_id})]: creating compile command");
 
-            // TODO: likely shouldn't perform the compile as root in the container
-            let mut cmd = tokio::process::Command::new("docker");
+        // TODO: likely shouldn't perform the compile as root in the container
+        let mut cmd = tokio::process::Command::new("docker");
 
-            cmd.arg("exec")
-                // Run in `cwd`
-                .arg("--workdir")
-                .arg(cwd)
-                // Define envvars
-                .args(env_vars.iter().flat_map(|(k, v)| {
-                    if k.contains('=') {
-                        tracing::debug!(
-                            "[perform_build({job_id})]: Skipping environment variable: {k:?}"
-                        );
-                        vec![]
-                    } else {
-                        vec!["--env".into(), format!("{k}=\"{v}\"")]
-                    }
-                }))
-                // container name
-                .arg(c_name)
-                // The exec command (e.g. /usr/bin/wine)
-                .args(exec_cmd)
-                // Finally, the executable and arguments
-                .arg(&executable)
-                .args(arguments)
-                .kill_on_drop(true);
+        cmd.arg("exec")
+            // Run in `cwd`
+            .arg("--workdir")
+            .arg(cwd)
+            // Define envvars
+            .args(env_vars.iter().flat_map(|(k, v)| {
+                if k.contains('=') {
+                    tracing::debug!(
+                        "[perform_build({job_id})]: Skipping environment variable: {k:?}"
+                    );
+                    vec![]
+                } else {
+                    vec!["--env".into(), format!("{k}=\"{v}\"")]
+                }
+            }))
+            // container name
+            .arg(c_name)
+            // The exec command (e.g. /usr/bin/wine)
+            .args(exec_cmd)
+            // Finally, the executable and arguments
+            .arg(&executable)
+            .args(arguments)
+            .kill_on_drop(true);
 
-            tracing::trace!("[perform_build({job_id})]: performing compile");
-            tracing::trace!("[perform_build({job_id})]: {:?}", cmd.as_std());
+        // Guard compiling until we get a token from the job queue
+        let _job_slot = job_queue
+            .acquire()
+            .await
+            .map_err(|e| BuildError::Unknown(e.into()))?;
 
-            cmd.output()
-                .await
-                .map_err(BuildError::SpawnChildProcess)?
-                .into()
-        };
+        tracing::trace!("[perform_build({job_id})]: performing compile");
+        tracing::trace!("[perform_build({job_id})]: {:?}", cmd.as_std());
+
+        let output: ProcessOutput = cmd
+            .output()
+            .await
+            .map_err(BuildError::SpawnChildProcess)?
+            .into();
 
         let outputs = {
             // Bail early if job_queue is closed while this job is running
@@ -1016,13 +1023,6 @@ impl BuilderIncoming for DockerBuilder {
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> BuildResult {
-        // Guard compiling until we get a token from the job queue
-        let _job_slot = self
-            .job_queue
-            .acquire()
-            .await
-            .map_err(|e| BuildError::Unknown(e.into()))?;
-
         tracing::debug!("[run_build({job_id})]: Performing build in container");
         let c_name = format!("sccache-builder-{job_id}");
 
