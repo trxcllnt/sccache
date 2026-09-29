@@ -97,6 +97,12 @@ fn run(command: Command) -> Result<()> {
                     shutdown_timeout_secs,
                     toolchains,
                 }) => {
+                    tracing::info!(
+                        "Starting {sccache} v{version} scheduler",
+                        sccache = env!("CARGO_BIN_NAME"),
+                        version = env!("CARGO_PKG_VERSION")
+                    );
+
                     let metrics = Metrics::new(
                         metrics,
                         [
@@ -193,6 +199,12 @@ fn run(command: Command) -> Result<()> {
                     toolchain_cache_size,
                     toolchains,
                 }) => {
+                    tracing::info!(
+                        "Starting {sccache} v{version} server",
+                        sccache = env!("CARGO_BIN_NAME"),
+                        version = env!("CARGO_PKG_VERSION")
+                    );
+
                     let metrics = Metrics::new(
                         metrics,
                         [

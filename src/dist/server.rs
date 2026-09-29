@@ -796,9 +796,6 @@ impl ServerService for Server {
             tracing::debug!("[run_job_failure({job_id})]: {res:?}");
         }
 
-        // Remove the job
-        self.jobs.lock().await.remove(job_id);
-
         // Increment the job_finished counter
         self.metrics.inc_job_finished_count();
 
@@ -806,7 +803,12 @@ impl ServerService for Server {
         self.builder.finish_build(job_id).await;
 
         // Store the job result and notify the interested schedulers
-        self.job_finished(job_id, res).await
+        let res = self.job_finished(job_id, res).await;
+
+        // Remove the job
+        self.jobs.lock().await.remove(job_id);
+
+        res
     }
 
     async fn update_scheduler_status(&self, status: StatusUpdate) -> Result<()> {

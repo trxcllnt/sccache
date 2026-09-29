@@ -265,6 +265,11 @@ impl OverlayBuilder {
                   job_queue: &tokio::sync::Semaphore,
                   cancelled_tx: tokio::sync::oneshot::Sender<()>,
                   cancelled_rx: tokio::sync::oneshot::Receiver<()>| {
+                // Bail if job_queue is closed while this job is running
+                if job_queue.is_closed() {
+                    return Err(BuildError::Cancelled);
+                }
+
                 let job_id = job_id_1.clone();
                 let job_id_1 = job_id.clone();
                 let build_dir = overlay_1.build_dir;
@@ -406,10 +411,7 @@ impl OverlayBuilder {
 
                 // Guard compiling until we get a token from the job queue
                 let _job_slot = runtime.block_on(async move {
-                    job_queue
-                        .acquire()
-                        .await
-                        .map_err(|e| BuildError::Unknown(e.into()))
+                    job_queue.acquire().await.map_err(|_| BuildError::Cancelled)
                 })?;
 
                 tracing::trace!("[perform_build({job_id})]: performing compile");
@@ -474,7 +476,8 @@ impl OverlayBuilder {
                     }
                 });
 
-                let output = match output {
+                // Bail if job_queue is closed while this job is running
+                let output = match output.filter(|_| !job_queue.is_closed()) {
                     None => return Err(BuildError::Cancelled),
                     Some(output) => output?,
                 };
@@ -527,10 +530,15 @@ impl OverlayBuilder {
         let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
         let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
 
-        children
-            .lock()
-            .await
-            .insert(job_id.to_owned(), (overlay, cancel_job_tx, cancelled_rx));
+        {
+            let mut children = children.lock().await;
+            // Bail early if job_queue is closed while this job is running
+            if job_queue.is_closed() {
+                Self::finish_overlay(job_id, &overlay).await;
+                return Err(BuildError::Cancelled);
+            }
+            children.insert(job_id.to_owned(), (overlay, cancel_job_tx, cancelled_rx));
+        }
 
         {
             // Explicitly launch a new thread outside tokio's thread pool,
@@ -600,6 +608,12 @@ impl BuilderIncoming for OverlayBuilder {
             .prepare_overlay_dirs(job_id, toolchain_dir)
             .await
             .map_err(BuildError::PrepareOverlay)?;
+
+        // Bail early if job_queue is closed while this job is running
+        if self.job_queue.is_closed() {
+            Self::finish_overlay(job_id, &overlay).await;
+            return Err(BuildError::Cancelled);
+        }
 
         tracing::debug!("[run_build({job_id})]: Performing build in {overlay:?}");
 
@@ -699,6 +713,11 @@ impl DockerBuilder {
         inputs: opendal::Buffer,
         job_queue: &tokio::sync::Semaphore,
     ) -> BuildResult {
+        // Bail early if job_queue is closed while this job is running
+        if job_queue.is_closed() {
+            return Err(BuildError::Cancelled);
+        }
+
         tracing::trace!("[perform_build({job_id})]: Compile environment: {env_vars:?}");
         tracing::trace!("[perform_build({job_id})]: Compile command: {executable:?} {arguments:?}");
         tracing::trace!("[perform_build({job_id})]: Output paths: {output_paths:?}");
@@ -946,6 +965,11 @@ impl DockerBuilder {
                     .into_iter()
                     .zip(host_absolute_output_dirs)
                 {
+                    // Bail early if job_queue is closed while this job is running
+                    if job_queue.is_closed() {
+                        return Err(BuildError::Cancelled);
+                    }
+
                     tracing::trace!(
                         "[perform_build({job_id})]: copying output dir: {container_path:?} -> {host_path:?}"
                     );
@@ -1023,13 +1047,22 @@ impl BuilderIncoming for DockerBuilder {
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> BuildResult {
+        // Bail early if job_queue is closed while this job is running
+        if self.job_queue.is_closed() {
+            return Err(BuildError::Cancelled);
+        }
+
         tracing::debug!("[run_build({job_id})]: Performing build in container");
         let c_name = format!("sccache-builder-{job_id}");
 
-        self.containers
-            .lock()
-            .await
-            .insert(job_id.to_owned(), c_name.clone());
+        {
+            let mut containers = self.containers.lock().await;
+            // Bail early if job_queue is closed while this job is running
+            if self.job_queue.is_closed() {
+                return Err(BuildError::Cancelled);
+            }
+            containers.insert(job_id.to_owned(), c_name.clone());
+        }
 
         let res = Self::perform_build(
             job_id,
