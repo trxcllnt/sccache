@@ -404,6 +404,7 @@ mod test {
             Some(MessageBroker {
                 addr: "amqp://127.0.0.1:5672//".into(),
                 max_retries: 2,
+                ..Default::default()
             })
         );
 
@@ -423,6 +424,7 @@ mod test {
             Some(MessageBroker {
                 addr: "redis://127.0.0.1:6379".into(),
                 max_retries: 2,
+                ..Default::default()
             })
         );
 

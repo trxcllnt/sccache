@@ -53,8 +53,12 @@ mod dist_server {
     pub struct MessageBroker {
         #[serde(default)]
         pub addr: String,
+        #[serde(default = "defaults::default_broker_connection_timeout")]
+        pub connection_timeout: u32,
         #[serde(default = "defaults::default_broker_max_retries")]
         pub max_retries: u32,
+        #[serde(default = "defaults::default_broker_retry_delay")]
+        pub retry_delay: u32,
     }
 
     impl Default for MessageBroker {
@@ -173,8 +177,16 @@ pub mod defaults {
 
     pub use crate::config::defaults::default_true;
 
+    pub fn default_broker_connection_timeout() -> u32 {
+        Duration::from_secs(5).as_secs() as u32
+    }
+
     pub fn default_broker_max_retries() -> u32 {
-        0
+        5
+    }
+
+    pub fn default_broker_retry_delay() -> u32 {
+        Duration::from_secs(5).as_secs() as u32
     }
 
     pub fn default_keepalive_interval() -> u64 {

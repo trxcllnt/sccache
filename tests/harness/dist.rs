@@ -376,7 +376,6 @@ impl DistSystemGlobals {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct DistMessageBroker {
-    addr: String,
     kind: String,
     host_port: u16,
     container_port: u16,
@@ -392,11 +391,10 @@ impl DistMessageBroker {
                 let addr = format!("amqp://127.0.0.1:{host_port}//");
                 Self {
                     kind: "rabbitmq".into(),
-                    config: addr.clone().into(),
+                    config: addr.into(),
                     image: "rabbitmq:latest".into(),
                     container_port: 5672,
                     host_port,
-                    addr,
                 }
             }
             "redis" => {
@@ -404,11 +402,10 @@ impl DistMessageBroker {
                 let addr = format!("redis://127.0.0.1:{host_port}/");
                 Self {
                     kind: "redis".into(),
-                    config: addr.clone().into(),
+                    config: addr.into(),
                     image: "redis:7".into(),
                     container_port: 6379,
                     host_port,
-                    addr,
                 }
             }
             _ => unreachable!(""),
@@ -424,7 +421,7 @@ impl DistMessageBroker {
     }
 
     pub fn addr(&self) -> HTTPUrl {
-        HTTPUrl::from_url(reqwest::Url::parse(&self.addr).unwrap())
+        HTTPUrl::from_url(reqwest::Url::parse(&self.config.addr).unwrap())
     }
 }
 

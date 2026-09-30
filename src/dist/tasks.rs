@@ -150,7 +150,7 @@ impl Tasks {
             let server_to_schedulers = server_to_schedulers_queue();
             Ok(celery::CeleryBuilder::new(id, &message_broker.addr)
                 // Indefinitely retry connecting to the broker
-                .broker_connection_max_retries(u32::MAX)
+                .broker_connection_max_retries(message_broker.max_retries)
                 // Queues with no consumers should be deleted after 60s
                 .broker_set_queue_expire_time(&scheduler_to_servers, 60 * 1000)
                 .broker_set_queue_expire_time(&server_to_schedulers, 60 * 1000)
@@ -160,7 +160,8 @@ impl Tasks {
                 .task_route(task_impls::run_job::NAME, &scheduler_to_servers)
                 // MessagePack is faster than JSON/Yaml/pickle etc.
                 .task_content_type(MessageContentType::MsgPack)
-                .task_max_retries(message_broker.max_retries)
+                // Don't retry any tasks
+                .task_max_retries(0)
                 // Don't delay retrying failed tasks
                 .task_min_retry_delay(0)
                 .task_max_retry_delay(0)
@@ -412,7 +413,7 @@ mod task_impls {
         }
     }
 
-    #[celery::task(max_retries = 0)]
+    #[celery::task]
     pub async fn job_finished(job_id: String, status: StatusUpdate) -> TaskResult<()> {
         tracing::trace!("[job_finished({job_id}, {status:?})]");
 
@@ -428,7 +429,7 @@ mod task_impls {
             })
     }
 
-    #[celery::task(max_retries = 0)]
+    #[celery::task]
     pub async fn server_status(status: StatusUpdate) -> TaskResult<()> {
         let id = status.id.clone();
 
@@ -444,7 +445,7 @@ mod task_impls {
             })
     }
 
-    #[celery::task(max_retries = 0)]
+    #[celery::task]
     pub async fn scheduler_status(status: StatusUpdate) -> TaskResult<()> {
         let id = status.id.clone();
 
