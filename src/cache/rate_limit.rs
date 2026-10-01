@@ -223,10 +223,10 @@ mod test {
 
             let storage = RateLimitStorage::create(
                 storage,
-                Duration::from_millis(100), // read_timeout
-                None,                       // write_timeout
-                3,                          // error_count
-                Duration::from_secs(5),     // window_size
+                Duration::from_millis(1), // read_timeout
+                None,                     // write_timeout
+                3,                        // error_count
+                Duration::from_secs(5),   // window_size
             );
 
             // Three timeout errors should trigger the rate limiter
@@ -257,10 +257,10 @@ mod test {
 
             let storage = RateLimitStorage::create(
                 storage,
-                Duration::from_secs(5),           // read_timeout
-                Some(Duration::from_millis(500)), // write_timeout
-                3,                                // error_count
-                Duration::from_secs(5),           // window_size
+                Duration::from_secs(5),         // read_timeout
+                Some(Duration::from_millis(1)), // write_timeout
+                3,                              // error_count
+                Duration::from_secs(5),         // window_size
             );
 
             // Three timeout errors should trigger the rate limiter
@@ -274,8 +274,8 @@ mod test {
                 "Rate limited due to error count"
             );
 
-            // Wait 2s for the rate limit window to pass
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            // Wait 6s for the rate limit window to pass
+            tokio::time::sleep(Duration::from_secs(6)).await;
 
             // Ensure we can get the key seeded to MockStorage at the start
             assert!(matches!(storage.get("key").await.unwrap(), Cache::Hit(..)));
