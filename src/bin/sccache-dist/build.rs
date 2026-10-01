@@ -570,11 +570,26 @@ impl OverlayBuilder {
         }
     }
 
+    async fn finish_build(
+        job_id: &str,
+        overlay: OverlaySpec,
+        cancel: tokio::sync::oneshot::Sender<()>,
+        cancelled: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let _ = futures::join!(async { cancel.send(()) }, cancelled);
+        Self::finish_overlay(job_id, &overlay).await;
+    }
+
     async fn finish_overlay(job_id: &str, overlay: &OverlaySpec) {
         let OverlaySpec {
             build_dir,
             toolchain_dir: _,
         } = overlay;
+
+        tracing::debug!(
+            "[finish_build({job_id})]: Finishing with overlay {:?}",
+            overlay.build_dir.display()
+        );
 
         if build_dir.exists()
             && let Err(e) = tokio::fs::remove_dir_all(build_dir).await
@@ -639,12 +654,7 @@ impl BuilderIncoming for OverlayBuilder {
 
     async fn finish_build(&self, job_id: &str) {
         if let Some((overlay, cancel, cancelled)) = self.children.lock().await.remove(job_id) {
-            tracing::debug!(
-                "[finish_build({job_id})]: Finishing with overlay {:?}",
-                overlay.build_dir.display()
-            );
-            let _ = futures::join!(async { cancel.send(()) }, cancelled);
-            Self::finish_overlay(job_id, &overlay).await;
+            Self::finish_build(job_id, overlay, cancel, cancelled).await;
         }
     }
 
@@ -652,12 +662,7 @@ impl BuilderIncoming for OverlayBuilder {
         self.job_queue.close();
         futures::future::join_all(self.children.lock().await.drain().map(
             |(job_id, (overlay, cancel, cancelled))| async move {
-                tracing::debug!(
-                    "[shutdown({job_id})]: Finishing with overlay {:?}",
-                    overlay.build_dir.display()
-                );
-                let _ = futures::join!(async { cancel.send(()) }, cancelled);
-                Self::finish_overlay(&job_id, &overlay).await;
+                Self::finish_build(&job_id, overlay, cancel, cancelled).await;
             },
         ))
         .await;

@@ -252,7 +252,7 @@ impl Scheduler {
         };
 
         // Wait for axum shutdown
-        let shutdown_server = async move { server.await.context("Server error") };
+        let shutdown_server = async move { server.await.context("Axum server error") };
 
         self.tasks.app().display_pretty().await;
 

@@ -337,34 +337,56 @@ impl Server {
             shutdown_timeout.as_secs()
         );
 
-        let shutdown_jobs = tokio::time::timeout(shutdown_timeout, async {
-            let num_jobs = self.jobs.lock().await.len();
+        // Kill build processes, remove containers, overlayfs dirs, etc.
+        self.builder.shutdown().await;
 
-            let jobs_label = if num_jobs == 1 {
-                format!("{} pending job", num_jobs)
-            } else {
-                format!("{} pending jobs", num_jobs)
-            };
+        let shutdown_start = Instant::now();
 
-            tracing::info!("Cancelling {jobs_label}");
+        // Wait until all jobs are cancelled. When the build processes are
+        // cancelled, they should error with `BuildError::Cancelled`, which is
+        // translated into a `RunJobResponse::Retryable("Server terminated")`
+        // response written in `job_finished`
+        let shutdown_jobs = loop {
+            if Instant::now().duration_since(shutdown_start) <= shutdown_timeout {
+                let jobs = {
+                    let jobs = self.jobs.lock().await;
+                    if jobs.is_empty() {
+                        break Ok(());
+                    }
+                    jobs.keys().cloned().collect::<Vec<_>>()
+                };
 
-            // Kill build processes, remove containers, overlayfs dirs, etc.
-            self.builder.shutdown().await;
+                let jobs_info = if jobs.len() == 1 {
+                    format!("{} pending job", jobs.len())
+                } else {
+                    format!("{} pending jobs", jobs.len())
+                };
 
-            // Wait until all jobs are cancelled. When the build processes are
-            // cancelled, they should error with `BuildError::Cancelled`, which is
-            // translated into a `RunJobResponse::Retryable("Server terminated")`
-            // response written in `job_finished`
-            while !self.jobs.lock().await.is_empty() {
+                tracing::info!("Cancelling {jobs_info}");
+
+                let res = RunJobResponse::server_terminated(&self.server_id);
+                // Kill the jobs
+                let _ = futures::future::join_all(
+                    jobs.iter()
+                        .map(|job_id| self.notify_run_job_res(job_id, &res)),
+                )
+                .await;
+
+                // Kill build processes, remove containers, overlayfs dirs, etc.
+                self.builder.shutdown().await;
+
+                tracing::info!("Cancelled {jobs_info}");
+
                 tokio::time::sleep(Duration::from_secs(1)).await;
+            } else {
+                tracing::warn!(
+                    "Waited {}s for graceful shutdown, proceeding...",
+                    shutdown_timeout.as_secs()
+                );
+
+                break Err(anyhow!("Shutdown deadline elapsed"));
             }
-
-            tracing::info!("Cancelled {jobs_label}");
-
-            Ok(())
-        })
-        .await
-        .unwrap_or_else(|e| Err(e.into()));
+        };
 
         // Close broker connection.
         let shutdown_broker = self.tasks.app().close().await.context("Broker error");
@@ -450,24 +472,23 @@ impl Server {
     async fn poll_for_cancelled_jobs(&self) -> Result<()> {
         let cancelled_jobs =
             futures::future::join_all(self.jobs.lock().await.keys().map(|job_id| async move {
-                (job_id.clone(), self.jobs_io.get_job_status(job_id).await)
+                self.jobs_io
+                    .get_job_status(job_id)
+                    .await
+                    .unwrap_or(None)
+                    .filter(|status| matches!(status, RunJobStatus::Cancelled))
+                    .map(|_| job_id.clone())
             }))
-            .await
-            .into_iter()
-            .filter_map(|(job_id, status)| {
-                status.ok().and_then(|status| {
-                    if matches!(status, Some(RunJobStatus::Cancelled)) {
-                        Some(job_id)
-                    } else {
-                        None
-                    }
-                })
-            });
+            .await;
 
-        let _ = futures::future::join_all(cancelled_jobs.map(|job_id| async move {
-            // Kill the running build
-            self.builder.finish_build(&job_id).await;
-        }))
+        let res = RunJobResponse::job_cancelled(&self.server_id);
+        let _ = futures::future::join_all(
+            cancelled_jobs
+                .iter()
+                .filter_map(|maybe_job_id| maybe_job_id.as_deref())
+                // Kill the job
+                .map(|job_id| self.notify_run_job_res(job_id, &res)),
+        )
         .await;
 
         Ok(())
@@ -573,14 +594,6 @@ impl Server {
         // Record total run_job time
         let _timer = self.metrics.run_job_timer();
 
-        // Add job
-        {
-            let mut jobs = self.jobs.lock().await;
-            if !jobs.contains_key(job_id) {
-                jobs.insert(job_id.to_owned(), Instant::now());
-            }
-        }
-
         // Increment the job_started counter
         self.metrics.inc_job_accepted_count();
 
@@ -663,19 +676,25 @@ impl Server {
     }
 
     async fn job_finished(&self, job_id: &str, res: &RunJobResponse) -> Result<()> {
-        // Store the job result for retrieval by a scheduler
-        let _ = self.jobs_io.put_job_result(job_id, res).await;
+        let server_terminated = if *self.lifetime.borrow() {
+            // Store the job result for retrieval by a scheduler
+            let _ = self.jobs_io.put_job_result(job_id, res).await;
+            matches!(res, RunJobResponse::RetryableError { message, .. } if message == "Server terminated")
+        } else {
+            // If the build failed because the server was terminated,
+            // report it as a server termination, not a failed build.
+            let _ = self
+                .jobs_io
+                .put_job_result(job_id, &RunJobResponse::server_terminated(&self.server_id))
+                .await;
+            true
+        };
 
         // Delete the status for the now finished job
         let schedulers = self.del_finished_job_status(job_id).await?;
 
-        match res {
-            RunJobResponse::RetryableError { message, .. } if message == "Server terminated" => {
-                tracing::info!(
-                    "Sending server terminated response for job {job_id} to {schedulers:?}"
-                );
-            }
-            _ => {}
+        if server_terminated {
+            tracing::info!("Sending server terminated response for job {job_id} to {schedulers:?}");
         }
 
         let status = self.status_update().await;
@@ -744,44 +763,60 @@ impl ServerService for Server {
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> Result<RunJobResponse> {
-        if *self.lifetime.borrow() {
-            self.schedulers
-                .lock()
-                .await
-                .entry(reply_to.into())
-                .and_modify(|last_seen| {
-                    *last_seen = Instant::now();
-                })
-                .or_insert_with(Instant::now);
+        // Add job
+        self.jobs
+            .lock()
+            .await
+            .insert(job_id.to_owned(), Instant::now());
 
-            match self.check_if_job_cancelled(job_id, reply_to).await? {
-                RunJobStatus::Cancelled => {
-                    // Broadcast status after accepting the job
-                    self.broadcast_server_status(None).await;
-                    Err(RunJobError::job_cancelled())
+        // Add or update scheduler
+        self.schedulers
+            .lock()
+            .await
+            .entry(reply_to.into())
+            .and_modify(|last_seen| {
+                *last_seen = Instant::now();
+            })
+            .or_insert_with(Instant::now);
+
+        let mut lifetime = self.lifetime.subscribe();
+
+        if *lifetime.borrow() {
+            let job = async {
+                match self.check_if_job_cancelled(job_id, reply_to).await? {
+                    RunJobStatus::Cancelled => {
+                        // Broadcast status after accepting the job
+                        self.broadcast_server_status(None).await;
+                        Ok(RunJobResponse::job_cancelled(&self.server_id))
+                    }
+                    RunJobStatus::Active { schedulers } => {
+                        // Broadcast status after accepting the job
+                        self.broadcast_server_status(Some(schedulers)).await;
+                        // Load and run the job
+                        self.load_job_and_run_build(job_id, toolchain, command, outputs)
+                            .await
+                            .map_err(anyhow::Error::new)
+                    }
                 }
-                RunJobStatus::Active { schedulers } => {
-                    // Broadcast status after accepting the job
-                    self.broadcast_server_status(Some(schedulers)).await;
-                    // Load and run the job
-                    self.load_job_and_run_build(job_id, toolchain, command, outputs)
-                        .await
+            };
+
+            if matches!(lifetime.has_changed(), Ok(false)) {
+                tokio::select! {
+                    biased;
+                    _ = lifetime.changed() => {
+                        Ok(RunJobResponse::server_terminated(&self.server_id))
+                    }
+                    res = job => res
                 }
+            } else {
+                Ok(RunJobResponse::server_terminated(&self.server_id))
             }
         } else {
-            Err(RunJobError::server_terminated())
+            Ok(RunJobResponse::server_terminated(&self.server_id))
         }
-        .map_err(anyhow::Error::new)
     }
 
     async fn notify_run_job_err(&self, job_id: &str, err: RunJobError) -> Result<()> {
-        // If the build failed because the server was terminated,
-        // report it as a server termination, not a failed build.
-        let err = if *self.lifetime.borrow() {
-            err
-        } else {
-            RunJobError::server_terminated()
-        };
         self.notify_run_job_res(
             job_id,
             &RunJobResponse::from_run_job_error(&self.server_id, &err),
@@ -790,25 +825,25 @@ impl ServerService for Server {
     }
 
     async fn notify_run_job_res(&self, job_id: &str, res: &RunJobResponse) -> Result<()> {
-        if matches!(res, RunJobResponse::Complete { .. }) {
-            tracing::debug!("[run_job_success({job_id})]: {res:?}");
-        } else {
-            tracing::debug!("[run_job_failure({job_id})]: {res:?}");
-        }
-
-        // Increment the job_finished counter
-        self.metrics.inc_job_finished_count();
-
-        // Clean up the build resources
-        self.builder.finish_build(job_id).await;
-
-        // Store the job result and notify the interested schedulers
-        let res = self.job_finished(job_id, res).await;
-
         // Remove the job
-        self.jobs.lock().await.remove(job_id);
+        if self.jobs.lock().await.remove(job_id).is_some() {
+            if matches!(res, RunJobResponse::Complete { .. }) {
+                tracing::debug!("[run_job_success({job_id})]: {res:?}");
+            } else {
+                tracing::debug!("[run_job_failure({job_id})]: {res:?}");
+            }
 
-        res
+            // Increment the job_finished counter
+            self.metrics.inc_job_finished_count();
+
+            // Clean up the build resources
+            self.builder.finish_build(job_id).await;
+
+            // Store the job result and notify the interested schedulers
+            self.job_finished(job_id, res).await
+        } else {
+            Ok(())
+        }
     }
 
     async fn update_scheduler_status(&self, status: StatusUpdate) -> Result<()> {

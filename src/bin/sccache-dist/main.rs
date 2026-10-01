@@ -182,6 +182,7 @@ fn run(command: Command) -> Result<()> {
                             Duration::from_secs(shutdown_timeout_secs)
                         )
                         .await
+                        .inspect_err(|e| tracing::error!("Server shutdown with error: {e:#}"))
                 }
 
                 Command::Server(config::dist::server::Config {
@@ -285,6 +286,7 @@ fn run(command: Command) -> Result<()> {
                             health_check_bind_addr,
                         )
                         .await
+                        .inspect_err(|e| tracing::error!("Server shutdown with error: {e:#}"))
                 }
             }
         })
