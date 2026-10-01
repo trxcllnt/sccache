@@ -40,9 +40,7 @@ use crate::{
     },
     errors::*,
     lru_disk_cache::{LruCache, lru_cache},
-    util::{
-        Digest, HashToDigest, MetadataCtimeExt, OsStrExt, Timestamp, path_to_bytes, strip_basedirs,
-    },
+    util::{Digest, HashToDigest, MetadataCtimeExt, OsStrExt, Timestamp, path_to_bytes},
 };
 
 /// The current format is 1 header byte for the version + bincode encoding
@@ -535,9 +533,56 @@ pub async fn preprocessor_cache_entry_hash_key(
         // - Compiling b/x.c results in a false cache hit since a/x.c and b/x.c
         // share preprocessor cache entries and a/r.h exists.
         let buf = path_to_bytes(input_path.as_path())?;
-        // Strip basedirs from the input file path if configured
-        let buf_to_hash = strip_basedirs(&buf, basedirs);
-        digest.update(&buf_to_hash);
+
+        // Do not strip basedirs from the input file path.
+        //
+        // If the compiler, args, and input file are identical to another
+        // compilation in a different base dir, then that would compute the
+        // same preprocessor cache entry key as the compilation in the other
+        // basedir.
+        //
+        // That could lead to loading the wrong object from cache if their
+        // dependencies are different, which they almost certainly will be.
+        //
+        // Example:
+        // ```shell
+        // cat <<"EOF" >a/value.h
+        // #define VALUE 42
+        // EOF
+        //
+        // cat <<"EOF" >b/value.h
+        // #define VALUE 43
+        // EOF
+        //
+        // $ cat <<"EOF" | tee {a,b}/input.cpp >/dev/null
+        // #include "value.h"
+        // int result() { return VALUE; }
+        // EOF
+        //
+        // $ cat <<"EOF" | tee {a,b}/main.cpp >/dev/null
+        // #include <cstdio>
+        // int result();
+        // int main() {
+        //     printf("%d\n", result());
+        //     return 0;
+        // }
+        // EOF
+        //
+        // $ export SCCACHE_BASEDIRS="$(pwd)/a:$(pwd)/b"
+        // $ sccache gcc -c a/input.cpp -o a/input.o
+        // $ sccache gcc -c b/input.cpp -o b/input.o # < error: cache hit returns a/input.o
+        // $ gcc a/input.o a/main.cpp -o a/main
+        // $ gcc b/input.o b/main.cpp -o b/main
+        //
+        // # correct:
+        // $ a/main
+        // > 42
+        //
+        // # incorrect, should be 43:
+        // $ b/main
+        // > 42
+        // ```
+        digest.update(&buf);
     }
 
     digest = {
@@ -1064,9 +1109,9 @@ mod test {
         .unwrap()
         .unwrap();
 
-        assert_eq!(
+        assert_ne!(
             hash1_with_basedirs, hash2_with_basedirs,
-            "Hashes should be equal when using basedirs with identical files in different directories"
+            "Hashes should be different when using basedirs with identical files in different directories"
         );
 
         // Test 2: With basedir1 for first, and basedir2 for second, hashes should be the same
@@ -1100,9 +1145,9 @@ mod test {
         .unwrap()
         .unwrap();
 
-        assert_eq!(
+        assert_ne!(
             hash1_with_basedirs, hash2_with_basedirs,
-            "Hashes should be equal when using basedirs with identical files in different directories"
+            "Hashes should be different when using basedirs with identical files in different directories"
         );
 
         // Test 3: Without basedirs, hashes should be different
