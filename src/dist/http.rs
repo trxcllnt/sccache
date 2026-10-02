@@ -86,7 +86,7 @@ mod common {
                         err.status()
                             .map(|u| format!("status={u:?}"))
                             .unwrap_or_default(),
-                        format!("err={err:?}"),
+                        format!("err={err:#}"),
                     ]
                     .join(", ")
                 );
@@ -225,7 +225,6 @@ mod scheduler {
     // Tell axum how to convert `AppError` into a response.
     impl IntoResponse for AppError {
         fn into_response(self) -> Response {
-            tracing::error!("AppError: {:?}", self.0);
             (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", self.0)).into_response()
         }
     }
@@ -259,7 +258,7 @@ mod scheduler {
                         return Ok(match bincode_serialize(res).await {
                             Ok(body) => (StatusCode::OK, body),
                             Err(err) => {
-                                tracing::error!("Failed to serialize response body: {err:?}");
+                                tracing::error!("Failed to serialize response body: {err:#}");
                                 (
                                     StatusCode::INTERNAL_SERVER_ERROR,
                                     format!("Failed to serialize response body: {err:#}")

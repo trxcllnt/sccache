@@ -269,7 +269,7 @@ impl Scheduler {
         shutdown_server
             .and(shutdown_broker)
             .inspect(|_| tracing::info!("Scheduler shutdown gracefully"))
-            .inspect_err(|err| tracing::warn!("Scheduler did not shutdown gracefully: {err:?}"))
+            .inspect_err(|err| tracing::warn!("Scheduler did not shutdown gracefully: {err:#}"))
     }
 
     async fn poll_for_finished_jobs(&self) {

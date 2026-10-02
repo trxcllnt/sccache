@@ -396,7 +396,7 @@ impl Server {
             .and(shutdown_jobs)
             .and(shutdown_broker)
             .inspect(|_| tracing::info!("Server shutdown gracefully"))
-            .inspect_err(|err| tracing::warn!("Server did not shutdown gracefully: {err:?}"))
+            .inspect_err(|err| tracing::warn!("Server did not shutdown gracefully: {err:#}"))
     }
 
     async fn status_update(&self) -> StatusUpdate {
