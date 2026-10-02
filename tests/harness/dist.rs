@@ -970,12 +970,12 @@ impl DistSystem {
                     (
                         // Prefer sccache=trace if SCCACHE_DEBUG=1
                         env::var("SCCACHE_DEBUG").and(Ok(
-                            "celery=warn,sccache=trace,tower_http=debug,axum::rejection=trace"
+                            "celery=info,sccache=trace,tower_http=debug,axum::rejection=trace"
                         ))
                     )
                     .or(env::var("SCCACHE_SERVER_LOG").as_deref())
                     .or(env::var("SCCACHE_LOG").as_deref())
-                    .unwrap_or("celery=warn,sccache=debug,tower_http=debug,axum::rejection=trace") // default to debug
+                    .unwrap_or("celery=info,sccache=debug,tower_http=debug,axum::rejection=trace") // default to debug
                 ),
             ])
             .args([
@@ -1076,11 +1076,11 @@ impl DistSystem {
                     "SCCACHE_LOG={}",
                     (
                         // Prefer sccache=trace if SCCACHE_DEBUG=1
-                        env::var("SCCACHE_DEBUG").and(Ok("celery=warn,sccache=trace"))
+                        env::var("SCCACHE_DEBUG").and(Ok("celery=info,sccache=trace"))
                     )
                     .or(env::var("SCCACHE_SERVER_LOG").as_deref())
                     .or(env::var("SCCACHE_LOG").as_deref())
-                    .unwrap_or("celery=warn,sccache=debug") // default to debug
+                    .unwrap_or("celery=info,sccache=debug") // default to debug
                 ),
             ])
             .args([

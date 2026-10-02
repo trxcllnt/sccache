@@ -18,7 +18,7 @@ if ! test -n "${RUST_BACKTRACE:+x}"; then
 fi
 
 if ! test -n "${SCCACHE_LOG:+x}"; then
-    SCCACHE_LOG="celery=warn,sccache=info,tower_http=info,axum::rejection=trace"
+    SCCACHE_LOG="celery=info,sccache=info,tower_http=info,axum::rejection=trace"
 fi
 
 env AWS_PROFILE=none \

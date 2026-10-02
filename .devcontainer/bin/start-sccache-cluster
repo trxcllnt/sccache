@@ -28,7 +28,7 @@ while true; do
     fi
     sleep 1
     NO_COLOR=1 \
-    SCCACHE_LOG=celery=warn,sccache=debug,tower_http=info,axum::rejection=trace \
+    SCCACHE_LOG=celery=info,sccache=debug,tower_http=info,axum::rejection=trace \
         .devcontainer/bin/start-sccache-scheduler >scheduler.log 2>&1 &
     SCHEDULER_PID="$!"
     sleep 1
@@ -43,14 +43,14 @@ echo "sccache-dist scheduler started"
 
 # Start server 1
 NO_COLOR=1 \
-SCCACHE_LOG=celery=warn,sccache=debug \
+SCCACHE_LOG=celery=info,sccache=debug \
     .devcontainer/bin/start-sccache-server-1 >server-1.log 2>&1 &
 
 echo "sccache-dist server 1 started"
 
 # Start server 2
 NO_COLOR=1 \
-SCCACHE_LOG=celery=warn,sccache=debug \
+SCCACHE_LOG=celery=info,sccache=debug \
     .devcontainer/bin/start-sccache-server-2 >server-2.log 2>&1 &
 
 echo "sccache-dist server 2 started"

@@ -30,7 +30,7 @@ services:
       SCCACHE_DIST_METRICS_PROMETHEUS_USERNAME: "sccache"
       SCCACHE_DIST_METRICS_PROMETHEUS_PASSWORD: "sccache"
       SCCACHE_DIST_METRICS_PROMETHEUS_HTTP_METHOD: "POST" # Required when pushing to Vector, as it doesn't support PUT
-      SCCACHE_LOG: "celery=warn,tower_http=info,axum::rejection=trace,sccache=${SCCACHE_LOG:-info}"
+      SCCACHE_LOG: "celery=info,tower_http=info,axum::rejection=trace,sccache=${SCCACHE_LOG:-info}"
     volumes:
       - /tmp/sccache:/sccache:z
       - ../../target/${CARGO_BUILD_TARGET:-x86_64-unknown-linux-musl}/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
@@ -47,8 +47,8 @@ services:
       set -o errexit;
       umask 000;
       apt update && apt install -y --no-install-recommends ca-certificates curl;
-      rm -rf '$$SCCACHE_DIST_TOOLCHAINS_DIR';
-      mkdir -p '$$SCCACHE_DIST_TOOLCHAINS_DIR';
+      rm -rf '$$SCCACHE_DIST_TOOLCHAINS_DISK_DIR';
+      mkdir -p '$$SCCACHE_DIST_TOOLCHAINS_DISK_DIR';
       exec /sccache-dist scheduler;"
 
   sccache-scheduler-2:
@@ -60,6 +60,13 @@ services:
       SCCACHE_DIST_ID: "scheduler-2"
       SCCACHE_DIST_PUBLIC_ADDR: "0.0.0.0:10502"
       SCCACHE_DIST_METRICS_PROMETHEUS_ENDPOINT: "http://vector-ingest:9091/metrics/job/scheduler-2"
+    command: >
+      bash -c "
+      sleep 10;
+      set -o errexit;
+      umask 000;
+      apt update && apt install -y --no-install-recommends ca-certificates curl;
+      exec /sccache-dist scheduler;"
 
   sccache-scheduler:
     hostname: sccache-scheduler
@@ -87,7 +94,7 @@ services:
       SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE: "10737418240" # 10 GiBytes
       SCCACHE_DIST_HEALTH_CHECK_BIND_ADDR: 0.0.0.0:9001
       SCCACHE_DIST_PROMETHEUS_PUSH_ENDPOINT: "http://vector-ingest:9091/metrics/job/server-1"
-      SCCACHE_LOG: "celery=warn,sccache=${SCCACHE_LOG:-debug}"
+      SCCACHE_LOG: "celery=info,sccache=${SCCACHE_LOG:-debug}"
     volumes:
       - /tmp/sccache:/sccache:z
       - ../../target/${CARGO_BUILD_TARGET:-x86_64-unknown-linux-musl}/${BUILD_TYPE:-release}/sccache-dist:/sccache-dist:ro
@@ -104,8 +111,8 @@ services:
       set -o errexit;
       umask 000;
       apt update && apt install -y --no-install-recommends ca-certificates libcap2 bubblewrap curl;
-      rm -rf '$$SCCACHE_DIST_BUILD_DIR';
-      mkdir -p '$$SCCACHE_DIST_BUILD_DIR';
+      rm -rf '$$SCCACHE_DIST_BUILDER_BUILD_DIR';
+      mkdir -p '$$SCCACHE_DIST_BUILDER_BUILD_DIR';
       exec /sccache-dist server;"
 
   sccache-server-2:
@@ -133,6 +140,6 @@ services:
       set -o errexit;
       umask 000;
       apt update && apt install -y --no-install-recommends ca-certificates libcap2 bubblewrap curl;
-      rm -rf '$$SCCACHE_DIST_BUILD_DIR';
-      mkdir -p '$$SCCACHE_DIST_BUILD_DIR';
+      rm -rf '$$SCCACHE_DIST_BUILDER_BUILD_DIR';
+      mkdir -p '$$SCCACHE_DIST_BUILDER_BUILD_DIR';
       exec /sccache-dist server;"

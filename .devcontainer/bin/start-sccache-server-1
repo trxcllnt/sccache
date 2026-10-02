@@ -18,7 +18,7 @@ if ! test -n "${RUST_BACKTRACE:+x}"; then
 fi
 
 if ! test -n "${SCCACHE_LOG:+x}"; then
-    SCCACHE_LOG="celery=warn,sccache=info"
+    SCCACHE_LOG="celery=info,sccache=info"
 fi
 
 sudo --preserve-env=AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY \
