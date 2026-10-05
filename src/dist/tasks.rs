@@ -149,8 +149,11 @@ impl Tasks {
             let scheduler_to_servers = scheduler_to_servers_queue();
             let server_to_schedulers = server_to_schedulers_queue();
             Ok(celery::CeleryBuilder::new(id, &message_broker.addr)
-                // Indefinitely retry connecting to the broker
+                // Retry connecting to the broker
+                .broker_connection_retry(message_broker.connection_retry)
                 .broker_connection_max_retries(message_broker.max_retries)
+                .broker_connection_retry_delay(message_broker.retry_delay)
+                .broker_connection_timeout(message_broker.connection_timeout)
                 // Queues with no consumers should be deleted after 60s
                 .broker_set_queue_expire_time(&scheduler_to_servers, 60 * 1000)
                 .broker_set_queue_expire_time(&server_to_schedulers, 60 * 1000)

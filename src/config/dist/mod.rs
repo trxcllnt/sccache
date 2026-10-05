@@ -55,6 +55,8 @@ mod dist_server {
         pub addr: String,
         #[serde(default = "defaults::default_broker_connection_timeout")]
         pub connection_timeout: u32,
+        #[serde(default = "defaults::default_true")]
+        pub connection_retry: bool,
         #[serde(default = "defaults::default_broker_max_retries")]
         pub max_retries: u32,
         #[serde(default = "defaults::default_broker_retry_delay")]
