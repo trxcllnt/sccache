@@ -859,7 +859,6 @@ mod test {
                         timeout: 1200,
                     },
                 },
-                rewrite_includes_only: true,
                 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
                 url: HTTPUrl::from_str("http://sccache.my-company.com").ok(),
                 #[cfg(not(any(feature = "dist-client", feature = "dist-server")))]
@@ -1027,7 +1026,6 @@ mod test {
                 ("SCCACHE_DIST_KEEPALIVE_ENABLED", "true"),
                 ("SCCACHE_DIST_KEEPALIVE_INTERVAL", "10"),
                 ("SCCACHE_DIST_KEEPALIVE_TIMEOUT", "1200"),
-                ("SCCACHE_DIST_REWRITE_INCLUDES_ONLY", "true"),
                 ("SCCACHE_DIST_URL", "http://sccache.my-company.com"),
                 ("SCCACHE_DIST_TOOLCHAINS", ""),
                 ("SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE", "10000"),
@@ -1336,7 +1334,6 @@ mod test {
                         token: "secrettoken".into()
                     },
                     cache_dir: PathBuf::from("/home/user/.cache/sccache-dist-client"),
-                    rewrite_includes_only: false,
                     toolchains: vec![
                         dist::Toolchain::PathOverride {
                             archive: "/toolchains/cc.tar.gz".into(),

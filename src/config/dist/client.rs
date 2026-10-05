@@ -49,9 +49,6 @@ pub struct Config {
     #[serde(default)]
     pub net: Networking,
 
-    #[serde(default, deserialize_with = "deserialize_bool")]
-    pub rewrite_includes_only: bool,
-
     #[cfg(any(feature = "dist-client", feature = "dist-server"))]
     #[serde(default, alias = "scheduler_url")]
     pub url: Option<crate::config::utils::HTTPUrl>,

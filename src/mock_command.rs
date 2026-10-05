@@ -318,18 +318,15 @@ impl RunCommand for AsyncCommand {
 impl fmt::Display for AsyncCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(ref cmd) = self.inner {
-            let cwd = cmd
-                .get_current_dir()
-                .map(|p| p.to_owned())
-                .or_else(|| std::env::current_dir().ok())
-                .unwrap_or_else(|| Path::new("").to_owned());
-            write!(f, r#"cd "{}"; "#, cwd.display())?;
+            if let Some(cwd) = cmd.get_current_dir() {
+                write!(f, r#"cd "{}"; "#, cwd.display())?;
+            }
             if cfg!(target_os = "windows") {
                 write!(f, "& ")?;
             }
-            write!(f, r#"{:?}"#, cmd.get_program())?;
+            write!(f, r#""{}""#, cmd.get_program().display())?;
             for arg in cmd.get_args() {
-                write!(f, " {arg:?}")?;
+                write!(f, r#" "{}""#, arg.display())?;
             }
             fmt::Result::Ok(())
         } else {
@@ -594,7 +591,7 @@ impl fmt::Display for MockCommand {
             write!(f, "& ")?;
         }
         for arg in self.args.iter() {
-            write!(f, " {arg:?}")?;
+            write!(f, r#" "{}""#, arg.display())?;
         }
         fmt::Result::Ok(())
     }

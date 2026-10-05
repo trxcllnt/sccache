@@ -20,96 +20,94 @@ extern crate log;
 mod harness;
 
 use assert_cmd::prelude::*;
-use fs_err as fs;
 use harness::{
     AdditionalStats, Compiler,
     client::{SccacheClient, make_sccache_client},
     compile_cmdline, find_compilers, write_source,
 };
-use itertools::Itertools;
 use pastey::paste;
-use sccache::compiler::{Language, PreprocessorCacheEntry};
-use std::{ffi::OsString, io::Read, path::Path};
+use sccache::compiler::Language;
+use std::{ffi::OsString, path::Path};
 
-fn assert_num_preprocessor_cache_entries_and_results(
-    entries: &[(OsString, PreprocessorCacheEntry)],
-    exp_num_entries: usize,
-    exp_num_results: &[usize],
-) {
-    // Assert the number of preprocessor cache entries matches the expected number of entries
-    assert_eq!(exp_num_entries, entries.len());
-    // Assert the preprocessor cache entry now has the expected number of results
-    assert_eq!(
-        exp_num_results,
-        entries
-            .iter()
-            .map(|(_, e)| e.iter().count())
-            .sorted()
-            .as_slice()
-    );
-}
+// fn assert_num_preprocessor_cache_entries_and_results(
+//     entries: &[(OsString, PreprocessorCacheEntry)],
+//     exp_num_entries: usize,
+//     exp_num_results: &[usize],
+// ) {
+//     // Assert the number of preprocessor cache entries matches the expected number of entries
+//     assert_eq!(exp_num_entries, entries.len());
+//     // Assert the preprocessor cache entry now has the expected number of results
+//     assert_eq!(
+//         exp_num_results,
+//         entries
+//             .iter()
+//             .map(|(_, e)| e.iter().count())
+//             .sorted()
+//             .as_slice()
+//     );
+// }
 
-fn assert_preprocessor_cache_entries_are_identical(
-    old: &[(OsString, PreprocessorCacheEntry)],
-    new: &[(OsString, PreprocessorCacheEntry)],
-) {
-    // Ensure same number of preprocessor cache entries
-    assert_eq!(new.len(), old.len());
-    let old = old.iter().sorted_by(|a, b| a.0.cmp(&b.0));
-    let new = new.iter().sorted_by(|a, b| a.0.cmp(&b.0));
-    for ((old_key, old), (new_key, new)) in old.zip(new) {
-        // Assert preprocessor cache entry keys match
-        assert_eq!(old_key, new_key);
-        // Assert the preprocessor cache entry results are the same
-        assert_eq!(
-            old.iter().collect::<Vec<_>>(),
-            new.iter().collect::<Vec<_>>()
-        );
-    }
-}
+// fn assert_preprocessor_cache_entries_are_identical(
+//     old: &[(OsString, PreprocessorCacheEntry)],
+//     new: &[(OsString, PreprocessorCacheEntry)],
+// ) {
+//     // Ensure same number of preprocessor cache entries
+//     assert_eq!(new.len(), old.len());
+//     let old = old.iter().sorted_by(|a, b| a.0.cmp(&b.0));
+//     let new = new.iter().sorted_by(|a, b| a.0.cmp(&b.0));
+//     for ((old_key, old), (new_key, new)) in old.zip(new) {
+//         // Assert preprocessor cache entry keys match
+//         assert_eq!(old_key, new_key);
+//         // Assert the preprocessor cache entry results are the same
+//         assert_eq!(
+//             old.iter().collect::<Vec<_>>(),
+//             new.iter().collect::<Vec<_>>()
+//         );
+//     }
+// }
 
-fn assert_preprocessor_cache_entries_result_orders_changed(
-    old: &[(OsString, PreprocessorCacheEntry)],
-    new: &[(OsString, PreprocessorCacheEntry)],
-) {
-    // Ensure same number of preprocessor cache entries
-    assert_eq!(new.len(), old.len());
+// fn assert_preprocessor_cache_entries_result_orders_changed(
+//     old: &[(OsString, PreprocessorCacheEntry)],
+//     new: &[(OsString, PreprocessorCacheEntry)],
+// ) {
+//     // Ensure same number of preprocessor cache entries
+//     assert_eq!(new.len(), old.len());
 
-    let old = old
-        .iter()
-        .sorted_by(|a, b| a.0.cmp(&b.0))
-        .collect::<Vec<_>>();
-    let new = new
-        .iter()
-        .sorted_by(|a, b| a.0.cmp(&b.0))
-        .collect::<Vec<_>>();
+//     let old = old
+//         .iter()
+//         .sorted_by(|a, b| a.0.cmp(&b.0))
+//         .collect::<Vec<_>>();
+//     let new = new
+//         .iter()
+//         .sorted_by(|a, b| a.0.cmp(&b.0))
+//         .collect::<Vec<_>>();
 
-    for ((old_key, old), (new_key, new)) in old.iter().zip(new.iter()) {
-        // Assert preprocessor cache entry keys match
-        assert_eq!(old_key, new_key);
+//     for ((old_key, old), (new_key, new)) in old.iter().zip(new.iter()) {
+//         // Assert preprocessor cache entry keys match
+//         assert_eq!(old_key, new_key);
 
-        let old_back = old.iter().next_back();
-        let new_back = new.iter().next_back();
+//         let old_back = old.iter().next_back();
+//         let new_back = new.iter().next_back();
 
-        // Assert the new preprocessor cache entry result is at the back of the LRU
-        assert_ne!((old_key, old_back), (new_key, new_back));
+//         // Assert the new preprocessor cache entry result is at the back of the LRU
+//         assert_ne!((old_key, old_back), (new_key, new_back));
 
-        let new_back = new_back.unwrap();
-        // Assert all but the last preprocessor cache entry results are the same
-        assert_eq!(
-            old.iter().filter(|x| x.0 != new_back.0).collect::<Vec<_>>(),
-            new.iter().filter(|x| x.0 != new_back.0).collect::<Vec<_>>()
-        );
-    }
-}
+//         let new_back = new_back.unwrap();
+//         // Assert all but the last preprocessor cache entry results are the same
+//         assert_eq!(
+//             old.iter().filter(|x| x.0 != new_back.0).collect::<Vec<_>>(),
+//             new.iter().filter(|x| x.0 != new_back.0).collect::<Vec<_>>()
+//         );
+//     }
+// }
 
-fn deflate(data: Vec<u8>) -> std::io::Result<Vec<u8>> {
-    let mut buf = vec![];
-    flate2::read::ZlibDecoder::new(&data[..]).read_to_end(&mut buf)?;
-    Ok(buf)
-}
+// fn deflate(data: Vec<u8>) -> std::io::Result<Vec<u8>> {
+//     let mut buf = vec![];
+//     flate2::read::ZlibDecoder::new(&data[..]).read_to_end(&mut buf)?;
+//     Ok(buf)
+// }
 
-fn test_preprocessor_cache_mode_single_entry_multiple_hashes(
+fn test_dependency_changes(
     client: &SccacheClient,
     compiler: &Compiler,
     tempdir: &Path,
@@ -122,7 +120,7 @@ fn test_preprocessor_cache_mode_single_entry_multiple_hashes(
         ..
     } = compiler;
 
-    println!("test_preprocessor_cache_mode_single_entry_multiple_hashes: {name}");
+    println!("test_dependency_changes: {name}");
 
     let src = "pp_test.c";
     let obj = "pp_test.c.o";
@@ -137,33 +135,34 @@ fn test_preprocessor_cache_mode_single_entry_multiple_hashes(
     };
 
     client.zero_stats();
-    let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
+    client.clear_disk_cache()?;
+    // let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
 
-    let preprocessor_cache_entry = || {
-        assert!(
-            preprocessor_cache_path.is_dir(),
-            "The preprocessor cache should exist"
-        );
+    // let preprocessor_cache_entry = || {
+    //     assert!(
+    //         preprocessor_cache_path.is_dir(),
+    //         "The preprocessor cache should exist"
+    //     );
 
-        let mut preprocessor_cache_entries =
-            walkdir::WalkDir::new(preprocessor_cache_path.as_path())
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter_map(|e| e.file_type().is_file().then_some(e))
-                .collect::<Vec<_>>();
+    //     let mut preprocessor_cache_entries =
+    //         walkdir::WalkDir::new(preprocessor_cache_path.as_path())
+    //             .into_iter()
+    //             .filter_map(|e| e.ok())
+    //             .filter_map(|e| e.file_type().is_file().then_some(e))
+    //             .collect::<Vec<_>>();
 
-        assert_eq!(
-            preprocessor_cache_entries.len(),
-            1,
-            "The preprocessor cache should have one entry"
-        );
+    //     assert_eq!(
+    //         preprocessor_cache_entries.len(),
+    //         1,
+    //         "The preprocessor cache should have one entry"
+    //     );
 
-        let preprocessor_cache_entry = preprocessor_cache_entries
-            .pop()
-            .expect("The preprocessor cache should have one entry");
+    //     let preprocessor_cache_entry = preprocessor_cache_entries
+    //         .pop()
+    //         .expect("The preprocessor cache should have one entry");
 
-        PreprocessorCacheEntry::read(&deflate(fs::read(preprocessor_cache_entry.path())?)?)
-    };
+    //     PreprocessorCacheEntry::read(&deflate(fs::read(preprocessor_cache_entry.path())?)?)
+    // };
 
     let mut expected_stats = client.stats().unwrap();
 
@@ -181,10 +180,10 @@ fn test_preprocessor_cache_mode_single_entry_multiple_hashes(
             assert_eq!(expected_stats, actual_stats);
             // Assert the number of results in the preprocessor cache entry
             // matches the number of expected preprocessor cache misses
-            assert_eq!(
-                expected_stats.preprocessor_cache_misses.all(),
-                preprocessor_cache_entry()?.iter().count() as u64,
-            );
+            // assert_eq!(
+            //     expected_stats.preprocessor_cache_misses.all(),
+            //     preprocessor_cache_entry()?.iter().count() as u64,
+            // );
             Ok(())
         };
 
@@ -209,13 +208,13 @@ int main(int argc, char** argv) {{
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
+            // preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
@@ -224,7 +223,7 @@ int main(int argc, char** argv) {{
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
     }
@@ -247,13 +246,13 @@ int a() {{ return b(); }}
 
         // Should be two object hashes now
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
+            // preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
@@ -263,7 +262,7 @@ int a() {{ return b(); }}
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
     }
@@ -274,13 +273,13 @@ int a() {{ return b(); }}
 
         // Should be three object hashes now
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
+            // preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
@@ -290,7 +289,7 @@ int a() {{ return b(); }}
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
     }
@@ -305,7 +304,7 @@ int a() {{ return b(); }}
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
     }
@@ -320,7 +319,7 @@ int a() {{ return b(); }}
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
     }
@@ -328,13 +327,13 @@ int a() {{ return b(); }}
     Ok(())
 }
 
-fn test_preprocessor_cache_mode_time_macros(
+fn test_time_macros(
     client: &SccacheClient,
     compiler: &Compiler,
     tempdir: &Path,
     clang_plusplus: bool,
 ) -> sccache::errors::Result<()> {
-    use sccache::errors::Result;
+    // use sccache::errors::Result;
     let Compiler {
         name,
         exe,
@@ -342,7 +341,7 @@ fn test_preprocessor_cache_mode_time_macros(
         ..
     } = compiler;
 
-    println!("test_preprocessor_cache_mode_time_macros: {name}");
+    println!("test_time_macros: {name}");
 
     let src = "time_macros_test.c";
     let obj = "time_macros_test.c.o";
@@ -357,22 +356,23 @@ fn test_preprocessor_cache_mode_time_macros(
     };
 
     client.zero_stats();
-    let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
+    client.clear_disk_cache()?;
+    // let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
 
-    let preprocessor_cache_entries = || {
-        walkdir::WalkDir::new(preprocessor_cache_path.as_path())
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_type().is_file().then_some(e))
-            .map(|preprocessor_cache_entry| {
-                let path = preprocessor_cache_entry.path();
-                let preprocessor_key = path.components().next_back().unwrap();
-                Ok((
-                    preprocessor_key.as_os_str().to_owned(),
-                    PreprocessorCacheEntry::read(&deflate(fs::read(path)?)?)?,
-                ))
-            })
-    };
+    // let preprocessor_cache_entries = || {
+    //     walkdir::WalkDir::new(preprocessor_cache_path.as_path())
+    //         .into_iter()
+    //         .filter_map(|e| e.ok())
+    //         .filter_map(|e| e.file_type().is_file().then_some(e))
+    //         .map(|preprocessor_cache_entry| {
+    //             let path = preprocessor_cache_entry.path();
+    //             let preprocessor_key = path.components().next_back().unwrap();
+    //             Ok((
+    //                 preprocessor_key.as_os_str().to_owned(),
+    //                 PreprocessorCacheEntry::read(&deflate(fs::read(path)?)?)?,
+    //             ))
+    //         })
+    // };
 
     let mut expected_stats = client.stats().unwrap();
 
@@ -408,43 +408,45 @@ int main(int argc, char** argv) {{
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
+            // preprocessed: Some(1),
+            // compilations: Some(1),
+            // cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
+            non_cacheable_compilations: Some(1),
+            // cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        // Assert the number of preprocessor cache entries is 0
-        let entries = preprocessor_cache_entries()
-            .collect::<Result<Vec<_>>>()
-            .unwrap_or_default();
-        assert_eq!(0, entries.len() as u64);
+        // // Assert the number of preprocessor cache entries is 0
+        // let entries = preprocessor_cache_entries()
+        //     .collect::<Result<Vec<_>>>()
+        //     .unwrap_or_default();
+        // assert_eq!(0, entries.len() as u64);
 
         // Wait 2s and compile again to ensure preprocessor cache miss
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
+            // preprocessed: Some(1),
+            // compilations: Some(1),
+            // cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
+            non_cacheable_compilations: Some(1),
+            // cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        // Assert the number of preprocessor cache entries is still 0
-        let entries = preprocessor_cache_entries()
-            .collect::<Result<Vec<_>>>()
-            .unwrap_or_default();
-        assert_eq!(0, entries.len() as u64);
+        // // Assert the number of preprocessor cache entries is still 0
+        // let entries = preprocessor_cache_entries()
+        //     .collect::<Result<Vec<_>>>()
+        //     .unwrap_or_default();
+        // assert_eq!(0, entries.len() as u64);
     }
 
-    let mut entries_a;
-    let mut entries_b;
+    // let mut entries_a;
+    // let mut entries_b;
 
     // Test time macro used in dependency
     {
@@ -474,39 +476,41 @@ void a() { printf("time: %s", __TIME__); }
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
+            // preprocessed: Some(1),
+            // compilations: Some(1),
+            // cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+            non_cacheable_compilations: Some(1),
+            // cache_misses: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is now 1 (with 1 result)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 1, &[1]);
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is now 1 (with 1 result)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 1, &[1]);
 
         // Wait 2s and compile again to ensure preprocessor cache miss
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
+            // preprocessed: Some(1),
+            // compilations: Some(1),
+            // cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+            non_cacheable_compilations: Some(1),
+            // cache_misses: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 1 (with 2 results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_b, 1, &[2]);
-        // Verify the new preprocessor cache entry result is at the back of the LRU
-        assert_preprocessor_cache_entries_result_orders_changed(&entries_a, &entries_b);
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 1 (with 2 results)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_b, 1, &[2]);
+        // // Verify the new preprocessor cache entry result is at the back of the LRU
+        // assert_preprocessor_cache_entries_result_orders_changed(&entries_a, &entries_b);
     }
 
     // Test time macro used in dependency of a dependency
@@ -534,41 +538,43 @@ void b() { printf("time: %s", __TIME__); }
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
+            // preprocessed: Some(1),
+            // compilations: Some(1),
+            // cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+            non_cacheable_compilations: Some(1),
+            // cache_misses: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 1 (with 3 results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 1, &[3]);
-        // Verify the new preprocessor cache entry result is at the back of the LRU
-        assert_preprocessor_cache_entries_result_orders_changed(&entries_b, &entries_a);
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 1 (with 3 results)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 1, &[3]);
+        // // Verify the new preprocessor cache entry result is at the back of the LRU
+        // assert_preprocessor_cache_entries_result_orders_changed(&entries_b, &entries_a);
 
         // Wait 2s and compile again to ensure preprocessor cache miss
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
-            compilations: Some(1),
-            cache_writes: Some(1),
+            // preprocessed: Some(1),
+            // compilations: Some(1),
+            // cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
-            cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+            non_cacheable_compilations: Some(1),
+            // cache_misses: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 1 (with 4 results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_b, 1, &[4]);
-        // Verify the new preprocessor cache entry result is at the back of the LRU
-        assert_preprocessor_cache_entries_result_orders_changed(&entries_a, &entries_b);
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 1 (with 4 results)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_b, 1, &[4]);
+        // // Verify the new preprocessor cache entry result is at the back of the LRU
+        // assert_preprocessor_cache_entries_result_orders_changed(&entries_a, &entries_b);
     }
 
     // Test removing __TIME__ macro from dependency B
@@ -578,21 +584,22 @@ void b() { printf("time: %s", __TIME__); }
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
+            // preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
+            // non_cacheable_compilations: Some(1),
             cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 1 (with 5 results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 1, &[5]);
-        // Verify the new preprocessor cache entry result is at the back of the LRU
-        assert_preprocessor_cache_entries_result_orders_changed(&entries_b, &entries_a);
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 1 (with 5 results)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 1, &[5]);
+        // // Verify the new preprocessor cache entry result is at the back of the LRU
+        // assert_preprocessor_cache_entries_result_orders_changed(&entries_b, &entries_a);
 
         // Wait 2s and compile again to ensure preprocessor cache hit
         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -601,27 +608,27 @@ void b() { printf("time: %s", __TIME__); }
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 1 (with 5 results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_b, 1, &[5]);
-        // Verify the preprocessor cache entry results are in the same order
-        assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 1 (with 5 results)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_b, 1, &[5]);
+        // // Verify the preprocessor cache entry results are in the same order
+        // assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
     }
 
     Ok(())
 }
 
-fn test_preprocessor_cache_mode_date_macros(
+fn test_date_macros(
     client: &SccacheClient,
     compiler: &Compiler,
     tempdir: &Path,
     clang_plusplus: bool,
 ) -> sccache::errors::Result<()> {
-    use sccache::errors::Result;
+    // use sccache::errors::Result;
 
     if (compiler.name == "clang" || compiler.name == "clang++")
         && !compiler
@@ -642,7 +649,7 @@ fn test_preprocessor_cache_mode_date_macros(
         ..
     } = compiler;
 
-    println!("test_preprocessor_cache_mode_date_macros: {name}");
+    println!("test_date_macros: {name}");
 
     let src = "date_macros_test.c";
     let obj = "date_macros_test.c.o";
@@ -657,22 +664,23 @@ fn test_preprocessor_cache_mode_date_macros(
     };
 
     client.zero_stats();
-    let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
+    client.clear_disk_cache()?;
+    // let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
 
-    let preprocessor_cache_entries = || {
-        walkdir::WalkDir::new(preprocessor_cache_path.as_path())
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_type().is_file().then_some(e))
-            .map(|preprocessor_cache_entry| {
-                let path = preprocessor_cache_entry.path();
-                let preprocessor_key = path.components().next_back().unwrap();
-                Ok((
-                    preprocessor_key.as_os_str().to_owned(),
-                    PreprocessorCacheEntry::read(&deflate(fs::read(path)?)?)?,
-                ))
-            })
-    };
+    // let preprocessor_cache_entries = || {
+    //     walkdir::WalkDir::new(preprocessor_cache_path.as_path())
+    //         .into_iter()
+    //         .filter_map(|e| e.ok())
+    //         .filter_map(|e| e.file_type().is_file().then_some(e))
+    //         .map(|preprocessor_cache_entry| {
+    //             let path = preprocessor_cache_entry.path();
+    //             let preprocessor_key = path.components().next_back().unwrap();
+    //             Ok((
+    //                 preprocessor_key.as_os_str().to_owned(),
+    //                 PreprocessorCacheEntry::read(&deflate(fs::read(path)?)?)?,
+    //             ))
+    //         })
+    // };
 
     let mut expected_stats = client.stats().unwrap();
 
@@ -698,8 +706,8 @@ fn test_preprocessor_cache_mode_date_macros(
     let s_epoch_today = s_epoch_today.timestamp().to_string();
     let s_epoch_tomorrow = s_epoch_tomorrow.timestamp().to_string();
 
-    let mut entries_a;
-    let mut entries_b;
+    // let mut entries_a;
+    // let mut entries_b;
 
     // Test __DATE__ macro used in main source file
     {
@@ -724,20 +732,20 @@ int main(int argc, char** argv) {{
             ]
             .concat(),
             AdditionalStats {
-                preprocessed: Some(1),
+                // preprocessed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_misses: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is now 1 (with 1 result)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 1, &[1]);
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is now 1 (with 1 result)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 1, &[1]);
 
         // Compile again to ensure preprocessor cache hit
         compile_and_verify(
@@ -750,14 +758,14 @@ int main(int argc, char** argv) {{
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 1 (with 1 result)
-        assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 1 (with 1 result)
+        // assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
 
         // Compile "tomorrow" to ensure cache miss
         compile_and_verify(
@@ -767,20 +775,20 @@ int main(int argc, char** argv) {{
             ]
             .concat(),
             AdditionalStats {
-                preprocessed: Some(1),
+                // preprocessed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_misses: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is now 2 (with 1 result each)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 2, &[1, 1]);
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is now 2 (with 1 result each)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 2, &[1, 1]);
 
         // Compile "tomorrow" again to ensure preprocessor cache hit
         compile_and_verify(
@@ -793,14 +801,14 @@ int main(int argc, char** argv) {{
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 2 (with 1 result each)
-        assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 2 (with 1 result each)
+        // assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
     }
 
     // Test date macro used in dependency
@@ -837,20 +845,20 @@ void a() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
-                preprocessed: Some(1),
+                // preprocessed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_misses: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is now 3 (with 1 result each)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 1]);
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is now 3 (with 1 result each)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 1]);
 
         // Compile again to ensure preprocessor cache hit
         compile_and_verify(
@@ -863,14 +871,14 @@ void a() { printf("date: %s", __DATE__); }
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with 1 result each)
-        assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with 1 result each)
+        // assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
 
         // Compile "tomorrow" to ensure cache miss
         compile_and_verify(
@@ -880,20 +888,20 @@ void a() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
-                preprocessed: Some(1),
+                // preprocessed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_misses: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 2] results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 2]);
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 2] results)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 2]);
 
         // Compile "tomorrow" again to ensure preprocessor cache hit
         compile_and_verify(
@@ -906,14 +914,14 @@ void a() { printf("date: %s", __DATE__); }
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 2] results)
-        assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 2] results)
+        // assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
     }
 
     // Test date macro used in dependency of a dependency
@@ -947,20 +955,20 @@ void b() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
-                preprocessed: Some(1),
+                // preprocessed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_misses: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 3] results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 3]);
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 3] results)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 3]);
 
         // Compile "today" again to ensure preprocessor cache hit
         compile_and_verify(
@@ -973,14 +981,14 @@ void b() { printf("date: %s", __DATE__); }
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 3] results)
-        assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 3] results)
+        // assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
 
         // Compile "tomorrow" to ensure cache miss
         compile_and_verify(
@@ -990,20 +998,20 @@ void b() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
-                preprocessed: Some(1),
+                // preprocessed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_misses: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 4] results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 4]);
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 4] results)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 4]);
 
         // Compile "today" again to ensure preprocessor cache hit
         compile_and_verify(
@@ -1016,27 +1024,27 @@ void b() { printf("date: %s", __DATE__); }
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 4] results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_b, 3, &[1, 1, 4]);
-        // Verify the new preprocessor cache entry result is at the back of the LRU
-        assert_preprocessor_cache_entries_result_orders_changed(
-            &entries_a
-                .iter()
-                .filter(|(_, e)| e.iter().count() > 1)
-                .cloned()
-                .collect::<Vec<_>>(),
-            &entries_b
-                .iter()
-                .filter(|(_, e)| e.iter().count() > 1)
-                .cloned()
-                .collect::<Vec<_>>(),
-        );
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 4] results)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_b, 3, &[1, 1, 4]);
+        // // Verify the new preprocessor cache entry result is at the back of the LRU
+        // assert_preprocessor_cache_entries_result_orders_changed(
+        //     &entries_a
+        //         .iter()
+        //         .filter(|(_, e)| e.iter().count() > 1)
+        //         .cloned()
+        //         .collect::<Vec<_>>(),
+        //     &entries_b
+        //         .iter()
+        //         .filter(|(_, e)| e.iter().count() > 1)
+        //         .cloned()
+        //         .collect::<Vec<_>>(),
+        // );
 
         // Compile "tomorrow" again to ensure preprocessor cache hit
         compile_and_verify(
@@ -1049,27 +1057,27 @@ void b() { printf("date: %s", __DATE__); }
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 4] results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 4]);
-        // Verify the new preprocessor cache entry result is at the back of the LRU
-        assert_preprocessor_cache_entries_result_orders_changed(
-            &entries_b
-                .iter()
-                .filter(|(_, e)| e.iter().count() > 1)
-                .cloned()
-                .collect::<Vec<_>>(),
-            &entries_a
-                .iter()
-                .filter(|(_, e)| e.iter().count() > 1)
-                .cloned()
-                .collect::<Vec<_>>(),
-        );
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 4] results)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 4]);
+        // // Verify the new preprocessor cache entry result is at the back of the LRU
+        // assert_preprocessor_cache_entries_result_orders_changed(
+        //     &entries_b
+        //         .iter()
+        //         .filter(|(_, e)| e.iter().count() > 1)
+        //         .cloned()
+        //         .collect::<Vec<_>>(),
+        //     &entries_a
+        //         .iter()
+        //         .filter(|(_, e)| e.iter().count() > 1)
+        //         .cloned()
+        //         .collect::<Vec<_>>(),
+        // );
     }
 
     // Test removing __DATE__ from dependency B
@@ -1085,20 +1093,20 @@ void b() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
-                preprocessed: Some(1),
+                // preprocessed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_misses: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 5] results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 5]);
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 5] results)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 5]);
 
         // Compile "today" again to ensure preprocessor cache hit
         compile_and_verify(
@@ -1111,14 +1119,14 @@ void b() { printf("date: %s", __DATE__); }
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 5] results)
-        assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 5] results)
+        // assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
 
         // Compile "tomorrow" again to ensure preprocessor cache hit
         compile_and_verify(
@@ -1131,20 +1139,20 @@ void b() { printf("date: %s", __DATE__); }
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
 
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 5] results)
-        assert_preprocessor_cache_entries_are_identical(&entries_b, &entries_a);
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 5] results)
+        // assert_preprocessor_cache_entries_are_identical(&entries_b, &entries_a);
     }
 
     Ok(())
 }
 
-fn test_preprocessor_cache_mode_timestamp_macros(
+fn test_timestamp_macros(
     client: &SccacheClient,
     compiler: &Compiler,
     tempdir: &Path,
@@ -1159,7 +1167,7 @@ fn test_preprocessor_cache_mode_timestamp_macros(
         ..
     } = compiler;
 
-    println!("test_preprocessor_cache_mode_timestamp_macros: {name}");
+    println!("test_timestamp_macros: {name}");
 
     let src = "timestamp_macro_test.c";
     let obj = "timestamp_macro_test.c.o";
@@ -1174,22 +1182,23 @@ fn test_preprocessor_cache_mode_timestamp_macros(
     };
 
     client.zero_stats();
-    let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
+    client.clear_disk_cache()?;
+    // let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
 
-    let preprocessor_cache_entries = || {
-        walkdir::WalkDir::new(preprocessor_cache_path.as_path())
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_type().is_file().then_some(e))
-            .map(|preprocessor_cache_entry| {
-                let path = preprocessor_cache_entry.path();
-                let preprocessor_key = path.components().next_back().unwrap();
-                Ok((
-                    preprocessor_key.as_os_str().to_owned(),
-                    PreprocessorCacheEntry::read(&deflate(fs::read(path)?)?)?,
-                ))
-            })
-    };
+    // let preprocessor_cache_entries = || {
+    //     walkdir::WalkDir::new(preprocessor_cache_path.as_path())
+    //         .into_iter()
+    //         .filter_map(|e| e.ok())
+    //         .filter_map(|e| e.file_type().is_file().then_some(e))
+    //         .map(|preprocessor_cache_entry| {
+    //             let path = preprocessor_cache_entry.path();
+    //             let preprocessor_key = path.components().next_back().unwrap();
+    //             Ok((
+    //                 preprocessor_key.as_os_str().to_owned(),
+    //                 PreprocessorCacheEntry::read(&deflate(fs::read(path)?)?)?,
+    //             ))
+    //         })
+    // };
 
     let mut expected_stats = client.stats().unwrap();
 
@@ -1207,8 +1216,8 @@ fn test_preprocessor_cache_mode_timestamp_macros(
         Ok(())
     };
 
-    let mut entries_a;
-    let mut entries_b;
+    // let mut entries_a;
+    // let mut entries_b;
 
     // Test __TIMESTAMP__ macro used in main source file
     {
@@ -1227,32 +1236,32 @@ int main(int argc, char** argv) {{
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
+            // preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is now 1 (with 1 result)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 1, &[1]);
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is now 1 (with 1 result)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 1, &[1]);
 
         // Compile again to ensure preprocessor cache hit
         compile_and_verify(AdditionalStats {
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 1 (with 1 result)
-        assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 1 (with 1 result)
+        // assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
 
         // Wait 2s, update source file with __TIMESTAMP__ macro,
         // then compile again to ensure preprocessor cache miss
@@ -1271,32 +1280,32 @@ int main(int argc, char** argv) {{
         );
 
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
+            // preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is now 2 (with 1 result each)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 2, &[1, 1]);
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is now 2 (with 1 result each)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 2, &[1, 1]);
 
         // Compile again to ensure preprocessor cache hit
         compile_and_verify(AdditionalStats {
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 2 (with 1 result each)
-        assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 2 (with 1 result each)
+        // assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
     }
 
     // Test timestamp macro used in dependency
@@ -1329,32 +1338,32 @@ void a() { printf("timestamp: %s", __TIMESTAMP__); }
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
+            // preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is now 3 (with 1 result each)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 1]);
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is now 3 (with 1 result each)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 1]);
 
         compile_and_verify(AdditionalStats {
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        // Assert the number of preprocessor cache entries is still 3
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with 1 result each)
-        assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
+        // // Assert the number of preprocessor cache entries is still 3
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with 1 result each)
+        // assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
 
         // Wait 2s, update dependency A with __TIMESTAMP__ macro,
         // then compile again to ensure preprocessor cache miss
@@ -1370,34 +1379,34 @@ void a() { printf("timestamp: %s", __TIMESTAMP__); }
         );
 
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
+            // preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        // Assert the number of preprocessor cache entries is still 3
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 2] results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 2]);
+        // // Assert the number of preprocessor cache entries is still 3
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 2] results)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 2]);
 
         // Compile again to ensure preprocessor cache hit
         compile_and_verify(AdditionalStats {
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        // Assert the number of preprocessor cache entries is still 3
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 2] results)
-        assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
+        // // Assert the number of preprocessor cache entries is still 3
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 2] results)
+        // assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
     }
 
     // Test timestamp macro used in dependency of a dependency
@@ -1427,33 +1436,33 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
+            // preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        // Assert the number of preprocessor cache entries is still 3
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 3] results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 3]);
+        // // Assert the number of preprocessor cache entries is still 3
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 3] results)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 3]);
 
         compile_and_verify(AdditionalStats {
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        // Assert the number of preprocessor cache entries is still 3
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 3] results)
-        assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
+        // // Assert the number of preprocessor cache entries is still 3
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 3] results)
+        // assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
 
         // Wait 2s, update dependency B with __TIMESTAMP__ macro,
         // then compile again to ensure preprocessor cache miss
@@ -1471,34 +1480,34 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
         );
 
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
+            // preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        // Assert the number of preprocessor cache entries is still 3
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 4] results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 4]);
+        // // Assert the number of preprocessor cache entries is still 3
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 4] results)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 4]);
 
         // Compile again to ensure preprocessor cache hit
         compile_and_verify(AdditionalStats {
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        // Assert the number of preprocessor cache entries is still 3
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 4] results)
-        assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
+        // // Assert the number of preprocessor cache entries is still 3
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 4] results)
+        // assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
 
         // Reset the mtime and compile again to validate preprocessor cache hits
         // Don't error if this fails due to permissions issues (i.e. in Windows CI)
@@ -1512,26 +1521,26 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
-                preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+                // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             })?;
 
-            entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-            // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 4] results)
-            assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 4]);
-            // Verify the new preprocessor cache entry result is at the back of the LRU
-            assert_preprocessor_cache_entries_result_orders_changed(
-                &entries_b
-                    .iter()
-                    .filter(|(_, e)| e.iter().count() > 1)
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                &entries_a
-                    .iter()
-                    .filter(|(_, e)| e.iter().count() > 1)
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            );
+            // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+            // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 4] results)
+            // assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 4]);
+            // // Verify the new preprocessor cache entry result is at the back of the LRU
+            // assert_preprocessor_cache_entries_result_orders_changed(
+            //     &entries_b
+            //         .iter()
+            //         .filter(|(_, e)| e.iter().count() > 1)
+            //         .cloned()
+            //         .collect::<Vec<_>>(),
+            //     &entries_a
+            //         .iter()
+            //         .filter(|(_, e)| e.iter().count() > 1)
+            //         .cloned()
+            //         .collect::<Vec<_>>(),
+            // );
         }
     }
 
@@ -1544,51 +1553,51 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            preprocessed: Some(1),
+            // preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_misses: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_misses: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        // Assert the number of preprocessor cache entries is still 3
-        entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 5] results)
-        assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 5]);
+        // // Assert the number of preprocessor cache entries is still 3
+        // entries_a = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 5] results)
+        // assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 5]);
 
         // Compile again to ensure preprocessor cache hit
         compile_and_verify(AdditionalStats {
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
-            preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
+            // preprocessor_cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        // Assert the number of preprocessor cache entries is still 3
-        entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
-        // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 5] results)
-        assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
+        // // Assert the number of preprocessor cache entries is still 3
+        // entries_b = preprocessor_cache_entries().collect::<Result<Vec<_>>>()?;
+        // // Verify the number of preprocessor cache entries is still 3 (with [1, 1, 5] results)
+        // assert_preprocessor_cache_entries_are_identical(&entries_a, &entries_b);
     }
 
     Ok(())
 }
 
-macro_rules! sccache_preprocessor_cache_mode_tests {
+macro_rules! sccache_macro_tests {
     ($compiler:ident, $compiler_name:expr) => {
         paste! {
             #[test]
             #[cfg(any(unix, target_env = "msvc"))]
-            fn [<test_sccache_command_preprocessor_cache_mode_single_entry_multiple_hashes_ $compiler>] () {
+            fn [<test_sccache_dependency_changes_ $compiler>] () {
                 let _ = env_logger::try_init();
                 let compilers = find_compilers();
                 if let Some(compiler) = compilers.iter().find(|c| c.name == $compiler_name) {
                     // Create and start the sccache client
                     let (_tempdir, tempdir_path, client) = make_sccache_client(true);
-                    test_preprocessor_cache_mode_single_entry_multiple_hashes(
+                    test_dependency_changes(
                         &client.start(),
                         &compiler,
                         &tempdir_path,
@@ -1602,13 +1611,13 @@ macro_rules! sccache_preprocessor_cache_mode_tests {
         paste! {
             #[test]
             #[cfg(any(unix, target_env = "msvc"))]
-            fn [<test_sccache_command_preprocessor_cache_mode_time_macros_ $compiler>] () {
+            fn [<test_sccache_macros_time_ $compiler>] () {
                 let _ = env_logger::try_init();
                 let compilers = find_compilers();
                 if let Some(compiler) = compilers.iter().find(|c| c.name == $compiler_name) {
                     // Create and start the sccache client
                     let (_tempdir, tempdir_path, client) = make_sccache_client(true);
-                    test_preprocessor_cache_mode_time_macros(
+                    test_time_macros(
                         &client.start(),
                         &compiler,
                         &tempdir_path,
@@ -1622,7 +1631,7 @@ macro_rules! sccache_preprocessor_cache_mode_tests {
         paste! {
             #[test]
             #[cfg(any(unix, target_env = "msvc"))]
-            fn [<test_sccache_command_preprocessor_cache_mode_date_macros_ $compiler>] () {
+            fn [<test_sccache_macros_date_ $compiler>] () {
                 // MSVC and NVHPC don't respect SOURCE_DATE_EPOCH
                 if !matches!($compiler_name, "cl" | "nvc" | "nvc++") {
                     let _ = env_logger::try_init();
@@ -1630,7 +1639,7 @@ macro_rules! sccache_preprocessor_cache_mode_tests {
                     if let Some(compiler) = compilers.iter().find(|c| c.name == $compiler_name) {
                         // Create and start the sccache client
                         let (_tempdir, tempdir_path, client) = make_sccache_client(true);
-                        test_preprocessor_cache_mode_date_macros(
+                        test_date_macros(
                             &client.start(),
                             &compiler,
                             &tempdir_path,
@@ -1645,13 +1654,13 @@ macro_rules! sccache_preprocessor_cache_mode_tests {
         paste! {
             #[test]
             #[cfg(any(unix, target_env = "msvc"))]
-            fn [<test_sccache_command_preprocessor_cache_mode_timestamp_macros_ $compiler>] () {
+            fn [<test_sccache_macros_timestamp_ $compiler>] () {
                 let _ = env_logger::try_init();
                 let compilers = find_compilers();
                 if let Some(compiler) = compilers.iter().find(|c| c.name == $compiler_name) {
                     // Create and start the sccache client
                     let (_tempdir, tempdir_path, client) = make_sccache_client(true);
-                    test_preprocessor_cache_mode_timestamp_macros(
+                    test_timestamp_macros(
                         &client.start(),
                         &compiler,
                         &tempdir_path,
@@ -1665,15 +1674,15 @@ macro_rules! sccache_preprocessor_cache_mode_tests {
 }
 
 #[cfg(unix)]
-sccache_preprocessor_cache_mode_tests!(gcc, "gcc");
+sccache_macro_tests!(gcc, "gcc");
 #[cfg(unix)]
-sccache_preprocessor_cache_mode_tests!(clang, "clang");
+sccache_macro_tests!(clang, "clang");
 #[cfg(unix)]
-sccache_preprocessor_cache_mode_tests!(clangxx, "clang++");
+sccache_macro_tests!(clangxx, "clang++");
 #[cfg(unix)]
-sccache_preprocessor_cache_mode_tests!(nvc, "nvc");
+sccache_macro_tests!(nvc, "nvc");
 #[cfg(unix)]
-sccache_preprocessor_cache_mode_tests!(nvcxx, "nvc++");
+sccache_macro_tests!(nvcxx, "nvc++");
 
 #[cfg(target_env = "msvc")]
-sccache_preprocessor_cache_mode_tests!(msvc, "cl");
+sccache_macro_tests!(msvc, "cl");

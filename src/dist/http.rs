@@ -1051,13 +1051,13 @@ mod client {
         dist::{
             self, CompileCommand, NewJobResponse, RunJobRequest, RunJobResponse, SchedulerStatus,
             SubmitToolchainResult, Toolchain,
-            pkg::{PackagedToolchain, ToolchainPackager},
+            pkg::{ArchivePackager, ToolchainPackager},
         },
         errors::*,
         util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc, new_reqwest_client},
     };
 
-    impl AsyncMulticastArgs for (Toolchain, Option<Arc<dyn PackagedToolchain + '_>>) {
+    impl AsyncMulticastArgs for (Toolchain, Option<Arc<dyn ArchivePackager + '_>>) {
         type Key = String;
         fn hash(&self) -> Self::Key {
             self.0.archive_id.clone()
@@ -1072,12 +1072,12 @@ mod client {
     }
 
     #[async_trait]
-    impl AsyncMulticastFunc<(Toolchain, Option<Arc<dyn PackagedToolchain>>), SubmitToolchainResult>
+    impl AsyncMulticastFunc<(Toolchain, Option<Arc<dyn ArchivePackager>>), SubmitToolchainResult>
         for SubmitToolchainFn
     {
         async fn call(
             &self,
-            (tc, package): &(Toolchain, Option<Arc<dyn PackagedToolchain>>),
+            (tc, package): &(Toolchain, Option<Arc<dyn ArchivePackager>>),
         ) -> Result<SubmitToolchainResult> {
             let id = &tc.archive_id;
 
@@ -1184,10 +1184,9 @@ mod client {
         fallback_to_local_compile: bool,
         max_retries: f64,
         request_timeout: u32,
-        rewrite_includes_only: bool,
         scheduler_url: reqwest::Url,
         submit_toolchain_reqs:
-            AsyncMulticast<(Toolchain, Option<Arc<dyn PackagedToolchain>>), SubmitToolchainResult>,
+            AsyncMulticast<(Toolchain, Option<Arc<dyn ArchivePackager>>), SubmitToolchainResult>,
         tc_cache: Arc<cache::ClientToolchains>,
     }
 
@@ -1201,7 +1200,6 @@ mod client {
             auth_token: String,
             fallback_to_local_compile: bool,
             max_retries: f64,
-            rewrite_includes_only: bool,
             net: &config::client::dist::Networking,
         ) -> Result<Self> {
             let request_timeout = net.request_timeout;
@@ -1224,7 +1222,6 @@ mod client {
                 fallback_to_local_compile,
                 max_retries,
                 request_timeout,
-                rewrite_includes_only,
                 scheduler_url: scheduler_url.clone(),
                 submit_toolchain_reqs,
                 tc_cache: client_toolchains,
@@ -1323,7 +1320,7 @@ mod client {
         async fn put_toolchain(
             &self,
             toolchain: Toolchain,
-            packaged: Option<Arc<dyn PackagedToolchain>>,
+            packaged: Option<Arc<dyn ArchivePackager>>,
         ) -> Result<SubmitToolchainResult> {
             self.submit_toolchain_reqs
                 .call((toolchain, packaged))
@@ -1340,7 +1337,7 @@ mod client {
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
-            Option<Arc<dyn PackagedToolchain>>,
+            Option<Arc<dyn ArchivePackager>>,
         )> {
             self.tc_cache
                 .hash_toolchain(
@@ -1362,10 +1359,6 @@ mod client {
 
         fn request_timeout(&self) -> u32 {
             self.request_timeout
-        }
-
-        fn rewrite_includes_only(&self) -> bool {
-            self.rewrite_includes_only
         }
 
         async fn get_custom_toolchain(&self, exe: &Path) -> Option<PathBuf> {

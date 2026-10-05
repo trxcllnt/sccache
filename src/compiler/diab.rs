@@ -24,7 +24,6 @@ use crate::{
         c::{
             ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath,
             GenerateCompileCommandsArgs, GenerateDependenciesArgs, ParseArgs, ParsedArguments,
-            PreprocessArgs, PreprocessorOutput,
         },
         gcc,
     },
@@ -35,7 +34,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use fs_err as fs;
-use futures::FutureExt;
 use std::{
     collections::HashMap,
     ffi::OsString,
@@ -69,31 +67,31 @@ impl CCompilerImpl for Diab {
         parse_arguments(arguments, cwd, &ARGS[..])
     }
 
-    async fn preprocess<T>(
-        &self,
-        PreprocessArgs {
-            creator,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            generate_dependencies,
-            ..
-        }: PreprocessArgs<'_, T>,
-    ) -> Result<PreprocessorOutput>
-    where
-        T: CommandCreatorSync,
-    {
-        preprocess(
-            creator,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            generate_dependencies,
-        )
-        .await
-    }
+    // async fn preprocess<T>(
+    //     &self,
+    //     PreprocessArgs {
+    //         creator,
+    //         executable,
+    //         parsed_args,
+    //         cwd,
+    //         env_vars,
+    //         generate_dependencies,
+    //         ..
+    //     }: PreprocessArgs<'_, T>,
+    // ) -> Result<PreprocessorOutput>
+    // where
+    //     T: CommandCreatorSync,
+    // {
+    //     preprocess(
+    //         creator,
+    //         executable,
+    //         parsed_args,
+    //         cwd,
+    //         env_vars,
+    //         generate_dependencies,
+    //     )
+    //     .await
+    // }
 
     async fn generate_dependencies<T>(
         &self,
@@ -105,19 +103,16 @@ impl CCompilerImpl for Diab {
             env_vars,
             ..
         }: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Option<DepfilePath>>
+    ) -> Result<Vec<PathBuf>>
     where
         T: CommandCreatorSync,
     {
-        generate_dependencies(creator, executable, parsed_args, cwd, env_vars)
-            .await
-            .map(Some)
+        generate_dependencies(creator, executable, parsed_args, cwd, env_vars).await
     }
 
     fn generate_compile_commands(
         &self,
         GenerateCompileCommandsArgs {
-            path_transformer,
             executable,
             parsed_args,
             cwd,
@@ -129,7 +124,7 @@ impl CCompilerImpl for Diab {
         Option<dist::CompileCommand>,
         Cacheable,
     )> {
-        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
+        generate_compile_commands(executable, parsed_args, cwd, env_vars)
     }
 }
 
@@ -373,74 +368,77 @@ where
     cmd
 }
 
-pub async fn preprocess<T>(
-    creator: &T,
-    executable: &Path,
-    parsed_args: &ParsedArguments,
-    cwd: &Path,
-    env_vars: &[(OsString, OsString)],
-    generate_dependencies: bool,
-) -> Result<PreprocessorOutput>
-where
-    T: CommandCreatorSync,
-{
-    let cmd = preprocess_cmd(
-        creator.clone().new_command_sync(executable),
-        parsed_args,
-        cwd,
-        env_vars,
-    );
+// pub async fn preprocess<T>(
+//     creator: &T,
+//     executable: &Path,
+//     parsed_args: &ParsedArguments,
+//     cwd: &Path,
+//     env_vars: &[(OsString, OsString)],
+//     generate_dependencies: bool,
+// ) -> Result<PreprocessorOutput>
+// where
+//     T: CommandCreatorSync,
+// {
+//     let cmd = preprocess_cmd(
+//         creator.clone().new_command_sync(executable),
+//         parsed_args,
+//         cwd,
+//         env_vars,
+//     );
 
-    let (cmd, depfile) = if generate_dependencies {
-        generate_dependencies_with_preprocess_cmd(parsed_args, cwd, cmd)
-            .map(|(cmd, depfile)| (cmd, Some(depfile)))?
-    } else {
-        (cmd, None)
-    };
+//     let (cmd, depfile) = if generate_dependencies {
+//         generate_dependencies_with_preprocess_cmd(parsed_args, cwd, cmd)
+//             .map(|(cmd, depfile)| (cmd, Some(depfile)))?
+//     } else {
+//         (cmd, None)
+//     };
 
-    trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
+//     trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
 
-    let output = run_input_output(cmd, None).await?;
+//     let output = run_input_output(cmd, None).await?;
 
-    let dependencies = depfile.map(|depfile| {
-        gcc::parse_dependencies(cwd.to_owned(), parsed_args.input.clone(), depfile).boxed()
-    });
+//     let dependencies = depfile.map(|depfile| {
+//         let cwd = cwd.to_owned();
+//         let input = parsed_args.input.clone();
+//         async move { gcc::parse_dependencies(cwd, input, &gcc::read_depfile(&depfile).await?) }
+//             .boxed()
+//     });
 
-    Ok(PreprocessorOutput::Output(output.into(), dependencies))
-}
+//     Ok(PreprocessorOutput::Output(output.into(), dependencies))
+// }
 
-fn generate_dependencies_with_preprocess_cmd<C>(
-    parsed_args: &ParsedArguments,
-    cwd: &Path,
-    mut preprocess_command: C,
-) -> Result<(C, DepfilePath)>
-where
-    C: RunCommand,
-{
-    let generate_deps = parsed_args
-        .dependency_args
-        .iter()
-        .any(|arg| arg == "-Xmake-dependency");
+// fn generate_dependencies_with_preprocess_cmd<C>(
+//     parsed_args: &ParsedArguments,
+//     cwd: &Path,
+//     mut preprocess_command: C,
+// ) -> Result<(C, DepfilePath)>
+// where
+//     C: RunCommand,
+// {
+//     let generate_deps = parsed_args
+//         .dependency_args
+//         .iter()
+//         .any(|arg| arg == "-Xmake-dependency");
 
-    // Add missing `-Xmake-dependency`
-    if !generate_deps {
-        preprocess_command.arg("-Xmake-dependency");
-    }
+//     // Add missing `-Xmake-dependency`
+//     if !generate_deps {
+//         preprocess_command.arg("-Xmake-dependency");
+//     }
 
-    let depfile = if let Some(depfile) = parsed_args.depfile.as_deref() {
-        // If `-Xmake-dependency-savefile <file>`
-        // write dependencies to the depfile
-        DepfilePath::Path(cwd.join(depfile))
-    } else {
-        // then write all dependencies to a tempfile
-        let temp = temppath()?;
-        preprocess_command.arg("-Xmake-dependency-savefile");
-        preprocess_command.arg(&temp);
-        DepfilePath::Temp(temp)
-    };
+//     let depfile = if let Some(depfile) = parsed_args.depfile.as_deref() {
+//         // If `-Xmake-dependency-savefile <file>`
+//         // write dependencies to the depfile
+//         DepfilePath::Path(cwd.join(depfile))
+//     } else {
+//         // then write all dependencies to a tempfile
+//         let temp = temppath()?;
+//         preprocess_command.arg("-Xmake-dependency-savefile");
+//         preprocess_command.arg(&temp);
+//         DepfilePath::Temp(temp)
+//     };
 
-    Ok((preprocess_command, depfile))
-}
+//     Ok((preprocess_command, depfile))
+// }
 
 async fn generate_dependencies<T>(
     creator: &T,
@@ -448,7 +446,7 @@ async fn generate_dependencies<T>(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-) -> Result<DepfilePath>
+) -> Result<Vec<PathBuf>>
 where
     T: CommandCreatorSync,
 {
@@ -477,11 +475,10 @@ where
 
     run_input_output(cmd, None).await?;
 
-    Ok(depfile)
+    gcc::parse_dependencies(&parsed_args.input, &gcc::read_depfile(&depfile).await?)
 }
 
 pub fn generate_compile_commands(
-    _path_transformer: &mut dist::PathTransformer,
     executable: &Path,
     parsed_args: &ParsedArguments,
     cwd: &Path,
@@ -497,12 +494,18 @@ pub fn generate_compile_commands(
         None => return Err(anyhow!("Missing object file output")),
     };
 
-    let mut arguments: Vec<OsString> = vec![
-        parsed_args.compilation_flag.clone(),
+    let mut arguments = vec![];
+
+    if !parsed_args.compilation_flag.is_empty() {
+        arguments.push(parsed_args.compilation_flag.clone());
+    }
+
+    arguments.extend([
         parsed_args.input.clone().into(),
         "-o".into(),
         out_file.into(),
-    ];
+    ]);
+
     arguments.extend_from_slice(&parsed_args.preprocessor_args);
     arguments.extend_from_slice(&parsed_args.unhashed_args);
     arguments.extend_from_slice(&parsed_args.common_args);
@@ -593,8 +596,7 @@ impl Iterator for ExpandAtArgs<'_> {
 #[cfg(test)]
 mod test {
     use super::{
-        ARGS, Language, OsString, ParsedArguments, dist, fs, generate_compile_commands,
-        parse_arguments,
+        ARGS, Language, OsString, ParsedArguments, fs, generate_compile_commands, parse_arguments,
     };
     use crate::compiler::c::ArtifactDescriptor;
     use crate::compiler::*;
@@ -929,15 +931,8 @@ mod test {
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
-        let mut path_transformer = dist::PathTransformer::new();
-        let (command, _, cacheable) = generate_compile_commands(
-            &mut path_transformer,
-            compiler,
-            &parsed_args,
-            f.tempdir.path(),
-            &[],
-        )
-        .unwrap();
+        let (command, _, cacheable) =
+            generate_compile_commands(compiler, &parsed_args, f.tempdir.path(), &[]).unwrap();
         let _ = command.execute(&service, &creator).wait();
         assert_eq!(Cacheable::Yes, cacheable);
         // Ensure that we ran all processes.

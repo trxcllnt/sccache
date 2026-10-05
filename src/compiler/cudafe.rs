@@ -16,9 +16,8 @@
 use crate::{
     compiler::{
         c::{
-            CCompilerImpl, CCompilerKind, DepfilePath, GenerateCompileCommandsArgs,
-            GenerateDependenciesArgs, ParseArgs, ParsedArguments, PreprocessArgs,
-            PreprocessorOutput,
+            CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs, GenerateDependenciesArgs,
+            ParseArgs, ParsedArguments,
         },
         cicc, {Cacheable, CompilerArguments, Language},
         {CompileCommandImpl, args::*},
@@ -53,30 +52,29 @@ impl CCompilerImpl for CudaFE {
     ) -> CompilerArguments<ParsedArguments> {
         cicc::parse_arguments(arguments, cwd, Language::CudaFE, &ARGS[..])
     }
-    async fn preprocess<T>(
-        &self,
-        PreprocessArgs {
-            parsed_args, cwd, ..
-        }: PreprocessArgs<'_, T>,
-    ) -> Result<PreprocessorOutput>
-    where
-        T: CommandCreatorSync,
-    {
-        cicc::preprocess(cwd, parsed_args).await
-    }
+    // async fn preprocess<T>(
+    //     &self,
+    //     PreprocessArgs {
+    //         parsed_args, cwd, ..
+    //     }: PreprocessArgs<'_, T>,
+    // ) -> Result<PreprocessorOutput>
+    // where
+    //     T: CommandCreatorSync,
+    // {
+    //     cicc::preprocess(cwd, parsed_args).await
+    // }
     async fn generate_dependencies<T>(
         &self,
         GenerateDependenciesArgs { .. }: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Option<DepfilePath>>
+    ) -> Result<Vec<PathBuf>>
     where
         T: CommandCreatorSync,
     {
-        Ok(None)
+        Ok(Vec::with_capacity(0))
     }
     fn generate_compile_commands(
         &self,
         GenerateCompileCommandsArgs {
-            path_transformer,
             executable,
             parsed_args,
             cwd,
@@ -89,7 +87,6 @@ impl CCompilerImpl for CudaFE {
         Cacheable,
     )> {
         cicc::generate_compile_commands(
-            path_transformer,
             executable,
             parsed_args,
             cwd,

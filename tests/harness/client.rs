@@ -1,7 +1,7 @@
 use fs_err as fs;
 use std::{
     env,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     str,
@@ -84,7 +84,6 @@ pub fn sccache_client_cfg(
             cache_dir: toolchains_dir,
             toolchains: vec![],
             toolchain_cache_size: TC_CACHE_SIZE,
-            rewrite_includes_only: false, // TODO
             net: config::client::dist::Networking {
                 max_connections: 1,
                 connect_timeout: 10,
@@ -145,6 +144,12 @@ impl SccacheClient {
         this.envvars
             .push(("SCCACHE_CACHED_CONF".into(), cached_cfg_path.into()));
         this
+    }
+
+    pub fn with_env<K: AsRef<OsStr>, V: AsRef<OsStr>>(mut self, key: K, val: V) -> Self {
+        self.envvars
+            .push((key.as_ref().into(), val.as_ref().into()));
+        self
     }
 
     pub fn start(self) -> Self {

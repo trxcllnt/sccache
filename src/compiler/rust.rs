@@ -16,7 +16,7 @@
 use {
     crate::{
         compiler::{DistPackagers, OutputsRewriter},
-        dist::pkg::{self, InputsWriter},
+        dist::pkg,
         lru_disk_cache::{LruCache, Meter},
     },
     semver::Version,
@@ -32,7 +32,7 @@ use {
 #[cfg(feature = "dist-client")]
 use crate::util::path_to_str;
 use crate::{
-    cache::{FileObjectSource, Storage},
+    cache::FileObjectSource,
     compiler::args::*,
     compiler::{
         Cacheable, ColorMode, Compilation, CompileCommand, Compiler, CompilerArguments,
@@ -42,7 +42,6 @@ use crate::{
     counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
-    server::SccacheService,
     util::{
         Digest, HashToDigest, OsStrExt, bytes_to_str, fmt_duration_as_secs, hash_all,
         hash_all_archives, run_input_output,
@@ -535,7 +534,7 @@ where
         arguments: &[OsString],
         cwd: &Path,
         _env_vars: &[(OsString, OsString)],
-        _might_dist_compile: bool,
+        _basedirs: &[Vec<u8>],
     ) -> CompilerArguments<Box<dyn CompilerHasher<T> + 'static>> {
         match parse_arguments(arguments, cwd) {
             CompilerArguments::Ok(args) => CompilerArguments::Ok(Box::new(RustHasher {
@@ -1391,18 +1390,12 @@ where
 
     async fn generate_hash_key(
         self: Box<Self>,
-        _service: &SccacheService<T>,
         creator: &T,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
         pool: &tokio::runtime::Handle,
-        _dist_client: Option<Arc<dyn dist::Client>>,
-        _storage: Arc<dyn Storage>,
         cache_control: CacheControl,
-    ) -> Result<(
-        HashResult<T>,
-        Option<Pin<Box<dyn Future<Output = Result<()>> + Send>>>,
-    )> {
+    ) -> Result<HashResult<T>> {
         trace!("[{}]: generate_hash_key", self.parsed_args.crate_name);
 
         // TODO: this doesn't produce correct arguments if they should be concatenated - should use iter_os_strings
@@ -1738,29 +1731,26 @@ where
             .chain(abs_staticlibs)
             .collect();
 
-        Ok((
-            HashResult {
-                key,
-                compilation: Box::new(RustCompilation {
-                    executable: self.executable.clone(),
-                    host: self.host.clone(),
-                    sysroot: self.sysroot.clone(),
-                    arguments,
-                    inputs,
-                    outputs,
-                    crate_link_paths: self.parsed_args.crate_link_paths.clone(),
-                    crate_name: self.parsed_args.crate_name.clone(),
-                    crate_types: self.parsed_args.crate_types.clone(),
-                    dep_info,
-                    cwd,
-                    env_vars,
-                    #[cfg(feature = "dist-client")]
-                    rlib_dep_reader: self.rlib_dep_reader.clone(),
-                }),
-                weak_toolchain_key,
-            },
-            None,
-        ))
+        Ok(HashResult {
+            key,
+            compilation: Box::new(RustCompilation {
+                executable: self.executable.clone(),
+                host: self.host.clone(),
+                sysroot: self.sysroot.clone(),
+                arguments,
+                inputs,
+                outputs,
+                crate_link_paths: self.parsed_args.crate_link_paths.clone(),
+                crate_name: self.parsed_args.crate_name.clone(),
+                crate_types: self.parsed_args.crate_types.clone(),
+                dep_info,
+                cwd,
+                env_vars,
+                #[cfg(feature = "dist-client")]
+                rlib_dep_reader: self.rlib_dep_reader.clone(),
+            }),
+            weak_toolchain_key,
+        })
     }
 
     fn color_mode(&self) -> ColorMode {
@@ -1783,8 +1773,6 @@ where
 impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
     fn generate_compile_commands(
         &self,
-        _path_transformer: &mut dist::PathTransformer,
-        _hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,
@@ -2099,10 +2087,10 @@ fn test_maybe_add_cargo_toml() {
 #[async_trait]
 impl pkg::InputsPackager for RustInputsPackager {
     #[allow(clippy::cognitive_complexity)] // TODO simplify this method.
-    async fn write_inputs(
+    fn write_inputs(
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
-        compressor: Box<dyn InputsWriter>,
+        compressor: &mut (dyn std::io::Write + Send),
     ) -> Result<()> {
         debug!("Packaging compile inputs for compile");
         let RustInputsPackager {
@@ -2259,47 +2247,84 @@ impl pkg::InputsPackager for RustInputsPackager {
         );
 
         let mut builder = tar::Builder::new(compressor);
+        for (input_path, dist_input_path) in all_tar_inputs.iter() {
+            let (mut file_header, dist_input_path) =
+                pkg::make_tar_header(input_path, dist_input_path)?;
+            let file = fs::File::open(input_path)?;
+            if can_trim_rlibs && can_trim_this(input_path) {
+                let mut archive = ar::Archive::new(file);
 
-        tokio::task::spawn_blocking(move || -> Result<_> {
-            for (input_path, dist_input_path) in all_tar_inputs.iter() {
-                let (mut file_header, dist_input_path) =
-                    pkg::make_tar_header(input_path, dist_input_path)?;
-                let file = fs::File::open(input_path)?;
-                if can_trim_rlibs && can_trim_this(input_path) {
-                    let mut archive = ar::Archive::new(file);
-
-                    while let Some(entry_result) = archive.next_entry() {
-                        let mut entry = entry_result?;
-                        if entry.header().identifier() != b"rust.metadata.bin" {
-                            continue;
-                        }
-                        let mut metadata_ar = vec![];
-                        {
-                            let mut ar_builder = ar::Builder::new(&mut metadata_ar);
-                            let header = entry.header().clone();
-                            ar_builder.append(&header, &mut entry)?;
-                        }
-                        file_header.set_size(metadata_ar.len() as u64);
-                        file_header.set_cksum();
-                        builder.append_data(
-                            &mut file_header,
-                            dist_input_path,
-                            metadata_ar.as_slice(),
-                        )?;
-                        break;
+                while let Some(entry_result) = archive.next_entry() {
+                    let mut entry = entry_result?;
+                    if entry.header().identifier() != b"rust.metadata.bin" {
+                        continue;
                     }
-                } else {
+                    let mut metadata_ar = vec![];
+                    {
+                        let mut ar_builder = ar::Builder::new(&mut metadata_ar);
+                        let header = entry.header().clone();
+                        ar_builder.append(&header, &mut entry)?;
+                    }
+                    file_header.set_size(metadata_ar.len() as u64);
                     file_header.set_cksum();
-                    builder.append_data(&mut file_header, dist_input_path, file)?;
+                    builder.append_data(
+                        &mut file_header,
+                        dist_input_path,
+                        metadata_ar.as_slice(),
+                    )?;
+                    break;
                 }
+            } else {
+                file_header.set_cksum();
+                builder.append_data(&mut file_header, dist_input_path, file)?;
             }
+        }
 
-            // Finish archive
-            let _ = builder.into_inner()?.finish()?;
+        // Finish archive
+        builder.finish()?;
 
-            Ok(())
-        })
-        .await?
+        Ok(())
+
+        // tokio::task::spawn_blocking(move || -> Result<_> {
+        //     for (input_path, dist_input_path) in all_tar_inputs.iter() {
+        //         let (mut file_header, dist_input_path) =
+        //             pkg::make_tar_header(input_path, dist_input_path)?;
+        //         let file = fs::File::open(input_path)?;
+        //         if can_trim_rlibs && can_trim_this(input_path) {
+        //             let mut archive = ar::Archive::new(file);
+
+        //             while let Some(entry_result) = archive.next_entry() {
+        //                 let mut entry = entry_result?;
+        //                 if entry.header().identifier() != b"rust.metadata.bin" {
+        //                     continue;
+        //                 }
+        //                 let mut metadata_ar = vec![];
+        //                 {
+        //                     let mut ar_builder = ar::Builder::new(&mut metadata_ar);
+        //                     let header = entry.header().clone();
+        //                     ar_builder.append(&header, &mut entry)?;
+        //                 }
+        //                 file_header.set_size(metadata_ar.len() as u64);
+        //                 file_header.set_cksum();
+        //                 builder.append_data(
+        //                     &mut file_header,
+        //                     dist_input_path,
+        //                     metadata_ar.as_slice(),
+        //                 )?;
+        //                 break;
+        //             }
+        //         } else {
+        //             file_header.set_cksum();
+        //             builder.append_data(&mut file_header, dist_input_path, file)?;
+        //         }
+        //     }
+
+        //     // Finish archive
+        //     let _ = builder.into_inner()?.finish()?;
+
+        //     Ok(())
+        // })
+        // .await?
     }
 }
 
@@ -2343,7 +2368,7 @@ impl pkg::ToolchainPackager for RustToolchainPackager {
     async fn package(
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
-    ) -> Result<Arc<dyn pkg::PackagedToolchain>> {
+    ) -> Result<Arc<dyn pkg::ArchivePackager>> {
         debug!(
             "Packaging Rust compiler for sysroot {:?}",
             self.sysroot.display()
@@ -2351,8 +2376,7 @@ impl pkg::ToolchainPackager for RustToolchainPackager {
 
         let bins_path = self.sysroot.join(BINS_DIR);
         let sysroot_executable = bins_path.join("rustc").with_extension(EXE_EXTENSION);
-        let mut package_builder =
-            pkg::ToolchainPackaged::new(sysroot_executable.clone(), path_transformer);
+        let mut package_builder = pkg::ArchiveBuilder::new(path_transformer);
 
         package_builder.add_executable_and_deps(&self.env_vars, &sysroot_executable)?;
 
@@ -2778,15 +2802,12 @@ mod test {
 
     use crate::compiler::*;
     use crate::mock_command::*;
-    use crate::server;
-    use crate::test::mock_storage::MockStorage;
     use crate::test::utils::*;
     use fs::File;
     use itertools::Itertools;
     use std::ffi::OsStr;
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
-    use test_case::test_case;
 
     fn _parse_arguments(arguments: &[String]) -> CompilerArguments<ParsedArguments> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
@@ -3537,9 +3558,8 @@ proc_macro false
         );
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
-    fn test_generate_hash_key(preprocessor_cache_mode: bool) {
+    #[test]
+    fn test_generate_hash_key() {
         use ar::{Builder, Header};
         drop(env_logger::try_init());
         let f = TestFixture::new();
@@ -3611,15 +3631,8 @@ proc_macro false
         mock_file_names(&creator, &["foo.rlib", "foo.a"]);
         let runtime = single_threaded_runtime();
         let pool = runtime.handle().clone();
-        let storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
-        let service = server::SccacheService::mock_with_storage(
-            storage.clone(),
-            storage.clone(),
-            pool.clone(),
-        );
-        let (res, fut) = hasher
+        let res = hasher
             .generate_hash_key(
-                &service,
                 &creator,
                 f.tempdir.path().to_owned(),
                 [
@@ -3637,15 +3650,11 @@ proc_macro false
                 ]
                 .to_vec(),
                 &pool,
-                None,
-                storage.clone(),
                 CacheControl::Default,
             )
             .wait()
             .unwrap();
-        if let Some(fut) = fut {
-            fut.wait().unwrap();
-        }
+
         let m = Digest::new();
         let empty_digest = m.finish();
 
@@ -3686,7 +3695,6 @@ proc_macro false
         args: &[&'static str],
         env_vars: &[(OsString, OsString)],
         pre_func: F,
-        preprocessor_cache_mode: bool,
     ) -> String
     where
         F: Fn(&Path) -> Result<()>,
@@ -3722,31 +3730,20 @@ proc_macro false
         let creator = new_creator();
         let runtime = single_threaded_runtime();
         let pool = runtime.handle().clone();
-        let storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
-        let service = server::SccacheService::mock_with_storage(
-            storage.clone(),
-            storage.clone(),
-            pool.clone(),
-        );
 
         mock_dep_info(&creator, &["foo.rs"]);
         mock_file_names(&creator, &["foo.rlib"]);
-        let (res, fut) = hasher
+        let res = hasher
             .generate_hash_key(
-                &service,
                 &creator,
                 f.tempdir.path().to_owned(),
                 env_vars.to_owned(),
                 &pool,
-                None,
-                storage.clone(),
                 CacheControl::Default,
             )
             .wait()
             .unwrap();
-        if let Some(fut) = fut {
-            fut.wait().unwrap();
-        }
+
         res.key
     }
 
@@ -3755,9 +3752,8 @@ proc_macro false
         Ok(())
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
-    fn test_equal_hashes_externs(preprocessor_cache_mode: bool) {
+    #[test]
+    fn test_equal_hashes_externs() {
         // Put some content in the extern rlibs so we can verify that the content hashes are
         // used in the right order.
         fn mk_files(tempdir: &Path) -> Result<()> {
@@ -3786,7 +3782,6 @@ proc_macro false
                 ],
                 &[],
                 mk_files,
-                preprocessor_cache_mode,
             ),
             hash_key(
                 &f,
@@ -3807,14 +3802,12 @@ proc_macro false
                 ],
                 &[],
                 mk_files,
-                preprocessor_cache_mode,
             )
         );
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
-    fn test_equal_hashes_link_paths(preprocessor_cache_mode: bool) {
+    #[test]
+    fn test_equal_hashes_link_paths() {
         let f = TestFixture::new();
         assert_eq!(
             hash_key(
@@ -3836,7 +3829,6 @@ proc_macro false
                 ],
                 &[],
                 nothing,
-                preprocessor_cache_mode,
             ),
             hash_key(
                 &f,
@@ -3857,14 +3849,12 @@ proc_macro false
                 ],
                 &[],
                 nothing,
-                preprocessor_cache_mode,
             )
         );
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
-    fn test_equal_hashes_ignored_args(preprocessor_cache_mode: bool) {
+    #[test]
+    fn test_equal_hashes_ignored_args() {
         let f = TestFixture::new();
         assert_eq!(
             hash_key(
@@ -3889,7 +3879,6 @@ proc_macro false
                 ],
                 &[],
                 nothing,
-                preprocessor_cache_mode,
             ),
             hash_key(
                 &f,
@@ -3912,14 +3901,12 @@ proc_macro false
                 ],
                 &[],
                 nothing,
-                preprocessor_cache_mode,
             )
         );
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
-    fn test_equal_hashes_ignored_check_cfg_arg(preprocessor_cache_mode: bool) {
+    #[test]
+    fn test_equal_hashes_ignored_check_cfg_arg() {
         let f = TestFixture::new();
         assert_eq!(
             hash_key(
@@ -3939,7 +3926,6 @@ proc_macro false
                 ],
                 &[],
                 nothing,
-                preprocessor_cache_mode,
             ),
             hash_key(
                 &f,
@@ -3960,14 +3946,12 @@ proc_macro false
                 ],
                 &[],
                 nothing,
-                preprocessor_cache_mode,
             )
         );
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
-    fn test_equal_hashes_cfg_features(preprocessor_cache_mode: bool) {
+    #[test]
+    fn test_equal_hashes_cfg_features() {
         let f = TestFixture::new();
         assert_eq!(
             hash_key(
@@ -3989,7 +3973,6 @@ proc_macro false
                 ],
                 &[],
                 nothing,
-                preprocessor_cache_mode,
             ),
             hash_key(
                 &f,
@@ -4010,7 +3993,6 @@ proc_macro false
                 ],
                 &[],
                 nothing,
-                preprocessor_cache_mode,
             )
         );
     }

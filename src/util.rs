@@ -2013,87 +2013,87 @@ pub fn strip_basedirs<'a>(preprocessor_output: &'a [u8], basedirs: &[Vec<u8>]) -
     Cow::Owned(result)
 }
 
-const PRAGMA_GCC_PCH_PREPROCESS: &[u8] = b"pragma GCC pch_preprocess";
+// const PRAGMA_GCC_PCH_PREPROCESS: &[u8] = b"pragma GCC pch_preprocess";
 
-/// Strip #line directives from a batch of preprocessor output
-pub fn remove_preprocessor_linemarkers(mut lines: BytesMut) -> BytesMut {
-    let mut start = 0;
-    let mut ranges = vec![];
+// /// Strip #line directives from a batch of preprocessor output
+// pub fn remove_preprocessor_linemarkers(mut lines: BytesMut) -> BytesMut {
+//     let mut start = 0;
+//     let mut ranges = vec![];
 
-    // Find newlines
-    for end in memchr::memmem::find_iter(&lines[..], "\n") {
-        let line = str::from_utf8(&lines[start..end])
-            .unwrap()
-            .trim()
-            .as_bytes();
+//     // Find newlines
+//     for end in memchr::memmem::find_iter(&lines[..], "\n") {
+//         let line = str::from_utf8(&lines[start..end])
+//             .unwrap()
+//             .trim()
+//             .as_bytes();
 
-        // There are at least 7 characters (# 1 "x") in a #line directive
-        if line.len() >= 7
-            // Check if we look at a line containing the file name of an included file.
-            // At least the following formats exist (where N is a positive integer):
-            //
-            // GCC/Clang/NVHPC:
-            //
-            //   # N "file"
-            //   # N "file" N
-            //   #pragma GCC pch_preprocess "file"
-            //
-            // MSVC and HP's compiler:
-            //
-            //   #line N "file"
-            //
-            // AIX's compiler:
-            //
-            //   #line N "file"
-            //   #line N
-            //
-            // Note that there may be other lines starting with '#' left after
-            // preprocessing as well, for instance "#    pragma".
-            && line[0] == b'#'
-            && (
-                // GCC/Clang/NVHPC:
-                (line[1] == b' ' && line[2] >= b'0' && line[2] <= b'9')
-                // GCC precompiled header:
-                || line[1..].starts_with(PRAGMA_GCC_PCH_PREPROCESS)
-                // MSVC/HP/AIX:
-                || &line[1..6] == b"line "
-            )
-        {
-            ranges.push(start..end + 1);
-        }
-        start = end + 1;
-    }
+//         // There are at least 7 characters (# 1 "x") in a #line directive
+//         if line.len() >= 7
+//             // Check if we look at a line containing the file name of an included file.
+//             // At least the following formats exist (where N is a positive integer):
+//             //
+//             // GCC/Clang/NVHPC:
+//             //
+//             //   # N "file"
+//             //   # N "file" N
+//             //   #pragma GCC pch_preprocess "file"
+//             //
+//             // MSVC and HP's compiler:
+//             //
+//             //   #line N "file"
+//             //
+//             // AIX's compiler:
+//             //
+//             //   #line N "file"
+//             //   #line N
+//             //
+//             // Note that there may be other lines starting with '#' left after
+//             // preprocessing as well, for instance "#    pragma".
+//             && line[0] == b'#'
+//             && (
+//                 // GCC/Clang/NVHPC:
+//                 (line[1] == b' ' && line[2] >= b'0' && line[2] <= b'9')
+//                 // GCC precompiled header:
+//                 || line[1..].starts_with(PRAGMA_GCC_PCH_PREPROCESS)
+//                 // MSVC/HP/AIX:
+//                 || &line[1..6] == b"line "
+//             )
+//         {
+//             ranges.push(start..end + 1);
+//         }
+//         start = end + 1;
+//     }
 
-    // Collapse consecutive ranges
-    let ranges = {
-        let mut collapsed = vec![];
-        let mut itr = ranges.drain(..);
-        let mut curr = itr.next();
-        while let Some(mut lhs) = curr.take() {
-            for rhs in itr.by_ref() {
-                if lhs.end == rhs.start {
-                    lhs.end = rhs.end;
-                } else {
-                    curr.replace(rhs);
-                    break;
-                }
-            }
-            collapsed.push(lhs);
-        }
-        collapsed
-    };
+//     // Collapse consecutive ranges
+//     let ranges = {
+//         let mut collapsed = vec![];
+//         let mut itr = ranges.drain(..);
+//         let mut curr = itr.next();
+//         while let Some(mut lhs) = curr.take() {
+//             for rhs in itr.by_ref() {
+//                 if lhs.end == rhs.start {
+//                     lhs.end = rhs.end;
+//                 } else {
+//                     curr.replace(rhs);
+//                     break;
+//                 }
+//             }
+//             collapsed.push(lhs);
+//         }
+//         collapsed
+//     };
 
-    // Remove #line directives
-    for range in ranges.into_iter().rev() {
-        lines.copy_within(range.end.., range.start);
-        lines.truncate(lines.len() - (range.end - range.start));
-    }
+//     // Remove #line directives
+//     for range in ranges.into_iter().rev() {
+//         lines.copy_within(range.end.., range.start);
+//         lines.truncate(lines.len() - (range.end - range.start));
+//     }
 
-    lines
-}
+//     lines
+// }
 
-/// Strip empty newlines from a batch of preprocessor output, except newlines inside C++11 raw string literals.
-pub fn remove_preprocessor_empty_newlines(mut lines: BytesMut) -> BytesMut {
+/// Strip empty newlines from a batch of source file lines, except newlines inside C++11 raw string literals.
+pub fn strip_empty_newlines(mut lines: BytesMut) -> BytesMut {
     use memchr::memmem::{find, find_iter};
 
     let mut start = 0;
@@ -2130,10 +2130,8 @@ pub fn remove_preprocessor_empty_newlines(mut lines: BytesMut) -> BytesMut {
 
         // Continue removing newlines if this line terminates a raw string literal.
         // This may find the end delimiter on the same line as the start delimiter,
-        // so that's why we don't continue early above. For example:
-        // ```
-        // R"esc(This is a raw string literal)esc"
-        // ```
+        // so the above doesn't `continue` the loop when we find a start delimiter.
+        // e.g. `R"esc(This is a raw string literal)esc"`
         if str_lit_delimiter
             .as_deref()
             .and_then(|delim| find(line, delim))
@@ -2171,6 +2169,148 @@ pub fn remove_preprocessor_empty_newlines(mut lines: BytesMut) -> BytesMut {
     }
 
     lines
+}
+
+pub fn apply_basedirs_to_args<P: AsRef<Path>>(
+    cwd: P,
+    args: &mut [OsString],
+    basedirs: &[Vec<u8>],
+) -> Result<()> {
+    if args.is_empty() || basedirs.is_empty() {
+        return Ok(());
+    }
+
+    use crate::dist::pkg::SimplifyPath;
+    use itertools::Itertools;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let cwd = cwd.as_ref();
+    let map = {
+        let mut paths = SimplifyPath {
+            dirs: Some(&mut BTreeSet::new()),
+            resolved_symlinks: Some(&mut BTreeMap::new()),
+        };
+        let cwd = paths.simplify(cwd)?;
+        basedirs
+            .iter()
+            .map(|basedir| {
+                bytes_to_path(basedir)
+                    .map_err(Into::into)
+                    .and_then(|path| paths.simplify(path))
+                    .map(|path| diff_paths(&path, &cwd).unwrap_or(path))
+                    .and_then(|path| {
+                        path_to_bytes(path)
+                            .map_err(Into::into)
+                            .map(|path| (basedir.clone(), path))
+                    })
+            })
+            .try_collect::<_, BTreeMap<_, _>, _>()?
+    };
+
+    let mut matches = vec![];
+
+    for arg in args {
+        let mut lhs = 0;
+
+        // We must return the original argument on all platforms, so we only normalize a copy for searching.
+        #[cfg(not(target_os = "windows"))]
+        let buf: &[u8] = arg.as_encoded_bytes();
+        #[cfg(target_os = "windows")]
+        let normalized = normalize_win_path(arg.as_encoded_bytes());
+        #[cfg(target_os = "windows")]
+        let buf: &[u8] = &normalized;
+
+        for pos in pathname_positions(buf) {
+            if pos < lhs {
+                continue;
+            }
+            lhs = pos;
+
+            let rest = &buf[pos..];
+            for basedir in basedirs.iter().rev() {
+                // Basedirs carry a trailing slash, see Config::basedirs. A path
+                // component can also end at the end of the argument, or at a
+                // separator such as the `=` of -ffile-prefix-map.
+                let base = basedir.as_slice();
+                let bare = &base[..base.len() - 1];
+                if rest.starts_with(base) {
+                    matches.push((pos..pos + bare.len(), base));
+                    lhs = pos + base.len();
+                    break;
+                } else if rest.starts_with(bare)
+                    && matches!(rest.get(bare.len()), None | Some(b'='))
+                {
+                    matches.push((pos..pos + bare.len(), base));
+                    lhs = pos + bare.len();
+                    break;
+                }
+            }
+        }
+
+        if !matches.is_empty() {
+            let mut lhs = 0;
+            let mut new = vec![];
+            for (range, dir) in matches.drain(..) {
+                new.extend_from_slice(&buf[lhs..range.start]);
+                if let Some(rel) = map.get(dir) {
+                    new.extend_from_slice(rel);
+                }
+                lhs = range.end;
+            }
+            new.extend_from_slice(&buf[lhs..]);
+            *arg = unsafe { OsString::from_encoded_bytes_unchecked(new) };
+        }
+    }
+
+    Ok(())
+}
+
+// This routine is adapted from the *old* Path's `path_relative_from`
+// function, which works differently from the new `relative_from` function.
+// In particular, this handles the case on unix where both paths are
+// absolute but with only the root as the common directory.
+fn diff_paths(path: &Path, base: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+
+    if path.is_absolute() != base.is_absolute() {
+        if path.is_absolute() {
+            Some(PathBuf::from(path))
+        } else {
+            None
+        }
+    } else {
+        let mut ita = path.components();
+        let mut itb = base.components();
+        let mut comps: Vec<Component<'_>> = vec![];
+        loop {
+            match (ita.next(), itb.next()) {
+                (None, None) => break,
+                (Some(a), None) => {
+                    comps.push(a);
+                    comps.extend(ita.by_ref());
+                    break;
+                }
+                (None, _) => comps.push(Component::ParentDir),
+                (Some(a), Some(b)) if comps.is_empty() && a == b => (),
+                (Some(a), Some(Component::<'_>::CurDir)) => comps.push(a),
+                (Some(_), Some(Component::<'_>::ParentDir)) => return None,
+                (Some(a), Some(_)) => {
+                    comps.push(Component::ParentDir);
+                    for _ in itb {
+                        comps.push(Component::ParentDir);
+                    }
+                    comps.push(a);
+                    comps.extend(ita.by_ref());
+                    break;
+                }
+            }
+        }
+        if comps.is_empty() {
+            Some(Path::new(".").into())
+        } else {
+            Some(comps.iter().map(|c| c.as_os_str()).collect())
+        }
+    }
 }
 
 /// Strip the base directories from a single compiler argument, for hashing.

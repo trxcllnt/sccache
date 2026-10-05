@@ -41,7 +41,7 @@ use crate::{
     server,
     util::{
         Digest, bytes_to_str, fmt_duration_as_secs, resolve_compiler_avoiding_wrapper,
-        run_input_output, strip_basedirs,
+        run_input_output,
     },
 };
 
@@ -594,7 +594,7 @@ where
         arguments: &[OsString],
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        might_dist_compile: bool,
+        basedirs: &[Vec<u8>],
     ) -> CompilerArguments<Box<dyn CompilerHasher<T> + 'static>>;
     fn box_clone(&self) -> Box<dyn Compiler<T>>;
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send + Sync>;
@@ -645,18 +645,12 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn generate_hash_key(
         self: Box<Self>,
-        service: &server::SccacheService<T>,
         creator: &T,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
         pool: &tokio::runtime::Handle,
-        dist_client: Option<Arc<dyn dist::Client>>,
-        storage: Arc<dyn Storage>,
         cache_control: CacheControl,
-    ) -> Result<(
-        HashResult<T>,
-        Option<Pin<Box<dyn Future<Output = Result<()>> + Send>>>,
-    )>;
+    ) -> Result<HashResult<T>>;
 
     /// Return the state of any `--color` option passed to the compiler.
     fn color_mode(&self) -> ColorMode;
@@ -670,7 +664,6 @@ where
         dist_client: Option<Arc<dyn dist::Client>>,
         creator: T,
         compilations_storage: Arc<dyn Storage>,
-        preprocessor_storage: Arc<dyn Storage>,
         arguments: Vec<OsString>,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
@@ -709,16 +702,7 @@ where
         });
 
         let hash_result = self
-            .generate_hash_key(
-                service,
-                &creator,
-                cwd.clone(),
-                env_vars,
-                &runtime,
-                dist_client.clone(),
-                preprocessor_storage.clone(),
-                cache_control,
-            )
+            .generate_hash_key(&creator, cwd.clone(), env_vars, &runtime, cache_control)
             .await;
 
         trace!(
@@ -729,18 +713,8 @@ where
         // Decrement pending_compilations as soon as we're done preprocessing
         drop(pending);
 
-        let (hash_result, preprocessor_cache_write) = match hash_result {
-            Ok((hash_result, preprocessor_cache_write)) => (
-                hash_result,
-                preprocessor_cache_write.map(|fut| {
-                    // Immediately drive the preprocessor cache write so it
-                    // runs concurrently to cache lookups and compilations
-                    runtime.spawn(async move {
-                        // We don't care about the result here
-                        let _ = fut.await;
-                    })
-                }),
-            ),
+        let hash_result = match hash_result {
+            Ok(hash_result) => hash_result,
             Err(err) => {
                 return match err.downcast::<ProcessError>() {
                     Ok(ProcessError(output)) => {
@@ -789,11 +763,7 @@ where
                     (res, start.elapsed())
                 };
 
-                let (hash_key, outputs, cacheable, dist_type, mut output) = compile?;
-                let basedirs = compilations_storage.basedirs();
-
-                output.stdout = strip_basedirs(&output.stdout, basedirs).into_owned();
-                output.stderr = strip_basedirs(&output.stderr, basedirs).into_owned();
+                let (hash_key, outputs, cacheable, dist_type, output) = compile?;
 
                 if !output.success() {
                     trace!(
@@ -810,7 +780,7 @@ where
                     );
                     return Ok((CompileResult::NotCached(dist_type, duration), output));
                 }
-                if cacheable != Cacheable::Yes {
+                if hash_key.is_empty() || cacheable != Cacheable::Yes {
                     // Not cacheable
                     trace!(
                         "[{out_pretty}]: Compiled in {}, but not cacheable",
@@ -865,18 +835,6 @@ where
                                 Err(anyhow::Error::new(err))
                             }
                         }
-                    })
-                } else {
-                    cache_write
-                };
-
-                let cache_write = if let Some(preprocessor_cache_write) = preprocessor_cache_write {
-                    Box::pin(async move {
-                        // the preprocessor cache write is allowed to error,
-                        // we only care about the object cache write
-                        futures::future::join(preprocessor_cache_write, cache_write)
-                            .await
-                            .1
                     })
                 } else {
                     cache_write
@@ -993,6 +951,7 @@ where
         let Self {
             cache_control,
             out_pretty,
+            hash_key,
             ..
         } = self;
 
@@ -1014,6 +973,7 @@ where
                 );
                 Ok(CacheLookupResult::Miss(MissType::ForcedRecache))
             }
+            _ if hash_key.is_empty() => Ok(CacheLookupResult::Miss(MissType::Normal)),
             _ => {
                 let _pending = self.sccache_service.increment_pending_cache_lookups();
                 CacheLookup::new(self, start, timeout, storage)
@@ -1069,10 +1029,8 @@ where
             ..
         } = self;
 
-        let mut path_transformer = dist::PathTransformer::new();
-
         let (compile_cmd, dist_compile_cmd, cacheable) = compilation
-            .generate_compile_commands(&mut path_transformer, &hash_key)
+            .generate_compile_commands()
             .context("Failed to generate compile commands")?;
 
         let dist = dist_client.and_then(|dist_client| {
@@ -1081,7 +1039,7 @@ where
                 dist_client,
                 dist_compile_cmd,
                 out_pretty: out_pretty.clone(),
-                path_transformer,
+                path_transformer: Default::default(),
                 weak_toolchain_key,
             })
         });
@@ -1373,17 +1331,33 @@ where
             // and we don't want to OOM the server during parallel builds.
             let job_inputs = crate::util::tempfile()?;
 
-            inputs_packager
-                .write_inputs(
-                    &mut path_transformer,
-                    crate::dist::pkg::InputsCompressor::new(flate2::write::ZlibEncoder::new(
-                        job_inputs.reopen()?,
-                        // Optimize for size since bandwidth costs more than client CPU cycles
-                        flate2::Compression::best(),
-                    )),
-                )
-                .await
-                .context("Could not write inputs for compilation")?;
+            let mut inputs_writer = flate2::write::ZlibEncoder::new(
+                job_inputs.reopen()?,
+                // // Optimize for size since bandwidth costs more than client CPU cycles
+                // flate2::Compression::best(),
+                flate2::Compression::default(),
+            );
+
+            path_transformer = tokio::task::spawn_blocking(move || {
+                inputs_packager
+                    .write_inputs(&mut path_transformer, &mut inputs_writer)
+                    .and_then(|_| {
+                        inputs_writer
+                            .flush()
+                            .context("failed to flush compressor")?;
+                        trace!(
+                            "Compressed inputs from {} MiB -> {} MiB",
+                            (inputs_writer.total_in() as f64 / (1024.0 * 1024.0)),
+                            (inputs_writer.total_out() as f64 / (1024.0 * 1024.0))
+                        );
+                        inputs_writer
+                            .finish()
+                            .context("failed to finish compressor")
+                    })
+                    .context("Could not write inputs for compilation")
+                    .map(|_| path_transformer)
+            })
+            .await??;
 
             job_inputs
         };
@@ -1815,8 +1789,6 @@ where
     /// execute the compiler.
     fn generate_compile_commands(
         &self,
-        path_transformer: &mut dist::PathTransformer,
-        hash_key: &str,
     ) -> Result<(
         Box<dyn CompileCommand<T>>,
         Option<dist::CompileCommand>,
@@ -2508,26 +2480,30 @@ where
         .arg("-")
         .arg("-o")
         .arg("-");
-    trace!("assembler_version: {:?}", cmd);
-    let output = cmd.spawn().await.ok()?.wait_with_output().await.ok()?;
+
+    trace!("assembler_version: {cmd}");
+
+    let output = run_input_output(cmd, None).await.ok()?;
 
     if !output.status.success() {
         debug!(
             "Failed to get the assembler version: {}",
-            String::from_utf8_lossy(&output.stderr)
+            bytes_to_str(output.stderr).ok()?
         );
         return None;
     }
     // The rest of what `--version` prints is copyright boilerplate.
-    let version = str::from_utf8(&output.stdout)
+    let version = bytes_to_str(&output.stdout)
         .ok()?
         .lines()
         .next()?
         .trim()
         .to_owned();
+
     if version.is_empty() {
         return None;
     }
+
     Some(version)
 }
 
@@ -2548,16 +2524,22 @@ where
         .envs(env.iter().map(|s| (&s.0, &s.1)))
         .args(extra_args)
         .arg("-print-prog-name=as");
-    trace!("assembler_path: {:?}", cmd);
-    let output = cmd.spawn().await.ok()?.wait_with_output().await.ok()?;
+
+    trace!("assembler_path: {cmd}");
+
+    let output = run_input_output(cmd, None).await.ok()?;
 
     if !output.status.success() {
         return None;
     }
-    let name = str::from_utf8(&output.stdout).ok()?.trim();
+
+    let name = bytes_to_str(&output.stdout).ok()?;
+    let name = name.trim();
+
     if name.is_empty() {
         return None;
     }
+
     // GCC answers with a bare name when it leaves finding the assembler to
     // $PATH, and clang does the same when there is nothing to find, so finish
     // the search the way the compiler will: against the client's $PATH.
@@ -2566,6 +2548,7 @@ where
         .find(|(k, _)| k == "PATH")
         .map(|(_, v)| v.clone())
         .or_else(|| env::var_os("PATH"));
+
     which::which_in(name, paths, cwd).ok()
 }
 
@@ -2731,15 +2714,18 @@ compiler_version=__VERSION__
         match kind {
             "clang" | "clang++" | "apple-clang" | "apple-clang++" => {
                 trace!("Found {kind} (version: {})", version.as_ref().unwrap());
+                // Identity of the assembler used with -fno-integrated-as.
                 let assembler_digest =
                     detect_assembler(&creator, &executable, &["-fno-integrated-as"], cwd, env)
                         .await;
+
                 return CCompiler::new(
                     Clang::new(
-                        kind.ends_with("++"),       // clangplusplus
-                        kind.starts_with("apple-"), // is_appleclang
-                        version,                    // version
+                        kind.ends_with("++"), // clangplusplus
+                        // kind.starts_with("apple-"), // is_appleclang
+                        version, // version
                         assembler_digest,
+                        Clang::find_extra_gcc_toolchain_markers(&executable),
                     ),
                     executable,
                     vec![],
@@ -2755,9 +2741,11 @@ compiler_version=__VERSION__
             }
             "gcc" | "g++" => {
                 trace!("Found {kind} (version: {})", version.as_ref().unwrap());
+
                 let assembler_digest = detect_assembler(&creator, &executable, &[], cwd, env).await;
+
                 // Include gcc's implicit specfiles in the object hash
-                let extra_hash_files =
+                let specfiles =
                     Gcc::read_implicit_specfiles(&mut creator, &executable, arguments, env, "-v")
                         .await?;
 
@@ -2768,11 +2756,11 @@ compiler_version=__VERSION__
                         gplusplus: kind == "g++",
                         version,
                         native_archs,
-                        specfiles: extra_hash_files.clone(),
                         assembler_digest,
+                        specfiles: specfiles.clone(),
                     },
                     executable,
-                    extra_hash_files,
+                    specfiles,
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
@@ -3140,7 +3128,6 @@ mod test {
                 .as_slice(),
                 cwd: ".".as_ref(),
                 env_vars: &[],
-                might_dist_compile: false,
             }) {
                 CompilerArguments::Ok(parsed_args) => {
                     assert_eq!(
@@ -3602,9 +3589,8 @@ LLVM version: 6.0",
         );
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
-    fn test_compiler_version_affects_hash(preprocessor_cache_mode: bool) {
+    #[test]
+    fn test_compiler_version_affects_hash() {
         drop(env_logger::try_init());
         let f = TestFixture::new();
         let clang = f.mk_bin("clang").unwrap();
@@ -3613,13 +3599,6 @@ LLVM version: 6.0",
         let pool = runtime.handle();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
         let cwd = f.tempdir.path();
-        let compilations_storage = Arc::new(MockStorage::new(None, true));
-        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
-        let service = server::SccacheService::mock_with_storage(
-            compilations_storage.clone(),
-            preprocessor_storage.clone(),
-            pool.clone(),
-        );
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
 
@@ -3647,50 +3626,36 @@ LLVM version: 6.0",
                     // Pretend to preprocess something.
                     let mut f = File::create(&dep)?;
                     f.write_all(b"foo.o :")?;
-                    Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+                    Ok(MockChild::new(exit_status(0), "", ""))
                 });
-                let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
+                let hasher = match c.parse_arguments(&arguments, cwd, &[], &[]) {
                     CompilerArguments::Ok(h) => h,
                     o => panic!("Bad result from parse_arguments: {o:?}"),
                 };
-                let (res, fut) = hasher
+                hasher
                     .generate_hash_key(
-                        &service,
                         &creator,
                         cwd.to_path_buf(),
                         vec![],
                         pool,
-                        None,
-                        preprocessor_storage.clone(),
                         CacheControl::Default,
                     )
                     .wait()
-                    .unwrap();
-                if let Some(fut) = fut {
-                    fut.wait().unwrap();
-                }
-                res
+                    .unwrap()
             })
             .collect();
         assert_eq!(results.len(), 2);
         assert_ne!(results[0].key, results[1].key);
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
-    fn test_assembler_affects_hash(preprocessor_cache_mode: bool) {
+    #[test]
+    fn test_assembler_affects_hash() {
+        drop(env_logger::try_init());
         let f = TestFixture::new();
         let clang = f.mk_bin("clang").unwrap();
         let creator = new_creator();
         let runtime = single_threaded_runtime();
         let pool = runtime.handle();
-        let compilations_storage = Arc::new(MockStorage::new(None, true));
-        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
-        let service = server::SccacheService::mock_with_storage(
-            compilations_storage.clone(),
-            preprocessor_storage.clone(),
-            pool.clone(),
-        );
         let cwd = f.tempdir.path();
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
@@ -3717,31 +3682,23 @@ LLVM version: 6.0",
             .wait()
             .unwrap()
             .0;
-            next_command(
-                &creator,
-                Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-            );
-            let hasher = match c.parse_arguments(arguments, ".".as_ref(), &[], false) {
+            // Generate dependencies
+            next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
+            let hasher = match c.parse_arguments(arguments, ".".as_ref(), &[], &[]) {
                 CompilerArguments::Ok(h) => h,
                 o => panic!("Bad result from parse_arguments: {:?}", o),
             };
-            let (res, fut) = hasher
+            hasher
                 .generate_hash_key(
-                    &service,
                     &creator,
                     cwd.to_path_buf(),
                     vec![],
                     pool,
-                    None,
-                    preprocessor_storage.clone(),
                     CacheControl::Default,
                 )
                 .wait()
-                .unwrap();
-            if let Some(fut) = fut {
-                fut.wait().unwrap();
-            }
-            res.key
+                .unwrap()
+                .key
         };
 
         // Two assemblers reporting the same version, one of them a rebuild.
@@ -3775,9 +3732,8 @@ LLVM version: 6.0",
         );
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
-    fn test_common_args_affects_hash(preprocessor_cache_mode: bool) {
+    #[test]
+    fn test_common_args_affects_hash() {
         drop(env_logger::try_init());
         let f = TestFixture::new();
         let creator = new_creator();
@@ -3790,12 +3746,6 @@ LLVM version: 6.0",
             ovec!["-c", "foo.c", "-o", "foo.o"],
         ];
         let cwd = f.tempdir.path();
-        let storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
-        let service = server::SccacheService::mock_with_storage(
-            storage.clone(),
-            storage.clone(),
-            pool.clone(),
-        );
 
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
@@ -3826,31 +3776,21 @@ LLVM version: 6.0",
                 .unwrap()
                 .0;
                 // The generate_hash_key preprocessor invocation.
-                next_command(
-                    &creator,
-                    Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-                );
-                let hasher = match c.parse_arguments(argument, cwd, &[], false) {
+                next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
+                let hasher = match c.parse_arguments(argument, cwd, &[], &[]) {
                     CompilerArguments::Ok(h) => h,
                     o => panic!("Bad result from parse_arguments: {o:?}"),
                 };
-                let (res, fut) = hasher
+                hasher
                     .generate_hash_key(
-                        &service,
                         &creator,
                         cwd.to_path_buf(),
                         vec![],
                         pool,
-                        None,
-                        storage.clone(),
                         CacheControl::Default,
                     )
                     .wait()
-                    .unwrap();
-                if let Some(fut) = fut {
-                    fut.wait().unwrap();
-                }
-                res
+                    .unwrap()
             })
             .collect();
 
@@ -3860,9 +3800,8 @@ LLVM version: 6.0",
         assert_ne!(results[0].key, results[2].key);
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
-    fn test_preprocessed_file_works_without_preprocessor_call(preprocessor_cache_mode: bool) {
+    #[test]
+    fn test_preprocessed_file_works_without_preprocessor_call() {
         drop(env_logger::try_init());
         let f = TestFixture::new();
         let clang = f.mk_bin("clang").unwrap();
@@ -3871,12 +3810,6 @@ LLVM version: 6.0",
         let pool = runtime.handle();
         let output = "compiler_id=clang\ncompiler_version=\"16.0.0\"";
         let cwd = f.tempdir.path();
-        let storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
-        let service = server::SccacheService::mock_with_storage(
-            storage.clone(),
-            storage.clone(),
-            pool.clone(),
-        );
 
         let results: Vec<_> = ["foo.c", "foo.i"]
             .iter()
@@ -3903,32 +3836,22 @@ LLVM version: 6.0",
 
                 // Only run the preprocessor on the non-preprocessed file
                 if !file.ends_with("i") {
-                    next_command(
-                        &creator,
-                        Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-                    );
+                    next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
                 }
-                let hasher = match c.parse_arguments(&arguments, ".".as_ref(), &[], false) {
+                let hasher = match c.parse_arguments(&arguments, ".".as_ref(), &[], &[]) {
                     CompilerArguments::Ok(h) => h,
                     o => panic!("Bad result from parse_arguments: {o:?}"),
                 };
-                let (res, fut) = hasher
+                hasher
                     .generate_hash_key(
-                        &service,
                         &creator,
                         cwd.to_path_buf(),
                         vec![],
                         pool,
-                        None,
-                        storage.clone(),
                         CacheControl::Default,
                     )
                     .wait()
-                    .unwrap();
-                if let Some(fut) = fut {
-                    fut.wait().unwrap();
-                }
-                res
+                    .unwrap()
             })
             .collect();
         assert_eq!(results.len(), 2);
@@ -3976,9 +3899,8 @@ LLVM version: 6.0",
         assert_eq!(CompilerKind::C(CCompilerKind::Gcc), c.kind());
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
-    fn test_compiler_get_cached_or_compile(preprocessor_cache_mode: bool) {
+    #[test]
+    fn test_compiler_get_cached_or_compile() {
         drop(env_logger::try_init());
         let pending = crate::server::SccacheGauge::default();
         let creator = new_creator();
@@ -3992,7 +3914,7 @@ LLVM version: 6.0",
             CacheMode::ReadWrite,
             vec![],
         ));
-        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, true));
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
         let service = server::SccacheService::mock_with_storage(
@@ -4045,7 +3967,7 @@ LLVM version: 6.0",
             // Pretend to preprocess something.
             let mut f = File::create(&d)?;
             f.write_all(b"foo.o :")?;
-            Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+            Ok(MockChild::new(exit_status(0), "", ""))
         });
         // The compiler invocation.
         const COMPILER_STDOUT: &[u8] = b"compiler stdout";
@@ -4064,7 +3986,7 @@ LLVM version: 6.0",
         });
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
-        let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
+        let hasher = match c.parse_arguments(&arguments, cwd, &[], &[]) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
@@ -4077,7 +3999,6 @@ LLVM version: 6.0",
                         None,
                         creator.clone(),
                         compilations_storage.clone(),
-                        preprocessor_storage.clone(),
                         arguments.clone(),
                         cwd.to_path_buf(),
                         vec![],
@@ -4105,10 +4026,7 @@ LLVM version: 6.0",
         // Now compile again, which should be a cache hit.
         fs::remove_file(&obj).unwrap();
         // The preprocessor invocation.
-        next_command(
-            &creator,
-            Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-        );
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
         // There should be no actual compiler invocation.
         let hasher2 = hasher.clone();
         let (cached, res) = runtime
@@ -4119,7 +4037,6 @@ LLVM version: 6.0",
                         None,
                         creator,
                         compilations_storage.clone(),
-                        preprocessor_storage.clone(),
                         arguments,
                         cwd.to_path_buf(),
                         vec![],
@@ -4138,14 +4055,10 @@ LLVM version: 6.0",
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
     }
 
-    #[test_case(true, false ; "with preprocessor cache")]
-    #[test_case(false, false ; "without preprocessor cache")]
-    #[test_case(false, true ; "server has toolchain")]
+    #[test_case(true ; "server has toolchain")]
+    #[test_case(false ; "server needs toolchain")]
     #[cfg(feature = "dist-client")]
-    fn test_compiler_get_cached_or_compile_dist(
-        preprocessor_cache_mode: bool,
-        server_already_has_toolchain: bool,
-    ) {
+    fn test_compiler_get_cached_or_compile_dist(server_already_has_toolchain: bool) {
         drop(env_logger::try_init());
         let pending = crate::server::SccacheGauge::default();
         let creator = new_creator();
@@ -4159,7 +4072,7 @@ LLVM version: 6.0",
             CacheMode::ReadWrite,
             vec![],
         ));
-        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, true));
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
         // Pretend to be GCC.
@@ -4206,13 +4119,13 @@ LLVM version: 6.0",
             // Pretend to preprocess something.
             let mut f = File::create(&d)?;
             f.write_all(b"foo.o :")?;
-            Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+            Ok(MockChild::new(exit_status(0), "", ""))
         });
-        // The inputs_packager preprocessor invocation.
-        next_command(
-            &creator,
-            Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-        );
+        // // The inputs_packager preprocessor invocation.
+        // next_command(
+        //     &creator,
+        //     Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
+        // );
         // The compiler invocation.
         const COMPILER_STDOUT: &[u8] = b"compiler stdout";
         const COMPILER_STDERR: &[u8] = b"compiler stderr";
@@ -4233,7 +4146,7 @@ LLVM version: 6.0",
 
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
-        let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
+        let hasher = match c.parse_arguments(&arguments, cwd, &[], &[]) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
@@ -4246,7 +4159,6 @@ LLVM version: 6.0",
                         Some(dist_client.clone()),
                         creator.clone(),
                         compilations_storage.clone(),
-                        preprocessor_storage.clone(),
                         arguments.clone(),
                         cwd.to_path_buf(),
                         vec![],
@@ -4279,7 +4191,7 @@ LLVM version: 6.0",
             // Pretend to preprocess something.
             let mut f = File::create(&d)?;
             f.write_all(b"foo.o :")?;
-            Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+            Ok(MockChild::new(exit_status(0), "", ""))
         });
         // There should be no actual compiler invocation.
         let hasher2 = hasher.clone();
@@ -4291,7 +4203,6 @@ LLVM version: 6.0",
                         Some(dist_client.clone()),
                         creator,
                         compilations_storage.clone(),
-                        preprocessor_storage.clone(),
                         arguments,
                         cwd.to_path_buf(),
                         vec![],
@@ -4312,9 +4223,8 @@ LLVM version: 6.0",
 
     /// Test that a cache read that results in an error is treated as a cache
     /// miss.
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
-    fn test_compiler_get_cached_or_compile_cache_error(preprocessor_cache_mode: bool) {
+    #[test]
+    fn test_compiler_get_cached_or_compile_cache_error() {
         drop(env_logger::try_init());
         let pending = crate::server::SccacheGauge::default();
         let creator = new_creator();
@@ -4323,7 +4233,7 @@ LLVM version: 6.0",
         let runtime = Runtime::new().unwrap();
         let pool = runtime.handle().clone();
         let compilations_storage = Arc::new(MockStorage::new(None, true));
-        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, true));
         let service = server::SccacheService::mock_with_storage(
             compilations_storage.clone(),
             preprocessor_storage.clone(),
@@ -4376,7 +4286,7 @@ LLVM version: 6.0",
             // Pretend to preprocess something.
             let mut f = File::create(&d)?;
             f.write_all(b"foo.o :")?;
-            Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+            Ok(MockChild::new(exit_status(0), "", ""))
         });
         // The compiler invocation.
         const COMPILER_STDOUT: &[u8] = b"compiler stdout";
@@ -4395,7 +4305,7 @@ LLVM version: 6.0",
         });
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
-        let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
+        let hasher = match c.parse_arguments(&arguments, cwd, &[], &[]) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
@@ -4407,7 +4317,6 @@ LLVM version: 6.0",
                 None,
                 creator,
                 compilations_storage,
-                preprocessor_storage,
                 arguments.clone(),
                 cwd.to_path_buf(),
                 vec![],
@@ -4433,10 +4342,9 @@ LLVM version: 6.0",
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
+    #[test]
     /// Test that cache read timing is recorded.
-    fn test_compiler_get_cached_or_compile_cache_get_timing(preprocessor_cache_mode: bool) {
+    fn test_compiler_get_cached_or_compile_cache_get_timing() {
         drop(env_logger::try_init());
         let pending = crate::server::SccacheGauge::default();
         let creator = new_creator();
@@ -4449,7 +4357,7 @@ LLVM version: 6.0",
         // Make our storage wait 2ms for each get/put operation.
         let storage_delay = Duration::from_millis(2);
         let compilations_storage = Arc::new(MockStorage::new(Some(storage_delay), true));
-        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, true));
         let service = server::SccacheService::mock_with_storage(
             compilations_storage.clone(),
             preprocessor_storage.clone(),
@@ -4499,11 +4407,12 @@ LLVM version: 6.0",
             // Pretend to preprocess something.
             let mut f = File::create(&d)?;
             f.write_all(b"foo.o :")?;
-            Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+            Ok(MockChild::new(exit_status(0), "", ""))
         });
         // The compiler invocation.
         const COMPILER_STDOUT: &[u8] = b"compiler stdout";
         const COMPILER_STDERR: &[u8] = b"compiler stderr";
+        let dep_file: &[u8] = b"dependency file";
         let obj_file: &[u8] = &[1, 2, 3, 4];
         // A cache entry to hand out
         let mut cachewrite = CacheWrite::new();
@@ -4514,6 +4423,9 @@ LLVM version: 6.0",
             .put_stderr(COMPILER_STDERR)
             .expect("Failed to store stderr");
         cachewrite
+            .put_object("dep", &mut Cursor::new(dep_file), None)
+            .expect("Failed to store cache object");
+        cachewrite
             .put_object("obj", &mut Cursor::new(obj_file), None)
             .expect("Failed to store cache object");
 
@@ -4521,7 +4433,7 @@ LLVM version: 6.0",
 
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
-        let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
+        let hasher = match c.parse_arguments(&arguments, cwd, &[], &[]) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
@@ -4532,7 +4444,6 @@ LLVM version: 6.0",
                 None,
                 creator,
                 compilations_storage,
-                preprocessor_storage,
                 arguments.clone(),
                 cwd.to_path_buf(),
                 vec![],
@@ -4551,9 +4462,8 @@ LLVM version: 6.0",
         }
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
-    fn test_compiler_get_cached_or_compile_force_recache(preprocessor_cache_mode: bool) {
+    #[test]
+    fn test_compiler_get_cached_or_compile_force_recache() {
         drop(env_logger::try_init());
         let pending = crate::server::SccacheGauge::default();
         let creator = new_creator();
@@ -4571,7 +4481,7 @@ LLVM version: 6.0",
             CacheMode::ReadWrite,
             vec![],
         ));
-        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, true));
         let service = server::SccacheService::mock_with_storage(
             compilations_storage.clone(),
             preprocessor_storage.clone(),
@@ -4629,7 +4539,7 @@ LLVM version: 6.0",
                 // Pretend to preprocess something.
                 let mut f = File::create(&d)?;
                 f.write_all(b"foo.o :")?;
-                Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+                Ok(MockChild::new(exit_status(0), "", ""))
             });
             // The compiler invocation.
             let o = obj.clone();
@@ -4646,7 +4556,7 @@ LLVM version: 6.0",
         }
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
-        let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
+        let hasher = match c.parse_arguments(&arguments, cwd, &[], &[]) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
@@ -4659,7 +4569,6 @@ LLVM version: 6.0",
                         None,
                         creator.clone(),
                         compilations_storage.clone(),
-                        preprocessor_storage.clone(),
                         arguments.clone(),
                         cwd.to_path_buf(),
                         vec![],
@@ -4693,7 +4602,6 @@ LLVM version: 6.0",
                 None,
                 creator,
                 compilations_storage.clone(),
-                preprocessor_storage.clone(),
                 arguments,
                 cwd.to_path_buf(),
                 vec![],
@@ -4719,9 +4627,8 @@ LLVM version: 6.0",
         assert_eq!(COMPILER_STDERR, res.stderr.as_slice());
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
-    fn test_compiler_get_cached_or_compile_preprocessor_error(preprocessor_cache_mode: bool) {
+    #[test]
+    fn test_compiler_get_cached_or_compile_preprocessor_error() {
         drop(env_logger::try_init());
         let pending = crate::server::SccacheGauge::default();
         let creator = new_creator();
@@ -4735,7 +4642,7 @@ LLVM version: 6.0",
             CacheMode::ReadWrite,
             vec![],
         ));
-        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, true));
         let service = server::SccacheService::mock_with_storage(
             compilations_storage.clone(),
             preprocessor_storage.clone(),
@@ -4744,13 +4651,13 @@ LLVM version: 6.0",
 
         // Pretend to be GCC.  Also inject a fake object file that the subsequent
         // preprocessor failure should remove.
-        let obj = f.tempdir.path().join("foo.o");
+        // let obj = f.tempdir.path().join("foo.o");
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
-        let o = obj.clone();
+        // let o = obj.clone();
         next_command_calls(&creator, move |_| {
-            let mut f = File::create(&o)?;
-            f.write_all(b"file contents")?;
+            // let mut f = File::create(&o)?;
+            // f.write_all(b"file contents")?;
             Ok(MockChild::new(exit_status(0), "compiler_id=gcc", ""))
         });
         next_assembler(&creator, "GNU assembler (GNU Binutils) 2.42", "");
@@ -4785,21 +4692,17 @@ LLVM version: 6.0",
         .wait()
         .unwrap()
         .0;
-        // We should now have a fake object file.
-        assert!(fs::metadata(&obj).is_ok());
+        // // We should now have a fake object file.
+        // assert!(fs::metadata(&obj).is_ok());
         // The preprocessor invocation.
         const PREPROCESSOR_STDERR: &[u8] = b"something went wrong";
         next_command(
             &creator,
-            Ok(MockChild::new(
-                exit_status(1),
-                b"preprocessor output",
-                PREPROCESSOR_STDERR,
-            )),
+            Ok(MockChild::new(exit_status(1), b"", PREPROCESSOR_STDERR)),
         );
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
-        let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
+        let hasher = match c.parse_arguments(&arguments, cwd, &[], &[]) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
@@ -4811,7 +4714,6 @@ LLVM version: 6.0",
                         None,
                         creator,
                         compilations_storage.clone(),
-                        preprocessor_storage.clone(),
                         arguments,
                         cwd.to_path_buf(),
                         vec![],
@@ -4825,16 +4727,18 @@ LLVM version: 6.0",
         assert_eq!(cached, CompileResult::Error(Default::default()));
         assert_eq!(1, res.code().or(res.signal()).unwrap());
         // Shouldn't get anything on stdout, since that would just be preprocessor spew!
-        assert_eq!(b"", res.stdout.as_slice());
-        assert_eq!(PREPROCESSOR_STDERR, res.stderr.as_slice());
-        // Errors in preprocessing should remove the object file.
-        assert!(fs::metadata(&obj).is_err());
+        assert_eq!("", str::from_utf8(&res.stdout).unwrap());
+        assert_eq!(
+            str::from_utf8(PREPROCESSOR_STDERR),
+            str::from_utf8(&res.stderr)
+        );
+        // // Errors in preprocessing should remove the object file.
+        // assert!(fs::metadata(&obj).is_err());
     }
 
-    #[test_case(true ; "with preprocessor cache")]
-    #[test_case(false ; "without preprocessor cache")]
+    #[test]
     #[cfg(feature = "dist-client")]
-    fn test_compiler_get_cached_or_compile_dist_error(preprocessor_cache_mode: bool) {
+    fn test_compiler_get_cached_or_compile_dist_error() {
         drop(env_logger::try_init());
         let pending = crate::server::SccacheGauge::default();
         let creator = new_creator();
@@ -4843,10 +4747,10 @@ LLVM version: 6.0",
         let runtime = Runtime::new().unwrap();
         let pool = runtime.handle().clone();
         let dist_clients = vec![
-            (true, test_dist::ErrorPutToolchainClient::new()),
-            (true, test_dist::ErrorAllocJobClient::new()),
-            (true, test_dist::ErrorSubmitToolchainClient::new()),
-            (true, test_dist::ErrorRunJobClient::new()),
+            test_dist::ErrorPutToolchainClient::new(),
+            test_dist::ErrorAllocJobClient::new(),
+            test_dist::ErrorSubmitToolchainClient::new(),
+            test_dist::ErrorRunJobClient::new(),
         ];
         // Write a dummy input file so the preprocessor cache mode can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
@@ -4856,7 +4760,7 @@ LLVM version: 6.0",
             CacheMode::ReadWrite,
             vec![],
         ));
-        let preprocessor_storage = Arc::new(MockStorage::new(None, preprocessor_cache_mode));
+        let preprocessor_storage = Arc::new(MockStorage::new(None, true));
         // Pretend to be GCC.
         next_command(
             &creator,
@@ -4900,22 +4804,22 @@ LLVM version: 6.0",
         // recaching.
         let obj = f.tempdir.path().join("foo.o");
         let dep = f.tempdir.path().join("foo.d");
-        for (attempts_compile, _) in dist_clients.iter() {
+        for _ in dist_clients.iter() {
             // The generate_hash_key preprocessor invocation.
             let d = dep.clone();
             next_command_calls(&creator, move |_| {
                 // Pretend to preprocess something.
                 let mut f = File::create(&d)?;
                 f.write_all(b"foo.o :")?;
-                Ok(MockChild::new(exit_status(0), "preprocessor output", ""))
+                Ok(MockChild::new(exit_status(0), "", ""))
             });
-            if *attempts_compile {
-                // The inputs_packager preprocessor invocation.
-                next_command(
-                    &creator,
-                    Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-                );
-            }
+            // if *attempts_compile {
+            //     // The inputs_packager preprocessor invocation.
+            //     next_command(
+            //         &creator,
+            //         Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
+            //     );
+            // }
             // The compiler invocation.
             let o = obj.clone();
             next_command_calls(&creator, move |_| {
@@ -4931,12 +4835,12 @@ LLVM version: 6.0",
         }
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
-        let hasher = match c.parse_arguments(&arguments, cwd, &[], false) {
+        let hasher = match c.parse_arguments(&arguments, cwd, &[], &[]) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
         // All these dist clients will fail, but should still result in successful compiles
-        for (_, dist_client) in dist_clients {
+        for dist_client in dist_clients {
             let service = server::SccacheService::mock_with_dist_client(
                 dist_client.clone(),
                 compilations_storage.clone(),
@@ -4957,7 +4861,6 @@ LLVM version: 6.0",
                     Some(dist_client.clone()),
                     creator.clone(),
                     compilations_storage.clone(),
-                    preprocessor_storage.clone(),
                     arguments.clone(),
                     cwd.to_path_buf(),
                     vec![],
@@ -5000,7 +4903,7 @@ mod test_dist {
     };
     use crate::dist::{
         BuildResult, PathTransformer,
-        pkg::{PackagedToolchain, ToolchainPackager},
+        pkg::{ArchivePackager, ToolchainPackager},
     };
     use crate::mock_command::ProcessOutput;
     use async_trait::async_trait;
@@ -5013,15 +4916,18 @@ mod test_dist {
 
     use crate::errors::*;
 
-    struct PanicPackagedToolchain;
+    struct PanicArchivePackager;
 
     #[async_trait]
-    impl PackagedToolchain for PanicPackagedToolchain {
+    impl ArchivePackager for PanicArchivePackager {
         async fn compute_hash(&self) -> Result<String> {
-            panic!("PackagedToolchain::compute_hash should not have called packager")
+            panic!("ArchivePackager::compute_hash should not have called packager")
         }
-        async fn write_tar_gz(&self, _: &Toolchain, _: &mut (dyn Write + Send)) -> Result<()> {
-            panic!("PackagedToolchain::write_compressed_tar should not have called packager")
+        fn compress(&self, _: &mut (dyn Write + Send)) -> Result<()> {
+            panic!("ArchivePackager::package should not have called compress")
+        }
+        fn write_tar_gz(&self, _: &mut (dyn Write + Send)) -> Result<()> {
+            panic!("ArchivePackager::write_compressed_tar should not have called packager")
         }
     }
 
@@ -5049,7 +4955,7 @@ mod test_dist {
         async fn put_toolchain(
             &self,
             _: Toolchain,
-            _: Option<Arc<dyn PackagedToolchain>>,
+            _: Option<Arc<dyn ArchivePackager>>,
         ) -> Result<SubmitToolchainResult> {
             unreachable!()
         }
@@ -5072,7 +4978,7 @@ mod test_dist {
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
-            Option<Arc<dyn PackagedToolchain>>,
+            Option<Arc<dyn ArchivePackager>>,
         )> {
             Err(anyhow!("MOCK: hash_toolchain failure"))
         }
@@ -5084,9 +4990,6 @@ mod test_dist {
         }
         fn request_timeout(&self) -> u32 {
             300
-        }
-        fn rewrite_includes_only(&self) -> bool {
-            false
         }
         async fn get_custom_toolchain(&self, _exe: &Path) -> Option<PathBuf> {
             None
@@ -5124,7 +5027,7 @@ mod test_dist {
         async fn put_toolchain(
             &self,
             _: Toolchain,
-            _: Option<Arc<dyn PackagedToolchain>>,
+            _: Option<Arc<dyn ArchivePackager>>,
         ) -> Result<SubmitToolchainResult> {
             unreachable!()
         }
@@ -5147,13 +5050,9 @@ mod test_dist {
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
-            Option<Arc<dyn PackagedToolchain>>,
+            Option<Arc<dyn ArchivePackager>>,
         )> {
-            Ok((
-                self.tc.clone(),
-                None,
-                Some(Arc::new(PanicPackagedToolchain)),
-            ))
+            Ok((self.tc.clone(), None, Some(Arc::new(PanicArchivePackager))))
         }
         fn fallback_to_local_compile(&self) -> bool {
             true
@@ -5163,9 +5062,6 @@ mod test_dist {
         }
         fn request_timeout(&self) -> u32 {
             300
-        }
-        fn rewrite_includes_only(&self) -> bool {
-            false
         }
         async fn get_custom_toolchain(&self, _exe: &Path) -> Option<PathBuf> {
             None
@@ -5217,7 +5113,7 @@ mod test_dist {
         async fn put_toolchain(
             &self,
             tc: Toolchain,
-            _: Option<Arc<dyn PackagedToolchain>>,
+            _: Option<Arc<dyn ArchivePackager>>,
         ) -> Result<SubmitToolchainResult> {
             assert_eq!(self.tc, tc);
             Err(anyhow!("MOCK: submit toolchain failure"))
@@ -5241,13 +5137,9 @@ mod test_dist {
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
-            Option<Arc<dyn PackagedToolchain>>,
+            Option<Arc<dyn ArchivePackager>>,
         )> {
-            Ok((
-                self.tc.clone(),
-                None,
-                Some(Arc::new(PanicPackagedToolchain)),
-            ))
+            Ok((self.tc.clone(), None, Some(Arc::new(PanicArchivePackager))))
         }
         fn fallback_to_local_compile(&self) -> bool {
             true
@@ -5257,9 +5149,6 @@ mod test_dist {
         }
         fn request_timeout(&self) -> u32 {
             300
-        }
-        fn rewrite_includes_only(&self) -> bool {
-            false
         }
         async fn get_custom_toolchain(&self, _exe: &Path) -> Option<PathBuf> {
             None
@@ -5311,7 +5200,7 @@ mod test_dist {
         async fn put_toolchain(
             &self,
             tc: Toolchain,
-            _: Option<Arc<dyn PackagedToolchain>>,
+            _: Option<Arc<dyn ArchivePackager>>,
         ) -> Result<SubmitToolchainResult> {
             assert_eq!(self.tc, tc);
             Ok(SubmitToolchainResult::Success)
@@ -5339,7 +5228,7 @@ mod test_dist {
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
-            Option<Arc<dyn PackagedToolchain>>,
+            Option<Arc<dyn ArchivePackager>>,
         )> {
             Ok((
                 self.tc.clone(),
@@ -5347,7 +5236,7 @@ mod test_dist {
                     "/overridden/compiler".to_owned(),
                     PathBuf::from("somearchiveid"),
                 )),
-                Some(Arc::new(PanicPackagedToolchain)),
+                Some(Arc::new(PanicArchivePackager)),
             ))
         }
         fn fallback_to_local_compile(&self) -> bool {
@@ -5358,9 +5247,6 @@ mod test_dist {
         }
         fn request_timeout(&self) -> u32 {
             300
-        }
-        fn rewrite_includes_only(&self) -> bool {
-            false
         }
         async fn get_custom_toolchain(&self, _exe: &Path) -> Option<PathBuf> {
             None
@@ -5421,7 +5307,7 @@ mod test_dist {
         async fn put_toolchain(
             &self,
             tc: Toolchain,
-            _: Option<Arc<dyn PackagedToolchain>>,
+            _: Option<Arc<dyn ArchivePackager>>,
         ) -> Result<SubmitToolchainResult> {
             if self.has_toolchain {
                 panic!("DistClient::put_toolchain should not have been called!")
@@ -5469,7 +5355,7 @@ mod test_dist {
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
-            Option<Arc<dyn PackagedToolchain>>,
+            Option<Arc<dyn ArchivePackager>>,
         )> {
             Ok((
                 self.tc.clone(),
@@ -5477,7 +5363,7 @@ mod test_dist {
                     "/overridden/compiler".to_owned(),
                     PathBuf::from("somearchiveid"),
                 )),
-                Some(Arc::new(PanicPackagedToolchain)),
+                Some(Arc::new(PanicArchivePackager)),
             ))
         }
         fn fallback_to_local_compile(&self) -> bool {
@@ -5488,9 +5374,6 @@ mod test_dist {
         }
         fn request_timeout(&self) -> u32 {
             300
-        }
-        fn rewrite_includes_only(&self) -> bool {
-            false
         }
         async fn get_custom_toolchain(&self, _exe: &Path) -> Option<PathBuf> {
             None

@@ -18,9 +18,8 @@ use crate::{
         SingleCompileCommand,
         args::*,
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DependenciesFuture, DepfilePath,
-            GenerateCompileCommandsArgs, GenerateDependenciesArgs, OutDir, ParseArgs,
-            ParsedArguments, PreprocessArgs, PreprocessorOutput, ProcessOutputStream,
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath,
+            GenerateCompileCommandsArgs, GenerateDependenciesArgs, ParseArgs, ParsedArguments,
         },
         clang, gcc,
         preprocessor_cache::normalize_path,
@@ -30,9 +29,17 @@ use crate::{
     errors::*,
     mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     util::{
-        OsStrExt, SCCACHE_TMPDIR, bytes_to_str, make_process_output_stream, os_str_to_str,
-        path_to_bytes, path_to_str, run_input_output, run_input_stream_output,
-        run_with_input_buffer_stderr, tempdir_in, temppath,
+        OsStrExt,
+        // SCCACHE_TMPDIR,
+        bytes_to_str,
+        make_process_output_stream,
+        os_str_to_str,
+        path_to_bytes,
+        path_to_str,
+        run_input_output,
+        run_input_stream_output,
+        run_with_input_buffer_stderr,
+        temppath,
     },
 };
 use async_trait::async_trait;
@@ -45,21 +52,21 @@ use std::{
     ffi::{OsStr, OsString},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    pin::Pin,
-    sync::{Arc, LazyLock},
+    // sync::{Arc, LazyLock},
+    sync::Arc,
 };
 use tokio::io::AsyncWriteExt;
 
-static MSVC_TMPDIR: LazyLock<std::result::Result<PathBuf, io::Error>> = LazyLock::new(|| {
-    SCCACHE_TMPDIR
-        .as_ref()
-        .map(|p| p.join("msvc"))
-        .map_err(|e| e.kind().into())
-        .and_then(|tmpdir| {
-            std::fs::create_dir_all(&tmpdir)?;
-            Ok(tmpdir)
-        })
-});
+// static MSVC_TMPDIR: LazyLock<std::result::Result<PathBuf, io::Error>> = LazyLock::new(|| {
+//     SCCACHE_TMPDIR
+//         .as_ref()
+//         .map(|p| p.join("msvc"))
+//         .map_err(|e| e.kind().into())
+//         .and_then(|tmpdir| {
+//             std::fs::create_dir_all(&tmpdir)?;
+//             Ok(tmpdir)
+//         })
+// });
 
 /// A struct on which to implement `CCompilerImpl`.
 ///
@@ -89,7 +96,6 @@ impl CCompilerImpl for Msvc {
             arguments,
             cwd,
             env_vars,
-            might_dist_compile,
             ..
         }: ParseArgs<'_>,
     ) -> CompilerArguments<ParsedArguments> {
@@ -123,59 +129,42 @@ impl CCompilerImpl for Msvc {
             );
         }
 
-        match parse_arguments(&arguments, cwd, self.is_clang) {
-            CompilerArguments::Ok(mut parsed_args) => {
-                // Set `out_dir` to a tmpdir so we have a place to write the preprocesed file.
-                // Don't needlessly create the tempdir if running `parse_arguments()` unit tests
-                if !cfg!(test) && might_dist_compile {
-                    parsed_args.out_dir = Some(Arc::new(OutDir::Tmp(
-                        MSVC_TMPDIR
-                            .as_ref()
-                            .map_err(anyhow::Error::new)
-                            .and_then(tempdir_in)
-                            .context("Failed to create tempdir")
-                            .unwrap(),
-                    )));
-                }
-                CompilerArguments::Ok(parsed_args)
-            }
-            other => other,
-        }
+        parse_arguments(&arguments, cwd, self.is_clang)
     }
 
-    async fn preprocess<T>(
-        &self,
-        PreprocessArgs {
-            creator,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            might_dist_compile,
-            rewrite_includes_only,
-            generate_dependencies,
-            include_line_numbers,
-            ..
-        }: PreprocessArgs<'_, T>,
-    ) -> Result<PreprocessorOutput>
-    where
-        T: CommandCreatorSync,
-    {
-        preprocess(
-            creator,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            &self.includes_prefix,
-            might_dist_compile,
-            rewrite_includes_only,
-            generate_dependencies,
-            include_line_numbers,
-            self.is_clang,
-        )
-        .await
-    }
+    // async fn preprocess<T>(
+    //     &self,
+    //     PreprocessArgs {
+    //         creator,
+    //         executable,
+    //         parsed_args,
+    //         cwd,
+    //         env_vars,
+    //         might_dist_compile,
+    //         rewrite_includes_only,
+    //         generate_dependencies,
+    //         include_line_numbers,
+    //         ..
+    //     }: PreprocessArgs<'_, T>,
+    // ) -> Result<PreprocessorOutput>
+    // where
+    //     T: CommandCreatorSync,
+    // {
+    //     preprocess(
+    //         creator,
+    //         executable,
+    //         parsed_args,
+    //         cwd,
+    //         env_vars,
+    //         &self.includes_prefix,
+    //         might_dist_compile,
+    //         rewrite_includes_only,
+    //         generate_dependencies,
+    //         include_line_numbers,
+    //         self.is_clang,
+    //     )
+    //     .await
+    // }
 
     /// Run the C preprocessor to generate the dependencies file.
     async fn generate_dependencies<T>(
@@ -188,7 +177,7 @@ impl CCompilerImpl for Msvc {
             env_vars,
             ..
         }: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Option<DepfilePath>>
+    ) -> Result<Vec<PathBuf>>
     where
         T: CommandCreatorSync,
     {
@@ -202,13 +191,11 @@ impl CCompilerImpl for Msvc {
             self.is_clang,
         )
         .await
-        .map(Some)
     }
 
     fn generate_compile_commands(
         &self,
         GenerateCompileCommandsArgs {
-            path_transformer,
             executable,
             parsed_args,
             cwd,
@@ -220,7 +207,7 @@ impl CCompilerImpl for Msvc {
         Option<dist::CompileCommand>,
         Cacheable,
     )> {
-        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
+        generate_compile_commands(executable, parsed_args, cwd, env_vars)
     }
 }
 
@@ -613,6 +600,7 @@ pub fn parse_arguments(
     let mut unhashed_args = vec![];
     let mut preprocessor_args = vec![];
     let mut dependency_args = vec![];
+    let mut extra_dist_files = vec![];
     let mut extra_hash_files = vec![];
     let mut compilation = false;
     let mut compilation_flag = OsString::new();
@@ -696,11 +684,17 @@ pub fn parse_arguments(
             }
         }
         match arg.get_data() {
-            Some(PreprocessorArgument(_)) | Some(PreprocessorArgumentPath(_)) => preprocessor_args
-                .extend(
+            Some(PreprocessorArgument(_)) => preprocessor_args.extend(
+                arg.normalize(NormalizedDisposition::Concatenated)
+                    .iter_os_strings(),
+            ),
+            Some(PreprocessorArgumentPath(path)) => {
+                extra_dist_files.push(cwd.join(path));
+                preprocessor_args.extend(
                     arg.normalize(NormalizedDisposition::Concatenated)
                         .iter_os_strings(),
-                ),
+                );
+            }
             Some(ProgramDatabase(_))
             | Some(DebugInfo)
             | Some(PassThrough)
@@ -710,6 +704,7 @@ pub fn parse_arguments(
                     .iter_os_strings(),
             ),
             Some(ExtraHashFile(path)) => {
+                extra_dist_files.push(cwd.join(path));
                 extra_hash_files.push(cwd.join(path));
                 common_args.extend(
                     arg.normalize(NormalizedDisposition::Concatenated)
@@ -816,17 +811,24 @@ pub fn parse_arguments(
                 }
 
                 Some(ClangProfileUse(path)) => {
-                    extra_hash_files.push(clang::resolve_profile_use_path(path, cwd));
+                    let path = clang::resolve_profile_use_path(path, cwd);
+                    extra_dist_files.push(path.clone());
+                    extra_hash_files.push(path);
                     &mut common_args
                 }
 
                 Some(ExtraHashFile(path)) => {
+                    extra_dist_files.push(cwd.join(path));
                     extra_hash_files.push(cwd.join(path));
                     &mut common_args
                 }
-                Some(PreprocessorArgumentFlag)
-                | Some(PreprocessorArgument(_))
-                | Some(PreprocessorArgumentPath(_)) => &mut preprocessor_args,
+                Some(PreprocessorArgumentFlag) | Some(PreprocessorArgument(_)) => {
+                    &mut preprocessor_args
+                }
+                Some(PreprocessorArgumentPath(path)) => {
+                    extra_dist_files.push(cwd.join(path));
+                    &mut preprocessor_args
+                }
                 Some(DepArgumentPath(_))
                 | Some(DepTarget(_))
                 | Some(NeedDepTarget)
@@ -859,7 +861,7 @@ pub fn parse_arguments(
 
     let (input, language) = match input_arg {
         Some(i) => match Language::from_file_name(Path::new(&i)) {
-            Some(l) => (i.clone(), l),
+            Some(language) => (i.clone(), language),
             None => cannot_cache!("unknown source language"),
         },
         // We can't cache compilation without an input.
@@ -999,14 +1001,6 @@ pub fn parse_arguments(
         );
     }
 
-    let mut extra_dist_files = vec![];
-    if language.needs_c_preprocessing() {
-        // If the language needs preprocessing, include the source file in the dist inputs.
-        // This ensures gcc embeds the correct source and line numbers in warnings/errors.
-        // See the docstring on the `PathTransformer::with_dist_extension` impl for details.
-        extra_dist_files.push(cwd.join(&input));
-    }
-
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),
         double_dash_input,
@@ -1035,7 +1029,6 @@ pub fn preprocess_cmd<T>(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-    rewrite_includes_only: bool,
     include_line_numbers: bool,
     is_clang: bool,
     out_file: Option<&Path>,
@@ -1069,11 +1062,7 @@ where
         .args(&parsed_args.common_args)
         .args(&parsed_args.arch_args);
 
-    if is_clang {
-        if rewrite_includes_only {
-            cmd.arg("-clang:-frewrite-includes");
-        }
-    } else {
+    if !is_clang {
         // Windows SDK generates C4668 during preprocessing, but compiles fine.
         // Read for more info: https://github.com/mozilla/sccache/issues/1725
         // And here: https://github.com/mozilla/sccache/issues/2250
@@ -1089,116 +1078,116 @@ where
     cmd
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn preprocess<T>(
-    creator: &T,
-    executable: &Path,
-    parsed_args: &ParsedArguments,
-    cwd: &Path,
-    env_vars: &[(OsString, OsString)],
-    includes_prefix: &str,
-    might_dist_compile: bool,
-    rewrite_includes_only: bool,
-    generate_dependencies: bool,
-    include_line_numbers: bool,
-    is_clang: bool,
-) -> Result<PreprocessorOutput>
-where
-    T: CommandCreatorSync,
-{
-    let out_file =
-        if let Some(out_dir) = parsed_args.out_dir.as_ref().filter(|_| might_dist_compile) {
-            parsed_args
-                .input
-                .as_path()
-                .file_name()
-                .map(|name| out_dir.path().join(name).with_added_extension("ii"))
-        } else {
-            None
-        };
+// #[allow(clippy::too_many_arguments)]
+// pub async fn preprocess<T>(
+//     creator: &T,
+//     executable: &Path,
+//     parsed_args: &ParsedArguments,
+//     cwd: &Path,
+//     env_vars: &[(OsString, OsString)],
+//     includes_prefix: &str,
+//     might_dist_compile: bool,
+//     rewrite_includes_only: bool,
+//     generate_dependencies: bool,
+//     include_line_numbers: bool,
+//     is_clang: bool,
+// ) -> Result<PreprocessorOutput>
+// where
+//     T: CommandCreatorSync,
+// {
+//     let out_file =
+//         if let Some(out_dir) = parsed_args.out_dir.as_ref().filter(|_| might_dist_compile) {
+//             parsed_args
+//                 .input
+//                 .as_path()
+//                 .file_name()
+//                 .map(|name| out_dir.path().join(name).with_added_extension("ii"))
+//         } else {
+//             None
+//         };
 
-    let cmd = preprocess_cmd(
-        creator.clone().new_command_sync(executable),
-        parsed_args,
-        cwd,
-        env_vars,
-        rewrite_includes_only,
-        // Include line numbers if we're going to run a distributed compilation, otherwise
-        // compile errors won't match up to the source lines where they occur.
-        out_file.is_some() || include_line_numbers,
-        is_clang,
-        // None: Preprocess to stdout
-        // Some: Preprocess to out_file
-        out_file.as_deref(),
-    );
+//     let cmd = preprocess_cmd(
+//         creator.clone().new_command_sync(executable),
+//         parsed_args,
+//         cwd,
+//         env_vars,
+//         rewrite_includes_only,
+//         // Include line numbers if we're going to run a distributed compilation, otherwise
+//         // compile errors won't match up to the source lines where they occur.
+//         out_file.is_some() || include_line_numbers,
+//         is_clang,
+//         // None: Preprocess to stdout
+//         // Some: Preprocess to out_file
+//         out_file.as_deref(),
+//     );
 
-    // Synthesize the depfile if we're clang.exe and the user passed `-deps <depfile>`
-    let generate_dependencies_clang_exe = is_clang && parsed_args.depfile.is_some();
+//     // Synthesize the depfile if we're clang.exe and the user passed `-deps <depfile>`
+//     let generate_dependencies_clang_exe = is_clang && parsed_args.depfile.is_some();
 
-    // Generate dependencies if we're going to need them for the dist-
-    // compile or if we're going to update the preprocessor cache entry
-    let generate_dependencies =
-        generate_dependencies || generate_dependencies_clang_exe || out_file.is_some();
+//     // Generate dependencies if we're going to need them for the dist-
+//     // compile or if we're going to update the preprocessor cache entry
+//     let generate_dependencies =
+//         generate_dependencies || generate_dependencies_clang_exe || out_file.is_some();
 
-    let (stdout, dependencies) = if !generate_dependencies {
-        trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
+//     let (stdout, dependencies) = if !generate_dependencies {
+//         trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
 
-        // If no dependencies were requested, just return preprocessor stdout
-        (
-            run_input_stream_output(cmd, 8 * 1024, None).await?.boxed(),
-            None,
-        )
-    } else if parsed_args.msvc_show_includes
-        || generate_dependencies_clang_exe
-        || parsed_args.depfile.is_none()
-    {
-        // Parse the dependencies from the `-showIncludes` stderr output when:
-        //
-        // * The user specifies `-showIncludes` (`-showIncludes` is incompatible with `-sourceDependencies`)
-        // * The user did *not* specify `-sourceDependencies`, and we need dependencies
-        //   for the preprocessor cache entry or distributed compilation, because parsing
-        //   stderr is faster than `-sourceDependencies` writing a file in Windows.
-        preprocess_with_dependencies_from_showincludes(
-            cmd,
-            parsed_args,
-            cwd,
-            parsed_args.depfile.as_deref(),
-            includes_prefix,
-        )
-        .await
-        .map(|(stdout, dependencies)| (stdout, Some(dependencies)))?
-    } else {
-        // Parse the `-sourceDependencies` file if the user specifed `-sourceDependencies` and not `-showIncludes`
-        preprocess_with_dependencies_from_sourcedependencies(
-            cmd,
-            parsed_args,
-            cwd,
-            parsed_args.depfile.as_deref(),
-        )
-        .await
-        .map(|(stdout, dependencies)| (stdout, Some(dependencies)))?
-    };
+//         // If no dependencies were requested, just return preprocessor stdout
+//         (
+//             run_input_stream_output(cmd, 8 * 1024, None).await?.boxed(),
+//             None,
+//         )
+//     } else if parsed_args.msvc_show_includes
+//         || generate_dependencies_clang_exe
+//         || parsed_args.depfile.is_none()
+//     {
+//         // Parse the dependencies from the `-showIncludes` stderr output when:
+//         //
+//         // * The user specifies `-showIncludes` (`-showIncludes` is incompatible with `-sourceDependencies`)
+//         // * The user did *not* specify `-sourceDependencies`, and we need dependencies
+//         //   for the preprocessor cache entry or distributed compilation, because parsing
+//         //   stderr is faster than `-sourceDependencies` writing a file in Windows.
+//         preprocess_with_dependencies_from_showincludes(
+//             cmd,
+//             parsed_args,
+//             cwd,
+//             parsed_args.depfile.as_deref(),
+//             includes_prefix,
+//         )
+//         .await
+//         .map(|(stdout, dependencies)| (stdout, Some(dependencies)))?
+//     } else {
+//         // Parse the `-sourceDependencies` file if the user specifed `-sourceDependencies` and not `-showIncludes`
+//         preprocess_with_dependencies_from_sourcedependencies(
+//             cmd,
+//             parsed_args,
+//             cwd,
+//             parsed_args.depfile.as_deref(),
+//         )
+//         .await
+//         .map(|(stdout, dependencies)| (stdout, Some(dependencies)))?
+//     };
 
-    if let Some(out_file) = out_file {
-        // If we're going to dist-compile, return the output file path and optional dependencies
+//     if let Some(out_file) = out_file {
+//         // If we're going to dist-compile, return the output file path and optional dependencies
 
-        // Drain stdout before returning to ensure the file was written
-        stdout.try_for_each(|_| futures::future::ok(())).await?;
+//         // Drain stdout before returning to ensure the file was written
+//         stdout.try_for_each(|_| futures::future::ok(())).await?;
 
-        let dependencies = if let Some(dependencies) = dependencies {
-            // Await the dependencies future to ensure the output and
-            // dep files were written, and the compiler process has exited
-            Some(futures::future::ok(dependencies.await?).boxed())
-        } else {
-            None
-        };
+//         let dependencies = if let Some(dependencies) = dependencies {
+//             // Await the dependencies future to ensure the output and
+//             // dep files were written, and the compiler process has exited
+//             Some(futures::future::ok(dependencies.await?).boxed())
+//         } else {
+//             None
+//         };
 
-        Ok(PreprocessorOutput::File(out_file, dependencies))
-    } else {
-        // Otherwise return preprocessor stdout and optional dependencies
-        Ok(PreprocessorOutput::Output(stdout, dependencies))
-    }
-}
+//         Ok(PreprocessorOutput::File(out_file, dependencies))
+//     } else {
+//         // Otherwise return preprocessor stdout and optional dependencies
+//         Ok(PreprocessorOutput::Output(stdout, dependencies))
+//     }
+// }
 
 async fn generate_dependencies<T>(
     creator: &T,
@@ -1208,7 +1197,7 @@ async fn generate_dependencies<T>(
     env_vars: &[(OsString, OsString)],
     includes_prefix: &str,
     is_clang: bool,
-) -> Result<DepfilePath>
+) -> Result<Vec<PathBuf>>
 where
     T: CommandCreatorSync,
 {
@@ -1227,14 +1216,13 @@ where
         },
         cwd,
         env_vars,
-        false, // rewrite_includes_only
         false, // include_line_numbers
         is_clang,
         None,
     );
 
-    let (stdout, dependencies) = if is_clang && parsed_args.depfile.is_some() {
-        preprocess_with_dependencies_from_showincludes(
+    let dependencies = if is_clang && parsed_args.depfile.is_some() {
+        generate_dependencies_with_showincludes(
             cmd,
             parsed_args,
             cwd,
@@ -1244,7 +1232,7 @@ where
         .await?
     } else {
         // If the user didn't pass `-showIncludes`, parse the `-sourceDependencies` file
-        preprocess_with_dependencies_from_sourcedependencies(
+        generate_dependencies_with_sourcedependencies(
             cmd,
             parsed_args,
             cwd,
@@ -1253,22 +1241,22 @@ where
         .await?
     };
 
-    // Drain stdout before awaiting the dependencies future
-    stdout.try_for_each(|_| futures::future::ok(())).await?;
+    Ok(dependencies)
 
-    // Await the dependencies future to ensure the depfile was written
-    dependencies.await?;
+    // // Drain stdout before awaiting the dependencies future
+    // stdout.try_for_each(|_| futures::future::ok(())).await?;
 
-    Ok(depfile)
+    // // Await the dependencies future to ensure the depfile was written
+    // dependencies.await
 }
 
-async fn preprocess_with_dependencies_from_showincludes<C>(
+async fn generate_dependencies_with_showincludes<C>(
     mut preprocess_command: C,
     parsed_args: &ParsedArguments,
     cwd: &Path,
     depfile: Option<&Path>,
     includes_prefix: &str,
-) -> Result<(Pin<Box<ProcessOutputStream>>, Pin<Box<DependenciesFuture>>)>
+) -> Result<Vec<PathBuf>>
 where
     C: RunCommand + std::fmt::Display + 'static,
 {
@@ -1350,15 +1338,19 @@ where
         Ok(dependencies)
     });
 
-    Ok((stdout, dependencies))
+    // Drain stdout before awaiting the dependencies future
+    stdout.try_for_each(|_| futures::future::ok(())).await?;
+
+    // Await the dependencies future to ensure the depfile was written
+    dependencies.await
 }
 
-async fn preprocess_with_dependencies_from_sourcedependencies<C>(
+async fn generate_dependencies_with_sourcedependencies<C>(
     mut preprocess_command: C,
     parsed_args: &ParsedArguments,
     cwd: &Path,
     depfile: Option<&Path>,
-) -> Result<(Pin<Box<ProcessOutputStream>>, Pin<Box<DependenciesFuture>>)>
+) -> Result<Vec<PathBuf>>
 where
     C: RunCommand + std::fmt::Display + 'static,
 {
@@ -1387,7 +1379,11 @@ where
 
     let dependencies = parse_dependencies_from_sourcedependencies_json(depfile).boxed();
 
-    Ok((stdout, dependencies))
+    // Drain stdout before awaiting the dependencies future
+    stdout.try_for_each(|_| futures::future::ok(())).await?;
+
+    // Await the dependencies future to ensure the depfile was written
+    dependencies.await
 }
 
 async fn parse_dependencies_from_showincludes(
@@ -1544,7 +1540,6 @@ async fn write_clang_dependencies_file(
 }
 
 fn generate_compile_commands(
-    path_transformer: &mut dist::PathTransformer,
     executable: &Path,
     parsed_args: &ParsedArguments,
     cwd: &Path,
@@ -1559,9 +1554,6 @@ fn generate_compile_commands(
         .filter(|(k, _)| k != "CL" && k != "_CL_")
         .cloned()
         .collect::<Vec<_>>();
-
-    #[cfg(not(feature = "dist-client"))]
-    let _ = path_transformer;
 
     let out_pretty = parsed_args.output_pretty();
 
@@ -1585,18 +1577,63 @@ fn generate_compile_commands(
             }
         });
 
-    let mut fo = OsString::from("-Fo");
-    fo.push(output);
+    let mut arguments = vec![];
 
-    let mut arguments: Vec<OsString> = vec![parsed_args.compilation_flag.clone(), fo];
     arguments.extend_from_slice(&parsed_args.preprocessor_args);
-    arguments.extend_from_slice(&parsed_args.dependency_args);
     arguments.extend_from_slice(&parsed_args.unhashed_args);
     arguments.extend_from_slice(&parsed_args.common_args);
+    arguments.extend_from_slice(&parsed_args.arch_args);
+
+    if parsed_args.language.needs_c_preprocessing() {
+        // Only add dependency args for files that need preprocessing
+        arguments.extend_from_slice(&parsed_args.dependency_args);
+    }
+
+    if !parsed_args.compilation_flag.is_empty() {
+        arguments.push(parsed_args.compilation_flag.clone());
+    }
+
+    match parsed_args.compilation_flag.to_str() {
+        Some("-E" | "/E") => {
+            let mut fi = OsString::from("-Fi");
+            fi.push(output);
+            arguments.push(fi);
+        }
+        Some("-c" | "/c") => {
+            let mut fo = OsString::from("-Fo");
+            fo.push(output);
+            arguments.push(fo);
+        }
+        // Some("") => {
+        //     let mut fe = OsString::from("-Fe");
+        //     fe.push(output);
+        //     arguments.push(fe);
+        // }
+        _ => {}
+    }
+
     if parsed_args.double_dash_input {
         arguments.push("--".into());
     }
+
     arguments.push(input.into());
+
+    #[cfg(not(feature = "dist-client"))]
+    let dist_command = None;
+    #[cfg(feature = "dist-client")]
+    let dist_command = (|| {
+        use crate::util::path_to_str;
+
+        let command = dist::CompileCommand {
+            arguments: dist::osstrings_to_strings(&arguments)?,
+            cwd: path_to_str(cwd).ok().map(Into::into)?,
+            env_vars: dist::osstring_tuples_to_strings(&env_vars)?,
+            executable: path_to_str(executable).ok().map(Into::into)?,
+        };
+
+        Some(command)
+    })();
+
     let command = SingleCompileCommand {
         arguments,
         cwd: cwd.to_owned(),
@@ -1606,54 +1643,11 @@ fn generate_compile_commands(
         share_jobserver: false,
     };
 
-    trace!("[{out_pretty}]: command: {command}");
+    trace!("[{out_pretty}]: compile command: {command}");
 
-    #[cfg(not(feature = "dist-client"))]
-    let dist_command = None;
-    #[cfg(feature = "dist-client")]
-    let dist_command = (|| {
-        use crate::util::path_to_str;
-
-        let command = dist::CompileCommand {
-            cwd: path_to_str(cwd).ok().map(Into::into)?,
-            env_vars: dist::osstring_tuples_to_strings(&env_vars)?,
-            executable: path_to_str(executable).ok().map(Into::into)?,
-            arguments: {
-                // http://releases.llvm.org/6.0.0/tools/clang/docs/UsersManual.html#clang-cl
-                // TODO: Use /T... for language?
-                let mut fo = String::from("-Fo");
-                fo.push_str(&path_to_str(output).ok()?);
-
-                let mut arguments: Vec<String> =
-                    vec![parsed_args.compilation_flag.clone().into_string().ok()?, fo];
-                // It's important to avoid preprocessor_args because of things like /FI which
-                // forcibly includes another file. This does mean we're potentially vulnerable
-                // to misidentification of flags like -DYNAMICBASE (though in that specific
-                // case we're safe as it only applies to link time, which sccache avoids).
-                arguments.extend(dist::osstrings_to_strings(&parsed_args.common_args)?);
-
-                if parsed_args.double_dash_input {
-                    arguments.push("--".into());
-                }
-
-                arguments.push(
-                    parsed_args
-                        .language
-                        .needs_c_preprocessing()
-                        .then(|| path_transformer.with_dist_extension(input))
-                        .as_deref()
-                        .or(Some(input))
-                        .and_then(|p| path_to_str(p).ok().map(Into::into))?,
-                );
-
-                arguments
-            },
-        };
-
-        trace!("[{out_pretty}]: dist_command: {command}");
-
-        Some(command)
-    })();
+    if let Some(ref dist_command) = dist_command {
+        trace!("[{out_pretty}]: dist command: {dist_command}");
+    }
 
     Ok((command, dist_command, cacheable))
 }
@@ -3491,12 +3485,11 @@ mod test {
             &parsed_args,
             Path::new(""),
             &[],
-            true, // rewrite_includes_only
             true, // include_line_numbers
             true, // is_clang
             None,
         );
-        let expected_args = ovec!["-nologo", "-E", "-clang:-frewrite-includes", "--", "foo.c"];
+        let expected_args = ovec!["-nologo", "-E", "--", "foo.c"];
         assert_eq!(cmd.args, expected_args);
     }
 
@@ -3527,15 +3520,8 @@ mod test {
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
-        let mut path_transformer = dist::PathTransformer::new();
-        let (command, dist_command, cacheable) = generate_compile_commands(
-            &mut path_transformer,
-            compiler,
-            &parsed_args,
-            f.tempdir.path(),
-            &[],
-        )
-        .unwrap();
+        let (command, dist_command, cacheable) =
+            generate_compile_commands(compiler, &parsed_args, f.tempdir.path(), &[]).unwrap();
         #[cfg(feature = "dist-client")]
         assert!(dist_command.is_some());
         #[cfg(not(feature = "dist-client"))]
@@ -3555,15 +3541,8 @@ mod test {
         };
         let f = TestFixture::new();
         let compiler = &f.bins[0];
-        let mut path_transformer = dist::PathTransformer::new();
-        let (command, _, _) = generate_compile_commands(
-            &mut path_transformer,
-            compiler,
-            &parsed_args,
-            f.tempdir.path(),
-            &[],
-        )
-        .unwrap();
+        let (command, _, _) =
+            generate_compile_commands(compiler, &parsed_args, f.tempdir.path(), &[]).unwrap();
         let expected_args = ovec!["-c", "-Fofoo.obj", "--", "foo.c"];
         assert_eq!(command.arguments, expected_args);
     }
@@ -3605,15 +3584,8 @@ mod test {
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
-        let mut path_transformer = dist::PathTransformer::new();
-        let (command, dist_command, cacheable) = generate_compile_commands(
-            &mut path_transformer,
-            compiler,
-            &parsed_args,
-            f.tempdir.path(),
-            &[],
-        )
-        .unwrap();
+        let (command, dist_command, cacheable) =
+            generate_compile_commands(compiler, &parsed_args, f.tempdir.path(), &[]).unwrap();
         #[cfg(feature = "dist-client")]
         assert!(dist_command.is_some());
         #[cfg(not(feature = "dist-client"))]

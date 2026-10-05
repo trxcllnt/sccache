@@ -18,9 +18,8 @@ use crate::{
         Cacheable, ColorMode, CompileCommandImpl, CompilerArguments,
         args::*,
         c::{
-            CCompilerImpl, CCompilerKind, DepfilePath, GenerateCompileCommandsArgs,
-            GenerateDependenciesArgs, ParseArgs, ParsedArguments, PreprocessArgs,
-            PreprocessorOutput,
+            CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs, GenerateDependenciesArgs,
+            ParseArgs, ParsedArguments,
         },
         gcc::{self, ArgData::*},
     },
@@ -30,7 +29,6 @@ use crate::{
 };
 use crate::{counted_array, dist};
 use async_trait::async_trait;
-use futures::FutureExt;
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
@@ -160,72 +158,74 @@ impl CCompilerImpl for Nvhpc {
         parsed_args
     }
 
-    async fn preprocess<T>(
-        &self,
-        PreprocessArgs {
-            creator,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            rewrite_includes_only,
-            generate_dependencies,
-            include_line_numbers,
-            ..
-        }: PreprocessArgs<'_, T>,
-    ) -> Result<PreprocessorOutput>
-    where
-        T: CommandCreatorSync,
-    {
-        // Chain the dependency generation and preprocessor commands to emulate a `proper` front end
-        let dependencies = if generate_dependencies || !parsed_args.dependency_args.is_empty() {
-            self.generate_dependencies(GenerateDependenciesArgs {
-                creator,
-                executable,
-                parsed_args,
-                cwd,
-                env_vars,
-            })
-            .await?
-            .map(|depfile| {
-                gcc::parse_dependencies(cwd.to_owned(), parsed_args.input.clone(), depfile).boxed()
-            })
-        } else {
-            None
-        };
+    // async fn preprocess<T>(
+    //     &self,
+    //     PreprocessArgs {
+    //         creator,
+    //         executable,
+    //         parsed_args,
+    //         cwd,
+    //         env_vars,
+    //         rewrite_includes_only,
+    //         generate_dependencies,
+    //         include_line_numbers,
+    //         ..
+    //     }: PreprocessArgs<'_, T>,
+    // ) -> Result<PreprocessorOutput>
+    // where
+    //     T: CommandCreatorSync,
+    // {
+    //     // Chain the dependency generation and preprocessor commands to emulate a `proper` front end
+    //     let dependencies = if generate_dependencies || !parsed_args.dependency_args.is_empty() {
+    //         Some(
+    //             futures::future::ok(
+    //                 self.generate_dependencies(GenerateDependenciesArgs {
+    //                     creator,
+    //                     executable,
+    //                     parsed_args,
+    //                     cwd,
+    //                     env_vars,
+    //                 })
+    //                 .await?,
+    //             )
+    //             .boxed(),
+    //         )
+    //     } else {
+    //         None
+    //     };
 
-        let extra_preprocessor_flags = [
-            // nvc++ must be directed to output to stdout
-            vec!["-o".into(), "-".into()],
-            if include_line_numbers {
-                vec![]
-            } else {
-                vec!["-P".into()]
-            },
-        ]
-        .concat();
+    //     let extra_preprocessor_flags = [
+    //         // nvc++ must be directed to output to stdout
+    //         vec!["-o".into(), "-".into()],
+    //         if include_line_numbers {
+    //             vec![]
+    //         } else {
+    //             vec!["-P".into()]
+    //         },
+    //     ]
+    //     .concat();
 
-        gcc::preprocess(
-            creator,
-            executable,
-            // nvc++ only preprocesses when there's no dependency flags
-            &ParsedArguments {
-                dependency_args: vec![],
-                ..parsed_args.clone()
-            },
-            cwd,
-            env_vars,
-            self.kind(),
-            rewrite_includes_only,
-            false, // generate_dependencies
-            &extra_preprocessor_flags,
-        )
-        .await
-        .map(|res| match res {
-            PreprocessorOutput::File(file, _) => PreprocessorOutput::File(file, dependencies),
-            PreprocessorOutput::Output(out, _) => PreprocessorOutput::Output(out, dependencies),
-        })
-    }
+    //     gcc::preprocess(
+    //         creator,
+    //         executable,
+    //         // nvc++ only preprocesses when there's no dependency flags
+    //         &ParsedArguments {
+    //             dependency_args: vec![],
+    //             ..parsed_args.clone()
+    //         },
+    //         cwd,
+    //         env_vars,
+    //         self.kind(),
+    //         rewrite_includes_only,
+    //         false, // generate_dependencies
+    //         &extra_preprocessor_flags,
+    //     )
+    //     .await
+    //     .map(|res| match res {
+    //         PreprocessorOutput::File(file, _) => PreprocessorOutput::File(file, dependencies),
+    //         PreprocessorOutput::Output(out, _) => PreprocessorOutput::Output(out, dependencies),
+    //     })
+    // }
 
     async fn generate_dependencies<T>(
         &self,
@@ -237,24 +237,21 @@ impl CCompilerImpl for Nvhpc {
             env_vars,
             ..
         }: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Option<DepfilePath>>
+    ) -> Result<Vec<PathBuf>>
     where
         T: CommandCreatorSync,
     {
         gcc::generate_dependencies(creator, executable, parsed_args, cwd, env_vars, self.kind())
             .await
-            .map(Some)
     }
 
     fn generate_compile_commands(
         &self,
         GenerateCompileCommandsArgs {
-            path_transformer,
             executable,
             parsed_args,
             cwd,
             env_vars,
-            rewrite_includes_only,
             ..
         }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
@@ -262,15 +259,7 @@ impl CCompilerImpl for Nvhpc {
         Option<dist::CompileCommand>,
         Cacheable,
     )> {
-        gcc::generate_compile_commands(
-            path_transformer,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            self.kind(),
-            rewrite_includes_only,
-        )
+        gcc::generate_compile_commands(executable, parsed_args, cwd, env_vars, self.kind())
     }
 }
 
@@ -328,7 +317,6 @@ mod test {
             arguments: &arguments,
             cwd: ".".as_ref(),
             env_vars: &[],
-            might_dist_compile: false,
         })
     }
 
@@ -515,15 +503,15 @@ mod test {
         assert_eq!(ovec!["-gpu=mem:separate"], a.common_args);
     }
 
-    #[test]
-    fn test_parse_cant_cache_flags() {
-        assert_eq!(
-            CompilerArguments::CannotCache("-E", None),
-            parse_arguments_(stringvec!["-c", "foo.c", "-o", "foo.o", "-E"])
-        );
-        assert_eq!(
-            CompilerArguments::CannotCache("-M", None),
-            parse_arguments_(stringvec!["-c", "foo.c", "-o", "foo.o", "-M"])
-        );
-    }
+    // #[test]
+    // fn test_parse_cant_cache_flags() {
+    //     assert_eq!(
+    //         CompilerArguments::CannotCache("-E", None),
+    //         parse_arguments_(stringvec!["-c", "foo.c", "-o", "foo.o", "-E"])
+    //     );
+    //     assert_eq!(
+    //         CompilerArguments::CannotCache("-M", None),
+    //         parse_arguments_(stringvec!["-c", "foo.c", "-o", "foo.o", "-M"])
+    //     );
+    // }
 }

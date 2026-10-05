@@ -234,7 +234,7 @@ fn test_server_compile() {
     let gcc = f.mk_bin("gcc").unwrap();
     let (addr, sender, server_creator, child) = run_server_thread(f.tempdir.path(), None);
     // Connect to the server.
-    const PREPROCESSOR_STDOUT: &[u8] = b"preprocessor stdout";
+    const PREPROCESSOR_STDOUT: &[u8] = b"";
     const PREPROCESSOR_STDERR: &[u8] = b"preprocessor stderr";
     const STDOUT: &[u8] = b"some stdout";
     const STDERR: &[u8] = b"some stderr";

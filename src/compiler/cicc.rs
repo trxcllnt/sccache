@@ -18,9 +18,8 @@ use crate::{
         Cacheable, CompileCommandImpl, CompilerArguments, Language, SingleCompileCommand,
         args::*,
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath,
-            GenerateCompileCommandsArgs, GenerateDependenciesArgs, ParseArgs, ParsedArguments,
-            PreprocessArgs, PreprocessorOutput,
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs,
+            GenerateDependenciesArgs, ParseArgs, ParsedArguments,
         },
     },
     counted_array, dist,
@@ -58,30 +57,29 @@ impl CCompilerImpl for Cicc {
     ) -> CompilerArguments<ParsedArguments> {
         parse_arguments(arguments, cwd, Language::Ptx, &ARGS[..])
     }
-    async fn preprocess<T>(
-        &self,
-        PreprocessArgs {
-            parsed_args, cwd, ..
-        }: PreprocessArgs<'_, T>,
-    ) -> Result<PreprocessorOutput>
-    where
-        T: CommandCreatorSync,
-    {
-        preprocess(cwd, parsed_args).await
-    }
+    // async fn preprocess<T>(
+    //     &self,
+    //     PreprocessArgs {
+    //         parsed_args, cwd, ..
+    //     }: PreprocessArgs<'_, T>,
+    // ) -> Result<PreprocessorOutput>
+    // where
+    //     T: CommandCreatorSync,
+    // {
+    //     preprocess(cwd, parsed_args).await
+    // }
     async fn generate_dependencies<T>(
         &self,
         GenerateDependenciesArgs { .. }: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Option<DepfilePath>>
+    ) -> Result<Vec<PathBuf>>
     where
         T: CommandCreatorSync,
     {
-        Ok(None)
+        Ok(Vec::with_capacity(0))
     }
     fn generate_compile_commands(
         &self,
         GenerateCompileCommandsArgs {
-            path_transformer,
             executable,
             parsed_args,
             cwd,
@@ -93,14 +91,7 @@ impl CCompilerImpl for Cicc {
         Option<dist::CompileCommand>,
         Cacheable,
     )> {
-        generate_compile_commands(
-            path_transformer,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            "-o",
-        )
+        generate_compile_commands(executable, parsed_args, cwd, env_vars, "-o")
     }
 }
 
@@ -262,12 +253,11 @@ where
     })
 }
 
-pub async fn preprocess(cwd: &Path, parsed_args: &ParsedArguments) -> Result<PreprocessorOutput> {
-    Ok(PreprocessorOutput::File(cwd.join(&parsed_args.input), None))
-}
+// pub async fn preprocess(cwd: &Path, parsed_args: &ParsedArguments) -> Result<PreprocessorOutput> {
+//     Ok(PreprocessorOutput::File(cwd.join(&parsed_args.input), None))
+// }
 
 pub fn generate_compile_commands(
-    path_transformer: &mut dist::PathTransformer,
     executable: &Path,
     parsed_args: &ParsedArguments,
     cwd: &Path,
@@ -305,50 +295,37 @@ pub fn generate_compile_commands(
 
     #[cfg(not(feature = "dist-client"))]
     {
-        // Unused arguments
-        let _ = path_transformer;
         Ok((command, None, Cacheable::Yes))
     }
     #[cfg(feature = "dist-client")]
     {
-        Ok((
-            command,
-            (|| {
-                use crate::util::path_to_str;
+        let dist_command = (|| {
+            use crate::util::path_to_str;
 
-                let command = dist::CompileCommand {
-                    arguments: [
-                        &dist::osstrings_to_strings(&parsed_args.common_args)?[..],
-                        // Don't send unhashed args (i.e. `-split-compile`) to the build cluster
-                        // &dist::osstrings_to_strings(&parsed_args.unhashed_args)?[..],
-                        &[
-                            output_flag.into(),
-                            path_to_str(output).map(Into::into).ok()?,
-                            parsed_args
-                                .language
-                                .needs_c_preprocessing()
-                                .then(|| path_transformer.with_dist_extension(input))
-                                .as_deref()
-                                .or(Some(input))
-                                .and_then(|p| path_to_str(p).map(Into::into).ok())?,
-                        ],
-                    ]
-                    .concat(),
-                    cwd: path_to_str(cwd).map(Into::into).ok()?,
-                    env_vars: dist::osstring_tuples_to_strings(env_vars)?,
-                    // executable: path_to_str(executable).ok().map(Into::into)?,
-                    executable: dunce::canonicalize(executable)
-                        .and_then(path_to_str)
-                        .map(Into::into)
-                        .ok()?,
-                };
+            let command = dist::CompileCommand {
+                arguments: [
+                    &dist::osstrings_to_strings(&parsed_args.common_args)?[..],
+                    &[
+                        output_flag.into(),
+                        path_to_str(output).map(Into::into).ok()?,
+                        path_to_str(input).map(Into::into).ok()?,
+                    ],
+                ]
+                .concat(),
+                cwd: path_to_str(cwd).map(Into::into).ok()?,
+                env_vars: dist::osstring_tuples_to_strings(env_vars)?,
+                executable: dunce::canonicalize(executable)
+                    .and_then(path_to_str)
+                    .map(Into::into)
+                    .ok()?,
+            };
 
-                trace!("[{out_pretty}]: {language} dist_command: {command}");
+            trace!("[{out_pretty}]: {language} dist_command: {command}");
 
-                Some(command)
-            })(),
-            Cacheable::Yes,
-        ))
+            Some(command)
+        })();
+
+        Ok((command, dist_command, Cacheable::Yes))
     }
 }
 

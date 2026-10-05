@@ -792,15 +792,18 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 Err(_) => {
                     let runtime = new_client_runtime()?;
                     runtime.block_on(async {
-                        let (compilations_storage, preprocessor_storage) = tokio::try_join!(
-                            StorageKind::Compilations.create(&config.cache, &config.basedirs),
-                            StorageKind::Preprocessor
-                                .create(&config.preprocessor.cache, &config.basedirs),
-                        )?;
+                        let compilations_storage = StorageKind::Compilations
+                            .create(&config.cache, &config.basedirs)
+                            .await?;
+                        // let (compilations_storage, preprocessor_storage) = tokio::try_join!(
+                        //     StorageKind::Compilations.create(&config.cache, &config.basedirs),
+                        //     StorageKind::Preprocessor
+                        //         .create(&config.preprocessor.cache, &config.basedirs),
+                        // )?;
                         ServerInfo::new(
                             ServerStats::default(),
                             Some(compilations_storage).as_deref(),
-                            Some(preprocessor_storage).as_deref(),
+                            // Some(preprocessor_storage).as_deref(),
                         )
                         .await
                     })?
@@ -811,32 +814,32 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 StatsFormat::Json => serde_json::to_writer(&mut io::stdout(), &stats)?,
             }
         }
-        Command::DebugPreprocessorCacheEntries(key) => {
-            trace!("Command::DebugPreprocessorCacheEntries");
-            let config = ClientConfig::load()?;
-            let runtime = Runtime::new()?;
-            runtime.block_on(async {
-                let storage = StorageKind::Preprocessor
-                    .create(&config.preprocessor.cache, &config.basedirs)
-                    .await?;
-                match crate::compiler::PreprocessorCacheEntry::get(storage.as_ref(), &key).await {
-                    Err(err) => {
-                        eprintln!("Err retrieving preprocessor entry for key {key:?}: {err:#?}");
-                    }
-                    Ok(crate::cache::Cache::Miss) => {
-                        eprintln!("No preprocessor entry for key {key:?}");
-                    }
-                    Ok(crate::cache::Cache::Hit(entry)) => {
-                        println!("=========================");
-                        println!("Showing preprocessor entry for key {key:?}");
-                        println!("{entry:?}");
-                        println!("=========================");
-                    }
-                }
+        // Command::DebugPreprocessorCacheEntries(key) => {
+        //     trace!("Command::DebugPreprocessorCacheEntries");
+        //     let config = ClientConfig::load()?;
+        //     let runtime = Runtime::new()?;
+        //     runtime.block_on(async {
+        //         let storage = StorageKind::Preprocessor
+        //             .create(&config.preprocessor.cache, &config.basedirs)
+        //             .await?;
+        //         match crate::compiler::PreprocessorCacheEntry::get(storage.as_ref(), &key).await {
+        //             Err(err) => {
+        //                 eprintln!("Err retrieving preprocessor entry for key {key:?}: {err:#?}");
+        //             }
+        //             Ok(crate::cache::Cache::Miss) => {
+        //                 eprintln!("No preprocessor entry for key {key:?}");
+        //             }
+        //             Ok(crate::cache::Cache::Hit(entry)) => {
+        //                 println!("=========================");
+        //                 println!("Showing preprocessor entry for key {key:?}");
+        //                 println!("{entry:?}");
+        //                 println!("=========================");
+        //             }
+        //         }
 
-                Ok::<(), anyhow::Error>(())
-            })?;
-        }
+        //         Ok::<(), anyhow::Error>(())
+        //     })?;
+        // }
         Command::InternalStartServer => {
             trace!("Command::InternalStartServer");
             match create_error_log() {
@@ -978,11 +981,8 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             println!();
         }
         #[cfg(feature = "dist-client")]
-        Command::PackageToolchain(executable, out) => {
-            use crate::compiler;
-            use crate::dist::{PathTransformer, Toolchain};
-
-            trace!("Command::PackageToolchain({})", executable.display());
+        Command::PackageToolchain(exe, output) => {
+            trace!("Command::PackageToolchain({})", exe.display());
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .worker_threads(1)
@@ -990,27 +990,27 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             let jobserver = Client::new_num(1);
             let creator = ProcessCommandCreator::new(&jobserver);
             let env: Vec<_> = env::vars_os().collect();
-            let mut out_file = File::create(out)?;
+            let mut out_file = File::create(&output)?;
             let cwd = env::current_dir().expect("A current working dir should exist");
 
             let pool = runtime.handle().clone();
             runtime.block_on(async move {
                 let packaged =
-                    compiler::get_compiler_info(creator, &executable, &cwd, &[], &env, &pool, None)
+                    crate::compiler::get_compiler_info(creator, &exe, &cwd, &[], &env, &pool, None)
                         .await?
                         .0
                         .get_toolchain_packager()
-                        .package(&mut PathTransformer::new())
+                        .package(&mut crate::dist::PathTransformer::new())
                         .await?;
 
-                packaged
-                    .write_tar_gz(
-                        &Toolchain {
-                            archive_id: packaged.compute_hash().await?,
-                        },
-                        &mut out_file,
-                    )
-                    .await
+                info!(
+                    "Compressing '{exe}' toolchain with digest '{hash}' to archive '{out}')",
+                    exe = exe.display(),
+                    out = output.display(),
+                    hash = packaged.compute_hash().await?
+                );
+
+                tokio::task::block_in_place(|| packaged.write_tar_gz(&mut out_file))
             })?;
         }
         #[cfg(not(feature = "dist-client"))]

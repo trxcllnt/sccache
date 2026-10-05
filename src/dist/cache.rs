@@ -18,7 +18,7 @@ mod client {
         config,
         dist::{
             PathTransformer, Toolchain,
-            pkg::{PackagedToolchain, ToolchainPackager},
+            pkg::{ArchivePackager, ToolchainPackager},
         },
         lru_disk_cache::Error as LruError,
         lru_disk_cache::LruDiskCache,
@@ -47,7 +47,7 @@ mod client {
         // Toolchains configured to not be distributed
         disabled_toolchains: HashSet<PathBuf>,
         // Toolchains that have been hashed but not yet cached to disk
-        pending_toolchains: Mutex<HashMap<String, Arc<dyn PackagedToolchain>>>,
+        pending_toolchains: Mutex<HashMap<String, Arc<dyn ArchivePackager>>>,
         // Local machine mapping from 'weak' hashes to strong toolchain hashes
         // - Weak hashes are what sccache uses to determine if a compiler has changed
         //   on the local machine - they're fast and 'good enough' (assuming we trust
@@ -191,7 +191,7 @@ mod client {
         ) -> Result<(
             Toolchain,
             Option<(String, PathBuf)>,
-            Option<Arc<dyn PackagedToolchain>>,
+            Option<Arc<dyn ArchivePackager>>,
         )> {
             if self.disabled_toolchains.contains(compiler_path) {
                 bail!(
@@ -214,7 +214,7 @@ mod client {
 
             if let Some(archive_id) = weak_map.get(weak_toolchain_key) {
                 let archive = cache.get_file(archive_id).ok();
-                let package = pending_toolchains.get(archive_id).cloned();
+                let package = pending_toolchains.get(archive_id);
                 if archive.is_some() || package.is_some() {
                     if let Some(file) = archive {
                         trace!(
@@ -229,7 +229,7 @@ mod client {
                             archive_id: archive_id.to_owned(),
                         },
                         None,
-                        package,
+                        package.cloned(),
                     ));
                 }
             }
@@ -261,11 +261,12 @@ mod client {
         pub async fn put_toolchain(
             &self,
             toolchain: &Toolchain,
-            package: &dyn PackagedToolchain,
+            package: &dyn ArchivePackager,
         ) -> Result<Option<fs::File>> {
             let archive_id = &toolchain.archive_id;
             // Only compress one toolchain at a time, because the default is to compress with all the cores.
             let mut cache = self.cache.lock().await;
+            let weak_map = self.weak_map.lock().await;
             let mut pending_toolchains = self.pending_toolchains.lock().await;
 
             if let Ok(file) = cache.get_file(archive_id) {
@@ -274,14 +275,19 @@ mod client {
                 return Ok(Some(file));
             }
 
+            if let Some((weak_toolchain_key, archive_id)) = weak_map
+                .iter()
+                .find(|&(_, strong_key)| strong_key == archive_id)
+            {
+                debug!("Compressing toolchain {weak_toolchain_key:?} -> {archive_id:?}");
+            }
+
             let mut f = cache
                 .prepare_add(archive_id, 0)
                 .await
                 .context("Failed to prepare toolchain cache dir")?;
 
-            package
-                .write_tar_gz(toolchain, f.as_file_mut())
-                .await
+            tokio::task::block_in_place(|| package.write_tar_gz(f.as_file_mut()))
                 .context("Could not compress toolchain")?;
 
             cache.commit(f).await.context("Failed to cache toolchain")?;
@@ -361,7 +367,7 @@ mod client {
         use std::{io::Write, sync::Arc};
 
         use {
-            crate::dist::pkg::{PackagedToolchain, ToolchainPackager},
+            crate::dist::pkg::{ArchivePackager, ToolchainPackager},
             async_trait::async_trait,
         };
 
@@ -374,7 +380,7 @@ mod client {
             async fn package(
                 self: Box<Self>,
                 _: &mut PathTransformer,
-            ) -> Result<Arc<dyn PackagedToolchain>> {
+            ) -> Result<Arc<dyn ArchivePackager>> {
                 panic!("should not have called packager")
             }
         }

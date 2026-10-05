@@ -190,7 +190,7 @@ mod path_transform {
         }
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Clone, Debug, Default)]
     pub struct PathTransformer {
         dist_to_local_path: HashMap<OsString, PathBuf>,
     }
@@ -1042,7 +1042,7 @@ pub trait Client: Send + Sync {
     async fn put_toolchain(
         &self,
         toolchain: Toolchain,
-        packaged: Option<Arc<dyn pkg::PackagedToolchain>>,
+        packaged: Option<Arc<dyn pkg::ArchivePackager>>,
     ) -> Result<SubmitToolchainResult>;
     async fn hash_toolchain(
         &self,
@@ -1053,11 +1053,10 @@ pub trait Client: Send + Sync {
     ) -> Result<(
         Toolchain,
         Option<(String, PathBuf)>,
-        Option<Arc<dyn pkg::PackagedToolchain>>,
+        Option<Arc<dyn pkg::ArchivePackager>>,
     )>;
     fn fallback_to_local_compile(&self) -> bool;
     fn max_retries(&self) -> f64;
     fn request_timeout(&self) -> u32;
-    fn rewrite_includes_only(&self) -> bool;
     async fn get_custom_toolchain(&self, exe: &Path) -> Option<PathBuf>;
 }

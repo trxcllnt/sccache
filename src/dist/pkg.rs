@@ -42,61 +42,22 @@ pub trait ToolchainPackager: Send + Sync {
     async fn package(
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
-    ) -> Result<Arc<dyn PackagedToolchain>>;
+    ) -> Result<Arc<dyn ArchivePackager>>;
 }
 
 #[async_trait]
-pub trait PackagedToolchain: Send + Sync {
+pub trait ArchivePackager: Send + Sync {
     async fn compute_hash(&self) -> Result<String>;
-    async fn write_tar_gz(
-        &self,
-        toolchain: &dist::Toolchain,
-        writer: &mut (dyn Write + Send),
-    ) -> Result<()>;
-}
-
-pub trait InputsWriter: Write + Send {
-    fn finish(self: Box<Self>) -> Result<(u64, u64)>;
-}
-
-pub struct InputsCompressor<W: Write + Send> {
-    inner: flate2::write::ZlibEncoder<W>,
-}
-
-impl<W: Write + Send> InputsCompressor<W> {
-    pub fn new(compressor: flate2::write::ZlibEncoder<W>) -> Box<Self> {
-        Box::new(Self { inner: compressor })
-    }
-}
-
-impl<W: Write + Send> Write for InputsCompressor<W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.inner.write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
-}
-
-impl<W: Write + Send> InputsWriter for InputsCompressor<W> {
-    fn finish(self: Box<Self>) -> Result<(u64, u64)> {
-        let mut inner = self.inner;
-        inner.flush().context("failed to flush compressor")?;
-        let total_in = inner.total_in();
-        let total_out = inner.total_out();
-        trace!("Compressed inputs from {total_in} -> {total_out}");
-        inner.finish().context("failed to finish compressor")?;
-        Ok((total_in, total_out))
-    }
+    fn compress(&self, writer: &mut (dyn Write + Send)) -> Result<()>;
+    fn write_tar_gz(&self, writer: &mut (dyn Write + Send)) -> Result<()>;
 }
 
 #[async_trait]
 pub trait InputsPackager: Send {
-    async fn write_inputs(
+    fn write_inputs(
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
-        inputs_writer: Box<dyn InputsWriter>,
+        inputs_writer: &mut (dyn Write + Send),
     ) -> Result<()>;
 }
 
@@ -117,7 +78,7 @@ pub trait InputsPackager: Send {
 mod toolchain_imp {
     use std::sync::Arc;
 
-    use super::{PackagedToolchain, ToolchainPackager, dist};
+    use super::{ArchivePackager, ToolchainPackager, dist};
     use async_trait::async_trait;
 
     use crate::errors::*;
@@ -129,7 +90,7 @@ mod toolchain_imp {
         async fn package(
             self: Box<Self>,
             _: &mut dist::PathTransformer,
-        ) -> Result<Arc<dyn PackagedToolchain>> {
+        ) -> Result<Arc<dyn ArchivePackager>> {
             bail!("Automatic packaging not supported on this platform")
         }
     }
@@ -168,8 +129,7 @@ mod toolchain_imp {
         util::{bytes_to_str, path_to_bytes},
     };
 
-    pub struct ToolchainPackaged<'a> {
-        executable: PathBuf,
+    pub struct ArchiveBuilder<'a> {
         // Put dirs and file in a deterministic order (map from tar_path -> real_path)
         dirs_set: BTreeSet<PathBuf>,
         file_set: BTreeSet<PathBuf>,
@@ -180,15 +140,30 @@ mod toolchain_imp {
         path_transformer: &'a mut dist::PathTransformer,
     }
 
-    impl<'a> ToolchainPackaged<'a> {
-        pub fn new(executable: PathBuf, path_transformer: &'a mut dist::PathTransformer) -> Self {
+    impl<'a> ArchiveBuilder<'a> {
+        pub fn new(path_transformer: &'a mut dist::PathTransformer) -> Self {
             Self {
-                executable,
                 dirs_set: BTreeSet::new(),
                 file_set: BTreeSet::new(),
                 symlinks: BTreeMap::new(),
                 path_transformer,
             }
+        }
+
+        pub fn add_path<P: AsRef<Path>>(
+            &mut self,
+            env_vars: &[(OsString, OsString)],
+            path: P,
+        ) -> Result<()> {
+            let path = path.as_ref();
+            if path.is_dir() {
+                self.add_dir(path)?;
+            } else if path.is_symlink() {
+                self.add_link(path.read_link()?, path)?;
+            } else if path.is_file() {
+                self.add_file(env_vars, path)?;
+            }
+            Ok(())
         }
 
         pub fn add_executable_and_deps<P: AsRef<Path>>(
@@ -213,7 +188,7 @@ mod toolchain_imp {
                     format!("Failed to analyse {} with ldd", obj_path.display())
                 })?;
                 remaining.extend(ldd_libraries);
-                trace!("add_executable_and_deps {}", obj_path.display());
+                // trace!("add_executable_and_deps {}", obj_path.display());
                 self.file_set.insert(obj_path);
             }
             Ok(())
@@ -223,10 +198,7 @@ mod toolchain_imp {
             let dir_path = dir_path.as_ref();
             assert!(dir_path.is_absolute());
             if !dir_path.is_dir() {
-                bail!(format!(
-                    "{} was not a dir when readying for tar",
-                    dir_path.display()
-                ))
+                bail!("'{}' is not a directory", dir_path.display())
             }
             if dir_path
                 .components()
@@ -237,7 +209,7 @@ mod toolchain_imp {
                 return Ok(());
             }
             let dir_path = self.simplify_path(dir_path)?;
-            trace!("add_dir {}", dir_path.display());
+            // trace!("add_dir '{}'", dir_path.display());
             self.dirs_set.insert(dir_path);
             Ok(())
         }
@@ -250,10 +222,7 @@ mod toolchain_imp {
             let file_path = file_path.as_ref();
             assert!(file_path.is_absolute());
             if !file_path.is_file() {
-                bail!(format!(
-                    "{} was not a file when readying for tar",
-                    file_path.display()
-                ))
+                bail!("'{}' is not a file", file_path.display())
             }
             if file_path.is_executable()
                 && self.add_executable_and_deps(env_vars, file_path).is_ok()
@@ -261,14 +230,18 @@ mod toolchain_imp {
                 return Ok(());
             }
             let file_path = self.simplify_path(file_path)?;
-            trace!("add_file {}", file_path.display());
+            // trace!("add_file '{}'", file_path.display());
             self.file_set.insert(file_path);
             Ok(())
         }
 
-        pub fn add_link<P: AsRef<Path>>(&mut self, target: P, name: P) -> Result<()> {
+        pub fn add_link<T: AsRef<Path>, N: AsRef<Path>>(
+            &mut self,
+            target: T,
+            link_name: N,
+        ) -> Result<()> {
             let target = target.as_ref();
-            let name = name.as_ref();
+            let name = link_name.as_ref();
             assert!(target.is_absolute());
             assert!(name.is_absolute());
 
@@ -288,7 +261,7 @@ mod toolchain_imp {
             // Simplify the link name to record any symlinks it traverses,
             // but write the original name as the actual link name in the archive.
             let _ = simplify(name)?;
-            trace!("add_link {} -> {}", p.display(), name.display());
+            // trace!("add_link '{}' -> '{}'", p.display(), name.display());
             self.symlinks.insert(p, name.to_path_buf());
             Ok(())
         }
@@ -321,7 +294,7 @@ mod toolchain_imp {
                     // Device or other oddity
                     continue;
                 }
-                trace!("walkdir add_file {}", path.display());
+                // trace!("walkdir add_file '{}'", path.display());
                 // It's either a file, or a symlink pointing to a file
                 self.add_file(env_vars, path)?;
             }
@@ -338,7 +311,7 @@ mod toolchain_imp {
             .simplify(path.as_ref())
         }
 
-        pub fn build(self) -> Result<Arc<dyn super::PackagedToolchain>> {
+        pub fn build(self) -> Result<Arc<dyn super::ArchivePackager>> {
             use itertools::Itertools;
 
             // Adjust the archive paths with the PathTransformer
@@ -392,8 +365,7 @@ mod toolchain_imp {
                 .try_collect()
                 .context("Failed transforming symlink paths")?;
 
-            Ok(Arc::new(PackagedToolchain {
-                executable: self.executable,
+            Ok(Arc::new(ArchivePackager {
                 dirs_set,
                 file_set,
                 symlinks,
@@ -401,8 +373,7 @@ mod toolchain_imp {
         }
     }
 
-    pub struct PackagedToolchain {
-        executable: PathBuf,
+    pub struct ArchivePackager {
         // Put dirs and file in a deterministic order (map from tar_path -> real_path)
         dirs_set: BTreeMap<PathBuf, PathBuf>,
         file_set: BTreeMap<PathBuf, PathBuf>,
@@ -413,7 +384,7 @@ mod toolchain_imp {
     }
 
     #[async_trait]
-    impl super::PackagedToolchain for PackagedToolchain {
+    impl super::ArchivePackager for ArchivePackager {
         async fn compute_hash(&self) -> Result<String> {
             let mut digest = crate::util::Digest::new();
 
@@ -437,57 +408,48 @@ mod toolchain_imp {
             Ok(digest.finish())
         }
 
-        async fn write_tar_gz(
-            &self,
-            toolchain: &dist::Toolchain,
-            writer: &mut (dyn Write + Send),
-        ) -> Result<()> {
+        fn compress(&self, writer: &mut (dyn Write + Send)) -> Result<()> {
+            let mut builder = tar::Builder::new(writer);
+
+            // Add directories before symlinks to ensure the dirs exist
+            // before symlinks that may point at them are unpacked
+            for (tar_path, dir_path) in self.dirs_set.iter() {
+                // trace!("dir: '{}'", dir_path.display());
+                builder.append_dir(tar_path, dir_path)?;
+            }
+            // Add symlinks before files to ensure the symlinks exist
+            // before files are unpacked to paths that may traverse them
+            for (src_path, dst_path) in self.symlinks.iter() {
+                // trace!("link: '{}' -> '{}'", src_path.display(), dst_path.display());
+                let mut header = tar::Header::new_gnu();
+                header.set_size(0);
+                header.set_mtime(0);
+                header.set_entry_type(tar::EntryType::Symlink);
+                // Leave `to_path` as absolute, assuming the tar will
+                // be used in a chroot-like environment.
+                builder.append_link(&mut header, tar_safe_path(src_path), dst_path)?;
+            }
+            for (tar_path, file_path) in self.file_set.iter() {
+                // trace!("file: '{}'", file_path.display());
+                builder.append_path_with_name(file_path, tar_path)?;
+            }
+
+            builder.finish().map_err(anyhow::Error::new)
+        }
+
+        fn write_tar_gz(&self, writer: &mut (dyn Write + Send)) -> Result<()> {
             use gzp::{
                 deflate::Gzip,
-                par::compress::{Compression, ParCompressBuilder},
+                par::compress::{Compression as Comp, ParCompressBuilder},
             };
 
-            let dirs_set = self.dirs_set.clone();
-            let file_set = self.file_set.clone();
-            let symlinks = self.symlinks.clone();
-
-            debug!(
-                "Compressing toolchain for {:?} -> {:?}",
-                self.executable.display(),
-                toolchain.archive_id,
-            );
-
-            tokio::task::block_in_place(move || {
-                std::thread::scope(|scope| {
-                    let compressor = ParCompressBuilder::<Gzip>::new()
-                        .compression_level(Compression::default())
+            std::thread::scope(|scope| {
+                self.compress(
+                    &mut ParCompressBuilder::<Gzip>::new()
+                        .compression_level(Comp::default())
                         .num_threads(crate::util::num_cpus())?
-                        .from_borrowed_writer(writer, scope);
-
-                    let mut builder = tar::Builder::new(compressor);
-
-                    // Add directories before symlinks to ensure the dirs exist
-                    // before symlinks that may point at them are unpacked
-                    for (tar_path, dir_path) in dirs_set.iter() {
-                        builder.append_dir(tar_path, dir_path)?;
-                    }
-                    // Add symlinks before files to ensure the symlinks exist
-                    // before files are unpacked to paths that may traverse them
-                    for (src_path, dst_path) in symlinks.iter() {
-                        let mut header = tar::Header::new_gnu();
-                        header.set_size(0);
-                        header.set_mtime(0);
-                        header.set_entry_type(tar::EntryType::Symlink);
-                        // Leave `to_path` as absolute, assuming the tar will
-                        // be used in a chroot-like environment.
-                        builder.append_link(&mut header, tar_safe_path(src_path), dst_path)?;
-                    }
-                    for (tar_path, file_path) in file_set.iter() {
-                        builder.append_path_with_name(file_path, tar_path)?;
-                    }
-
-                    builder.finish().map_err(anyhow::Error::new)
-                })
+                        .from_borrowed_writer(writer, scope),
+                )
             })
         }
     }

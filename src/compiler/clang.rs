@@ -14,12 +14,11 @@
 
 use crate::{
     compiler::{
-        Cacheable, CompileCommandImpl, CompilerArguments, Language,
+        Cacheable, CompileCommandImpl, CompilerArguments,
         args::*,
         c::{
-            CCompilerImpl, CCompilerKind, DepfilePath, GenerateCompileCommandsArgs,
-            GenerateDependenciesArgs, ParseArgs, ParsedArguments, PreprocessArgs,
-            PreprocessorOutput,
+            CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs, GenerateDependenciesArgs,
+            ParseArgs, ParsedArguments,
         },
         gcc::{self, ArgData::*},
     },
@@ -27,7 +26,6 @@ use crate::{
     mock_command::CommandCreatorSync,
 };
 use async_trait::async_trait;
-use semver::{BuildMetadata, Prerelease, Version};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -40,57 +38,37 @@ pub struct Clang {
     pub clangplusplus: bool,
     /// String from __VERSION__ macro.
     pub version: Option<String>,
-    /// Identity of the assembler used with -fno-integrated-as.
     pub assembler_digest: Option<String>,
-    // true if clang is >= v14
-    supports_fminimize_whitespace: bool,
+    extra_dist_files: Vec<PathBuf>,
 }
 
 impl Clang {
     pub fn new(
         clangplusplus: bool,
-        is_appleclang: bool,
         version: Option<String>,
         assembler_digest: Option<String>,
+        extra_dist_files: Vec<PathBuf>,
     ) -> Self {
         Self {
-            supports_fminimize_whitespace: is_minversion(is_appleclang, version.as_ref(), 14),
+            // supports_fminimize_whitespace: is_minversion(is_appleclang, version.as_ref(), 14),
             assembler_digest,
             clangplusplus,
+            extra_dist_files,
             version,
         }
     }
-}
 
-fn is_minversion(is_appleclang: bool, version: Option<&String>, major: u64) -> bool {
-    // Apple clang follows its own versioning scheme.
-    if is_appleclang {
-        return false;
+    pub fn find_extra_gcc_toolchain_markers(exe: &Path) -> Vec<PathBuf> {
+        use crate::compiler::c::CToolchainPackager;
+        if let Some(path) = CToolchainPackager::named_file(exe, "-print-file-name=crtbegin.o") {
+            vec![path]
+        } else if let Some(path) = CToolchainPackager::named_file(exe, "-print-file-name=libgcc.a")
+        {
+            vec![path]
+        } else {
+            vec![]
+        }
     }
-
-    let version_val = match version {
-        Some(version_val) => version_val,
-        None => return false,
-    };
-
-    let version_str = match version_val.split(' ').find(|x| x.contains('.')) {
-        Some(version_str) => version_str,
-        None => return false,
-    };
-
-    let parsed_version = match Version::parse(version_str.trim_end_matches('"')) {
-        Ok(parsed_version) => parsed_version,
-        Err(_) => return false,
-    };
-
-    parsed_version
-        >= (Version {
-            major,
-            minor: 0,
-            patch: 0,
-            pre: Prerelease::default(),
-            build: BuildMetadata::default(),
-        })
 }
 
 #[async_trait]
@@ -104,65 +82,75 @@ impl CCompilerImpl for Clang {
     fn version(&self) -> Option<String> {
         self.version.clone()
     }
-    fn assembler_digest(&self) -> Option<String> {
-        self.assembler_digest.clone()
+    fn assembler_digest(&self) -> Option<&str> {
+        self.assembler_digest.as_deref()
+    }
+    fn extra_dist_files(&self) -> impl Iterator<Item = PathBuf> {
+        self.extra_dist_files.iter().cloned()
     }
     fn parse_arguments(
         &self,
         ParseArgs { arguments, cwd, .. }: ParseArgs<'_>,
     ) -> CompilerArguments<ParsedArguments> {
-        gcc::parse_arguments(
+        let mut parsed_args = gcc::parse_arguments(
             arguments,
             cwd,
             (&gcc::ARGS[..], &ARGS[..]),
             self.clangplusplus,
             self.kind(),
-        )
+        );
+        if let CompilerArguments::Ok(ref mut parsed_args) = parsed_args {
+            parsed_args
+                .extra_dist_files
+                .extend_from_slice(&self.extra_dist_files);
+        }
+
+        parsed_args
     }
 
-    async fn preprocess<T>(
-        &self,
-        PreprocessArgs {
-            creator,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            rewrite_includes_only,
-            generate_dependencies,
-            include_line_numbers,
-            ..
-        }: PreprocessArgs<'_, T>,
-    ) -> Result<PreprocessorOutput>
-    where
-        T: CommandCreatorSync,
-    {
-        let extra_preprocessor_flags = if include_line_numbers {
-            vec![]
-        } else if !self.supports_fminimize_whitespace
-            || parsed_args.language == Language::AssemblerToPreprocess
-        {
-            vec!["-P".into()]
-        } else {
-            // Clang 14 and later support -fminimize-whitespace, which normalizes
-            // away non-semantic whitespace which in turn increases cache hit rate.
-            // '-fminimize-whitespace' invalid for input of type assembler-with-cpp
-            vec!["-P".into(), "-fminimize-whitespace".into()]
-        };
+    // async fn preprocess<T>(
+    //     &self,
+    //     PreprocessArgs {
+    //         creator,
+    //         executable,
+    //         parsed_args,
+    //         cwd,
+    //         env_vars,
+    //         rewrite_includes_only,
+    //         generate_dependencies,
+    //         include_line_numbers,
+    //         ..
+    //     }: PreprocessArgs<'_, T>,
+    // ) -> Result<PreprocessorOutput>
+    // where
+    //     T: CommandCreatorSync,
+    // {
+    //     let extra_preprocessor_flags = if include_line_numbers {
+    //         vec![]
+    //     } else if !self.supports_fminimize_whitespace
+    //         || parsed_args.language == Language::AssemblerToPreprocess
+    //     {
+    //         vec!["-P".into()]
+    //     } else {
+    //         // Clang 14 and later support -fminimize-whitespace, which normalizes
+    //         // away non-semantic whitespace which in turn increases cache hit rate.
+    //         // '-fminimize-whitespace' invalid for input of type assembler-with-cpp
+    //         vec!["-P".into(), "-fminimize-whitespace".into()]
+    //     };
 
-        gcc::preprocess(
-            creator,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            self.kind(),
-            rewrite_includes_only,
-            generate_dependencies,
-            &extra_preprocessor_flags,
-        )
-        .await
-    }
+    //     gcc::preprocess(
+    //         creator,
+    //         executable,
+    //         parsed_args,
+    //         cwd,
+    //         env_vars,
+    //         self.kind(),
+    //         rewrite_includes_only,
+    //         generate_dependencies,
+    //         &extra_preprocessor_flags,
+    //     )
+    //     .await
+    // }
 
     async fn generate_dependencies<T>(
         &self,
@@ -174,24 +162,21 @@ impl CCompilerImpl for Clang {
             env_vars,
             ..
         }: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Option<DepfilePath>>
+    ) -> Result<Vec<PathBuf>>
     where
         T: CommandCreatorSync,
     {
         gcc::generate_dependencies(creator, executable, parsed_args, cwd, env_vars, self.kind())
             .await
-            .map(Some)
     }
 
     fn generate_compile_commands(
         &self,
         GenerateCompileCommandsArgs {
-            path_transformer,
             executable,
             parsed_args,
             cwd,
             env_vars,
-            rewrite_includes_only,
             ..
         }: GenerateCompileCommandsArgs<'_>,
     ) -> Result<(
@@ -199,15 +184,7 @@ impl CCompilerImpl for Clang {
         Option<dist::CompileCommand>,
         Cacheable,
     )> {
-        gcc::generate_compile_commands(
-            path_transformer,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            self.kind(),
-            rewrite_includes_only,
-        )
+        gcc::generate_compile_commands(executable, parsed_args, cwd, env_vars, self.kind())
     }
 }
 
@@ -360,15 +337,15 @@ mod test {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
         Clang::new(
             false, // clangplusplus
-            false, // is_appleclang
-            None,  // version
-            None,  // assembler_digest
+            // false, // is_appleclang
+            None, // version
+            None,
+            vec![],
         )
         .parse_arguments(ParseArgs {
             arguments: &arguments,
             cwd: &std::env::current_dir().unwrap(),
             env_vars: &[],
-            might_dist_compile: false,
         })
     }
 
@@ -379,54 +356,6 @@ mod test {
                 o => panic!("Got unexpected parse result: {:?}", o),
             }
         }
-    }
-
-    #[test]
-    fn test_supports_fminimize_whitespace() {
-        assert!(
-            Clang::new(
-                false,                                       // clangplusplus
-                false,                                       // is_appleclang
-                Some("\"Ubuntu Clang 14.0.0\"".to_string()), // version
-                None,                                        // assembler_digest
-            )
-            .supports_fminimize_whitespace
-        );
-
-        assert!(
-            !Clang::new(
-                false,                                       // clangplusplus
-                false,                                       // is_appleclang
-                Some("\"Ubuntu Clang 13.0.0\"".to_string()), // version
-                None,                                        // assembler_digest
-            )
-            .supports_fminimize_whitespace
-        );
-
-        assert!(Clang::new(
-            false, // clangplusplus
-            false, // is_appleclang
-            Some("\"FreeBSD Clang 14.0.5 (https://github.com/llvm/llvm-project.git llvmorg-14.0.5-0-gc12386ae247c)\"".to_string()), // version
-                None, // assembler_digest
-        )
-        .supports_fminimize_whitespace);
-
-        assert!(!Clang::new(
-            false, // clangplusplus
-            false, // is_appleclang
-            Some("\"FreeBSD Clang 13.0.0 (git@github.com:llvm/llvm-project.git llvmorg-13.0.0-0-gd7b669b3a303)\"".to_string()), // version
-                None, // assembler_digest
-        )
-        .supports_fminimize_whitespace);
-
-        // is_appleclang wins
-        assert!(!Clang::new(
-            false, // clangplusplus
-            true, // is_appleclang
-            Some("\"FreeBSD Clang 14.0.5 (https://github.com/llvm/llvm-project.git llvmorg-14.0.5-0-gc12386ae247c)\"".to_string()), // version
-                None, // assembler_digest
-        )
-        .supports_fminimize_whitespace);
     }
 
     #[test]
@@ -1703,15 +1632,12 @@ mod test {
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
-        let mut path_transformer = dist::PathTransformer::new();
         let (command, dist_command, cacheable) = gcc::generate_compile_commands(
-            &mut path_transformer,
             compiler,
             &parsed_args,
             f.tempdir.path(),
             &[],
             CCompilerKind::Clang,
-            false,
         )
         .unwrap();
         // ClangCUDA cannot be dist-compiled
