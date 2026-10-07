@@ -1157,7 +1157,7 @@ impl CompileCommandImpl for NvccCompileCommand {
 
         let pending = service.increment_pending_compilations();
 
-        let (mut nvcc_internal_files, nvcc_subcommand_groups) =
+        let (nvcc_internal_files, nvcc_subcommand_groups) =
             group_nvcc_subcommands_by_compilation_stage(
                 creator,
                 executable,
@@ -1174,7 +1174,7 @@ impl CompileCommandImpl for NvccCompileCommand {
 
         drop(pending);
 
-        let maybe_keep_temps_then_clean = || async move {
+        let maybe_keep_temps_then_clean = |mut nvcc_internal_files: HashMap<String, String>| async move {
             let _active = service.increment_active_compilations();
 
             // Move and/or delete nvcc's internal files.
@@ -1196,16 +1196,16 @@ impl CompileCommandImpl for NvccCompileCommand {
                 for (old, new) in nvcc_internal_files.drain() {
                     let src = src_dir.join(new);
                     let dst = dst_dir.join(old);
-                    if dst != src && src.exists() {
-                        match tokio::fs::rename(&src, &dst).await {
-                            Ok(_) => {}
-                            Err(err) => match err.kind() {
-                                std::io::ErrorKind::CrossesDevices => {
-                                    tokio::fs::copy(&src, &dst).await?;
-                                    tokio::fs::remove_file(&src).await?;
-                                }
-                                _ => bail!(err),
-                            },
+                    if dst != src
+                        && src.exists()
+                        && let Err(err) = tokio::fs::rename(&src, &dst).await
+                    {
+                        match err.kind() {
+                            std::io::ErrorKind::CrossesDevices => {
+                                tokio::fs::copy(&src, &dst).await?;
+                                tokio::fs::remove_file(&src).await?;
+                            }
+                            _ => bail!(err),
                         }
                     }
                 }
@@ -1239,7 +1239,15 @@ impl CompileCommandImpl for NvccCompileCommand {
             |mut output: ProcessOutput, chunks: Vec<Vec<Vec<NvccGeneratedSubcommand>>>| async {
                 for chunk in chunks {
                     let results = futures::future::join_all(chunk.into_iter().map(|commands| {
-                        run_nvcc_subcommands_group(service, creator, commands, output_path)
+                        run_nvcc_subcommands_group(
+                            service,
+                            creator,
+                            commands,
+                            output_path,
+                            out_dir.as_ref().path(),
+                            keep_dir.as_deref(),
+                            &nvcc_internal_files,
+                        )
                     }))
                     .await;
 
@@ -1291,14 +1299,18 @@ impl CompileCommandImpl for NvccCompileCommand {
             if !command_groups.is_empty() {
                 output = match run_command_groups(output, command_groups).await {
                     Ok(output) => output,
-                    Err(err) => return maybe_keep_temps_then_clean().await.and(Err(err)),
+                    Err(err) => {
+                        return maybe_keep_temps_then_clean(nvcc_internal_files)
+                            .await
+                            .and(Err(err));
+                    }
                 };
             }
         }
 
         output.stdout.shrink_to_fit();
         output.stderr.shrink_to_fit();
-        maybe_keep_temps_then_clean().await?;
+        maybe_keep_temps_then_clean(nvcc_internal_files).await?;
         Ok(output)
     }
 }
@@ -1317,6 +1329,7 @@ struct NvccGeneratedSubcommand {
     cwd: PathBuf,
     kind: NvccSubcommandKind,
     env_vars: Vec<(OsString, OsString)>,
+    inputs_to_delete_after_completion: Vec<String>,
     #[allow(unused)]
     output: Option<PathBuf>,
 }
@@ -1508,152 +1521,212 @@ fn create_nvcc_commands_graph(
 
     for (dir, exe, args) in all_commands.iter() {
         let cmd = exe.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-        if let Some((kind, group, parsed_args, env_vars)) = match cmd {
-            "" => continue,
-            // cudafe++ _must be_ cached, because the `.module_id` file is unique to each invocation (new in CTK 12.8)
-            "cudafe++" => Some((
-                NvccSubcommandKind::Compile,
-                &mut cuda_front_end_group,
-                parse_args_simple(args.iter().map(Into::into), dir),
-                env_vars.clone(),
-            )),
-            // fatbinary and nvlink are not cacheable
-            "fatbinary" | "nvlink" => Some((
-                NvccSubcommandKind::Other,
-                &mut final_assembly_group,
-                parse_args_simple(args.iter().map(Into::into), dir),
-                env_vars.clone(),
-            )),
-            // cicc, ptxas, and tileiras are cacheable
-            "cicc" => Some(parse_args_simple(args.iter().map(Into::into), dir))
-                .map(|parsed_args| {
-                    fixup_cicc_args(
+        if let Some((kind, group, parsed_args, env_vars, inputs_to_delete_after_completion)) =
+            match cmd {
+                "" => continue,
+                // cudafe++ _must be_ cached, because the `.module_id` file is unique to each invocation (new in CTK 12.8)
+                "cudafe++" => {
+                    let parsed_args = parse_args_simple(args.iter().map(Into::into), dir);
+                    let inputs_to_delete_after_completion = parsed_args
+                        .input
+                        .as_os_str()
+                        .to_str()
+                        .filter(|s| s.ends_with("cpp4.ii"))
+                        .map(Into::into)
+                        .into_iter()
+                        .collect();
+
+                    Some((
+                        NvccSubcommandKind::Compile,
+                        &mut cuda_front_end_group,
+                        parsed_args,
+                        env_vars.clone(),
+                        inputs_to_delete_after_completion,
+                    ))
+                }
+                // fatbinary and nvlink are not cacheable
+                "fatbinary" => {
+                    let parsed_args = parse_args_simple(args.iter().map(Into::into), dir);
+                    let inputs_to_delete_after_completion = parsed_args
+                        .common_args
+                        .iter()
+                        .filter_map(|arg| {
+                            // Extract the path from the ",file=<path>" part of these args:
+                            // --image3=kind=elf,sm=86,file=/tmp/out/x.compute_86.tile.cubin
+                            if arg.starts_with("--image3=") {
+                                arg.split(",").find_map(|comp| {
+                                    if comp.starts_with("file=") {
+                                        comp.split_once("=")
+                                            .and_then(|(_, path)| path.to_str())
+                                            .map(|s| s.to_owned())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    Some((
+                        NvccSubcommandKind::Other,
+                        &mut final_assembly_group,
+                        parsed_args,
+                        env_vars.clone(),
+                        inputs_to_delete_after_completion,
+                    ))
+                }
+                "nvlink" => Some((
+                    NvccSubcommandKind::Other,
+                    &mut final_assembly_group,
+                    parse_args_simple(args.iter().map(Into::into), dir),
+                    env_vars.clone(),
+                    vec![],
+                )),
+                // cicc, ptxas, and tileiras are cacheable
+                "cicc" => {
+                    let parsed_args = parse_args_simple(args.iter().map(Into::into), dir);
+                    let parsed_args = fixup_cicc_args(
                         parsed_args,
                         keep_dir.as_deref(),
                         compile_flag,
                         cudafe_has_gen_module_id_file_flag,
-                    )
-                })
-                .map(|parsed_args| {
-                    (
+                    );
+                    let inputs_to_delete_after_completion = parsed_args
+                        .input
+                        .as_os_str()
+                        .to_str()
+                        .filter(|s| s.ends_with("cpp1.ii"))
+                        .map(Into::into)
+                        .into_iter()
+                        .collect();
+
+                    Some((
                         NvccSubcommandKind::Compile,
                         device_compile_groups
                             .entry(parsed_args.input.clone())
                             .or_default(),
                         parsed_args,
                         env_vars.clone(),
-                    )
-                }),
-            // Group these with their prior corresponding cicc commands
-            "ptxas" | "tileiras" => {
-                let cicc_output_flag = match cmd {
-                    "ptxas" => "obj",
-                    "tileiras" => "--tile_bc_file_name",
-                    _ => unreachable!(),
-                };
-                // (ptxas | tileiras) ... <input>
-                // (ptxas | tileiras) ... <input> -o <output>
-                Some(parse_args_simple(args.iter().map(Into::into), dir))
-                    // Ignore ptxas invocations without an output or input
-                    .filter(|parsed_args| parsed_args.outputs.contains_key("obj"))
-                    .filter(|parsed_args| !parsed_args.input.as_os_str().is_empty())
-                    .and_then(|parsed_args| {
-                        // Search for the prior corresponding cicc call
-                        device_compile_groups
-                            .values()
-                            .find_map(|cmds| {
-                                cmds.iter().rev().find_map(|(cicc, _)| {
-                                    cicc.outputs
-                                        .get(cicc_output_flag)
-                                        .filter(|o| o.path == parsed_args.input)
-                                        .map(|_| cicc.input.clone())
+                        inputs_to_delete_after_completion,
+                    ))
+                }
+                // Group these with their prior corresponding cicc commands
+                "ptxas" | "tileiras" => {
+                    let cicc_output_flag = match cmd {
+                        "ptxas" => "obj",
+                        "tileiras" => "--tile_bc_file_name",
+                        _ => unreachable!(),
+                    };
+                    // (ptxas | tileiras) ... <input>
+                    // (ptxas | tileiras) ... <input> -o <output>
+                    Some(parse_args_simple(args.iter().map(Into::into), dir))
+                        // Ignore ptxas invocations without an output or input
+                        .filter(|parsed_args| parsed_args.outputs.contains_key("obj"))
+                        .filter(|parsed_args| !parsed_args.input.as_os_str().is_empty())
+                        .and_then(|parsed_args| {
+                            // Search for the prior corresponding cicc call
+                            device_compile_groups
+                                .values()
+                                .find_map(|cmds| {
+                                    cmds.iter().rev().find_map(|(cicc, _)| {
+                                        cicc.outputs
+                                            .get(cicc_output_flag)
+                                            .filter(|o| o.path == parsed_args.input)
+                                            .map(|_| cicc.input.clone())
+                                    })
                                 })
-                            })
-                            // Otherwise create a new device compile group
-                            .or_else(|| Some(parsed_args.input.clone()))
-                            .map(|input| {
-                                (parsed_args, device_compile_groups.entry(input).or_default())
-                            })
-                    })
-                    .map(|(parsed_args, group)| {
-                        (
-                            NvccSubcommandKind::Compile,
-                            group,
-                            parsed_args,
-                            env_vars.clone(),
-                        )
-                    })
-            }
-            _ => {
-                Some(parse_args_simple(args.iter().map(Into::into), dir))
-                    // All generated host compiler commands include one of these defines.
-                    // If one of these isn't present, this command is either a new binary
-                    // in the CTK that we don't know about, or a line like `rm x_dlink.reg.c`
-                    // that nvcc generates in certain cases.
-                    .filter(|parsed_args| {
-                        parsed_args.common_args.iter().any(|arg| {
-                            arg.starts_with("-D__CUDA_ARCH__")
-                                || arg.starts_with("-D__CUDA_ARCH_LIST__")
-                                || arg.starts_with("-D__CUDACC__")
-                                || arg.starts_with("-D__CUDACC_VER")
-                                || arg.starts_with("-D__CUDACC_RDC__")
-                                || arg.starts_with("-D__NVCC__")
-                                || arg.starts_with("-lcudart")
-                                || arg.starts_with("-lcudadevrt")
+                                // Otherwise create a new device compile group
+                                .or_else(|| Some(parsed_args.input.clone()))
+                                .map(|input| {
+                                    (parsed_args, device_compile_groups.entry(input).or_default())
+                                })
                         })
-                    })
-                    .and_then(|parsed_args| {
-                        parsed_args
-                            .outputs
-                            .get("obj")
-                            .map(|o| o.path.clone())
-                            .map(|o| (parsed_args, o))
-                    })
-                    .map(|(parsed_args, output)| {
-                        // Each host preprocessor step represents the start of a new command group
-                        if parsed_args.common_args.contains(&preprocessor_flag) {
-                            // If the output file ends with...
-                            // * .cpp4.ii - cudafe++ input
-                            // * .cpp1.ii - cicc/ptxas input
-                            let group = if output
-                                .file_name()
-                                .expect("output is a named file")
-                                .ends_with(".cpp4.ii")
-                            {
-                                &mut cuda_front_end_group
-                            } else {
-                                device_compile_groups.entry(output).or_default()
-                            };
+                        .map(|(parsed_args, group)| {
                             (
-                                NvccSubcommandKind::Preprocess,
+                                NvccSubcommandKind::Compile,
                                 group,
                                 parsed_args,
                                 env_vars.clone(),
+                                vec![],
                             )
-                        } else if compile_flag == &NvccCompileFlag::Executable {
-                            // If building an executable, cache the host compiler objects.
-                            (
-                                NvccSubcommandKind::Compile,
-                                &mut final_assembly_group,
-                                parsed_args,
-                                env_vars.clone(),
-                            )
-                        } else {
-                            (
-                                NvccSubcommandKind::Compile,
-                                &mut final_assembly_group,
-                                parsed_args,
-                                // Don't cache this object because it will be cached using the outer nvcc object's hash_key
-                                env_vars
-                                    .iter()
-                                    .chain(&[("SCCACHE_NO_CACHE".into(), "1".into())])
-                                    .cloned()
-                                    .collect::<Vec<_>>(),
-                            )
-                        }
-                    })
+                        })
+                }
+                _ => {
+                    Some(parse_args_simple(args.iter().map(Into::into), dir))
+                        // All generated host compiler commands include one of these defines.
+                        // If one of these isn't present, this command is either a new binary
+                        // in the CTK that we don't know about, or a line like `rm x_dlink.reg.c`
+                        // that nvcc generates in certain cases.
+                        .filter(|parsed_args| {
+                            parsed_args.common_args.iter().any(|arg| {
+                                arg.starts_with("-D__CUDA_ARCH__")
+                                    || arg.starts_with("-D__CUDA_ARCH_LIST__")
+                                    || arg.starts_with("-D__CUDACC__")
+                                    || arg.starts_with("-D__CUDACC_VER")
+                                    || arg.starts_with("-D__CUDACC_RDC__")
+                                    || arg.starts_with("-D__NVCC__")
+                                    || arg.starts_with("-lcudart")
+                                    || arg.starts_with("-lcudadevrt")
+                            })
+                        })
+                        .and_then(|parsed_args| {
+                            parsed_args
+                                .outputs
+                                .get("obj")
+                                .map(|o| o.path.clone())
+                                .map(|o| (parsed_args, o))
+                        })
+                        .map(|(parsed_args, output)| {
+                            // Each host preprocessor step represents the start of a new command group
+                            if parsed_args.common_args.contains(&preprocessor_flag) {
+                                // If the output file ends with...
+                                // * .cpp4.ii - cudafe++ input
+                                // * .cpp1.ii - cicc/ptxas input
+                                let group = if output
+                                    .file_name()
+                                    .expect("output is a named file")
+                                    .ends_with(".cpp4.ii")
+                                {
+                                    &mut cuda_front_end_group
+                                } else {
+                                    device_compile_groups.entry(output).or_default()
+                                };
+                                (
+                                    NvccSubcommandKind::Preprocess,
+                                    group,
+                                    parsed_args,
+                                    env_vars.clone(),
+                                    vec![],
+                                )
+                            } else if compile_flag == &NvccCompileFlag::Executable {
+                                // If building an executable, cache the host compiler objects.
+                                (
+                                    NvccSubcommandKind::Compile,
+                                    &mut final_assembly_group,
+                                    parsed_args,
+                                    env_vars.clone(),
+                                    vec![],
+                                )
+                            } else {
+                                (
+                                    NvccSubcommandKind::Compile,
+                                    &mut final_assembly_group,
+                                    parsed_args,
+                                    // Don't cache this object because it will be cached using the outer nvcc object's hash_key
+                                    env_vars
+                                        .iter()
+                                        .chain(&[("SCCACHE_NO_CACHE".into(), "1".into())])
+                                        .cloned()
+                                        .collect::<Vec<_>>(),
+                                    vec![],
+                                )
+                            }
+                        })
+                }
             }
-        } {
+        {
             let cmd = NvccGeneratedSubcommand {
                 // Resolve compiler avoiding ccache wrappers to prevent double-caching.
                 exe: resolve_compiler_avoiding_wrapper(exe, &env_vars),
@@ -1661,6 +1734,7 @@ fn create_nvcc_commands_graph(
                 cwd: dir.to_owned(),
                 env_vars,
                 kind,
+                inputs_to_delete_after_completion,
                 output: parsed_args.outputs.get("obj").map(|o| dir.join(&o.path)),
             };
 
@@ -2501,6 +2575,9 @@ async fn run_nvcc_subcommands_group<T>(
     creator: &T,
     commands: Vec<NvccGeneratedSubcommand>,
     output_path: &Path,
+    obj_dir: &Path,
+    keep_dir: Option<&Path>,
+    nvcc_internal_files: &HashMap<String, String>,
 ) -> Result<ProcessOutput>
 where
     T: CommandCreatorSync,
@@ -2508,6 +2585,11 @@ where
     let mut output = ProcessOutput::default();
 
     for cmd in commands {
+        let inputs_to_delete_after_completion = nvcc_internal_files
+            .iter()
+            .filter(|(_, new)| cmd.inputs_to_delete_after_completion.contains(new))
+            .collect::<Vec<_>>();
+
         let out = match cmd.kind {
             NvccSubcommandKind::Other => run_nvcc_subcommand(creator, output_path, cmd)
                 .await
@@ -2564,6 +2646,52 @@ where
                 }
             }
         };
+
+        if !inputs_to_delete_after_completion.is_empty() {
+            // Move and/or delete nvcc's internal files.
+            //
+            // If the caller passed `-keep` or `-keep-dir`, copy the internal
+            // files to the requested location. We do this because we override
+            // `-keep` and `-keep-dir` in our `nvcc --dryrun` call.
+            //
+            // Renames the files back to the original names nvcc gave them.
+
+            // Move nvcc internal files to `--keep-dir`, but only if it isn't the same as `out_dir`
+            if let Some(dst_dir) = keep_dir {
+                // Ensure `--keep-dir` exists
+                tokio::fs::create_dir_all(dst_dir).await?;
+
+                // Rename files back to original nvcc names
+                for (old, new) in inputs_to_delete_after_completion {
+                    let src = obj_dir.join(new);
+                    let dst = dst_dir.join(old);
+                    if dst != src
+                        && src.exists()
+                        && let Err(err) = tokio::fs::rename(&src, &dst).await
+                    {
+                        match err.kind() {
+                            std::io::ErrorKind::CrossesDevices => {
+                                tokio::fs::copy(&src, &dst).await?;
+                                tokio::fs::remove_file(&src).await?;
+                            }
+                            _ => bail!(err),
+                        }
+                    }
+                }
+            } else {
+                // Otherwise remove the nvcc internal files from `out_dir`
+                for (old, new) in inputs_to_delete_after_completion {
+                    let old = obj_dir.join(old);
+                    if old.exists() {
+                        tokio::fs::remove_file(old).await?;
+                    }
+                    let new = obj_dir.join(new);
+                    if new.exists() {
+                        tokio::fs::remove_file(new).await?;
+                    }
+                }
+            }
+        }
 
         output = aggregate_output(output, out);
 
