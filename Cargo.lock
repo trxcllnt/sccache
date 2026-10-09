@@ -680,7 +680,7 @@ dependencies = [
 [[package]]
 name = "celery"
 version = "0.5.5"
-source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=fix%2Fretries#2d66016aa5aec2f8a5e9e7dc25f1021065ef2772"
+source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=fix%2Fretries#0cac2323c2f32beb0d903ff847a80fa90b0aa2a3"
 dependencies = [
  "async-rs",
  "async-trait",
@@ -703,7 +703,7 @@ dependencies = [
  "serde-pickle",
  "serde_json",
  "serde_yaml",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
  "uuid",
@@ -712,7 +712,7 @@ dependencies = [
 [[package]]
 name = "celery-codegen"
 version = "0.5.5"
-source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=fix%2Fretries#2d66016aa5aec2f8a5e9e7dc25f1021065ef2772"
+source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=fix%2Fretries#0cac2323c2f32beb0d903ff847a80fa90b0aa2a3"
 dependencies = [
  "proc-macro2",
  "quote",
