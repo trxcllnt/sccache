@@ -214,6 +214,7 @@ impl ServerBuilder {
             server_id,
             tasks,
             load_toolchain,
+            run_job: AsyncMulticast::new(RunJobFunc {}),
         });
 
         server.tasks.set_service(server.clone())?;
@@ -236,6 +237,7 @@ pub struct Server {
     server_id: String,
     tasks: Arc<dyn dist::tasks::ServerTasks>,
     load_toolchain: AsyncMulticast<Toolchain, PathBuf>,
+    run_job: AsyncMulticast<RunJobArgs, RunJobResponse>,
 }
 
 impl Server {
@@ -767,57 +769,17 @@ impl ServerService for Server {
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> Result<RunJobResponse> {
-        // Add job
-        self.jobs
-            .lock()
-            .await
-            .insert(job_id.to_owned(), Instant::now());
-
-        // Add or update scheduler
-        self.schedulers
-            .lock()
-            .await
-            .entry(reply_to.into())
-            .and_modify(|last_seen| {
-                *last_seen = Instant::now();
+        self.run_job
+            .call(RunJobArgs {
+                job_id: job_id.to_owned(),
+                reply_to: reply_to.to_owned(),
+                toolchain,
+                command,
+                outputs,
+                server: self.clone(),
             })
-            .or_insert_with(Instant::now);
-
-        let mut lifetime = self.lifetime.subscribe();
-
-        if *lifetime.borrow() {
-            let job = async {
-                match self.check_if_job_cancelled(job_id, reply_to).await? {
-                    RunJobStatus::Cancelled => {
-                        // Broadcast status after accepting the job
-                        self.broadcast_server_status(None).await;
-                        Ok(RunJobResponse::job_cancelled(&self.server_id))
-                    }
-                    RunJobStatus::Active { schedulers } => {
-                        // Broadcast status after accepting the job
-                        self.broadcast_server_status(Some(schedulers)).await;
-                        // Load and run the job
-                        self.load_job_and_run_build(job_id, toolchain, command, outputs)
-                            .await
-                            .map_err(anyhow::Error::new)
-                    }
-                }
-            };
-
-            if matches!(lifetime.has_changed(), Ok(false)) {
-                tokio::select! {
-                    biased;
-                    _ = lifetime.changed() => {
-                        Ok(RunJobResponse::server_terminated(&self.server_id))
-                    }
-                    res = job => res
-                }
-            } else {
-                Ok(RunJobResponse::server_terminated(&self.server_id))
-            }
-        } else {
-            Ok(RunJobResponse::server_terminated(&self.server_id))
-        }
+            .await
+            .map(|(_, res)| res)
     }
 
     async fn notify_run_job_err(&self, job_id: &str, err: RunJobError) -> Result<()> {
@@ -878,5 +840,98 @@ struct LoadToolchainFn {
 impl AsyncMulticastFunc<Toolchain, PathBuf> for LoadToolchainFn {
     async fn call(&self, tc: &Toolchain) -> Result<PathBuf> {
         self.toolchains.get_toolchain(tc).await
+    }
+}
+
+#[derive(Clone)]
+struct RunJobArgs {
+    job_id: String,
+    reply_to: String,
+    toolchain: Toolchain,
+    command: CompileCommand,
+    outputs: Vec<String>,
+    server: Server,
+}
+
+impl AsyncMulticastArgs for RunJobArgs {
+    type Key = String;
+    fn hash(&self) -> Self::Key {
+        self.job_id.clone()
+    }
+}
+
+struct RunJobFunc;
+
+#[async_trait]
+impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFunc {
+    async fn call(&self, args: &RunJobArgs) -> Result<RunJobResponse> {
+        let RunJobArgs {
+            job_id,
+            reply_to,
+            toolchain,
+            command,
+            outputs,
+            server,
+        } = args;
+
+        // Add job
+        server
+            .jobs
+            .lock()
+            .await
+            .insert(job_id.to_owned(), Instant::now());
+
+        // Add or update scheduler
+        server
+            .schedulers
+            .lock()
+            .await
+            .entry(reply_to.into())
+            .and_modify(|last_seen| {
+                *last_seen = Instant::now();
+            })
+            .or_insert_with(Instant::now);
+
+        let mut lifetime = server.lifetime.subscribe();
+
+        if *lifetime.borrow() {
+            let job = async {
+                match server.check_if_job_cancelled(job_id, reply_to).await? {
+                    RunJobStatus::Cancelled => {
+                        // Broadcast status after accepting the job
+                        server.broadcast_server_status(None).await;
+                        Err(RunJobError::job_cancelled().into())
+                    }
+                    RunJobStatus::Active { schedulers } => {
+                        // Broadcast status after accepting the job
+                        server.broadcast_server_status(Some(schedulers)).await;
+                        // Load and run the job
+                        server
+                            .load_job_and_run_build(
+                                job_id,
+                                toolchain.clone(),
+                                command.clone(),
+                                outputs.clone(),
+                            )
+                            .await
+                            .map_err(anyhow::Error::new)
+                    }
+                }
+            };
+
+            if matches!(lifetime.has_changed(), Ok(false)) {
+                tokio::select! {
+                    biased;
+                    _ = lifetime.changed() => {
+                        Err(RunJobError::server_terminated().into())
+                    }
+                    res = job => res
+                }
+            } else {
+                Err(RunJobError::server_terminated().into())
+            }
+        } else {
+            Err(RunJobError::server_terminated().into())
+        }
     }
 }
