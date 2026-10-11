@@ -1805,7 +1805,7 @@ where
 {
     Retry::spawn(
         FibonacciBackoff::from_millis(1000) // wait 1s before retrying
-            .max_delay_millis(10000) // set max interval to 10 seconds
+            .max_delay_millis(60000) // set max interval to 60 seconds
             .map(tokio_retry2::strategy::jitter) // add jitter to the retry interval
             .take(limit), // limit retries
         func,
