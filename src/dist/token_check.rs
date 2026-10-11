@@ -171,6 +171,10 @@ impl ProxyTokenCheck {
     }
 
     async fn check_token_with_forwarding(&self, token: &str) -> Result<ClientClaims> {
+        if token.is_empty() {
+            bail!("Token must not be empty");
+        }
+
         // If the token is cached and not cache has not expired, return it
         if let Some(token_ttl) = self.token_ttl {
             let mut cache = self.cache.lock().await;
@@ -311,6 +315,10 @@ impl ValidJWTCheck {
 
     async fn check_jwt_validity(&self, token: &str) -> Result<ClientClaims> {
         tracing::trace!("Validating JWT");
+
+        if token.is_empty() {
+            bail!("Token must not be empty");
+        }
 
         let header = jwt::decode_header(token).context("Could not decode jwt header")?;
 
