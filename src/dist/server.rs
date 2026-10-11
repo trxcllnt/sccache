@@ -670,7 +670,11 @@ impl Server {
             .map_err(|err| {
                 // Record run_build errors
                 self.metrics.inc_job_build_error_count();
-                tracing::warn!("[run_job({job_id})]: Build error: {err:?}");
+                if matches!(err, BuildError::Cancelled) {
+                    tracing::debug!("[run_job({job_id})]: Build error: {err:?}");
+                } else {
+                    tracing::warn!("[run_job({job_id})]: Build error: {err:?}");
+                }
                 err
             })
     }
@@ -679,7 +683,7 @@ impl Server {
         let server_terminated = if *self.lifetime.borrow() {
             // Store the job result for retrieval by a scheduler
             let _ = self.jobs_io.put_job_result(job_id, res).await;
-            matches!(res, RunJobResponse::RetryableError { message, .. } if message == "Server terminated")
+            matches!(res, RunJobResponse::RetryableError { message, .. } if message.contains("Server terminated"))
         } else {
             // If the build failed because the server was terminated,
             // report it as a server termination, not a failed build.
