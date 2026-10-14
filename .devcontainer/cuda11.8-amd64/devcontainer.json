@@ -2,7 +2,7 @@
   "dockerFile": "${localWorkspaceFolder}/.devcontainer/Dockerfile",
   "build": {
     "args": {
-      "BASE": "messense/rust-musl-cross:x86_64-musl",
+      "BASE": "ghcr.io/rust-cross/rust-musl-cross:x86_64-musl",
       "CARGO_BUILD_TARGET": "x86_64-unknown-linux-musl",
       "LOCAL_WORKSPACE_FOLDER": "${localWorkspaceFolder}",
       "RUST_VERSION": "1.88.0"
@@ -44,11 +44,6 @@
   "mounts": [
     "type=bind,src=/tmp,dst=/tmp"
   ],
-  "containerEnv": {
-    "CC": "gcc",
-    "CXX": "g++",
-    "CUDAHOSTCXX": "g++"
-  },
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2.5.6": {
       "userUid": "1001",
@@ -118,12 +113,36 @@
         "lldb.launch.preRunCommands": [
             "script lldb.debugger.HandleCommand('settings set target.source-map /rustc/{} \"{}/lib/rustlib/src/rust\"'.format(os.popen('rustc --version --verbose').read().split('commit-hash: ')[1].split('\\n')[0].strip(), os.popen('rustc --print sysroot').readline().strip()))"
         ],
+        "rust-analyzer.initializeStopped": true,
         "rust-analyzer.cachePriming.enable": false,
         "rust-analyzer.cargo.allTargets": true,
-        "rust-analyzer.cargo.features": "all",
-        "rust-analyzer.cargo.targetDir": ".vscode/.rust-analyzer",
-        "rust-analyzer.checkOnSave": true,
+        "rust-analyzer.cargo.target": "x86_64-unknown-linux-musl",
+        "rust-analyzer.cargo.features": [
+            "all",
+            "vendored-openssl",
+            "dist-client",
+            "dist-server",
+            "dist-tests"
+        ],
+        "rust-analyzer.cargo.extraEnv": {
+            "CC": "gcc",
+            "CXX": "g++"
+        },
         "rust-analyzer.check.command": "clippy",
+        "rust-analyzer.check.extraEnv": {
+            "CC": "gcc",
+            "CXX": "g++"
+        },
+        "rust-analyzer.server.extraEnv": {
+            "CC": "gcc",
+            "CXX": "g++"
+        },
+        "rust-analyzer.runnables.extraEnv": {
+            "CC": "gcc",
+            "CXX": "g++"
+        },
+        "rust-analyzer.cargo.targetDir": true,
+        "rust-analyzer.checkOnSave": true,
         "search.exclude": {
           "**/build/**": true,
           "**/target/**": true,

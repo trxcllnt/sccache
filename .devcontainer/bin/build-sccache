@@ -9,4 +9,7 @@ if test $# -eq 0; then
     set -- --profile dev
 fi
 
+CC="$(which gcc || which clang || which nvc)" \
+CXX="$(which g++ || which clang++ || which nvc++)" \
+CUDAHOSTCXX="$(which g++ || which clang++ || which nvc++)" \
 cargo build --bins -F all,vendored-openssl,dist-client,dist-server "$@"
