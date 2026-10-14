@@ -558,6 +558,7 @@ where
         Box::new((*self).clone())
     }
 
+    #[cfg(test)]
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send + Sync> {
         self
     }

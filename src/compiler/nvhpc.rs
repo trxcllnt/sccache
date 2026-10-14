@@ -158,75 +158,6 @@ impl CCompilerImpl for Nvhpc {
         parsed_args
     }
 
-    // async fn preprocess<T>(
-    //     &self,
-    //     PreprocessArgs {
-    //         creator,
-    //         executable,
-    //         parsed_args,
-    //         cwd,
-    //         env_vars,
-    //         rewrite_includes_only,
-    //         generate_dependencies,
-    //         include_line_numbers,
-    //         ..
-    //     }: PreprocessArgs<'_, T>,
-    // ) -> Result<PreprocessorOutput>
-    // where
-    //     T: CommandCreatorSync,
-    // {
-    //     // Chain the dependency generation and preprocessor commands to emulate a `proper` front end
-    //     let dependencies = if generate_dependencies || !parsed_args.dependency_args.is_empty() {
-    //         Some(
-    //             futures::future::ok(
-    //                 self.generate_dependencies(GenerateDependenciesArgs {
-    //                     creator,
-    //                     executable,
-    //                     parsed_args,
-    //                     cwd,
-    //                     env_vars,
-    //                 })
-    //                 .await?,
-    //             )
-    //             .boxed(),
-    //         )
-    //     } else {
-    //         None
-    //     };
-
-    //     let extra_preprocessor_flags = [
-    //         // nvc++ must be directed to output to stdout
-    //         vec!["-o".into(), "-".into()],
-    //         if include_line_numbers {
-    //             vec![]
-    //         } else {
-    //             vec!["-P".into()]
-    //         },
-    //     ]
-    //     .concat();
-
-    //     gcc::preprocess(
-    //         creator,
-    //         executable,
-    //         // nvc++ only preprocesses when there's no dependency flags
-    //         &ParsedArguments {
-    //             dependency_args: vec![],
-    //             ..parsed_args.clone()
-    //         },
-    //         cwd,
-    //         env_vars,
-    //         self.kind(),
-    //         rewrite_includes_only,
-    //         false, // generate_dependencies
-    //         &extra_preprocessor_flags,
-    //     )
-    //     .await
-    //     .map(|res| match res {
-    //         PreprocessorOutput::File(file, _) => PreprocessorOutput::File(file, dependencies),
-    //         PreprocessorOutput::Output(out, _) => PreprocessorOutput::Output(out, dependencies),
-    //     })
-    // }
-
     async fn generate_dependencies<T>(
         &self,
         GenerateDependenciesArgs {
@@ -241,8 +172,15 @@ impl CCompilerImpl for Nvhpc {
     where
         T: CommandCreatorSync,
     {
-        gcc::generate_dependencies(creator, executable, parsed_args, cwd, env_vars, self.kind())
-            .await
+        gcc::generate_dependencies(
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars.iter().cloned(),
+            self.kind(),
+        )
+        .await
     }
 
     fn generate_compile_commands(
@@ -266,11 +204,12 @@ impl CCompilerImpl for Nvhpc {
 counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     //todo: refactor show_includes into dependency_args
     take_arg!("--gcc-toolchain", OsString, CanBeSeparated(b'='), PassThrough),
-    take_arg!("--include-path", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
+    take_arg!("--include-path", PathBuf, CanBeSeparated, NvhpcIncludePath),
+    take_arg!("--include_directory", PathBuf, CanBeSeparated, NvhpcIncludePath),
     take_arg!("--linker-options", OsString, CanBeSeparated, PassThrough),
     flag!("--nvcchost", PassThroughFlag),
-    take_arg!("--preinclude", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
-    take_arg!("--system-include-path", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
+    take_arg!("--preinclude", PathBuf, CanBeSeparated, NvhpcIncludeFile),
+    take_arg!("--system-include-path", PathBuf, CanBeSeparated, NvhpcSystemIncludePath),
 
     take_arg!("-Mconcur", OsString, CanBeSeparated(b'='), PassThrough),
     flag!("-Mnostdlib", PreprocessorArgumentFlag),
@@ -372,12 +311,14 @@ mod test {
         let a = parses!(
             "-c",
             "-fabc",
+            "--preinclude",
+            "preinclude-file",
             "-I",
-            "include-file",
+            "include-path1",
             "-o",
             "foo.o",
             "--include-path",
-            "include-file",
+            "include-path2",
             "-isystem",
             "/system/include/file",
             "-gpu=ccnative",
@@ -399,9 +340,11 @@ mod test {
         );
         assert_eq!(
             ovec![
-                "-Iinclude-file",
-                "--include-path",
-                "include-file",
+                "-include",
+                "preinclude-file",
+                "-Iinclude-path1",
+                "-I",
+                "include-path2",
                 "-isystem",
                 "/system/include/file",
                 "-Werror=an_error",

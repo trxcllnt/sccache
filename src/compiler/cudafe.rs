@@ -52,17 +52,6 @@ impl CCompilerImpl for CudaFE {
     ) -> CompilerArguments<ParsedArguments> {
         cicc::parse_arguments(arguments, cwd, Language::CudaFE, &ARGS[..])
     }
-    // async fn preprocess<T>(
-    //     &self,
-    //     PreprocessArgs {
-    //         parsed_args, cwd, ..
-    //     }: PreprocessArgs<'_, T>,
-    // ) -> Result<PreprocessorOutput>
-    // where
-    //     T: CommandCreatorSync,
-    // {
-    //     cicc::preprocess(cwd, parsed_args).await
-    // }
     async fn generate_dependencies<T>(
         &self,
         GenerateDependenciesArgs { .. }: GenerateDependenciesArgs<'_, T>,

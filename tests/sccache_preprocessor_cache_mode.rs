@@ -107,6 +107,21 @@ use std::{ffi::OsString, path::Path};
 //     Ok(buf)
 // }
 
+fn assert_stats_eq(
+    expected_stats: &sccache::server::ServerStats,
+    actual_stats: &sccache::server::ServerStats,
+) {
+    if actual_stats != expected_stats {
+        panic!(
+            "assertion `left == right` failed.\n  expected: {}\n    actual: {}",
+            serde_json::to_string(&serde_patch::diff(actual_stats, expected_stats).unwrap())
+                .unwrap(),
+            serde_json::to_string(&serde_patch::diff(expected_stats, actual_stats).unwrap())
+                .unwrap()
+        )
+    }
+}
+
 fn test_dependency_changes(
     client: &SccacheClient,
     compiler: &Compiler,
@@ -177,7 +192,7 @@ fn test_dependency_changes(
             // Zero-out duration stats
             let actual_stats = client.stats().unwrap() + AdditionalStats::default();
             expected_stats += additional_stats;
-            assert_eq!(expected_stats, actual_stats);
+            assert_stats_eq(&expected_stats, &actual_stats);
             // Assert the number of results in the preprocessor cache entry
             // matches the number of expected preprocessor cache misses
             // assert_eq!(
@@ -208,7 +223,7 @@ int main(int argc, char** argv) {{
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -220,6 +235,7 @@ int main(int argc, char** argv) {{
 
         // Compile again to ensure preprocessor cache hit
         compile_and_verify(AdditionalStats {
+            hashed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -246,7 +262,7 @@ int a() {{ return b(); }}
 
         // Should be two object hashes now
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -259,6 +275,7 @@ int a() {{ return b(); }}
         // Compile again to ensure preprocessor cache hit
         // Should still be two object hashes
         compile_and_verify(AdditionalStats {
+            hashed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -273,7 +290,7 @@ int a() {{ return b(); }}
 
         // Should be three object hashes now
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -286,6 +303,7 @@ int a() {{ return b(); }}
         // Compile again to ensure preprocessor cache hit
         // Should still be three object hashes
         compile_and_verify(AdditionalStats {
+            hashed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -301,6 +319,7 @@ int a() {{ return b(); }}
 
         // Should still be three object hashes
         compile_and_verify(AdditionalStats {
+            hashed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -316,6 +335,7 @@ int a() {{ return b(); }}
 
         // Should still be three object hashes
         compile_and_verify(AdditionalStats {
+            hashed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -387,7 +407,7 @@ fn test_time_macros(
             // Zero-out duration stats
             let actual_stats = client.stats().unwrap() + AdditionalStats::default();
             expected_stats += additional_stats;
-            assert_eq!(expected_stats, actual_stats);
+            assert_stats_eq(&expected_stats, &actual_stats);
             Ok(())
         };
 
@@ -408,7 +428,7 @@ int main(int argc, char** argv) {{
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             // compilations: Some(1),
             // cache_writes: Some(1),
             compile_requests: Some(1),
@@ -428,7 +448,7 @@ int main(int argc, char** argv) {{
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             // compilations: Some(1),
             // cache_writes: Some(1),
             compile_requests: Some(1),
@@ -476,7 +496,7 @@ void a() { printf("time: %s", __TIME__); }
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             // compilations: Some(1),
             // cache_writes: Some(1),
             compile_requests: Some(1),
@@ -495,7 +515,7 @@ void a() { printf("time: %s", __TIME__); }
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             // compilations: Some(1),
             // cache_writes: Some(1),
             compile_requests: Some(1),
@@ -538,7 +558,7 @@ void b() { printf("time: %s", __TIME__); }
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             // compilations: Some(1),
             // cache_writes: Some(1),
             compile_requests: Some(1),
@@ -559,7 +579,7 @@ void b() { printf("time: %s", __TIME__); }
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             // compilations: Some(1),
             // cache_writes: Some(1),
             compile_requests: Some(1),
@@ -584,7 +604,7 @@ void b() { printf("time: %s", __TIME__); }
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -605,6 +625,7 @@ void b() { printf("time: %s", __TIME__); }
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         compile_and_verify(AdditionalStats {
+            hashed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -695,7 +716,7 @@ fn test_date_macros(
             // Zero-out duration stats
             let actual_stats = client.stats().unwrap() + AdditionalStats::default();
             expected_stats += additional_stats;
-            assert_eq!(expected_stats, actual_stats);
+            assert_stats_eq(&expected_stats, &actual_stats);
             Ok(())
         };
 
@@ -732,7 +753,7 @@ int main(int argc, char** argv) {{
             ]
             .concat(),
             AdditionalStats {
-                // preprocessed: Some(1),
+                hashed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
@@ -755,6 +776,7 @@ int main(int argc, char** argv) {{
             ]
             .concat(),
             AdditionalStats {
+                hashed: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
@@ -775,7 +797,7 @@ int main(int argc, char** argv) {{
             ]
             .concat(),
             AdditionalStats {
-                // preprocessed: Some(1),
+                hashed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
@@ -798,6 +820,7 @@ int main(int argc, char** argv) {{
             ]
             .concat(),
             AdditionalStats {
+                hashed: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
@@ -845,7 +868,7 @@ void a() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
-                // preprocessed: Some(1),
+                hashed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
@@ -868,6 +891,7 @@ void a() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
+                hashed: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
@@ -888,7 +912,7 @@ void a() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
-                // preprocessed: Some(1),
+                hashed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
@@ -911,6 +935,7 @@ void a() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
+                hashed: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
@@ -955,7 +980,7 @@ void b() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
-                // preprocessed: Some(1),
+                hashed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
@@ -978,6 +1003,7 @@ void b() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
+                hashed: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
@@ -998,7 +1024,7 @@ void b() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
-                // preprocessed: Some(1),
+                hashed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
@@ -1021,6 +1047,7 @@ void b() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
+                hashed: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
@@ -1054,6 +1081,7 @@ void b() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
+                hashed: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
@@ -1093,7 +1121,7 @@ void b() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
-                // preprocessed: Some(1),
+                hashed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
@@ -1116,6 +1144,7 @@ void b() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
+                hashed: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
@@ -1136,6 +1165,7 @@ void b() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
+                hashed: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
@@ -1212,7 +1242,7 @@ fn test_timestamp_macros(
         // Zero-out duration stats
         let actual_stats = client.stats().unwrap() + AdditionalStats::default();
         expected_stats += additional_stats;
-        assert_eq!(expected_stats, actual_stats);
+        assert_stats_eq(&expected_stats, &actual_stats);
         Ok(())
     };
 
@@ -1236,7 +1266,7 @@ int main(int argc, char** argv) {{
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -1252,6 +1282,7 @@ int main(int argc, char** argv) {{
 
         // Compile again to ensure preprocessor cache hit
         compile_and_verify(AdditionalStats {
+            hashed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -1280,7 +1311,7 @@ int main(int argc, char** argv) {{
         );
 
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -1296,6 +1327,7 @@ int main(int argc, char** argv) {{
 
         // Compile again to ensure preprocessor cache hit
         compile_and_verify(AdditionalStats {
+            hashed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -1338,7 +1370,7 @@ void a() { printf("timestamp: %s", __TIMESTAMP__); }
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -1353,6 +1385,7 @@ void a() { printf("timestamp: %s", __TIMESTAMP__); }
         // assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 1]);
 
         compile_and_verify(AdditionalStats {
+            hashed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -1379,7 +1412,7 @@ void a() { printf("timestamp: %s", __TIMESTAMP__); }
         );
 
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -1396,6 +1429,7 @@ void a() { printf("timestamp: %s", __TIMESTAMP__); }
 
         // Compile again to ensure preprocessor cache hit
         compile_and_verify(AdditionalStats {
+            hashed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -1436,7 +1470,7 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -1452,6 +1486,7 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
         // assert_num_preprocessor_cache_entries_and_results(&entries_a, 3, &[1, 1, 3]);
 
         compile_and_verify(AdditionalStats {
+            hashed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -1480,7 +1515,7 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
         );
 
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -1497,6 +1532,7 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
 
         // Compile again to ensure preprocessor cache hit
         compile_and_verify(AdditionalStats {
+            hashed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -1518,6 +1554,7 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
         if mtime_reset.is_ok() {
             // Compile again to ensure preprocessor cache hit
             compile_and_verify(AdditionalStats {
+                hashed: Some(1),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
@@ -1553,7 +1590,7 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
 
         // Compile and populate preprocessor and object disk caches
         compile_and_verify(AdditionalStats {
-            // preprocessed: Some(1),
+            hashed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -1570,6 +1607,7 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
 
         // Compile again to ensure preprocessor cache hit
         compile_and_verify(AdditionalStats {
+            hashed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),

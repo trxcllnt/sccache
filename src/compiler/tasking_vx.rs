@@ -21,8 +21,8 @@ use crate::{
             NormalizedDisposition, PathTransformerFn, SearchableArgInfo,
         },
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath,
-            GenerateCompileCommandsArgs, GenerateDependenciesArgs, ParseArgs, ParsedArguments,
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs,
+            GenerateDependenciesArgs, ParseArgs, ParsedArguments,
         },
         gcc,
     },
@@ -61,54 +61,6 @@ impl CCompilerImpl for TaskingVX {
     ) -> CompilerArguments<ParsedArguments> {
         parse_arguments(arguments, cwd, &ARGS[..])
     }
-
-    // async fn preprocess<T>(
-    //     &self,
-    //     PreprocessArgs {
-    //         creator,
-    //         executable,
-    //         parsed_args,
-    //         cwd,
-    //         env_vars,
-    //         generate_dependencies,
-    //         ..
-    //     }: PreprocessArgs<'_, T>,
-    // ) -> Result<PreprocessorOutput>
-    // where
-    //     T: CommandCreatorSync,
-    // {
-    //     // Tasking can produce a dep file while preprocessing, BUT if this is
-    //     // enabled the preprocessor output is discarded. Run depfile generation
-    //     // first and preprocessing for hash generation afterwards.
-    //     //
-    //     // From: TASKING  VX-toolset for TriCore User Guide
-    //     // With --preprocess=+make the compiler
-    //     // will generate dependency lines that can be used in a Makefile. The
-    //     // preprocessor output is discarded. The default target name is the basename
-    //     // of the input file, with the extension .o. With the option --make-target
-    //     // you can specify a target name which overrules the default target name.
-    //     let dependencies = if generate_dependencies || parsed_args.depfile.is_some() {
-    //         Some(
-    //             futures::future::ok(
-    //                 self.generate_dependencies(GenerateDependenciesArgs {
-    //                     creator,
-    //                     executable,
-    //                     parsed_args,
-    //                     cwd,
-    //                     env_vars,
-    //                 })
-    //                 .await?,
-    //             )
-    //             .boxed(),
-    //         )
-    //     } else {
-    //         None
-    //     };
-
-    //     preprocess(creator, executable, parsed_args, cwd, env_vars)
-    //         .await
-    //         .map(|output| PreprocessorOutput::Output(output.into(), dependencies))
-    // }
 
     async fn generate_dependencies<T>(
         &self,
@@ -330,30 +282,6 @@ where
     })
 }
 
-// async fn preprocess<T>(
-//     creator: &T,
-//     executable: &Path,
-//     parsed_args: &ParsedArguments,
-//     cwd: &Path,
-//     env_vars: &[(OsString, OsString)],
-// ) -> Result<ProcessOutput>
-// where
-//     T: CommandCreatorSync,
-// {
-//     let mut cmd = creator.clone().new_command_sync(executable);
-//     cmd.arg("-E")
-//         .arg(&parsed_args.input)
-//         .args(&parsed_args.preprocessor_args)
-//         .args(&parsed_args.common_args)
-//         .env_clear()
-//         .envs(env_vars.to_vec())
-//         .current_dir(cwd);
-
-//     trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
-
-//     run_input_output(cmd, None).await
-// }
-
 async fn generate_dependencies<T>(
     creator: &T,
     executable: &Path,
@@ -364,11 +292,15 @@ async fn generate_dependencies<T>(
 where
     T: CommandCreatorSync,
 {
-    let depfile = parsed_args
-        .depfile
-        .as_deref()
-        .map(|depfile| DepfilePath::Path(cwd.join(depfile)));
-
+    // Tasking can produce a dep file while preprocessing, but if this is
+    // enabled the preprocessor output is discarded.
+    //
+    // From: TASKING  VX-toolset for TriCore User Guide
+    // With --preprocess=+make the compiler
+    // will generate dependency lines that can be used in a Makefile. The
+    // preprocessor output is discarded. The default target name is the basename
+    // of the input file, with the extension .o. With the option --make-target
+    // you can specify a target name which overrules the default target name.
     let mut cmd = creator.clone().new_command_sync(executable);
     cmd.current_dir(cwd)
         .env_clear()
@@ -378,7 +310,7 @@ where
         .arg("-Em")
         .arg(&parsed_args.input);
 
-    if let Some(depfile) = depfile.as_deref() {
+    if let Some(depfile) = parsed_args.depfile.as_deref() {
         cmd.arg("-o").arg(depfile);
     }
 
@@ -388,8 +320,8 @@ where
 
     gcc::parse_dependencies(
         &parsed_args.input,
-        &if let Some(depfile) = depfile.as_deref() {
-            gcc::read_depfile(depfile).await?
+        &if let Some(depfile) = parsed_args.depfile.as_deref() {
+            gcc::read_depfile(cwd.join(depfile)).await?
         } else {
             bytes_to_str(output.stdout)?
         },

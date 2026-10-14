@@ -22,21 +22,22 @@ use crate::{
             NormalizedDisposition, PathTransformerFn, SearchableArgInfo,
         },
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath,
-            GenerateCompileCommandsArgs, GenerateDependenciesArgs, ParseArgs, ParsedArguments,
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs,
+            GenerateDependenciesArgs, ParseArgs, ParsedArguments,
         },
         gcc,
     },
     counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
-    util::{OsStrExt, run_input_output, temppath},
+    util::{OsStrExt, bytes_to_str, run_input_output},
 };
 use async_trait::async_trait;
 use fs_err as fs;
+use itertools::Itertools;
 use std::{
     collections::HashMap,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     io::Read,
     path::{Path, PathBuf},
 };
@@ -66,32 +67,6 @@ impl CCompilerImpl for Diab {
     ) -> CompilerArguments<ParsedArguments> {
         parse_arguments(arguments, cwd, &ARGS[..])
     }
-
-    // async fn preprocess<T>(
-    //     &self,
-    //     PreprocessArgs {
-    //         creator,
-    //         executable,
-    //         parsed_args,
-    //         cwd,
-    //         env_vars,
-    //         generate_dependencies,
-    //         ..
-    //     }: PreprocessArgs<'_, T>,
-    // ) -> Result<PreprocessorOutput>
-    // where
-    //     T: CommandCreatorSync,
-    // {
-    //     preprocess(
-    //         creator,
-    //         executable,
-    //         parsed_args,
-    //         cwd,
-    //         env_vars,
-    //         generate_dependencies,
-    //     )
-    //     .await
-    // }
 
     async fn generate_dependencies<T>(
         &self,
@@ -158,6 +133,8 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     flag!("-V", TooHardFlag),
     flag!("-VV", TooHardFlag),
     take_arg!("-W", OsString, Separated, PassThrough),
+    flag!("-X156", DepArgumentFlag),
+    take_arg!("-X156=", OsString, Concatenated, DepArgument),
     flag!("-Xmake-dependency", DepArgumentFlag),
     flag!(
         "-Xmake-dependency-canonicalize-path-off",
@@ -175,6 +152,7 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
         Concatenated(b'='),
         DepArgument
     ),
+    take_arg!("-Xmake-dependency=", OsString, Concatenated, DepArgument),
     flag!("-c", DoCompilation),
     take_arg!(
         "-include",
@@ -348,98 +326,6 @@ where
     })
 }
 
-fn preprocess_cmd<T>(
-    mut cmd: T,
-    parsed_args: &ParsedArguments,
-    cwd: &Path,
-    env_vars: &[(OsString, OsString)],
-) -> T
-where
-    T: RunCommand,
-{
-    cmd.current_dir(cwd)
-        .env_clear()
-        .arg("-E")
-        .arg(&parsed_args.input)
-        .envs(env_vars.to_vec())
-        .args(&parsed_args.dependency_args)
-        .args(&parsed_args.preprocessor_args)
-        .args(&parsed_args.common_args);
-    cmd
-}
-
-// pub async fn preprocess<T>(
-//     creator: &T,
-//     executable: &Path,
-//     parsed_args: &ParsedArguments,
-//     cwd: &Path,
-//     env_vars: &[(OsString, OsString)],
-//     generate_dependencies: bool,
-// ) -> Result<PreprocessorOutput>
-// where
-//     T: CommandCreatorSync,
-// {
-//     let cmd = preprocess_cmd(
-//         creator.clone().new_command_sync(executable),
-//         parsed_args,
-//         cwd,
-//         env_vars,
-//     );
-
-//     let (cmd, depfile) = if generate_dependencies {
-//         generate_dependencies_with_preprocess_cmd(parsed_args, cwd, cmd)
-//             .map(|(cmd, depfile)| (cmd, Some(depfile)))?
-//     } else {
-//         (cmd, None)
-//     };
-
-//     trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
-
-//     let output = run_input_output(cmd, None).await?;
-
-//     let dependencies = depfile.map(|depfile| {
-//         let cwd = cwd.to_owned();
-//         let input = parsed_args.input.clone();
-//         async move { gcc::parse_dependencies(cwd, input, &gcc::read_depfile(&depfile).await?) }
-//             .boxed()
-//     });
-
-//     Ok(PreprocessorOutput::Output(output.into(), dependencies))
-// }
-
-// fn generate_dependencies_with_preprocess_cmd<C>(
-//     parsed_args: &ParsedArguments,
-//     cwd: &Path,
-//     mut preprocess_command: C,
-// ) -> Result<(C, DepfilePath)>
-// where
-//     C: RunCommand,
-// {
-//     let generate_deps = parsed_args
-//         .dependency_args
-//         .iter()
-//         .any(|arg| arg == "-Xmake-dependency");
-
-//     // Add missing `-Xmake-dependency`
-//     if !generate_deps {
-//         preprocess_command.arg("-Xmake-dependency");
-//     }
-
-//     let depfile = if let Some(depfile) = parsed_args.depfile.as_deref() {
-//         // If `-Xmake-dependency-savefile <file>`
-//         // write dependencies to the depfile
-//         DepfilePath::Path(cwd.join(depfile))
-//     } else {
-//         // then write all dependencies to a tempfile
-//         let temp = temppath()?;
-//         preprocess_command.arg("-Xmake-dependency-savefile");
-//         preprocess_command.arg(&temp);
-//         DepfilePath::Temp(temp)
-//     };
-
-//     Ok((preprocess_command, depfile))
-// }
-
 async fn generate_dependencies<T>(
     creator: &T,
     executable: &Path,
@@ -450,32 +336,130 @@ async fn generate_dependencies<T>(
 where
     T: CommandCreatorSync,
 {
-    let depfile = if let Some(depfile) = parsed_args.depfile.as_deref() {
-        DepfilePath::Path(cwd.join(depfile))
-    } else {
-        DepfilePath::Temp(temppath()?)
-    };
+    let generate_user_dependencies = parsed_args.dependency_args.iter().any(|arg| {
+        if (arg.contains("-X156=") || arg.contains("-Xmake-dependency="))
+            && let Some((_, mask)) = arg.split_once("=")
+        {
+            // http://bitsavers.informatik.uni-stuttgart.de/pdf/windRiver/Compiler_5.4_2007/wr_compiler_users_guide_mips_5.4.pdf
+            // -Xmake-dependency=2
+            //     Same as -Xmake-dependency=1, but show only files enclosed in double
+            //     quotation marks (#include "filename").
+            // -Xmake-dependency=6
+            //     Show only files enclosed in double quotation marks (-Xmake-dependency=2);
+            //     write output to a file, then continue with normal compilation
+            //     (-Xmake-dependency=4).
+            // -Xmake-dependency=a
+            //     Show only files in double quotation marks (-Xmake-dependency=2) and
+            //     output phony targets (-Xmake-dependency=8).
+            // -Xmake-dependency=e
+            //     Show only files enclosed in double quotation marks (-Xmake-dependency=2);
+            //     output phony targets (-Xmake-dependency=8); write output to a file, then
+            //     continue with normal compilation (-Xmake-dependency=4).
+            matches!(mask.to_str(), Some("2" | "6" | "a" | "e"))
+        } else {
+            false
+        }
+    });
 
-    let cmd = preprocess_cmd(
-        creator.clone().new_command_sync(executable),
-        &ParsedArguments {
-            // Replace existing dependency options with flags to generate and write all dependencies to `depfile`
-            dependency_args: vec![
-                "-Xmake-dependency".into(),
-                "-Xmake-dependency-savefile".into(),
-                depfile.as_path().into(),
-            ],
-            ..parsed_args.clone()
-        },
-        cwd,
-        env_vars,
-    );
+    let args_without_dependency_flags = std::iter::empty()
+        .chain(parsed_args.preprocessor_args.iter())
+        .chain(parsed_args.common_args.iter())
+        .map(|arg| arg.as_os_str())
+        .filter(|&arg| arg != parsed_args.compilation_flag)
+        .collect::<Vec<_>>();
+
+    if generate_user_dependencies && parsed_args.depfile.is_some() {
+        let args = args_without_dependency_flags
+            .clone()
+            .into_iter()
+            .chain(
+                parsed_args
+                    .dependency_args
+                    .iter()
+                    .map(|arg| {
+                        if arg.contains("-X156=") || arg.contains("-Xmake-dependency=") {
+                            OsStr::new("-Xmake-dependency=2")
+                        } else {
+                            arg.as_os_str()
+                        }
+                    })
+                    .unique(),
+            )
+            .chain(std::iter::once(parsed_args.input.as_os_str()));
+
+        let mut cmd = creator.clone().new_command_sync(executable);
+        cmd.current_dir(cwd).env_clear().envs(env_vars.to_vec());
+
+        for arg in args {
+            cmd.arg(arg);
+        }
+
+        trace!(
+            "[{}]: user dependencies: {cmd}",
+            parsed_args.output_pretty(),
+        );
+
+        run_input_output(cmd, None).await?;
+    }
+
+    let depfile = parsed_args
+        .depfile
+        .as_deref()
+        .filter(|_| !generate_user_dependencies);
+
+    let cmd = {
+        let args = args_without_dependency_flags
+            .into_iter()
+            .chain(
+                std::iter::once(OsStr::new("-Xmake-dependency"))
+                    .chain(depfile.iter().flat_map(|depfile| {
+                        [
+                            OsStr::new("-Xmake-dependency-savefile"),
+                            depfile.as_os_str(),
+                        ]
+                    }))
+                    .chain(
+                        parsed_args
+                            .dependency_args
+                            .iter()
+                            // If this is generating the real dependency file,
+                            // pass all the user's other dependency flags.
+                            .filter(|_| depfile.is_some())
+                            .map(|arg| {
+                                // Map all depflags to `-Xmake-dependency`
+                                if arg.contains("-X156=") || arg.contains("-Xmake-dependency=") {
+                                    OsStr::new("-Xmake-dependency")
+                                } else {
+                                    arg.as_os_str()
+                                }
+                            }),
+                    )
+                    .unique(),
+            )
+            .chain(std::iter::once(parsed_args.input.as_os_str()));
+
+        let mut cmd = creator.clone().new_command_sync(executable);
+        cmd.current_dir(cwd).env_clear().envs(env_vars.to_vec());
+
+        for arg in args {
+            cmd.arg(arg);
+        }
+
+        cmd
+    };
 
     trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
-    run_input_output(cmd, None).await?;
+    let output = run_input_output(cmd, None).await?;
 
-    gcc::parse_dependencies(&parsed_args.input, &gcc::read_depfile(&depfile).await?)
+    gcc::parse_dependencies(
+        &parsed_args.input,
+        &if let Some(depfile) = depfile {
+            gcc::read_depfile(cwd.join(depfile)).await?
+        } else {
+            bytes_to_str(output.stdout)?
+        },
+    )
 }
 
 pub fn generate_compile_commands(

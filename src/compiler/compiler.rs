@@ -597,6 +597,7 @@ where
         basedirs: &[Vec<u8>],
     ) -> CompilerArguments<Box<dyn CompilerHasher<T> + 'static>>;
     fn box_clone(&self) -> Box<dyn Compiler<T>>;
+    #[cfg(test)]
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send + Sync>;
 }
 
@@ -690,7 +691,7 @@ where
             }
         );
 
-        let start = Instant::now();
+        let hash_time = Instant::now();
 
         let dist_client = dist_client.filter(|_| {
             // Clients might want to set this when configuring
@@ -705,9 +706,11 @@ where
             .generate_hash_key(&creator, cwd.clone(), env_vars, &runtime, cache_control)
             .await;
 
-        trace!(
+        let hash_time = hash_time.elapsed();
+
+        debug!(
             "[{out_pretty}]: generate_hash_key took {}",
-            fmt_duration_as_secs(&start.elapsed())
+            fmt_duration_as_secs(&hash_time)
         );
 
         // Decrement pending_compilations as soon as we're done preprocessing
@@ -719,12 +722,19 @@ where
                 return match err.downcast::<ProcessError>() {
                     Ok(ProcessError(output)) => {
                         debug!("[{out_pretty}]: process error: {output:?}");
-                        Ok((CompileResult::Error(start.elapsed()), output))
+                        Ok((CompileResult::Error(hash_time), output))
                     }
                     Err(e) => Err(e),
                 };
             }
         };
+
+        if cache_control != CacheControl::ForceNoCache {
+            // Track how long generate_hash_key took
+            let mut stats = service.stats.lock().await;
+            stats.hashed += 1;
+            stats.hasher_duration += hash_time;
+        }
 
         // Instance to perform the cache lookup and prepare to compile
         let lookup_or_compile = CacheLookupOrCompile::new(
@@ -870,7 +880,6 @@ struct CacheLookupOrCompile<'a, T: CommandCreatorSync> {
     hash_key: String,
     out_pretty: String,
     outputs: Vec<FileObjectSource>,
-    filtered_outputs: Vec<FileObjectSource>,
     runtime: tokio::runtime::Handle,
     sccache_service: &'a server::SccacheService<T>,
     weak_toolchain_key: String,
@@ -907,7 +916,7 @@ where
             })
             .collect::<Vec<_>>();
 
-        let filtered_outputs = if compilation.is_locally_preprocessed() {
+        let outputs = if compilation.is_locally_preprocessed() {
             // In this mode, cache entries are exclusively distinguished by their preprocessed
             // source contents. But two files may differ in their names and / or the names of
             // included files while still producing the same preprocessed output, so they get the
@@ -936,7 +945,6 @@ where
             hash_key,
             out_pretty,
             outputs,
-            filtered_outputs,
             runtime,
             sccache_service,
             weak_toolchain_key,
@@ -1079,7 +1087,7 @@ impl<'a> CacheLookup<'a> {
         Self {
             hash_key: details.hash_key.clone(),
             out_pretty: details.out_pretty.clone(),
-            outputs: details.filtered_outputs.clone(),
+            outputs: details.outputs.clone(),
             runtime: details.runtime.clone(),
             start,
             storage,
@@ -2744,26 +2752,22 @@ compiler_version=__VERSION__
 
                 let assembler_digest = detect_assembler(&creator, &executable, &[], cwd, env).await;
 
-                // Include gcc's implicit specfiles in the object hash
-                let specfiles =
-                    Gcc::read_implicit_specfiles(&mut creator, &executable, arguments, env, "-v")
-                        .await?;
-
-                let native_archs = Gcc::read_native_arch(&mut creator, &executable, env).await;
-
-                return CCompiler::new(
-                    Gcc {
-                        gplusplus: kind == "g++",
-                        version,
-                        native_archs,
-                        assembler_digest,
-                        specfiles: specfiles.clone(),
-                    },
-                    executable,
-                    specfiles,
+                let gcc = Gcc::new_from_compiler(
+                    &mut creator,
+                    &executable,
+                    arguments.iter().cloned(),
+                    env.iter().cloned(),
+                    kind == "g++", // gplusplus
+                    version,
+                    assembler_digest,
                 )
-                .await
-                .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
+                .await?;
+
+                let specfiles = gcc.specfiles.clone();
+
+                return CCompiler::new(gcc, executable, specfiles)
+                    .await
+                    .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "msvc" | "msvc-clang" => {
                 let is_clang = kind == "msvc-clang";
@@ -2780,7 +2784,7 @@ compiler_version=__VERSION__
 
                 return CCompiler::new(
                     Msvc {
-                        includes_prefix,
+                        _includes_prefix: includes_prefix,
                         is_clang,
                         version,
                     },
@@ -2811,79 +2815,20 @@ compiler_version=__VERSION__
                     host_compiler_version.as_ref().unwrap()
                 );
 
-                // Include gcc's implicit specfiles in the object hash
-                let mut extra_hash_files = Nvcc::read_implicit_specfiles(
+                let nvcc = Nvcc::new_from_compiler(
                     &mut creator,
                     &executable,
-                    arguments,
-                    env,
-                    &host_compiler,
-                    "-Xcompiler=-v",
+                    arguments.iter().cloned(),
+                    env.iter().cloned(),
+                    version,
+                    host_compiler,
+                    host_compiler_version,
                 )
                 .await?;
 
-                // Include cudafe++, cicc, ptxas, tileiras, and fatbinary
-                // in the hash in case the nvcc binary doesn't change but
-                // one of its subcomponents does.
-                let nvcc_tools =
-                    // >= CUDA 13.3: Try with `--enable-tile` so we find tileiras
-                    Nvcc::find_internal_tools(
-                        &mut creator,
-                        &executable,
-                        &["--enable-tile".into()],
-                        env,
-                        &host_compiler,
-                    )
-                    .await;
-
-                let nvcc_tools = if let Ok(nvcc_tools) = nvcc_tools {
-                    nvcc_tools
-                } else {
-                    // <= CUDA 13.2: Fallback without `--enable-tile`
-                    Nvcc::find_internal_tools(&mut creator, &executable, &[], env, &host_compiler)
-                        .await
-                        .unwrap_or_default()
-                };
-
-                extra_hash_files.extend(
-                    nvcc_tools
-                        .iter()
-                        // Resolve compiler avoiding ccache wrappers to prevent double-caching.
-                        .map(|path| resolve_compiler_avoiding_wrapper(path, env)),
-                );
-
-                let archs_all =
-                    Nvcc::read_all_archs(&mut creator, &executable, env, &host_compiler)
-                        .await
-                        .unwrap_or_default();
-                let archs_major =
-                    Nvcc::read_major_archs(&mut creator, &executable, env, &host_compiler)
-                        .await
-                        .unwrap_or_default();
-                let archs_native =
-                    Nvcc::read_native_archs(&mut creator, &executable, env, &host_compiler)
-                        .await
-                        .unwrap_or_default();
-
-                return CCompiler::new(
-                    Nvcc {
-                        archs_all,
-                        archs_major,
-                        archs_native,
-                        host_compiler,
-                        version,
-                        host_compiler_version,
-                    },
-                    executable,
-                    vec![],
-                )
-                .and_then(|nvcc| async move {
-                    crate::util::hash_all(&extra_hash_files)
-                        .await
-                        .map(|extra_hashes| nvcc.with_extra_hashes(extra_hashes))
-                })
-                .await
-                .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
+                let nvcc = CCompiler::new(nvcc, executable, vec![]).await?;
+                let hashes = crate::util::hash_all(&nvcc.compiler().nvcc_tools).await?;
+                return Ok(Box::new(nvcc.with_extra_hashes(hashes)) as Box<dyn Compiler<T>>);
             }
             "nvhpc" => {
                 let version = version.map(|s| s.replace(' ', ""));

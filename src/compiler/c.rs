@@ -17,7 +17,7 @@ use crate::{
     compiler::{
         CacheControl, Cacheable, ColorMode, Compilation, CompileCommand, CompileCommandImpl,
         Compiler, CompilerArguments, CompilerHasher, CompilerKind, HashResult, Language,
-        preprocessor_cache::PreprocessorDependenciesCache,
+        util::SourceFileCache,
     },
     dist,
     errors::*,
@@ -29,6 +29,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
@@ -38,21 +39,12 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
 };
-use tempfile::TempPath;
 
 #[cfg(feature = "dist-client")]
 use crate::{
     compiler::{DistPackagers, NoopOutputsRewriter},
     dist::pkg,
 };
-
-// cache for hashed source files
-static SOURCES_CACHE: LazyLock<PreprocessorDependenciesCache> = LazyLock::new(|| {
-    PreprocessorDependenciesCache::new(
-        // TODO: capacity chosen arbitrarily, should measure instead
-        50_000,
-    )
-});
 
 /// A generic implementation of the `Compiler` trait for C/C++ compilers.
 #[derive(Clone)]
@@ -125,18 +117,6 @@ pub struct ParseArgs<'a> {
     pub cwd: &'a Path,
     pub env_vars: &'a [(OsString, OsString)],
 }
-
-// pub struct PreprocessArgs<'a, T: CommandCreatorSync> {
-//     pub service: &'a SccacheService<T>,
-//     pub creator: &'a T,
-//     pub executable: &'a Path,
-//     pub parsed_args: &'a ParsedArguments,
-//     pub cwd: &'a Path,
-//     pub env_vars: &'a [(OsString, OsString)],
-//     pub might_dist_compile: bool,
-//     pub generate_dependencies: bool,
-//     pub include_line_numbers: bool,
-// }
 
 pub struct GenerateDependenciesArgs<'a, T: CommandCreatorSync> {
     pub creator: &'a T,
@@ -331,81 +311,6 @@ impl From<&CCompilerKind> for CompilerKind {
     }
 }
 
-// pub type ProcessOutputStream = dyn futures::stream::Stream<Item = Result<BytesMut>> + Send;
-// pub type DependenciesFuture = dyn futures::Future<Output = Result<Vec<PathBuf>>> + Send;
-
-// pub enum PreprocessorOutput {
-//     // cudafe++, cicc, and ptxas return this. Their output is always
-//     // saved to an intermediate file, and no preprocessor caching should
-//     // be done on them.
-//     File(PathBuf, Option<Pin<Box<DependenciesFuture>>>),
-//     Output(
-//         Pin<Box<ProcessOutputStream>>,
-//         Option<Pin<Box<DependenciesFuture>>>,
-//     ),
-// }
-
-// impl From<ProcessOutput> for Pin<Box<ProcessOutputStream>> {
-//     fn from(mut res: ProcessOutput) -> Self {
-//         if !res.success() {
-//             // Drop the stdout since it's the preprocessor output,
-//             // just hand back stderr and the exit status.
-//             res.stdout = vec![];
-//             Box::pin(futures::stream::iter([Err(ProcessError(res).into())]))
-//         } else {
-//             Box::pin(futures::stream::iter([Ok(BytesMut::from(Bytes::from(
-//                 res.stdout,
-//             )))]))
-//         }
-//     }
-// }
-
-pub enum DepfilePath {
-    Path(PathBuf),
-    Temp(TempPath),
-}
-
-impl DepfilePath {
-    pub fn as_path(&self) -> &Path {
-        match self {
-            Self::Path(path) => path.as_path(),
-            Self::Temp(temp) => temp.as_ref(),
-        }
-    }
-}
-
-impl fmt::Debug for DepfilePath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.as_path())
-    }
-}
-
-impl fmt::Display for DepfilePath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_path().display())
-    }
-}
-
-impl std::ops::Deref for DepfilePath {
-    type Target = Path;
-
-    fn deref(&self) -> &Path {
-        self.as_path()
-    }
-}
-
-impl AsRef<Path> for DepfilePath {
-    fn as_ref(&self) -> &Path {
-        self.as_path()
-    }
-}
-
-impl AsRef<OsStr> for DepfilePath {
-    fn as_ref(&self) -> &OsStr {
-        self.as_path().as_os_str()
-    }
-}
-
 /// An interface to a specific C compiler.
 #[async_trait]
 pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
@@ -424,11 +329,6 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
     }
     /// Determine whether `arguments` are supported by this compiler.
     fn parse_arguments(&self, args: ParseArgs<'_>) -> CompilerArguments<ParsedArguments>;
-
-    // /// Run the C preprocessor with the specified set of arguments.
-    // async fn preprocess<T>(&self, args: PreprocessArgs<'_, T>) -> Result<PreprocessorOutput>
-    // where
-    //     T: CommandCreatorSync;
 
     /// Run the C preprocessor to generate the dependencies file.
     async fn generate_dependencies<T>(
@@ -578,6 +478,20 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
             env_vars,
         }) {
             CompilerArguments::Ok(mut args) => {
+                // Make input path and arguments relative to basedirs
+                args.input = {
+                    let input = cwd.join(&args.input);
+                    let input = dunce::canonicalize(&input).unwrap_or(input);
+                    let mut input = vec![input.into_os_string()];
+                    if let Err(err) = apply_basedirs_to_args(cwd, input.as_mut_slice(), basedirs) {
+                        return CompilerArguments::CannotCache(
+                            "base dirs",
+                            Some(format!("{err:#}")),
+                        );
+                    }
+                    input.drain(..).next().unwrap().into()
+                };
+
                 for args in [
                     &mut args.common_args,
                     &mut args.dependency_args,
@@ -634,16 +548,11 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
         Box::new((*self).clone())
     }
 
+    #[cfg(test)]
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send + Sync> {
         self
     }
 }
-
-// enum PreprocessorCacheLookup {
-//     Disabled,
-//     Hit(String),
-//     Miss(String, bool),
-// }
 
 #[async_trait]
 impl<T, I> CompilerHasher<T> for CCompilerHasher<I>
@@ -660,8 +569,8 @@ where
         creator: &T,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
-        _pool: &tokio::runtime::Handle,
-        _cache_control: CacheControl,
+        _runtime: &tokio::runtime::Handle,
+        cache_control: CacheControl,
     ) -> Result<HashResult<T>> {
         let CCompilerHasher {
             compiler,
@@ -678,8 +587,6 @@ where
         // executable path to try and prevent this
         let weak_toolchain_key = format!("{}-{}", executable.to_string_lossy(), executable_digest);
 
-        // The cache key doesn't matter if we don't intend to do any cache
-        // operations, so return empty string
         let mut dist_files = vec![cwd.join(&parsed_args.input)];
 
         // Only get dependencies if the file requires preprocessing
@@ -698,38 +605,44 @@ where
             );
         }
 
-        // If the compiler has support for it, the expansion of __DATE__ will change
-        // according to the value of SOURCE_DATE_EPOCH. If the compiler doesn't support
-        // it (i.e. MSVC), this envvar shouldn't be defined.
-        let compile_timestamp = env_vars
-            .iter()
-            .find(|(k, _)| k == "SOURCE_DATE_EPOCH")
-            .and_then(|(_, v)| v.as_os_str().to_str())
-            .and_then(|v| v.parse().ok())
-            .and_then(DateTime::from_timestamp_secs)
-            .unwrap_or_else(Utc::now);
+        let key = if CacheControl::ForceNoCache == cache_control {
+            // Skip hashing if we're not going to do any cache reads/writes
+            // In this mode, the cache key doesn't matter, so return empty string
+            String::new()
+        } else {
+            // If the compiler has support for it, the expansion of __DATE__ will change
+            // according to the value of SOURCE_DATE_EPOCH. If the compiler doesn't support
+            // it (i.e. MSVC), this envvar shouldn't be defined.
+            let compile_timestamp = env_vars
+                .iter()
+                .find(|(k, _)| k == "SOURCE_DATE_EPOCH")
+                .and_then(|(_, v)| v.as_os_str().to_str())
+                .and_then(|v| v.parse().ok())
+                .and_then(DateTime::from_timestamp_secs)
+                .unwrap_or_else(Utc::now);
 
-        let key = HashKeyParams::new(&parsed_args)
-            .with_compile_timestamp(compile_timestamp)
-            .with_cwd(&cwd)
-            .with_env_vars(&env_vars)
-            .with_digests(
-                &std::iter::once(&executable_digest)
-                    .chain(self.extra_hashes.iter())
-                    .chain(hash_all(&parsed_args.extra_hash_files).await?.iter())
-                    .map(|s| s.as_str())
-                    .chain(
-                        compiler
-                            .assembler_digest()
-                            .filter(|_| parsed_args.uses_external_assembler),
-                    )
-                    .collect::<Vec<_>>(),
-            )
-            .with_input_files(&dist_files)
-            .with_plusplus(compiler.plusplus())
-            .compute()
-            .await?
-            .unwrap_or_default();
+            HashKeyParams::new(&parsed_args)
+                .with_compile_timestamp(compile_timestamp)
+                .with_cwd(&cwd)
+                .with_env_vars(&env_vars)
+                .with_digests(
+                    &std::iter::once(&executable_digest)
+                        .chain(self.extra_hashes.iter())
+                        .chain(hash_all(&parsed_args.extra_hash_files).await?.iter())
+                        .map(|s| s.as_str())
+                        .chain(
+                            compiler
+                                .assembler_digest()
+                                .filter(|_| parsed_args.uses_external_assembler),
+                        )
+                        .collect::<Vec<_>>(),
+                )
+                .with_input_files(&dist_files)
+                .with_plusplus(compiler.plusplus())
+                .compute()
+                .await?
+                .unwrap_or_default()
+        };
 
         return Ok(HashResult {
             key,
@@ -1504,6 +1417,7 @@ static CACHED_ENV_VARS: LazyLock<HashSet<&'static OsStr>> = LazyLock::new(|| {
         "CCC_OVERRIDE_OPTIONS",
         "CPATH",
         "CPLUS_INCLUDE_PATH",
+        "INCLUDE",
         "IPHONEOS_DEPLOYMENT_TARGET",
         "MACOSX_DEPLOYMENT_TARGET",
         "OBJC_INCLUDE_PATH",
@@ -1517,6 +1431,14 @@ static CACHED_ENV_VARS: LazyLock<HashSet<&'static OsStr>> = LazyLock::new(|| {
     .iter()
     .map(OsStr::new)
     .collect()
+});
+
+// cache for hashed source files
+static SOURCE_FILE_CACHE: LazyLock<SourceFileCache> = LazyLock::new(|| {
+    SourceFileCache::new(
+        // TODO: capacity chosen arbitrarily, should measure instead
+        50_000,
+    )
 });
 
 /// Parameters for computing a hash key for C/C++ compilation caching.
@@ -1670,11 +1592,24 @@ impl<'a> HashKeyParams<'a> {
                 .hash(&mut HashToDigest { digest: &mut m });
         }
 
-        // Hash the input source and dependency files
-        for path in self.input_files {
-            let path = self.cwd.join(path);
-            let path = dunce::canonicalize(&path).unwrap_or(path);
-            let entry = SOURCES_CACHE.get(&path, self.compile_timestamp).await?;
+        // Canonicalize the dependency paths on a background thread
+        let paths = tokio::task::spawn_blocking({
+            let cwd = self.cwd.to_owned();
+            let mut paths = self.input_files.to_vec();
+            move || {
+                for path in paths.iter_mut() {
+                    if let Ok(path2) = dunce::canonicalize(cwd.join(path.as_path())) {
+                        *path = path2;
+                    }
+                }
+                paths
+            }
+        })
+        .await?;
+
+        // Hash the input and dependencies
+        let entries = futures::future::try_join_all(paths.into_iter().map(|path| async move {
+            let entry = SOURCE_FILE_CACHE.get(&path, self.compile_timestamp).await?;
 
             if entry.found_time {
                 // __TIME__ found, disable caching
@@ -1683,22 +1618,67 @@ impl<'a> HashKeyParams<'a> {
                     self.parsed_args.output_pretty(),
                     path.display()
                 );
-                return Ok(None);
+                Ok::<_, anyhow::Error>(None)
+            } else {
+                Ok(Some(entry.clone()))
             }
+        }))
+        .await?;
 
-            entry
-                .entry
-                .digest
-                .hash(&mut HashToDigest { digest: &mut m });
+        if entries.iter().any(|entry| entry.is_none()) {
+            Ok(None)
+        } else {
+            for entry in entries.into_iter().flatten() {
+                entry.digest.hash(&mut HashToDigest { digest: &mut m });
+            }
+            Ok(Some(m.finish()))
         }
-
-        Ok(Some(m.finish()))
     }
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Clone, Deserialize, Serialize)]
+pub struct P1689r5_JSON {
+    pub version: u8,
+    pub revision: u8,
+    #[serde(default)]
+    pub rules: Vec<P1689r5_Rule>,
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Clone, Deserialize, Serialize)]
+pub struct P1689r5_Rule {
+    #[serde(rename = "primary-output")]
+    pub primary_output: String,
+    #[serde(default)]
+    pub outputs: Vec<String>,
+    #[serde(default)]
+    pub provides: Vec<P1689r5_Dep>,
+    #[serde(default)]
+    pub requires: Vec<P1689r5_Dep>,
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Clone, Deserialize, Serialize)]
+pub struct P1689r5_Dep {
+    #[serde(default, rename = "logical-name")]
+    pub logical_name: String,
+    #[serde(default, rename = "source-path")]
+    pub source_path: String,
+    #[serde(default, rename = "lookup-method")]
+    pub lookup_method: String,
+    #[serde(default, rename = "unique-on-source-path")]
+    pub unique_on_source_path: bool,
 }
 
 #[cfg(test)]
 mod test {
-    use crate::test::utils::*;
+    use futures::io::AllowStdIo;
+
+    use crate::{
+        test::utils::*,
+        util::{HASH_BUFFER_SIZE, MAX_TIME_MACRO_HAYSTACK_LEN},
+    };
 
     use super::*;
 
@@ -2354,4 +2334,165 @@ mod test {
     //         });
     //     }
     // }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_find_time_macros_empty_file() {
+        let buf: Vec<u8> = vec![];
+        let buf = AllowStdIo::new(&buf[..]);
+        let hash = Digest::from_reader_with_time_macros(buf).await.unwrap().0;
+        assert_eq!(hash.finish(), Digest::new().finish());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_find_time_macros_small_file_no_match() {
+        let buf = b"This is a small file, which doesn't contain any time macros.";
+        let buf = AllowStdIo::new(&buf[..]);
+        let finder = Digest::from_reader_with_time_macros(buf).await.unwrap().1;
+        assert!(!finder.found_time_macros());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_find_time_macros_small_file_match() {
+        let buf = b"__TIME__";
+        let buf = AllowStdIo::new(&buf[..]);
+        let finder = Digest::from_reader_with_time_macros(buf).await.unwrap().1;
+        assert!(finder.found_time_macros());
+        assert!(finder.found_time());
+        assert!(!finder.found_timestamp());
+        assert!(!finder.found_date());
+        let buf = b"__DATE__";
+        let buf = AllowStdIo::new(&buf[..]);
+        let finder = Digest::from_reader_with_time_macros(buf).await.unwrap().1;
+        assert!(finder.found_time_macros());
+        assert!(!finder.found_time());
+        assert!(!finder.found_timestamp());
+        assert!(finder.found_date());
+        let buf = b"__TIMESTAMP__";
+        let buf = AllowStdIo::new(&buf[..]);
+        let finder = Digest::from_reader_with_time_macros(buf).await.unwrap().1;
+        assert!(finder.found_time_macros());
+        assert!(!finder.found_time());
+        assert!(finder.found_timestamp());
+        assert!(!finder.found_date());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_find_time_macros_small_file_match_multiple() {
+        let buf = b"__TIMESTAMP____DATE____TIME__";
+        let buf = AllowStdIo::new(&buf[..]);
+        let finder = Digest::from_reader_with_time_macros(buf).await.unwrap().1;
+        assert!(finder.found_time_macros());
+        assert!(finder.found_time());
+        assert!(finder.found_timestamp());
+        assert!(finder.found_date());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_find_time_macros_large_file_no_match() {
+        let buf = vec![0; HASH_BUFFER_SIZE * 2];
+        let buf = AllowStdIo::new(&buf[..]);
+        let finder = Digest::from_reader_with_time_macros(buf).await.unwrap().1;
+        assert!(!finder.found_time_macros());
+        assert!(!finder.found_time());
+        assert!(!finder.found_timestamp());
+        assert!(!finder.found_date());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_find_time_macros_large_file_match_no_overlap() {
+        let mut buf = vec![0; HASH_BUFFER_SIZE * 2];
+        buf.extend(b"__TIMESTAMP____DATE____TIME__");
+        let buf = AllowStdIo::new(&buf[..]);
+        let finder = Digest::from_reader_with_time_macros(buf).await.unwrap().1;
+        assert!(finder.found_time_macros());
+        assert!(finder.found_time());
+        assert!(finder.found_timestamp());
+        assert!(finder.found_date());
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_find_time_macros_large_file_match_overlap() {
+        let mut buf = vec![0; HASH_BUFFER_SIZE * 2];
+        // Make the pattern overlap two buffer chunks to make sure we account for this
+        let start = HASH_BUFFER_SIZE - MAX_TIME_MACRO_HAYSTACK_LEN / 2;
+        buf[start..][..b"__TIMESTAMP__".len()].copy_from_slice(b"__TIMESTAMP__");
+        let buf = AllowStdIo::new(&buf[..]);
+        let finder = Digest::from_reader_with_time_macros(buf).await.unwrap().1;
+        assert!(finder.found_time_macros());
+        assert!(!finder.found_time());
+        assert!(finder.found_timestamp());
+        assert!(!finder.found_date());
+
+        let mut buf = vec![0; HASH_BUFFER_SIZE * 2];
+        // Make the pattern overlap two buffer chunks to make sure we account for this
+        let start = HASH_BUFFER_SIZE - MAX_TIME_MACRO_HAYSTACK_LEN / 2;
+        buf[start..][..b"__TIME__".len()].copy_from_slice(b"__TIME__");
+        let buf = AllowStdIo::new(&buf[..]);
+        let finder = Digest::from_reader_with_time_macros(buf).await.unwrap().1;
+        assert!(finder.found_time_macros());
+        assert!(finder.found_time());
+        assert!(!finder.found_timestamp());
+        assert!(!finder.found_date());
+
+        let mut buf = vec![0; HASH_BUFFER_SIZE * 2];
+        // Make the pattern overlap two buffer chunks to make sure we account for this
+        let start = HASH_BUFFER_SIZE - MAX_TIME_MACRO_HAYSTACK_LEN / 2;
+        buf[start..][..b"__DATE__".len()].copy_from_slice(b"__DATE__");
+        let buf = AllowStdIo::new(&buf[..]);
+        let finder = Digest::from_reader_with_time_macros(buf).await.unwrap().1;
+        assert!(finder.found_time_macros());
+        assert!(!finder.found_time());
+        assert!(!finder.found_timestamp());
+        assert!(finder.found_date());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_find_time_macros_large_file_match_overlap_multiple_pages() {
+        let mut buf = vec![0; HASH_BUFFER_SIZE * 3];
+        // Make the patterns overlap buffer chunks twice to make sure we account for this
+        let start = HASH_BUFFER_SIZE - MAX_TIME_MACRO_HAYSTACK_LEN / 2;
+        buf[start..][..b"__TIME__".len()].copy_from_slice(b"__TIME__");
+        let start = HASH_BUFFER_SIZE * 2 - MAX_TIME_MACRO_HAYSTACK_LEN / 2;
+        buf[start..][..b"__DATE__".len()].copy_from_slice(b"__DATE__");
+        let buf = AllowStdIo::new(&buf[..]);
+        let finder = Digest::from_reader_with_time_macros(buf).await.unwrap().1;
+        assert!(finder.found_time_macros());
+        assert!(finder.found_time());
+        assert!(!finder.found_timestamp());
+        assert!(finder.found_date());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_find_time_macros_large_file_match_overlap_multiple_pages_tiny() {
+        let mut buf = vec![0; HASH_BUFFER_SIZE * 3];
+        // Make the patterns overlap buffer chunks twice to make sure we account for this
+        let start = HASH_BUFFER_SIZE - MAX_TIME_MACRO_HAYSTACK_LEN / 2;
+        buf[start..][..b"__TIME__".len()].copy_from_slice(b"__TIME__");
+        let start = HASH_BUFFER_SIZE * 2 - MAX_TIME_MACRO_HAYSTACK_LEN / 2;
+        buf[start..][..b"__DATE__".len()].copy_from_slice(b"__DATE__");
+        // Test overlap with the last chunk being less than the haystack
+        buf.extend([0; MAX_TIME_MACRO_HAYSTACK_LEN / 2 + 1]);
+        let start = HASH_BUFFER_SIZE * 3 - MAX_TIME_MACRO_HAYSTACK_LEN / 2;
+        buf[start..][..b"__TIMESTAMP__".len()].copy_from_slice(b"__TIMESTAMP__");
+        let buf = AllowStdIo::new(&buf[..]);
+        let finder = Digest::from_reader_with_time_macros(buf).await.unwrap().1;
+        assert!(finder.found_time_macros());
+        assert!(finder.found_time());
+        assert!(finder.found_timestamp());
+        assert!(finder.found_date());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_find_time_macros_ghost_pattern() {
+        // Check the (unlikely) case of a pattern being spread between the
+        // start of a chunk and its end.
+        let mut buf = vec![0; HASH_BUFFER_SIZE * 3];
+        buf[HASH_BUFFER_SIZE..HASH_BUFFER_SIZE + b"__TI".len()].copy_from_slice(b"__TI");
+        buf[HASH_BUFFER_SIZE * 2 - "ME__".len()..HASH_BUFFER_SIZE * 2].copy_from_slice(b"ME__");
+        let buf = AllowStdIo::new(&buf[..]);
+        let finder = Digest::from_reader_with_time_macros(buf).await.unwrap().1;
+        assert!(!finder.found_time_macros());
+        assert!(!finder.found_time());
+        assert!(!finder.found_timestamp());
+        assert!(!finder.found_date());
+    }
 }

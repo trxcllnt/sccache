@@ -248,7 +248,7 @@ pub fn find_cuda_compilers() -> Vec<Compiler> {
 #[derive(Clone, Debug, Default)]
 pub struct AdditionalStats {
     pub cache_writes: Option<u64>,
-    // pub preprocessed: Option<u64>,
+    pub hashed: Option<u64>,
     pub compilations: Option<u64>,
     pub compile_requests: Option<u64>,
     pub non_cacheable_compilations: Option<u64>,
@@ -270,7 +270,7 @@ impl std::ops::Add<AdditionalStats> for ServerStats {
 impl std::ops::AddAssign<AdditionalStats> for ServerStats {
     fn add_assign(&mut self, rhs: AdditionalStats) {
         self.cache_writes += rhs.cache_writes.unwrap_or(0);
-        // self.preprocessed += rhs.preprocessed.unwrap_or(0);
+        self.hashed += rhs.hashed.unwrap_or(0);
         self.compilations += rhs.compilations.unwrap_or(0);
         self.compile_requests += rhs.compile_requests.unwrap_or(0);
         self.requests_executed += rhs.requests_executed.unwrap_or(0);
@@ -307,7 +307,7 @@ impl std::ops::AddAssign<AdditionalStats> for ServerStats {
         self.cache_write_duration = Default::default();
         self.cache_read_hit_duration = Default::default();
         self.compiler_write_duration = Default::default();
-        // self.preprocessor_duration = Default::default();
+        self.hasher_duration = Default::default();
         // self.preprocessor_cache_hit_duration = Default::default();
         // self.preprocessor_cache_miss_duration = Default::default();
     }

@@ -21,7 +21,7 @@ use crate::{
     config::{CacheMode, ClientConfig},
     dist,
     errors::*,
-    jobserver::Client,
+    jobserver,
     mock_command::{CommandCreatorSync, ProcessCommandCreator, ProcessOutput},
     protocol::{
         Compile, CompileFinished, CompileResponse, Request, Response, StorageHandshakeInfo,
@@ -438,7 +438,7 @@ pub fn start_server<C: AsRef<ClientConfig>>(
         });
         panic_hook(info);
     }));
-    let client = Client::new();
+    let client = jobserver::Client::new();
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     if std::env::var("TOKIO_WORKER_THREADS").is_err() {
         builder.worker_threads(2 * util::num_cpus());
@@ -589,7 +589,7 @@ impl<C: CommandCreatorSync> SccacheServer<tokio::net::TcpListener, C> {
     pub fn new(
         port: u16,
         runtime: Runtime,
-        client: Client,
+        client: jobserver::Client,
         dist_client: DistClientContainer,
         storage: Arc<dyn Storage>,
         preprocessor_storage: Arc<dyn Storage>,
@@ -617,7 +617,7 @@ impl<A: crate::net::Acceptor, C: CommandCreatorSync> SccacheServer<A, C> {
     pub fn with_listener(
         listener: A,
         runtime: Runtime,
-        client: Client,
+        client: jobserver::Client,
         dist_client: DistClientContainer,
         storage: Arc<dyn Storage>,
         preprocessor_storage: Arc<dyn Storage>,
@@ -1228,7 +1228,7 @@ where
         preprocessor_storage: Arc<dyn Storage>,
         cache_read_timeout: Duration,
         cache_write_timeout: Option<Duration>,
-        client: &Client,
+        client: &jobserver::Client,
         rt: tokio::runtime::Handle,
         tx: mpsc::Sender<ServerMessage>,
         info: ActiveInfo,
@@ -1270,7 +1270,7 @@ where
     ) -> SccacheService<C> {
         let (tx, _) = mpsc::channel(1);
         let (_, info) = WaitUntilZero::new();
-        let client = Client::new_num(1);
+        let client = jobserver::Client::new_num(1);
         let creator = C::new(&client);
         let dist_client = Arc::new(DistClientContainer::new_disabled());
         let compiler_info_queue = Arc::new(AsyncMulticast::new(CompilerInfoFn {
@@ -1310,7 +1310,7 @@ where
     ) -> SccacheService<C> {
         let (tx, _) = mpsc::channel(1);
         let (_, info) = WaitUntilZero::new();
-        let client = Client::new_num(1);
+        let client = jobserver::Client::new_num(1);
         let creator = C::new(&client);
         let dist_client = Arc::new(DistClientContainer::new_with_state(DistClientState::Some(
             Box::new(DistClientConfig {
@@ -2130,16 +2130,16 @@ pub struct ServerStats {
     pub cache_write_duration: Duration,
     /// The total time spent reading cache hits.
     pub cache_read_hit_duration: Duration,
-    // /// The number of successful preprocessor calls.
-    // pub preprocessed: u64,
+    /// The number of successful hashes computed.
+    pub hashed: u64,
     /// The number of successful compilations performed.
     pub compilations: u64,
     // /// The total time spent verifying preprocessor cache hits.
     // pub preprocessor_cache_hit_duration: Duration,
     // /// The total time spent verifying preprocessor cache misses.
     // pub preprocessor_cache_miss_duration: Duration,
-    // /// The total time spent preprocessing.
-    // pub preprocessor_duration: Duration,
+    /// The total time spent hashing.
+    pub hasher_duration: Duration,
     /// The total time spent compiling.
     pub compiler_write_duration: Duration,
     /// The count of compilation failures.
@@ -2183,11 +2183,11 @@ impl std::ops::AddAssign for ServerStats {
         self.cache_writes += rhs.cache_writes;
         self.cache_write_duration += rhs.cache_write_duration;
         self.cache_read_hit_duration += rhs.cache_read_hit_duration;
-        // self.preprocessed += rhs.preprocessed;
+        self.hashed += rhs.hashed;
         self.compilations += rhs.compilations;
         // self.preprocessor_cache_hit_duration += rhs.preprocessor_cache_hit_duration;
         // self.preprocessor_cache_miss_duration += rhs.preprocessor_cache_miss_duration;
-        // self.preprocessor_duration += rhs.preprocessor_duration;
+        self.hasher_duration += rhs.hasher_duration;
         self.compiler_write_duration += rhs.compiler_write_duration;
         self.compile_fails += rhs.compile_fails;
         for (k, v) in rhs.not_cached {
@@ -2270,11 +2270,11 @@ impl Default for ServerStats {
             cache_writes: u64::default(),
             cache_write_duration: Duration::new(0, 0),
             cache_read_hit_duration: Duration::new(0, 0),
-            // preprocessed: u64::default(),
+            hashed: u64::default(),
             compilations: u64::default(),
             // preprocessor_cache_hit_duration: Duration::new(0, 0),
             // preprocessor_cache_miss_duration: Duration::new(0, 0),
-            // preprocessor_duration: Duration::new(0, 0),
+            hasher_duration: Duration::new(0, 0),
             compiler_write_duration: Duration::new(0, 0),
             compile_fails: u64::default(),
             not_cached: HashMap::new(),
@@ -2398,6 +2398,7 @@ impl ServerStats {
         set_stat!(stats_vec, self.forced_recaches, "Forced recaches");
         set_stat!(stats_vec, self.cache_write_errors, "Cache write errors");
 
+        set_stat!(stats_vec, self.hashed, "Hashes");
         set_stat!(
             stats_vec,
             self.compilations + self.compile_fails + self.non_cacheable_compilations,
@@ -2453,14 +2454,14 @@ impl ServerStats {
         //         "Average preprocessor cache miss"
         //     );
         // }
-        // if self.preprocessed > 0 {
-        //     set_duration_stat!(
-        //         stats_vec,
-        //         self.preprocessor_duration,
-        //         self.preprocessed,
-        //         "Average preprocessor"
-        //     );
-        // }
+        if self.hashed > 0 {
+            set_duration_stat!(
+                stats_vec,
+                self.hasher_duration,
+                self.hashed,
+                "Average hash time"
+            );
+        }
         set_duration_stat!(
             stats_vec,
             self.compiler_write_duration,

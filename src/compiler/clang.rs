@@ -26,15 +26,17 @@ use crate::{
     mock_command::CommandCreatorSync,
 };
 use async_trait::async_trait;
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use crate::errors::*;
 
 /// A struct on which to implement `CCompilerImpl`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Clang {
-    /// true iff this is clang++.
+    /// true if this is clang++.
     pub clangplusplus: bool,
     /// String from __VERSION__ macro.
     pub version: Option<String>,
@@ -50,7 +52,6 @@ impl Clang {
         extra_dist_files: Vec<PathBuf>,
     ) -> Self {
         Self {
-            // supports_fminimize_whitespace: is_minversion(is_appleclang, version.as_ref(), 14),
             assembler_digest,
             clangplusplus,
             extra_dist_files,
@@ -108,50 +109,6 @@ impl CCompilerImpl for Clang {
         parsed_args
     }
 
-    // async fn preprocess<T>(
-    //     &self,
-    //     PreprocessArgs {
-    //         creator,
-    //         executable,
-    //         parsed_args,
-    //         cwd,
-    //         env_vars,
-    //         rewrite_includes_only,
-    //         generate_dependencies,
-    //         include_line_numbers,
-    //         ..
-    //     }: PreprocessArgs<'_, T>,
-    // ) -> Result<PreprocessorOutput>
-    // where
-    //     T: CommandCreatorSync,
-    // {
-    //     let extra_preprocessor_flags = if include_line_numbers {
-    //         vec![]
-    //     } else if !self.supports_fminimize_whitespace
-    //         || parsed_args.language == Language::AssemblerToPreprocess
-    //     {
-    //         vec!["-P".into()]
-    //     } else {
-    //         // Clang 14 and later support -fminimize-whitespace, which normalizes
-    //         // away non-semantic whitespace which in turn increases cache hit rate.
-    //         // '-fminimize-whitespace' invalid for input of type assembler-with-cpp
-    //         vec!["-P".into(), "-fminimize-whitespace".into()]
-    //     };
-
-    //     gcc::preprocess(
-    //         creator,
-    //         executable,
-    //         parsed_args,
-    //         cwd,
-    //         env_vars,
-    //         self.kind(),
-    //         rewrite_includes_only,
-    //         generate_dependencies,
-    //         &extra_preprocessor_flags,
-    //     )
-    //     .await
-    // }
-
     async fn generate_dependencies<T>(
         &self,
         GenerateDependenciesArgs {
@@ -166,8 +123,15 @@ impl CCompilerImpl for Clang {
     where
         T: CommandCreatorSync,
     {
-        gcc::generate_dependencies(creator, executable, parsed_args, cwd, env_vars, self.kind())
-            .await
+        gcc::generate_dependencies(
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars.iter().cloned(),
+            self.kind(),
+        )
+        .await
     }
 
     fn generate_compile_commands(

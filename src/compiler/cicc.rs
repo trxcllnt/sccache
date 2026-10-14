@@ -57,17 +57,6 @@ impl CCompilerImpl for Cicc {
     ) -> CompilerArguments<ParsedArguments> {
         parse_arguments(arguments, cwd, Language::Ptx, &ARGS[..])
     }
-    // async fn preprocess<T>(
-    //     &self,
-    //     PreprocessArgs {
-    //         parsed_args, cwd, ..
-    //     }: PreprocessArgs<'_, T>,
-    // ) -> Result<PreprocessorOutput>
-    // where
-    //     T: CommandCreatorSync,
-    // {
-    //     preprocess(cwd, parsed_args).await
-    // }
     async fn generate_dependencies<T>(
         &self,
         GenerateDependenciesArgs { .. }: GenerateDependenciesArgs<'_, T>,

@@ -18,19 +18,17 @@ use crate::{
         SingleCompileCommand,
         args::*,
         c::{
-            ArtifactDescriptor, CCompilerImpl, CCompilerKind, DepfilePath,
-            GenerateCompileCommandsArgs, GenerateDependenciesArgs, ParseArgs, ParsedArguments,
+            ArtifactDescriptor, CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs,
+            GenerateDependenciesArgs, ParseArgs, ParsedArguments,
         },
         clang,
     },
     counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
-    util::{OsStrExt, bytes_to_str, run_input_output, temppath},
+    util::{OsStrExt, bytes_to_str, run_input_output},
 };
-
 use async_trait::async_trait;
-use fs::File;
 use fs_err as fs;
 use itertools::Itertools;
 use std::{
@@ -39,6 +37,7 @@ use std::{
     ffi::{OsStr, OsString},
     io::Read,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 /// A struct on which to implement `CCompilerImpl`.
@@ -49,42 +48,102 @@ pub struct Gcc {
     pub native_archs: Option<(String, String)>,
     pub specfiles: Vec<PathBuf>,
     pub assembler_digest: Option<String>,
+    pragma_once_fix: Arc<PathBuf>,
 }
 
 impl Gcc {
-    pub async fn read_implicit_specfiles<T>(
-        creator: &mut T,
-        exe: &Path,
-        arguments: &[OsString],
-        env_vars: &[(OsString, OsString)],
+    pub async fn new_from_compiler<
+        C,
+        Arg: AsRef<OsStr>,
+        Args: Iterator<Item = Arg> + Clone,
+        Exe: AsRef<Path>,
+        Key: AsRef<OsStr>,
+        Var: AsRef<OsStr>,
+        Envs: Iterator<Item = (Key, Var)> + Clone,
+    >(
+        creator: &mut C,
+        executable: Exe,
+        args: Args,
+        env_vars: Envs,
+        gplusplus: bool,
+        version: Option<String>,
+        assembler_digest: Option<String>,
+    ) -> Result<Self>
+    where
+        C: CommandCreatorSync,
+    {
+        #[cfg(unix)]
+        let pragma_once_fix = Arc::new(
+            crate::compiler::util::build_gcc_pragma_once_fix(executable.as_ref(), env_vars.clone())
+                .await
+                .unwrap_or_else(|_| PathBuf::new()),
+        );
+        #[cfg(not(unix))]
+        let pragma_once_fix = Arc::new(PathBuf::new());
+
+        // Include gcc's implicit specfiles in the object hash
+        let specfiles = Self::read_implicit_specfiles(
+            creator,
+            executable.as_ref(),
+            args.clone(),
+            env_vars.clone(),
+            "-v",
+        )
+        .await?;
+
+        let native_archs =
+            Self::read_native_arch(creator, executable.as_ref(), env_vars.clone()).await;
+
+        Ok(Self {
+            assembler_digest,
+            gplusplus,
+            native_archs,
+            specfiles,
+            version,
+            pragma_once_fix,
+        })
+    }
+
+    pub async fn read_implicit_specfiles<
+        C,
+        Arg: AsRef<OsStr>,
+        Args: Iterator<Item = Arg>,
+        Exe: AsRef<Path>,
+        Key: AsRef<OsStr>,
+        Var: AsRef<OsStr>,
+        Envs: Iterator<Item = (Key, Var)>,
+    >(
+        creator: &mut C,
+        executable: Exe,
+        args: Args,
+        env_vars: Envs,
         v_flag: &str,
     ) -> Result<Vec<PathBuf>>
     where
-        T: CommandCreatorSync,
+        C: CommandCreatorSync,
     {
         use crate::compiler::write_temp_file;
         use bytes::Buf;
-        use itertools::Itertools;
         use std::io::BufRead;
 
-        let (_tempdir, src) = write_temp_file(
+        let (_tempdir, testfile) = write_temp_file(
             &tokio::runtime::Handle::current(),
             "testfile.c".as_ref(),
             Default::default(),
         )
         .await?;
 
-        let mut cmd = creator.new_command_sync(exe);
-        cmd.env_clear()
-            .envs(env_vars.iter().map(|s| (&s.0, &s.1)))
-            .args(arguments)
-            .arg(v_flag)
-            .arg("-E")
-            .arg(&src);
+        let mut cmd = creator.new_command_sync(executable.as_ref());
+        cmd.env_clear().envs(env_vars);
+        for arg in args {
+            cmd.arg(arg);
+        }
+        cmd.arg(v_flag).arg("-E").arg(&testfile);
 
-        let output = run_input_output(cmd, None).await.unwrap_or_default();
-
-        Ok(output
+        Ok(cmd
+            .output()
+            .await
+            .unwrap_or_default()
             .stderr
             .reader()
             .lines()
@@ -96,21 +155,27 @@ impl Gcc {
             .unwrap_or_default())
     }
 
-    pub async fn read_native_arch<T>(
-        creator: &mut T,
-        exe: &Path,
-        env_vars: &[(OsString, OsString)],
+    pub async fn read_native_arch<
+        C,
+        Exe: AsRef<Path>,
+        Key: AsRef<OsStr>,
+        Var: AsRef<OsStr>,
+        Envs: Iterator<Item = (Key, Var)>,
+    >(
+        creator: &mut C,
+        executable: Exe,
+        env_vars: Envs,
     ) -> Option<(String, String)>
     where
-        T: CommandCreatorSync,
+        C: CommandCreatorSync,
     {
         use bytes::Buf;
         use itertools::Itertools;
         use std::io::BufRead;
 
-        let mut cmd = creator.new_command_sync(exe);
+        let mut cmd = creator.new_command_sync(executable.as_ref());
         cmd.env_clear()
-            .envs(env_vars.iter().map(|s| (&s.0, &s.1)))
+            .envs(env_vars)
             .arg("-Q")
             .arg("-march=native")
             .arg("--help=target");
@@ -176,44 +241,6 @@ impl CCompilerImpl for Gcc {
         parsed_args
     }
 
-    // #[allow(clippy::too_many_arguments)]
-    // async fn preprocess<T>(
-    //     &self,
-    //     PreprocessArgs {
-    //         creator,
-    //         executable,
-    //         parsed_args,
-    //         cwd,
-    //         env_vars,
-    //         rewrite_includes_only,
-    //         generate_dependencies,
-    //         include_line_numbers,
-    //         ..
-    //     }: PreprocessArgs<'_, T>,
-    // ) -> Result<PreprocessorOutput>
-    // where
-    //     T: CommandCreatorSync,
-    // {
-    //     let extra_preprocessor_flags = if include_line_numbers {
-    //         vec![]
-    //     } else {
-    //         vec!["-P".into()]
-    //     };
-
-    //     preprocess(
-    //         creator,
-    //         executable,
-    //         parsed_args,
-    //         cwd,
-    //         env_vars,
-    //         self.kind(),
-    //         rewrite_includes_only,
-    //         generate_dependencies,
-    //         &extra_preprocessor_flags,
-    //     )
-    //     .await
-    // }
-
     async fn generate_dependencies<T>(
         &self,
         GenerateDependenciesArgs {
@@ -228,7 +255,30 @@ impl CCompilerImpl for Gcc {
     where
         T: CommandCreatorSync,
     {
-        generate_dependencies(creator, executable, parsed_args, cwd, env_vars, self.kind()).await
+        generate_dependencies(
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            [("LD_PRELOAD".into(), "".into())]
+                .iter()
+                .chain(env_vars.iter())
+                .cloned()
+                .map(|(key, mut val)| {
+                    //
+                    if key == "LD_PRELOAD" {
+                        if !val.is_empty() {
+                            val.push(":");
+                        }
+                        if !self.pragma_once_fix.as_os_str().is_empty() {
+                            val.push(self.pragma_once_fix.as_os_str());
+                        }
+                    }
+                    (key, val)
+                }),
+            self.kind(),
+        )
+        .await
     }
 
     fn generate_compile_commands(
@@ -264,6 +314,10 @@ ArgData! { pub
     PreprocessorArgumentFlag,
     PreprocessorArgument(OsString),
     PreprocessorArgumentPath(PathBuf),
+    NvhpcIncludeFile(PathBuf),
+    NvhpcIncludePath(PathBuf),
+    NvhpcSystemIncludePath(PathBuf),
+
     // Used for arguments that shouldn't affect the computed hash
     UnhashedFlag,
     Unhashed(OsString),
@@ -322,7 +376,7 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     flag!("--write-user-dependencies", NeedDepTarget),
     take_arg!("-A", OsString, Separated, PassThrough),
     take_arg!("-B", PathBuf, CanBeSeparated, PassThroughPath),
-    take_arg!("-D", OsString, CanBeSeparated, PassThrough),
+    take_arg!("-D", OsString, CanBeSeparated, PreprocessorArgument),
     flag!("-E", DoCompilation), // TooHardFlag),
     take_arg!("-F", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
     take_arg!("-G", OsString, Separated, PassThrough),
@@ -336,6 +390,7 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     flag!("-MP", NeedDepTarget),
     take_arg!("-MQ", OsString, Separated, DepTarget),
     take_arg!("-MT", OsString, Separated, DepTarget),
+    take_arg!("-O", OsString, Concatenated, PreprocessorArgument),
     flag!("-P", PassThroughFlag), // TooHardFlag),
     take_arg!("-U", OsString, CanBeSeparated, PassThrough),
     take_arg!("-V", OsString, Separated, PassThrough),
@@ -573,6 +628,9 @@ where
             | Some(Standard(_))
             | Some(ExtraHashFileClangModuleFile(_))
             | Some(PassThroughFlag)
+            | Some(NvhpcIncludeFile(_))
+            | Some(NvhpcIncludePath(_))
+            | Some(NvhpcSystemIncludePath(_))
             | Some(PreprocessorArgumentFlag)
             | Some(PreprocessorArgument(_))
             | Some(PreprocessorArgumentPath(_))
@@ -622,10 +680,10 @@ where
             },
         }
         let args = match arg.get_data() {
+            Some(Standard(_)) => &mut preprocessor_args,
             Some(SplitDwarf)
             | Some(ModuleOnlyFlag)
             | Some(PedanticFlag)
-            | Some(Standard(_))
             | Some(ProfileGenerate)
             | Some(ClangProfileUse(_))
             | Some(TestCoverage)
@@ -732,6 +790,24 @@ where
                 extra_dist_files.push(cwd.join(path));
                 &mut preprocessor_args
             }
+            Some(NvhpcIncludeFile(path)) => {
+                extra_dist_files.push(path.clone());
+                preprocessor_args.push("-include".into());
+                preprocessor_args.push(path.into());
+                continue;
+            }
+            Some(NvhpcIncludePath(path)) => {
+                extra_dist_files.push(path.clone());
+                preprocessor_args.push("-I".into());
+                preprocessor_args.push(path.into());
+                continue;
+            }
+            Some(NvhpcSystemIncludePath(path)) => {
+                extra_dist_files.push(path.clone());
+                preprocessor_args.push("-isystem".into());
+                preprocessor_args.push(path.into());
+                continue;
+            }
             Some(DepArgumentPath(_))
             | Some(NeedDepTarget)
             | Some(StructuredDepFormat(_))
@@ -771,6 +847,9 @@ where
         let arg = try_or_cannot_cache!(arg, "argument parse");
         let args = match arg.get_data() {
             Some(SplitDwarf)
+            | Some(NvhpcIncludeFile(_))
+            | Some(NvhpcIncludePath(_))
+            | Some(NvhpcSystemIncludePath(_))
             | Some(ModuleOnlyFlag)
             | Some(PedanticFlag)
             | Some(Standard(_))
@@ -1049,195 +1128,121 @@ fn module_artifact_descriptor(
     }
 }
 
-// #[allow(clippy::too_many_arguments)]
-// pub fn preprocess_cmd<T>(
-//     mut cmd: T,
-//     parsed_args: &ParsedArguments,
-//     cwd: &Path,
-//     env_vars: &[(OsString, OsString)],
-//     kind: &CCompilerKind,
-//     extra_preprocessor_flags: &[OsString],
-// ) -> T
-// where
-//     T: RunCommand,
-// {
-//     cmd.current_dir(cwd).env_clear().envs(env_vars.to_vec());
-
-//     if let Some(language) = parsed_args.language.as_compiler_str(kind.into()) {
-//         cmd.arg("-x").arg(language);
-//     }
-
-//     cmd.args(&parsed_args.preprocessor_args)
-//         .args(&parsed_args.dependency_args)
-//         .args(&parsed_args.common_args)
-//         .args(
-//             (
-//                 // Explicitly rewrite the -arch args to be preprocessor defines of the form
-//                 // __arch__ so that they affect the preprocessor output but don't cause
-//                 // clang to error.
-//                 if kind == &CCompilerKind::Clang {
-//                     let rewritten_arch_args = parsed_args
-//                         .arch_args
-//                         .iter()
-//                         .filter(|&arg| arg.ne(clang::ARCH_FLAG))
-//                         .filter_map(|arg| {
-//                             arg.to_str()
-//                                 .map(|arg_string| format!("-D__{arg_string}__=1").into())
-//                         })
-//                         .collect::<Vec<OsString>>();
-//                     let mut unique_rewritten = rewritten_arch_args.clone();
-//                     unique_rewritten.sort();
-//                     unique_rewritten.dedup();
-//                     if unique_rewritten.len() <= 1 {
-//                         // don't use rewritten arch args if there is only one arch
-//                         parsed_args.arch_args.clone()
-//                     } else {
-//                         trace!("-arch args before rewrite: {:?}", parsed_args.arch_args);
-//                         trace!("-arch args after rewrite:  {rewritten_arch_args:?}");
-//                         rewritten_arch_args
-//                     }
-//                 } else {
-//                     parsed_args.arch_args.clone()
-//                 }
-//             )
-//             .as_slice(),
-//         );
-
-//     // Some "gcc-like" compilers (QNX's qcc/q++) need an explicit `-o -`,
-//     // otherwise they write the preprocessed file to `<input>.i`
-//     if let CCompilerKind::Gcc = kind {
-//         cmd.arg("-o").arg("-");
-//     }
-
-//     cmd
-//         // older NVCC versions only support `-E` when it comes after preprocessor and common flags.
-//         .arg("-E")
-//         .args(extra_preprocessor_flags);
-
-//     if parsed_args.double_dash_input {
-//         cmd.arg("--");
-//     }
-
-//     cmd.arg(&parsed_args.input);
-
-//     cmd
-// }
-
-// #[allow(clippy::too_many_arguments)]
-// pub async fn preprocess<T>(
-//     creator: &T,
-//     executable: &Path,
-//     parsed_args: &ParsedArguments,
-//     cwd: &Path,
-//     env_vars: &[(OsString, OsString)],
-//     kind: CCompilerKind,
-//     rewrite_includes_only: bool,
-//     generate_dependencies: bool,
-//     extra_preprocessor_flags: &[OsString],
-// ) -> Result<PreprocessorOutput>
-// where
-//     T: CommandCreatorSync,
-// {
-//     let cmd = preprocess_cmd(
-//         creator.clone().new_command_sync(executable),
-//         parsed_args,
-//         cwd,
-//         env_vars,
-//         &kind,
-//         rewrite_includes_only,
-//         extra_preprocessor_flags,
-//     );
-
-//     let (cmd, depfile) = if generate_dependencies {
-//         generate_dependencies_with_preprocess_cmd(
-//             creator,
-//             executable,
-//             parsed_args,
-//             cwd,
-//             env_vars,
-//             kind,
-//             cmd,
-//         )
-//         .await
-//         .map(|(cmd, depfile)| (cmd, Some(depfile)))?
-//     } else {
-//         (cmd, None)
-//     };
-
-//     trace!("[{}]: preprocess: {cmd}", parsed_args.output_pretty());
-//     trace!("[{}]: depfile: {depfile:?}", parsed_args.output_pretty());
-
-//     let output = run_input_stream_output(cmd, 8 * 1024, None).await?.boxed();
-
-//     let dependencies = depfile.map(|depfile| {
-//         let cwd = cwd.to_owned();
-//         let input = parsed_args.input.clone();
-//         async move { parse_dependencies(cwd, input, &read_depfile(&depfile).await?) }.boxed()
-//     });
-
-//     Ok(PreprocessorOutput::Output(output, dependencies))
-// }
-
-pub async fn generate_dependencies<T>(
+pub async fn generate_dependencies<
+    T,
+    Cwd: AsRef<Path>,
+    Exe: AsRef<Path>,
+    Key: AsRef<OsStr>,
+    Var: AsRef<OsStr>,
+    Envs: Iterator<Item = (Key, Var)> + Clone,
+>(
     creator: &T,
-    executable: &Path,
+    executable: Exe,
     parsed_args: &ParsedArguments,
-    cwd: &Path,
-    env_vars: &[(OsString, OsString)],
+    cwd: Cwd,
+    env_vars: Envs,
     kind: CCompilerKind,
 ) -> Result<Vec<PathBuf>>
 where
     T: CommandCreatorSync,
 {
-    let write_user_dependencies = parsed_args
-        .dependency_args
-        .iter()
-        .any(|arg| arg.contains("-MMD") || arg.contains("--write-user-dependencies"));
+    let dependencies = generate_dependencies_with_compiler(
+        creator,
+        executable.as_ref(),
+        parsed_args,
+        cwd.as_ref(),
+        env_vars,
+        kind,
+    )
+    .await?;
 
-    // If `-MMD` (with or without `-MF <file>`), write that depfile out now. We
-    // need to return dependencies with system includes to compute the hash key
-    // but the user requested dependencies *without* system includes be written
-    // to `parsed_args.depfile`.
-    if write_user_dependencies && parsed_args.depfile.is_some() {
-        let dependency_args = std::iter::once(OsStr::new("-MM")).chain(
+    Ok(dependencies)
+}
+
+pub async fn generate_dependencies_with_compiler<
+    T,
+    Cwd: AsRef<Path>,
+    Exe: AsRef<Path>,
+    Key: AsRef<OsStr>,
+    Var: AsRef<OsStr>,
+    Envs: Iterator<Item = (Key, Var)> + Clone,
+>(
+    creator: &T,
+    executable: Exe,
+    parsed_args: &ParsedArguments,
+    cwd: Cwd,
+    env_vars: Envs,
+    kind: CCompilerKind,
+) -> Result<Vec<PathBuf>>
+where
+    T: CommandCreatorSync,
+{
+    let generate_user_dependencies = parsed_args.dependency_args.iter().any(|arg| {
+        arg.contains("-MMD")
+            || arg.contains("--write-user-dependencies")
+            || arg.contains("--generate-nonsystem-dependencies-with-compile")
+    });
+
+    let args_without_dependency_flags = std::iter::empty()
+        .chain(
+            // Set the langauge flag
             parsed_args
-                .dependency_args
-                .iter()
-                .filter(|arg| !arg.contains("-MMD") && !arg.contains("--write-user-dependencies"))
-                .map(|s| s.as_os_str()),
-        );
-
-        let cmd = generate_dependencies_cmd(
-            creator,
-            executable,
-            cwd,
-            env_vars,
+                .language
+                .as_compiler_str(kind.into())
+                .into_iter()
+                .flat_map(|lang| ["-x", lang])
+                .map(OsStr::new),
+        )
+        .chain(
             std::iter::empty()
-                .chain(
-                    if let Some(lang) = parsed_args.language.as_compiler_str(kind.into()) {
-                        vec!["-x".into(), lang.into()]
-                    } else {
-                        Vec::<OsString>::with_capacity(0)
-                    }
-                    .iter()
-                    .map(|s| s.as_os_str()),
-                )
-                .chain(parsed_args.preprocessor_args.iter().map(|s| s.as_os_str()))
-                .chain(parsed_args.arch_args.iter().map(|s| s.as_os_str()))
-                .chain(parsed_args.common_args.iter().map(|s| s.as_os_str()))
-                .chain(dependency_args)
-                .chain(
-                    if parsed_args.double_dash_input {
-                        vec!["--".into()]
-                    } else {
-                        Vec::<OsString>::with_capacity(0)
-                    }
-                    .iter()
-                    .map(|s| s.as_os_str()),
-                )
-                .chain(std::iter::once(parsed_args.input.as_os_str()))
-                .filter(|&arg| arg != parsed_args.compilation_flag),
-        );
+                .chain(parsed_args.preprocessor_args.iter())
+                .chain(parsed_args.arch_args.iter())
+                .chain(parsed_args.common_args.iter())
+                .map(|arg| arg.as_os_str()),
+        )
+        .filter(|&arg| arg != parsed_args.compilation_flag)
+        .collect::<Vec<_>>();
+
+    // If `-MMD -MF <file>`, write that depfile out now. We need to return
+    // dependencies with system includes to compute the hash key, but the
+    // user requested dependencies *without* system includes be written
+    // to `parsed_args.depfile`
+    if generate_user_dependencies && parsed_args.depfile.is_some() {
+        let args = args_without_dependency_flags
+            .clone()
+            .into_iter()
+            .chain(
+                std::iter::once(OsStr::new("-MM"))
+                    .chain(parsed_args.dependency_args.iter().map(|arg| {
+                        // Map all depflags to `-MM`
+                        if arg.contains("-M")
+                            || arg.contains("-MD")
+                            || arg.contains("-MMD")
+                            || arg.contains("--dependencies")
+                            || arg.contains("--write-dependencies")
+                            || arg.contains("--write-user-dependencies")
+                            || arg.contains("--generate-dependencies-with-compile")
+                            || arg.contains("--generate-nonsystem-dependencies-with-compile")
+                        {
+                            OsStr::new("-MM")
+                        } else {
+                            arg.as_os_str()
+                        }
+                    }))
+                    .unique(),
+            )
+            .chain(parsed_args.double_dash_input.then_some(OsStr::new("--")))
+            .chain(std::iter::once(parsed_args.input.as_os_str()));
+
+        let mut cmd = creator.clone().new_command_sync(executable.as_ref());
+
+        cmd.current_dir(cwd.as_ref())
+            .env_clear()
+            .envs(env_vars.clone());
+
+        for arg in args {
+            cmd.arg(arg);
+        }
 
         trace!(
             "[{}]: user dependencies: {cmd}",
@@ -1257,32 +1262,65 @@ where
         })?;
     }
 
-    let depfile = if let Some(depfile) = parsed_args
+    let depfile = parsed_args
         .depfile
         .as_deref()
-        // Don't write to the user's depfile if they did `-MMD`
-        .filter(|_| !write_user_dependencies)
-    {
-        // Generate dependencies to the file specified by `-MF`
-        Some(DepfilePath::Path(cwd.join(depfile)))
-    }
-    // c++20 modules don't support preprocessing with `-M`, only `-MD -MF`
-    else if parsed_args.cxx20_modules {
-        Some(DepfilePath::Temp(temppath()?))
-    } else {
-        // Generate dependencies to stdout
-        None
+        .filter(|_| !generate_user_dependencies);
+
+    let cmd = {
+        let args = args_without_dependency_flags
+            .into_iter()
+            .chain(
+                std::iter::once(OsStr::new("-M"))
+                    .chain(
+                        depfile
+                            .iter()
+                            .flat_map(|depfile| [OsStr::new("-MF"), depfile.as_os_str()]),
+                    )
+                    .chain(
+                        parsed_args
+                            .dependency_args
+                            .iter()
+                            // If this is generating the real dependency file,
+                            // pass all the user's other dependency flags.
+                            .filter(|_| depfile.is_some())
+                            .map(|arg| {
+                                // Map all depflags to `-M`
+                                if arg.contains("-MM")
+                                    || arg.contains("-MD")
+                                    || arg.contains("-MMD")
+                                    || arg.contains("--dependencies")
+                                    || arg.contains("--write-dependencies")
+                                    || arg.contains("--write-user-dependencies")
+                                    || arg.contains("--generate-dependencies-with-compile")
+                                    || arg
+                                        .contains("--generate-nonsystem-dependencies-with-compile")
+                                {
+                                    OsStr::new("-M")
+                                } else {
+                                    arg.as_os_str()
+                                }
+                            }),
+                    )
+                    .unique(),
+            )
+            .chain(parsed_args.double_dash_input.then_some(OsStr::new("--")))
+            .chain(std::iter::once(parsed_args.input.as_os_str()));
+
+        let mut cmd = creator.clone().new_command_sync(executable.as_ref());
+
+        cmd.current_dir(cwd.as_ref())
+            .env_clear()
+            .envs(env_vars.clone());
+
+        for arg in args {
+            cmd.arg(arg);
+        }
+
+        cmd
     };
 
-    let cmd = generate_all_dependencies_cmd(
-        creator,
-        executable,
-        parsed_args,
-        cwd,
-        env_vars,
-        &kind,
-        depfile.as_deref(),
-    );
+    trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
     let output = run_input_output(cmd, None).await.or_else(|err| {
         // nvc++ exits with an error even though it generated dependencies
@@ -1298,179 +1336,12 @@ where
 
     parse_dependencies(
         &parsed_args.input,
-        &if let Some(depfile) = depfile.as_deref() {
-            read_depfile(depfile).await?
+        &if let Some(depfile) = depfile {
+            read_depfile(cwd.as_ref().join(depfile)).await?
         } else {
             bytes_to_str(output.stdout)?
         },
     )
-}
-
-// async fn generate_dependencies_with_preprocess_cmd<T>(
-//     creator: &T,
-//     executable: &Path,
-//     parsed_args: &ParsedArguments,
-//     cwd: &Path,
-//     env_vars: &[(OsString, OsString)],
-//     kind: CCompilerKind,
-//     mut preprocess_command: T::Cmd,
-// ) -> Result<(T::Cmd, DepfilePath)>
-// where
-//     T: CommandCreatorSync,
-// {
-//     let generate_deps_with_system_headers = parsed_args
-//         .dependency_args
-//         .iter()
-//         .any(|arg| arg.contains("-MD") || arg.contains("--write-dependencies"));
-
-//     let generate_deps_without_system_headers = parsed_args
-//         .dependency_args
-//         .iter()
-//         .any(|arg| arg.contains("-MMD") || arg.contains("--write-user-dependencies"));
-
-//     let depfile = if let Some(depfile) = parsed_args
-//         .depfile
-//         .as_deref()
-//         .filter(|_| generate_deps_with_system_headers)
-//         .filter(|_| !generate_deps_without_system_headers)
-//     {
-//         // If `-MD -MF <file>`, write all dependencies to <file> while preprocessing.
-//         DepfilePath::Path(cwd.join(depfile))
-//     } else {
-//         let temp = temppath()?;
-
-//         if generate_deps_without_system_headers {
-//             // If `-MMD` (with or without `-MF <file>`), generate and write all dependencies to a tempfile immediately.
-//             // We need dependencies with system includes for preprocessor cache mode, but the user potentially requested
-//             // dependencies *without* system includes be written to `parsed_args.depfile`. Those will be generated by the
-//             // preprocessor command already, so write deps with system includes to a tempfile so we can read them later.
-//             run_input_output(
-//                 generate_dependencies_cmd(
-//                     creator,
-//                     executable,
-//                     parsed_args,
-//                     cwd,
-//                     env_vars,
-//                     &kind,
-//                     Some(&temp),
-//                 ),
-//                 None,
-//             )
-//             .await?;
-//         } else {
-//             // If only `-MD`, or missing/invalid depflags, write all dependencies to a tempfile while preprocessing.
-//             if !generate_deps_with_system_headers {
-//                 // Add missing `-MD` to preprocessor command
-//                 if let CCompilerKind::Gcc = kind {
-//                     let mut md = OsString::new();
-//                     md.push("-Wp,-MD,");
-//                     md.push(temp.as_os_str());
-//                     preprocess_command.arg(md);
-//                 } else {
-//                     preprocess_command.arg("-MD");
-//                 }
-//             }
-//             // Add `-MF <temp>` to preprocessor command
-//             if let CCompilerKind::Gcc = kind {
-//                 let mut mf = OsString::new();
-//                 mf.push("-Wp,-MF,");
-//                 mf.push(temp.as_os_str());
-//                 preprocess_command.arg(mf);
-//             } else {
-//                 preprocess_command.arg("-MF");
-//                 preprocess_command.arg(&temp);
-//             }
-//         }
-
-//         DepfilePath::Temp(temp)
-//     };
-
-//     Ok((preprocess_command, depfile))
-// }
-
-fn generate_all_dependencies_cmd<T>(
-    creator: &T,
-    executable: &Path,
-    parsed_args: &ParsedArguments,
-    cwd: &Path,
-    env_vars: &[(OsString, OsString)],
-    kind: &CCompilerKind,
-    depfile: Option<&Path>,
-) -> T::Cmd
-where
-    T: CommandCreatorSync,
-{
-    // Replace existing dependency options with flags to write all dependencies to stdout or `depfile`
-    let mut dependency_args = Vec::<OsString>::new();
-
-    dependency_args.push("-M".into());
-
-    if let Some(depfile) = depfile {
-        dependency_args.push("-MF".into());
-        dependency_args.push(depfile.into());
-    }
-
-    let dependency_args = dependency_args.iter().map(|s| s.as_os_str());
-
-    let cmd = generate_dependencies_cmd(
-        creator,
-        executable,
-        cwd,
-        env_vars,
-        // kind,
-        std::iter::empty()
-            .chain(
-                if let Some(lang) = parsed_args.language.as_compiler_str(kind.into()) {
-                    vec!["-x".into(), lang.into()]
-                } else {
-                    Vec::<OsString>::with_capacity(0)
-                }
-                .iter()
-                .map(|s| s.as_os_str()),
-            )
-            .chain(parsed_args.preprocessor_args.iter().map(|s| s.as_os_str()))
-            .chain(parsed_args.arch_args.iter().map(|s| s.as_os_str()))
-            .chain(parsed_args.common_args.iter().map(|s| s.as_os_str()))
-            .chain(dependency_args)
-            .chain(
-                if parsed_args.double_dash_input {
-                    vec!["--".into()]
-                } else {
-                    Vec::<OsString>::with_capacity(0)
-                }
-                .iter()
-                .map(|s| s.as_os_str()),
-            )
-            .chain(std::iter::once(parsed_args.input.as_os_str()))
-            .filter(|&arg| arg != parsed_args.compilation_flag),
-    );
-
-    trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
-
-    cmd
-}
-
-fn generate_dependencies_cmd<T, S: AsRef<OsStr>, I: Iterator<Item = S>>(
-    creator: &T,
-    executable: impl AsRef<Path>,
-    cwd: impl AsRef<Path>,
-    env_vars: &[(OsString, OsString)],
-    args: I,
-) -> T::Cmd
-where
-    T: CommandCreatorSync,
-{
-    let mut cmd = creator.clone().new_command_sync(executable.as_ref());
-
-    cmd.current_dir(cwd)
-        .env_clear()
-        .envs(env_vars.iter().map(|(k, v)| (k.as_os_str(), v.as_os_str())));
-
-    for arg in args {
-        cmd.arg(arg);
-    }
-
-    cmd
 }
 
 pub async fn read_depfile<'a, P: AsRef<Path>>(depfile: P) -> Result<std::borrow::Cow<'a, str>> {
@@ -1524,8 +1395,6 @@ pub fn parse_dependencies<P: AsRef<Path>, S: AsRef<str>>(
                 return None;
             }
             Some(path)
-            // Make relative paths absolute with respect to cwd
-            // Some(cwd.join(path))
         })
         .collect::<Vec<_>>();
 
@@ -1569,19 +1438,19 @@ pub fn generate_compile_commands(
     if parsed_args.language.needs_c_preprocessing() {
         // Only add dependency args for files that need preprocessing
         arguments.extend_from_slice(&parsed_args.dependency_args);
+
+        // Rewrite `-fdiagnostics-color[=auto]` to `fdiagnostics-color=always`,
+        // otherwise gcc disables colored output because stdout is not a tty.
+        // See: https://github.com/mozilla/sccache/pull/2758
+        if parsed_args.color_mode != ColorMode::Off {
+            arguments.push("-fdiagnostics-color=always".into());
+        }
     }
 
-    arguments.extend(vec!["-o".into(), output.into()]);
+    arguments.extend_from_slice(&["-o".into(), output.into()]);
 
     if !parsed_args.compilation_flag.is_empty() {
         arguments.push(parsed_args.compilation_flag.clone());
-    }
-
-    // Rewrite `-fdiagnostics-color[=auto]` to `fdiagnostics-color=always`,
-    // otherwise gcc disables colored output because stdout is not a tty.
-    // See: https://github.com/mozilla/sccache/pull/2758
-    if parsed_args.language.needs_c_preprocessing() && parsed_args.color_mode != ColorMode::Off {
-        arguments.push("-fdiagnostics-color=always".into());
     }
 
     if parsed_args.double_dash_input {
@@ -1605,15 +1474,12 @@ pub fn generate_compile_commands(
     } else {
         (|| {
             use crate::util::path_to_str;
-
-            let command = dist::CompileCommand {
+            Some(dist::CompileCommand {
                 arguments: dist::osstrings_to_strings(&arguments)?,
                 cwd: path_to_str(cwd).ok().map(Into::into)?,
                 env_vars: dist::osstring_tuples_to_strings(env_vars)?,
                 executable: path_to_str(executable).ok().map(Into::into)?,
-            };
-
-            Some(command)
+            })
         })()
     };
 
@@ -1692,7 +1558,7 @@ impl Iterator for ExpandIncludeFile<'_> {
             //
             // [1]: https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html#Overall-Options
             let mut contents = String::new();
-            let res = File::open(&file).and_then(|mut f| f.read_to_string(&mut contents));
+            let res = fs::File::open(&file).and_then(|mut f| f.read_to_string(&mut contents));
             if let Err(e) = res {
                 debug!("failed to read @-file `{}`: {}", file.display(), e);
                 return Some(arg);
@@ -1768,7 +1634,6 @@ fn split_gnu_response_file_args(contents: &str) -> Vec<OsString> {
 
 #[cfg(test)]
 mod test {
-    use fs::File;
     use itertools::assert_equal;
     use std::io::Write;
 
@@ -3072,7 +2937,7 @@ mod test {
     #[test]
     fn at_signs() {
         let td = crate::util::temp_dir().unwrap();
-        File::create(td.path().join("foo"))
+        fs::File::create(td.path().join("foo"))
             .unwrap()
             .write_all(
                 b"\
@@ -3162,7 +3027,7 @@ mod test {
             .prefix("sccache")
             .tempdir()
             .unwrap();
-        File::create(td.path().join("args"))
+        fs::File::create(td.path().join("args"))
             .unwrap()
             .write_all(b"-c foo.c -o foo.o \"-DGREETING=hello world\"\n")
             .unwrap();
@@ -3171,7 +3036,7 @@ mod test {
             input,
             language,
             outputs,
-            common_args,
+            preprocessor_args,
             ..
         } = match parse_arguments_(vec![arg], false) {
             CompilerArguments::Ok(args) => args,
@@ -3189,7 +3054,7 @@ mod test {
                 }
             )
         );
-        assert_eq!(ovec!["-DGREETING=hello world"], common_args);
+        assert_eq!(ovec!["-DGREETING=hello world"], preprocessor_args);
     }
 
     #[test]
@@ -3346,10 +3211,10 @@ mod test {
         let expected_args = ovec![
             "-x",
             "c",
+            "-fdiagnostics-color=always",
             "-o",
             "foo.o",
             "-c",
-            "-fdiagnostics-color=always",
             "--",
             "foo.c"
         ];
