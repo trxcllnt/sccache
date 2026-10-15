@@ -213,7 +213,7 @@ divan = { package = "codspeed-divan-compat", version = "4" }
 filetime = "0.2"
 pastey = "0.2"
 predicates = "=3.1.0"
-serial_test = "4"
+serial_test = "3.1"
 temp-env = "0.3.6"
 test-case = "3.3.1"
 thirtyfour = "0.36"
