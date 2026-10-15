@@ -501,7 +501,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("sdl-", PassThrough),
     msvc_flag!("showIncludes", ShowIncludes),
     msvc_take_arg!("source-charset:", OsString, Concatenated, PassThroughWithSuffix),
-    msvc_take_arg!("sourceDependencies", OsString, Concatenated, DepFile),
+    msvc_take_arg!("sourceDependencies", OsString, CanBeSeparated, DepFile),
     msvc_take_arg!("std:", OsString, Concatenated, PassThroughWithSuffix),
     msvc_take_arg!("stdIfcDir", PathBuf, Separated, TooHardPath),
     msvc_flag!("u", PassThrough),
@@ -564,6 +564,7 @@ pub fn parse_arguments(
     let mut multiple_input_files = Vec::new();
     let mut too_hard_if_fd_is_present = None;
     let mut language = None;
+    let mut next_raw_arg_is_directives_depfile = false;
 
     // Custom iterator to expand `@` arguments which stand for reading a file
     // and interpreting it as a list of more arguments.
@@ -613,11 +614,18 @@ pub fn parse_arguments(
             Some(DepFile(p)) => {
                 // Handle /sourceDependencies:directives
                 if let Some(p) = p.strip_prefix(":directives") {
-                    directives_depfile = Some(PathBuf::from(p));
+                    if p.is_empty() {
+                        next_raw_arg_is_directives_depfile = true;
+                    } else {
+                        next_raw_arg_is_directives_depfile = false;
+                        directives_depfile = Some(PathBuf::from(p));
+                        dependency_args.push("/sourceDependencies:directives".into());
+                        dependency_args.push(p.to_owned());
+                    }
                 } else {
                     depfile = Some(PathBuf::from(p));
+                    dependency_args.extend(arg.iter_os_strings());
                 }
-                dependency_args.extend(arg.iter_os_strings());
             }
             Some(ProgramDatabase(p)) => pdb = Some(p.clone()),
             Some(DebugInfo) => debug_info = true,
@@ -640,12 +648,19 @@ pub fn parse_arguments(
                         }
                     }
                     Argument::Raw(ref val) => {
-                        if input_arg.is_some() {
-                            // Can't cache compilations with multiple inputs.
-                            multiple_input = true;
-                            multiple_input_files.push(val.clone());
+                        if next_raw_arg_is_directives_depfile {
+                            next_raw_arg_is_directives_depfile = false;
+                            directives_depfile = Some(PathBuf::from(val));
+                            dependency_args.push("/sourceDependencies:directives".into());
+                            dependency_args.push(val.clone());
+                        } else {
+                            if input_arg.is_some() {
+                                // Can't cache compilations with multiple inputs.
+                                multiple_input = true;
+                                multiple_input_files.push(val.clone());
+                            }
+                            input_arg = Some(val.clone());
                         }
-                        input_arg = Some(val.clone());
                     }
                     Argument::UnknownFlag(ref flag) => common_args.push(flag.clone()),
                     _ => unreachable!(),
@@ -1866,8 +1881,10 @@ mod test {
                 "-c",
                 "foo.c",
                 "/Fofoo.obj",
-                "/sourceDependenciesfoo.obj.json",
-                "/sourceDependencies:directivesfoo_modules.obj.json"
+                "/sourceDependencies",
+                "foo.obj.json",
+                "/sourceDependencies:directives",
+                "foo_modules.obj.json"
             ],
             ovec![
                 "-c",
