@@ -1242,11 +1242,6 @@ where
             .chain(
                 std::iter::once(OsStr::new("-M"))
                     .chain(
-                        depfile
-                            .iter()
-                            .flat_map(|depfile| [OsStr::new("-MF"), depfile.as_os_str()]),
-                    )
-                    .chain(
                         parsed_args
                             .dependency_args
                             .iter()
