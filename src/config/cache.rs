@@ -513,6 +513,7 @@ impl<'de> de::Visitor<'de> for AzureVisitor {
         let mut rw_mode = None;
 
         let to_ignore = [
+            "preprocessor",
             "enabled",
             "container",
             "key_prefix",
@@ -748,6 +749,7 @@ impl<'de> de::Visitor<'de> for GCSVisitor {
         let mut rw_mode = None;
 
         let to_ignore = [
+            "preprocessor",
             "enabled",
             "bucket",
             "key_prefix",
@@ -1072,6 +1074,7 @@ impl<'de> de::Visitor<'de> for S3Visitor {
         let mut rw_mode = None;
 
         let to_ignore = [
+            "preprocessor",
             "enabled",
             "bucket",
             "region",
