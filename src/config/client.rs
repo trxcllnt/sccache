@@ -20,7 +20,7 @@ pub mod dist {
 use crate::{
     config::{
         Loadable, Valid,
-        cache::{Azure, AzureAuth, Cache, Caches, MultiLevel},
+        cache::{Azure, AzureAuth, Cache, Caches},
         utils::{deserialize_basedirs, deserialize_bool, serialize_basedirs},
     },
     errors::*,
@@ -42,10 +42,6 @@ pub struct Config {
     /// Object cache configs
     #[serde(default)]
     pub cache: Caches,
-
-    /// Preprocessor cache configs
-    #[serde(default)]
-    pub preprocessor: PreprocessorCaches,
 
     /// Base directory (or directories) to strip from paths for cache key computation.
     /// Similar to ccache's CCACHE_BASEDIR.
@@ -101,27 +97,6 @@ impl Config {
             }
         }
 
-        if self.preprocessor.cache.configs.is_empty()
-            && self.cache.configs.iter().any(|(_, cache)| match cache {
-                Cache::Disk(crate::config::cache::Disk { enabled, .. }) => *enabled,
-                _ => false,
-            })
-        {
-            self.preprocessor.cache.configs = self
-                .cache
-                .configs
-                .iter()
-                .filter_map(|(name, cache)| match cache {
-                    Cache::Disk(..) => Some((name.clone(), cache.clone())),
-                    _ => None,
-                })
-                .collect();
-
-            self.preprocessor.cache.multilevel.chain = Some(MultiLevel::chain_from_configs(
-                &self.preprocessor.cache.configs,
-            ));
-        }
-
         Ok(self)
     }
 }
@@ -149,30 +124,11 @@ impl Valid for Config {
             }
         }
 
-        for (name, orig_cache) in orig.preprocessor.cache.configs.iter() {
-            if !self.preprocessor.cache.configs.contains_key(name) {
-                self.preprocessor
-                    .cache
-                    .configs
-                    .insert(name.clone(), orig_cache.clone());
-            }
-        }
-
         self.cache.validate_storage_levels(
             if self.cache.multilevel.chain.as_deref() == orig.cache.multilevel.chain.as_deref() {
                 "cache.multilevel.chain"
             } else {
                 "SCCACHE_CACHE_MULTILEVEL_CHAIN"
-            },
-        )?;
-
-        self.preprocessor.cache.validate_storage_levels(
-            if self.preprocessor.cache.multilevel.chain.as_deref()
-                == orig.preprocessor.cache.multilevel.chain.as_deref()
-            {
-                "preprocessor.cache.multilevel.chain"
-            } else {
-                "SCCACHE_PREPROCESSOR_CACHE_MULTILEVEL_CHAIN"
             },
         )?;
 
@@ -183,20 +139,12 @@ impl Valid for Config {
         self.cache
             .validate_storage_levels("cache.multilevel.chain")?;
 
-        self.preprocessor
-            .cache
-            .validate_storage_levels("preprocessor.cache.multilevel.chain")?;
-
         self.ensure_default_disk_cache()
     }
 
     fn validate_vars(self) -> Result<Self> {
         self.cache
             .validate_storage_levels("SCCACHE_CACHE_MULTILEVEL_CHAIN")?;
-
-        self.preprocessor
-            .cache
-            .validate_storage_levels("SCCACHE_PREPROCESSOR_CACHE_MULTILEVEL_CHAIN")?;
 
         self.ensure_default_disk_cache()
     }
@@ -230,25 +178,6 @@ impl Loadable<Self> for Config {
             }
             _ => true,
         });
-
-        conf.preprocessor
-            .cache
-            .configs
-            .retain(|name, cache| match cache {
-                Cache::Azure(Azure { auth, .. }) => {
-                    if matches!(auth, AzureAuth::None) {
-                        if let Some(chain) = conf.cache.multilevel.chain.as_mut()
-                            && let Ok(idx) = chain.binary_search(name)
-                        {
-                            chain.remove(idx);
-                        }
-                        false
-                    } else {
-                        true
-                    }
-                }
-                _ => true,
-            });
 
         Ok(conf)
     }
@@ -294,32 +223,6 @@ impl Loadable<Self> for Config {
             "MULTILEVEL_",
         ];
 
-        let mut cache_as_preprocessor_cache = BTreeSet::new();
-        cache_as_preprocessor_cache.insert("DISK".to_owned());
-
-        let vars = vars
-            .into_iter()
-            .map(|(key, val)| -> Result<(S, S)> {
-                let key_str = os_str_to_str(key.as_ref())?;
-
-                // Only take vars that start with `SCCACHE_`
-                if let Some(key) = key_str.strip_prefix(&prefix_)
-                    && let Some(key) = key.strip_suffix("USE_PREPROCESSOR_CACHE_MODE")
-                    && let Some(kind) = caches_.iter().find_map(|kind_| {
-                        if key.starts_with(kind_) {
-                            kind_.strip_suffix("_")
-                        } else {
-                            None
-                        }
-                    })
-                {
-                    cache_as_preprocessor_cache.insert(kind.to_owned());
-                }
-
-                Ok((key, val))
-            })
-            .try_collect::<_, Vec<_>, _>()?;
-
         let vars = vars
             .into_iter()
             .map(|(key, val)| -> Result<Vec<(String, String)>> {
@@ -336,8 +239,6 @@ impl Loadable<Self> for Config {
                 let key = match key {
                     // SCCACHE_DIR -> SCCACHE_CACHE_DISK_DIR
                     "DIR" => "DISK_DIR",
-                    // SCCACHE_DIRECT -> SCCACHE_PREPROCESSOR_CACHE_DISK_ENABLED
-                    "DIRECT" => "PREPROCESSOR_CACHE_DISK_ENABLED",
                     // SCCACHE_LOCAL_RW_MODE -> SCCACHE_CACHE_DISK_RW_MODE
                     "LOCAL_RW_MODE" => "DISK_RW_MODE",
                     // SCCACHE_CACHE_SIZE -> SCCACHE_CACHE_DISK_SIZE
@@ -398,13 +299,7 @@ impl Loadable<Self> for Config {
                     return Ok(vec![(key.into(), val.into_owned())]);
                 }
 
-                if matches!(
-                    key,
-                    "CACHE_READ_TIMEOUT"
-                        | "CACHE_WRITE_TIMEOUT"
-                        | "PREPROCESSOR_CACHE_READ_TIMEOUT"
-                        | "PREPROCESSOR_CACHE_WRITE_TIMEOUT"
-                ) {
+                if matches!(key, "CACHE_READ_TIMEOUT" | "CACHE_WRITE_TIMEOUT") {
                     // SCCACHE_CACHE_READ_TIMEOUT -> SCCACHE_CACHE_READ_TIMEOUT_SECS
                     // SCCACHE_CACHE_WRITE_TIMEOUT -> SCCACHE_CACHE_WRITE_TIMEOUT_SECS
                     let key = format!("{key}_SECS");
@@ -418,34 +313,9 @@ impl Loadable<Self> for Config {
                         None
                     }
                 }) {
-                    if key == "USE_PREPROCESSOR_CACHE_MODE" {
-                        // SCCACHE_S3_USE_PREPROCESSOR_CACHE_MODE -> SCCACHE_PREPROCESSOR_CACHE_S3_ENABLED
-                        let key = format!("PREPROCESSOR_CACHE_{kind}_ENABLED");
-                        return Ok(vec![(key, val.into_owned())]);
-                    }
-
-                    if key == "PREPROCESSOR_CACHE_KEY_PREFIX" {
-                        // SCCACHE_S3_PREPROCESSOR_CACHE_KEY_PREFIX -> SCCACHE_PREPROCESSOR_CACHE_S3_KEY_PREFIX
-                        let key = format!("PREPROCESSOR_CACHE_{kind}_KEY_PREFIX");
-                        return Ok(vec![(key, val.into_owned())]);
-                    }
-
                     if kind == "AZURE" && key == "BLOB_CONTAINER" {
                         // SCCACHE_AZURE_BLOB_CONTAINER -> SCCACHE_AZURE_CONTAINER
                         key = "CONTAINER";
-                    }
-
-                    if kind == "DISK" || cache_as_preprocessor_cache.contains(kind) {
-                        // If SCCACHE_S3_USE_PREPROCESSOR_CACHE_MODE = true, duplicate the cache properties as
-                        // if they were also defined for the preprocessor cache:
-                        // SCCACHE_CACHE_S3_BUCKET -> "bucket"
-                        // SCCACHE_PREPROCESSOR_CACHE_S3_BUCKET -> "bucket"
-                        let key1 = format!("CACHE_{kind}_{key}");
-                        let key2 = format!("PREPROCESSOR_CACHE_{kind}_{key}");
-                        return Ok(vec![
-                            (key1, val.clone().into_owned()),
-                            (key2, val.clone().into_owned()),
-                        ]);
                     }
 
                     // SCCACHE_AZURE_CONNECTION_STRING -> SCCACHE_CACHE_AZURE_CONNECTION_STRING
@@ -665,11 +535,6 @@ impl TryFrom<Vec<PathBuf>> for Basedirs {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
-pub struct PreprocessorCaches {
-    pub cache: Caches,
-}
-
 static CACHED_CONFIG_PATH: LazyLock<PathBuf> = LazyLock::new(CachedConfig::file_config_path);
 static CACHED_CONFIG: Mutex<Option<CachedFileConfig>> = Mutex::new(None);
 
@@ -820,27 +685,6 @@ mod test {
                 Disk::default().into(),
             ]
             .into(),
-            preprocessor: PreprocessorCaches {
-                cache: vec![
-                    Disk::default().into(),
-                    S3::from_bucket("s3").into(),
-                    Redis::from_url("redis://redis:1234").into(),
-                    Memcached::from_url("memcached://memcached:1234").into(),
-                    GCS::from_bucket("gcs").into(),
-                    GHA::from_version("").into(),
-                    Azure {
-                        auth: AzureAuth::SharedKey {
-                            connection_string: "connection-string".into(),
-                        },
-                        ..Azure::from_container("azure")
-                    }
-                    .into(),
-                    Webdav::from_endpoint("http://webdav:1234").into(),
-                    OSS::from_bucket("oss").into(),
-                    COS::from_bucket("cos").into(),
-                ]
-                .into(),
-            },
             dist: dist::Config {
                 auth: dist::Auth::Token {
                     token: "hello-world".into(),
@@ -877,11 +721,6 @@ mod test {
         config.cache.rate_limit.on_error_count = Some(5);
         config.cache.rate_limit.on_error_window_size_secs = Some(5);
 
-        config.preprocessor.cache.read_timeout_secs = 120;
-        config.preprocessor.cache.write_timeout_secs = Some(300);
-        config.preprocessor.cache.skip_check = false;
-        config.preprocessor.cache.multilevel.write_error_policy = WriteErrorPolicy::Ignore;
-
         let vars = std::iter::empty()
             .chain([
                 ("SCCACHE_BASEDIRS", basedirs.join(dirs_delim).as_str()),
@@ -890,22 +729,11 @@ mod test {
                 ("SCCACHE_CACHE_WRITE_TIMEOUT_SECS", "300"),
                 ("SCCACHE_CACHE_RATE_LIMIT_ON_ERROR_COUNT", "5"),
                 ("SCCACHE_CACHE_RATE_LIMIT_ON_ERROR_WINDOW_SIZE_SECS", "5"),
-                ("SCCACHE_PREPROCESSOR_CACHE_READ_TIMEOUT", "120"),
-                ("SCCACHE_PREPROCESSOR_CACHE_WRITE_TIMEOUT", "300"),
                 (
                     "SCCACHE_MULTILEVEL_CHAIN",
                     " cos, oss , webdav,azure,gha,gcs,memcached,redis,s3 ,disk",
                 ),
                 ("SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY", "all"),
-                (
-                    "SCCACHE_PREPROCESSOR_CACHE_MULTILEVEL_CHAIN",
-                    " disk ,   s3, redis, memcached , gcs,gha,azure, webdav,oss, cos",
-                ),
-                (
-                    "SCCACHE_PREPROCESSOR_CACHE_MULTILEVEL_WRITE_ERROR_POLICY",
-                    "ignore",
-                ),
-                ("SCCACHE_DISK_USE_PREPROCESSOR_CACHE_MODE", "true"),
             ])
             .chain(config.cache.configs.values().flat_map(|cache| match cache {
                 Cache::Disk(c) => vec![("SCCACHE_DIR", c.dir.to_str().unwrap())],
@@ -934,60 +762,6 @@ mod test {
                 Cache::COS(c) => vec![("SCCACHE_COS_BUCKET", c.bucket.as_str())],
                 _ => vec![],
             }))
-            .chain(
-                config
-                    .preprocessor
-                    .cache
-                    .configs
-                    .values()
-                    .flat_map(|cache| match cache {
-                        Cache::Disk(c) => vec![(
-                            "SCCACHE_PREPROCESSOR_CACHE_DISK_DIR",
-                            c.dir.to_str().unwrap(),
-                        )],
-                        Cache::S3(c) => {
-                            vec![("SCCACHE_PREPROCESSOR_CACHE_S3_BUCKET", c.bucket.as_str())]
-                        }
-                        Cache::Redis(c) => vec![(
-                            "SCCACHE_PREPROCESSOR_CACHE_REDIS_URL",
-                            c.url.as_deref().unwrap(),
-                        )],
-                        Cache::Memcached(c) => {
-                            vec![("SCCACHE_PREPROCESSOR_CACHE_MEMCACHED_URL", c.url.as_str())]
-                        }
-                        Cache::GCS(c) => {
-                            vec![("SCCACHE_PREPROCESSOR_CACHE_GCS_BUCKET", c.bucket.as_str())]
-                        }
-                        Cache::GHA(_) => vec![("SCCACHE_PREPROCESSOR_CACHE_GHA_ENABLED", "true")],
-                        Cache::Azure(Azure {
-                            container,
-                            auth: AzureAuth::SharedKey { connection_string },
-                            ..
-                        }) => {
-                            vec![
-                                (
-                                    "SCCACHE_PREPROCESSOR_CACHE_AZURE_CONTAINER",
-                                    container.as_str(),
-                                ),
-                                (
-                                    "SCCACHE_PREPROCESSOR_CACHE_AZURE_CONNECTION_STRING",
-                                    connection_string.as_str(),
-                                ),
-                            ]
-                        }
-                        Cache::Webdav(c) => vec![(
-                            "SCCACHE_PREPROCESSOR_CACHE_WEBDAV_ENDPOINT",
-                            c.endpoint.as_str(),
-                        )],
-                        Cache::OSS(c) => {
-                            vec![("SCCACHE_PREPROCESSOR_CACHE_OSS_BUCKET", c.bucket.as_str())]
-                        }
-                        Cache::COS(c) => {
-                            vec![("SCCACHE_PREPROCESSOR_CACHE_COS_BUCKET", c.bucket.as_str())]
-                        }
-                        _ => vec![],
-                    }),
-            )
             .chain([
                 ("SCCACHE_DIST_AUTH_TYPE", "token"),
                 ("SCCACHE_DIST_AUTH_TOKEN", "hello-world"),
@@ -997,17 +771,6 @@ mod test {
                 ),
                 (
                     "SCCACHE_CACHE_MULTILEVEL_CHAIN",
-                    config
-                        .cache
-                        .multilevel
-                        .chain
-                        .as_deref()
-                        .map(|chain| chain.join(","))
-                        .unwrap_or_default()
-                        .as_str(),
-                ),
-                (
-                    "SCCACHE_PREPROCESSOR_CACHE_MULTILEVEL_CHAIN",
                     config
                         .cache
                         .multilevel
@@ -1049,26 +812,6 @@ mod test {
             env_conf.cache.write_timeout_secs
         );
         assert_eq!(config.cache.skip_check, env_conf.cache.skip_check);
-        assert_eq!(
-            config.preprocessor.cache.configs,
-            env_conf.preprocessor.cache.configs
-        );
-        assert_eq!(
-            config.preprocessor.cache.multilevel,
-            env_conf.preprocessor.cache.multilevel
-        );
-        assert_eq!(
-            config.preprocessor.cache.read_timeout_secs,
-            env_conf.preprocessor.cache.read_timeout_secs
-        );
-        assert_eq!(
-            config.preprocessor.cache.write_timeout_secs,
-            env_conf.preprocessor.cache.write_timeout_secs
-        );
-        assert_eq!(
-            config.preprocessor.cache.skip_check,
-            env_conf.preprocessor.cache.skip_check
-        );
         assert_eq!(config.dist, env_conf.dist);
         assert_eq!(
             config.server_startup_timeout_ms,
@@ -1317,18 +1060,6 @@ mod test {
                     configs: cache_configs,
                     ..Default::default()
                 },
-                preprocessor: PreprocessorCaches {
-                    cache: vec![
-                        Disk {
-                            dir: PathBuf::from("/tmp/.cache/sccache"),
-                            size: 7 * 1024 * 1024 * 1024,
-                            rw_mode: CacheMode::ReadWrite,
-                            ..Default::default()
-                        }
-                        .into()
-                    ]
-                    .into(),
-                },
                 dist: dist::Config {
                     auth: dist::Auth::Token {
                         token: "secrettoken".into()
@@ -1381,17 +1112,6 @@ mod test {
                 .into(),
             ]
             .into(),
-            preprocessor: PreprocessorCaches {
-                cache: vec![
-                    Redis {
-                        ttl: 100,
-                        key_prefix: "key_prefix".into(),
-                        ..Redis::from_url("redis_url")
-                    }
-                    .into(),
-                ]
-                .into(),
-            },
             dist: dist::Config {
                 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
                 url: Some(HTTPUrl::from_str("http://scheduler.url")?),
@@ -1422,13 +1142,10 @@ mod test {
                 .map(Into::into)
                 .collect(),
         );
-        config.preprocessor.cache.read_timeout_secs = 100;
-        config.preprocessor.cache.write_timeout_secs = Some(100);
 
         let env_conf = Config::from_vars([
             // SCCACHE_MULTILEVEL_CHAIN -> SCCACHE_CACHE_MULTILEVEL_CHAIN
             ("SCCACHE_MULTILEVEL_CHAIN", "gcs,memcached,redis"),
-            ("SCCACHE_PREPROCESSOR_CACHE_MULTILEVEL_CHAIN", "redis"),
             // SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY -> SCCACHE_CACHE_MULTILEVEL_WRITE_ERROR_POLICY
             ("SCCACHE_MULTILEVEL_WRITE_POLICY", "ALL"),
             // SCCACHE_SKIP_CACHE_CHECK -> SCCACHE_CACHE_SKIP_CHECK
@@ -1437,10 +1154,6 @@ mod test {
             ("SCCACHE_CACHE_READ_TIMEOUT", "100"),
             // SCCACHE_CACHE_WRITE_TIMEOUT -> SCCACHE_CACHE_WRITE_TIMEOUT_SECS
             ("SCCACHE_CACHE_WRITE_TIMEOUT", "100"),
-            // SCCACHE_PREPROCESSOR_CACHE_READ_TIMEOUT -> SCCACHE_PREPROCESSOR_CACHE_READ_TIMEOUT_SECS
-            ("SCCACHE_PREPROCESSOR_CACHE_READ_TIMEOUT", "100"),
-            // SCCACHE_PREPROCESSOR_CACHE_WRITE_TIMEOUT -> SCCACHE_PREPROCESSOR_CACHE_WRITE_TIMEOUT_SECS
-            ("SCCACHE_PREPROCESSOR_CACHE_WRITE_TIMEOUT", "100"),
             ("SCCACHE_GCS_BUCKET", "gcs_bucket"),
             // SCCACHE_GCS_CRED_PATH -> SCCACHE_GCS_KEY_PATH
             ("SCCACHE_GCS_CRED_PATH", "gcs_cred_path"),
@@ -1452,10 +1165,6 @@ mod test {
             ("SCCACHE_REDIS", "redis_url"),
             // SCCACHE_REDIS_EXPIRATION -> SCCACHE_CACHE_REDIS_TTL
             ("SCCACHE_REDIS_EXPIRATION", "100"),
-            // SCCACHE_REDIS_USE_PREPROCESSOR_CACHE_MODE -> SCCACHE_PREPROCESSOR_CACHE_REDIS_ENABLED
-            ("SCCACHE_REDIS_USE_PREPROCESSOR_CACHE_MODE", "true"),
-            // SCCACHE_REDIS_PREPROCESSOR_CACHE_KEY_PREFIX -> SCCACHE_PREPROCESSOR_CACHE_REDIS_KEY_PREFIX
-            ("SCCACHE_REDIS_PREPROCESSOR_CACHE_KEY_PREFIX", "key_prefix"),
             // SCCACHE_DIST_SCHEDULER_URL -> SCCACHE_DIST_URL
             ("SCCACHE_DIST_SCHEDULER_URL", "http://scheduler.url"),
             // SCCACHE_DIST_CONNECT_TIMEOUT -> SCCACHE_DIST_NET_CONNECT_TIMEOUT
@@ -1500,17 +1209,6 @@ mod test {
                 .into(),
             ]
             .into(),
-            preprocessor: PreprocessorCaches {
-                cache: vec![
-                    Redis {
-                        ttl: 100,
-                        key_prefix: "key_prefix".into(),
-                        ..Redis::from_url("redis_url")
-                    }
-                    .into(),
-                ]
-                .into(),
-            },
             dist: dist::Config {
                 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
                 url: Some(HTTPUrl::from_str("http://scheduler.url")?),
@@ -1541,9 +1239,6 @@ mod test {
                 .map(Into::into)
                 .collect(),
         );
-
-        config.preprocessor.cache.read_timeout_secs = 100;
-        config.preprocessor.cache.write_timeout_secs = Some(100);
 
         let file_conf = Config::from_toml(
             r#"
@@ -1702,50 +1397,8 @@ mod test {
         };
 
         merged_conf.cache.multilevel = env_conf.cache.multilevel.clone();
-        merged_conf.preprocessor.cache = vec![
-            Disk {
-                dir: "/env-cache".into(),
-                rw_mode: CacheMode::ReadWrite,
-                ..Default::default()
-            }
-            .into(),
-        ]
-        .into();
 
         assert_eq!((file_conf + env_conf)?, merged_conf);
-
-        Ok(())
-    }
-
-    #[test]
-    fn disk_cache_enables_preprocessor_cache() -> Result<()> {
-        drop(env_logger::try_init());
-
-        let config = Config::from_vars([("SCCACHE_DIR", "/cache/sccache")])?;
-
-        assert_eq!(
-            config.cache,
-            vec![
-                Disk {
-                    dir: "/cache/sccache".into(),
-                    ..Disk::default()
-                }
-                .into()
-            ]
-            .into()
-        );
-
-        assert_eq!(
-            config.preprocessor.cache,
-            vec![
-                Disk {
-                    dir: "/cache/sccache".into(),
-                    ..Disk::default()
-                }
-                .into()
-            ]
-            .into()
-        );
 
         Ok(())
     }
@@ -1944,16 +1597,6 @@ mod test {
                     .into()
                 ]
                 .into(),
-                preprocessor: PreprocessorCaches {
-                    cache: vec![
-                        Disk {
-                            size: 7 * 1024 * 1024 * 1024,
-                            ..Default::default()
-                        }
-                        .into()
-                    ]
-                    .into()
-                },
                 dist: dist::Config {
                     toolchain_cache_size: 5 * 1024 * 1024 * 1024,
                     ..Default::default()
@@ -2551,8 +2194,6 @@ mod test {
                 ("SCCACHE_S3_KEY_PREFIX", "prefix"),
                 ("SCCACHE_S3_NO_CREDENTIALS", "0"),
                 ("SCCACHE_S3_RW_MODE", "ReAd_ONly"),
-                ("SCCACHE_S3_USE_PREPROCESSOR_CACHE_MODE", "true"),
-                ("SCCACHE_S3_PREPROCESSOR_CACHE_KEY_PREFIX", "preprocessor"),
             ])
             .and_then(|config| config.validate_vars())?;
 
@@ -2566,25 +2207,11 @@ mod test {
                             key_prefix: "prefix".into(),
                             no_credentials: false,
                             rw_mode: CacheMode::ReadOnly,
-                            // preprocessor_cache: None,
                             ..S3::from_bucket("my-bucket")
                         }
                         .into()
                     ]
                     .into(),
-                    preprocessor: PreprocessorCaches {
-                        cache: vec![
-                            S3 {
-                                region: Some("us-east-2".into()),
-                                key_prefix: "preprocessor".into(),
-                                no_credentials: false,
-                                rw_mode: CacheMode::ReadOnly,
-                                ..S3::from_bucket("my-bucket")
-                            }
-                            .into()
-                        ]
-                        .into()
-                    },
                     ..Default::default()
                 }
             );
@@ -3049,16 +2676,6 @@ mod test {
                         .into()
                     ]
                     .into(),
-                    preprocessor: PreprocessorCaches {
-                        cache: vec![
-                            Disk {
-                                dir: "/tmp/disk".into(),
-                                ..Default::default()
-                            }
-                            .into()
-                        ]
-                        .into(),
-                    },
                     ..Default::default()
                 }
             );
@@ -3100,17 +2717,6 @@ mod test {
                         .into()
                     ]
                     .into(),
-                    preprocessor: PreprocessorCaches {
-                        cache: vec![
-                            Disk {
-                                dir: "/tmp/disk".into(),
-                                size: 1024,
-                                ..Default::default()
-                            }
-                            .into(),
-                        ]
-                        .into()
-                    },
                     ..Default::default()
                 }
             );
@@ -3191,26 +2797,6 @@ mod test {
 
             assert!(err_str.contains(
                 r#"'unknown_cache' cache not configured, but specified in SCCACHE_CACHE_MULTILEVEL_CHAIN: ["unknown_cache"]"#
-            ));
-            Ok(())
-        }
-
-        #[test]
-        fn invalid_preprocessor_cache_level_from_env() -> Result<()> {
-            drop(env_logger::try_init());
-
-            let err_str = Config::from_vars([(
-                "SCCACHE_PREPROCESSOR_CACHE_MULTILEVEL_CHAIN",
-                "unknown_cache",
-            )])
-            .and_then(|conf| conf.validate_vars())
-            .unwrap_err()
-            .to_string();
-
-            eprintln!("{err_str}");
-
-            assert!(err_str.contains(
-                r#"'unknown_cache' cache not configured, but specified in SCCACHE_PREPROCESSOR_CACHE_MULTILEVEL_CHAIN: ["unknown_cache"]"#
             ));
             Ok(())
         }

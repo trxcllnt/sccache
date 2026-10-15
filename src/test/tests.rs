@@ -20,7 +20,7 @@ use crate::{
     jobserver::Client,
     mock_command::*,
     server::{DistClientContainer, SccacheServer, ServerMessage},
-    test::{mock_storage::MockStorage, utils::*},
+    test::utils::*,
 };
 use fs::File;
 use fs_err as fs;
@@ -81,7 +81,6 @@ where
             CacheMode::ReadWrite,
             vec![],
         ));
-        let preprocessor_storage = Arc::new(MockStorage::new(None, false));
 
         let client = Client::new();
         let srv = SccacheServer::new(
@@ -90,7 +89,6 @@ where
             client,
             dist_client,
             compilations_storage.clone(),
-            preprocessor_storage.clone(),
             Duration::from_secs(60),
             None,
         )

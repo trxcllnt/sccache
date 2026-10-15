@@ -11,7 +11,7 @@
 // limitations under the License.
 
 use crate::{
-    cache::{GetPathResult, StorageKind, cache::Storage, cache_io::Cache},
+    cache::{GetPathResult, cache::Storage, cache_io::Cache},
     client::ServerConnection,
     config::CacheMode,
     errors::*,
@@ -37,26 +37,18 @@ use std::{
 pub struct IpcStorage {
     conn: Arc<Mutex<ServerConnection>>,
     handshake: StorageHandshakeInfo,
-    kind: StorageKind,
 }
 
 impl IpcStorage {
     /// Connect to the daemon and perform the `StorageHandshake` RPC.
     /// Returns an `IpcStorage` that can be used as an `Arc<dyn Storage>`.
-    pub fn connect(conn: Arc<Mutex<ServerConnection>>, kind: StorageKind) -> Result<Self> {
-        let resp = conn
-            .lock()
-            .unwrap()
-            .request(Request::StorageHandshake { kind })?;
+    pub fn connect(conn: Arc<Mutex<ServerConnection>>) -> Result<Self> {
+        let resp = conn.lock().unwrap().request(Request::StorageHandshake)?;
         let handshake = match resp {
             Response::StorageHandshake(info) => info,
             other => bail!("IpcStorage: unexpected handshake response: {other:?}"),
         };
-        Ok(Self {
-            conn,
-            handshake,
-            kind,
-        })
+        Ok(Self { conn, handshake })
     }
 
     /// Return a clone of the underlying connection handle so callers can send
@@ -93,7 +85,6 @@ impl Storage for IpcStorage {
                 let resp = self
                     .rpc(Request::StorageGetRaw {
                         key: key.to_owned(),
-                        kind: self.kind,
                     })
                     .await?;
 
@@ -112,7 +103,6 @@ impl Storage for IpcStorage {
         match self
             .rpc(Request::StorageDelPath {
                 key: key.to_owned(),
-                kind: self.kind,
             })
             .await
         {
@@ -143,7 +133,6 @@ impl Storage for IpcStorage {
         match self
             .rpc(Request::StorageGetPath {
                 key: key.to_owned(),
-                kind: self.kind,
             })
             .await
         {
@@ -157,7 +146,6 @@ impl Storage for IpcStorage {
             .rpc(Request::StoragePutRaw {
                 key: key.to_owned(),
                 data: data.to_vec(),
-                kind: self.kind,
             })
             .await?;
         match resp {

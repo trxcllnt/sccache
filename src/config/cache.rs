@@ -1425,10 +1425,6 @@ pub mod defaults {
     pub fn default_read_timeout() -> u64 {
         Duration::from_secs(60).as_secs()
     }
-
-    pub fn default_preprocessor_cache_key_prefix() -> String {
-        "preprocessor".into()
-    }
 }
 
 #[cfg(test)]

@@ -189,11 +189,9 @@ async fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Result<Output> {
 pub fn dist_test_sccache_client_cfg(
     tmpdir: &Path,
     scheduler_url: HTTPUrl,
-    preprocessor_cache_mode: bool,
     cache_size: u64,
 ) -> sccache::config::ClientConfig {
-    let mut sccache_cfg =
-        harness::client::sccache_client_cfg(tmpdir, preprocessor_cache_mode, cache_size);
+    let mut sccache_cfg = harness::client::sccache_client_cfg(tmpdir, cache_size);
     sccache_cfg.dist.url = Some(scheduler_url);
     sccache_cfg
 }
@@ -219,7 +217,6 @@ async fn test_dist_cargo_build(message_broker: &str) -> Result<()> {
         let client = system.new_client(&dist_test_sccache_client_cfg(
             system.data_dir(),
             system.scheduler(0)?.url(),
-            false,
             0,
         ));
 
@@ -280,7 +277,6 @@ async fn test_dist_cpp_disk_storage(message_broker: &str) -> Result<()> {
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0)?.url(),
-        false,
         0,
     ));
 
@@ -318,7 +314,6 @@ async fn test_dist_cpp_toolchain(message_broker: &str) -> Result<()> {
         let client = system.new_client(&dist_test_sccache_client_cfg(
             system.data_dir(),
             system.scheduler(0)?.url(),
-            false,
             0,
         ));
 
@@ -367,7 +362,6 @@ async fn test_dist_cpp_cloud_storage(message_broker: &str) -> Result<()> {
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0)?.url(),
-        false,
         0,
     ));
 
@@ -404,7 +398,6 @@ async fn test_dist_cpp_server_restart(message_broker: &str) -> Result<()> {
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0)?.url(),
-        false,
         0,
     ));
 
@@ -445,7 +438,6 @@ async fn test_dist_cpp_no_server_times_out(message_broker: &str) -> Result<()> {
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0)?.url(),
-        false,
         0,
     ));
 
@@ -483,7 +475,6 @@ async fn test_dist_cpp_two_servers(message_broker: &str) -> Result<()> {
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0)?.url(),
-        false,
         0,
     ));
 
@@ -526,7 +517,6 @@ async fn test_dist_cpp_errors_on_job_load_failures(message_broker: &str) -> Resu
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0)?.url(),
-        false,
         0,
     ));
 
@@ -564,7 +554,6 @@ async fn test_dist_cpp_errors_on_toolchain_load_failures(message_broker: &str) -
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0)?.url(),
-        false,
         0,
     ));
 
@@ -605,11 +594,9 @@ async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Resu
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0)?.url(),
-        true,
         10_000_000, // enough for one tiny object file
     ));
 
-    // let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
     let _ = client.clear_disk_cache()?;
 
     cc_compile(&client, system.test_dir()).await?;
@@ -623,17 +610,10 @@ async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Resu
     assert_eq!(1, stats.requests_executed);
     assert_eq!(1, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
-    // assert_eq!(0, stats.preprocessor_cache_hits.all());
 
     let obj_file = "x.o";
     let obj_path = system.test_dir().join(obj_file);
     let data_a = std::fs::read(&obj_path)?;
-
-    // // Don't touch the preprocessor cache - and check that it exists
-    // assert!(
-    //     preprocessor_cache_path.is_dir(),
-    //     "The preprocessor cache should exist"
-    // );
 
     // Delete the object cache to ensure a cache miss
     client.clear_compilations_cache()?;
@@ -649,7 +629,6 @@ async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Resu
     assert_eq!(2, stats.requests_executed);
     assert_eq!(2, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
-    // assert_eq!(1, stats.preprocessor_cache_hits.all());
 
     // Check that this gave the same result (i.e. that it didn't compile a completely empty file).
     // It would be nice to check directly that the object file contains the symbol for the x() function
@@ -682,11 +661,9 @@ async fn test_dist_cuda_compiles(
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0)?.url(),
-        true,
         10_000_000, // enough for one tiny object file
     ));
 
-    // let (_, preprocessor_cache_path) = client.clear_disk_cache()?;
     let _ = client.clear_disk_cache()?;
 
     nvcc_compile(&client, cuda_compiler, host_compiler, system.test_dir()).await?;
@@ -694,17 +671,12 @@ async fn test_dist_cuda_compiles(
     let stats = client.stats()?;
     println!("{stats:?}");
 
-    // if matches!(host_compiler.name, "clang++") {
-    //     assert_eq!(4, stats.dist_compiles.values().sum::<usize>());
-    // } else {
     assert_eq!(6, stats.dist_compiles.values().sum::<usize>());
-    // }
     assert_eq!(0, stats.dist_errors);
     assert_eq!(1, stats.compile_requests);
     assert_eq!(7, stats.requests_executed);
     assert_eq!(7, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
-    // assert_eq!(0, stats.preprocessor_cache_hits.all());
 
     // Test we don't regress bug 2173 for CUDA compilations
 
@@ -712,12 +684,6 @@ async fn test_dist_cuda_compiles(
     let dep_path = system.test_dir().join("x.cu.o.d");
     let dep_a = std::fs::read(&dep_path)?;
     let obj_a = std::fs::read(&obj_path)?;
-
-    // // Don't touch the preprocessor cache - and check that it exists
-    // assert!(
-    //     preprocessor_cache_path.is_dir(),
-    //     "The preprocessor cache should exist"
-    // );
 
     // Delete the object cache to ensure a cache miss
     client.clear_compilations_cache()?;
@@ -728,17 +694,12 @@ async fn test_dist_cuda_compiles(
     let stats = client.stats()?;
     println!("{stats:?}");
 
-    // if matches!(host_compiler.name, "clang++") {
-    //     assert_eq!(4, stats.dist_compiles.values().sum::<usize>());
-    // } else {
     assert_eq!(6, stats.dist_compiles.values().sum::<usize>());
-    // }
     assert_eq!(0, stats.dist_errors);
     assert_eq!(1, stats.compile_requests);
     assert_eq!(7, stats.requests_executed);
     assert_eq!(7, stats.compilations);
     assert_eq!(0, stats.cache_hits.all());
-    // assert_eq!(1, stats.preprocessor_cache_hits.all());
 
     let dep_b = std::fs::read(&dep_path)?;
     let obj_b = std::fs::read(&obj_path)?;
@@ -776,7 +737,6 @@ async fn test_dist_stdpar_compiles(compiler: &Compiler, message_broker: &str) ->
     let client = system.new_client(&dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0)?.url(),
-        false,
         0,
     ));
 

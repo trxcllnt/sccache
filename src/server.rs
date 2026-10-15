@@ -449,20 +449,13 @@ pub fn start_server<C: AsRef<ClientConfig>>(
 
     let notify = env::var_os("SCCACHE_STARTUP_NOTIFY");
 
-    let init_storage = || -> Result<(Arc<dyn Storage>, Arc<dyn Storage>)> {
-        runtime.block_on(async {
-            Ok((
-                StorageKind::Compilations
-                    .create(&config.cache, &config.basedirs)
-                    .await?,
-                StorageKind::Preprocessor
-                    .create(&config.preprocessor.cache, &config.basedirs)
-                    .await?,
-            ))
-        })
-    };
+    let storage = runtime.block_on(async {
+        StorageKind::Compilations
+            .create(&config.cache, &config.basedirs)
+            .await
+    });
 
-    let (storage, preprocessor_storage) = init_storage().or_else(|err| {
+    let storage = storage.or_else(|err| {
         notify_server_startup(
             notify.as_ref(),
             ServerStartup::Err {
@@ -483,7 +476,6 @@ pub fn start_server<C: AsRef<ClientConfig>>(
                     client,
                     dist_client,
                     storage,
-                    preprocessor_storage,
                     Duration::from_secs(config.cache.read_timeout_secs),
                     config.cache.write_timeout_secs.map(Duration::from_secs),
                 );
@@ -507,7 +499,6 @@ pub fn start_server<C: AsRef<ClientConfig>>(
                     client,
                     dist_client,
                     storage,
-                    preprocessor_storage,
                     Duration::from_secs(config.cache.read_timeout_secs),
                     config.cache.write_timeout_secs.map(Duration::from_secs),
                 );
@@ -532,7 +523,6 @@ pub fn start_server<C: AsRef<ClientConfig>>(
                     client,
                     dist_client,
                     storage,
-                    preprocessor_storage,
                     Duration::from_secs(config.cache.read_timeout_secs),
                     config.cache.write_timeout_secs.map(Duration::from_secs),
                 );
@@ -592,7 +582,6 @@ impl<C: CommandCreatorSync> SccacheServer<tokio::net::TcpListener, C> {
         client: jobserver::Client,
         dist_client: DistClientContainer,
         storage: Arc<dyn Storage>,
-        preprocessor_storage: Arc<dyn Storage>,
         cache_read_timeout: Duration,
         cache_write_timeout: Option<Duration>,
     ) -> Result<Self> {
@@ -605,7 +594,6 @@ impl<C: CommandCreatorSync> SccacheServer<tokio::net::TcpListener, C> {
             client,
             dist_client,
             storage,
-            preprocessor_storage,
             cache_read_timeout,
             cache_write_timeout,
         ))
@@ -620,7 +608,6 @@ impl<A: crate::net::Acceptor, C: CommandCreatorSync> SccacheServer<A, C> {
         client: jobserver::Client,
         dist_client: DistClientContainer,
         storage: Arc<dyn Storage>,
-        preprocessor_storage: Arc<dyn Storage>,
         cache_read_timeout: Duration,
         cache_write_timeout: Option<Duration>,
     ) -> Self {
@@ -632,7 +619,6 @@ impl<A: crate::net::Acceptor, C: CommandCreatorSync> SccacheServer<A, C> {
         let service = SccacheService::new(
             dist_client,
             storage,
-            preprocessor_storage,
             cache_read_timeout,
             cache_write_timeout,
             &client,
@@ -966,9 +952,6 @@ where
     /// Cache storage.
     storage: Arc<dyn Storage>,
 
-    /// Preprocessor cache storage.
-    preprocessor_storage: Arc<dyn Storage>,
-
     /// Limits the number of concurrent pending compilations
     pending_compilations_limit: u64,
     /// The count of currently queued compile requests.
@@ -1120,14 +1103,10 @@ where
                         Message::WithoutBody(Response::ShuttingDown(Box::new(info)))
                     })
                 }
-                Request::StorageHandshake { kind } => {
-                    let storage = if kind == StorageKind::Compilations {
-                        &me.storage
-                    } else {
-                        &me.preprocessor_storage
-                    };
+                Request::StorageHandshake => {
+                    let storage = &me.storage;
 
-                    trace!("handle_client: storage_handshake kind={kind}");
+                    trace!("handle_client: storage_handshake");
                     let info = StorageHandshakeInfo {
                         location: storage.location().await,
                         cache_type_name: storage.cache_type_name().to_owned(),
@@ -1138,35 +1117,23 @@ where
                     };
                     Ok(Message::WithoutBody(Response::StorageHandshake(info)))
                 }
-                Request::StorageGetPath { key, kind } => {
-                    trace!("handle_client: storage_get_path kind={kind}, key={key}");
-                    let storage = if kind == StorageKind::Compilations {
-                        &me.storage
-                    } else {
-                        &me.preprocessor_storage
-                    };
+                Request::StorageGetPath { key } => {
+                    trace!("handle_client: storage_get_path key={key}");
+                    let storage = &me.storage;
                     Ok(Message::WithoutBody(Response::StorageGetPath(
                         storage.get_path(&key).await,
                     )))
                 }
-                Request::StorageDelPath { key, kind } => {
-                    trace!("handle_client: storage_del_path kind={kind}, key={key}");
-                    let storage = if kind == StorageKind::Compilations {
-                        &me.storage
-                    } else {
-                        &me.preprocessor_storage
-                    };
+                Request::StorageDelPath { key } => {
+                    trace!("handle_client: storage_del_path key={key}");
+                    let storage = &me.storage;
                     Ok(Message::WithoutBody(Response::StorageDelPath(
                         storage.del(&key).await.map_err(|e| format!("{e:#}")),
                     )))
                 }
-                Request::StorageGetRaw { key, kind } => {
-                    trace!("handle_client: storage_get kind={kind}, key={key}");
-                    let storage = if kind == StorageKind::Compilations {
-                        &me.storage
-                    } else {
-                        &me.preprocessor_storage
-                    };
+                Request::StorageGetRaw { key } => {
+                    trace!("handle_client: storage_get key={key}");
+                    let storage = &me.storage;
                     let resp = match storage.get(&key).await {
                         Ok(Cache::Hit(data)) => Response::StorageGetRaw(Some(data.to_vec())),
                         Ok(Cache::Miss) => Response::StorageGetRaw(None),
@@ -1177,13 +1144,9 @@ where
                     };
                     Ok(Message::WithoutBody(resp))
                 }
-                Request::StoragePutRaw { key, data, kind } => {
-                    trace!("handle_client: storage_put kind={kind}, key={key}");
-                    let storage = if kind == StorageKind::Compilations {
-                        &me.storage
-                    } else {
-                        &me.preprocessor_storage
-                    };
+                Request::StoragePutRaw { key, data } => {
+                    trace!("handle_client: storage_put key={key}");
+                    let storage = &me.storage;
                     let result = storage
                         .put(&key, data.into())
                         .await
@@ -1225,7 +1188,6 @@ where
     pub fn new(
         dist_client: DistClientContainer,
         storage: Arc<dyn Storage>,
-        preprocessor_storage: Arc<dyn Storage>,
         cache_read_timeout: Duration,
         cache_write_timeout: Option<Duration>,
         client: &jobserver::Client,
@@ -1250,7 +1212,6 @@ where
             active_compilations: Arc::default(),
             dist_client,
             storage,
-            preprocessor_storage,
             pending_compilations_limit: util::num_cpus() as u64,
             compiler_info_queue,
             cache_read_timeout,
@@ -1265,7 +1226,6 @@ where
 
     pub fn mock_with_storage(
         storage: Arc<dyn Storage>,
-        preprocessor_storage: Arc<dyn Storage>,
         rt: tokio::runtime::Handle,
     ) -> SccacheService<C> {
         let (tx, _) = mpsc::channel(1);
@@ -1288,7 +1248,6 @@ where
             active_compilations: Arc::default(),
             dist_client,
             storage,
-            preprocessor_storage,
             pending_compilations_limit: util::num_cpus() as u64,
             compiler_info_queue,
             cache_read_timeout: Duration::from_secs(60),
@@ -1305,7 +1264,6 @@ where
     pub fn mock_with_dist_client(
         dist_client: Arc<dyn dist::Client>,
         storage: Arc<dyn Storage>,
-        preprocessor_storage: Arc<dyn Storage>,
         rt: tokio::runtime::Handle,
     ) -> SccacheService<C> {
         let (tx, _) = mpsc::channel(1);
@@ -1342,7 +1300,6 @@ where
             active_compilations: Arc::default(),
             dist_client,
             storage,
-            preprocessor_storage,
             pending_compilations_limit: util::num_cpus() as u64,
             compiler_info_queue,
             cache_read_timeout: Duration::from_secs(60),
@@ -1431,12 +1388,7 @@ where
             pending_compilations: self.pending_compilations(),
             ..self.stats.lock().await.clone()
         };
-        ServerInfo::new(
-            stats,
-            Some(&*self.storage),
-            // Some(&*self.preprocessor_storage),
-        )
-        .await
+        ServerInfo::new(stats, Some(&*self.storage)).await
     }
 
     /// Zero stats about the cache.
@@ -2108,12 +2060,8 @@ pub struct ServerStats {
     pub requests_executed: u64,
     /// The count of cache hits for handled compile requests (per language).
     pub cache_hits: PerLanguageCount,
-    // /// The count of preprocessor cache hits for handled compile requests (per language).
-    // pub preprocessor_cache_hits: PerLanguageCount,
     /// The count of cache misses for handled compile requests (per language).
     pub cache_misses: PerLanguageCount,
-    // /// The count of preprocessor cache misses for handled compile requests (per language).
-    // pub preprocessor_cache_misses: PerLanguageCount,
     /// The count of cache misses because the cache took too long to respond.
     pub cache_timeouts: u64,
     /// The count of errors reading cache entries.
@@ -2134,10 +2082,6 @@ pub struct ServerStats {
     pub hashed: u64,
     /// The number of successful compilations performed.
     pub compilations: u64,
-    // /// The total time spent verifying preprocessor cache hits.
-    // pub preprocessor_cache_hit_duration: Duration,
-    // /// The total time spent verifying preprocessor cache misses.
-    // pub preprocessor_cache_miss_duration: Duration,
     /// The total time spent hashing.
     pub hasher_duration: Duration,
     /// The total time spent compiling.
@@ -2155,8 +2099,6 @@ pub struct ServerStats {
     pub fatal_errors: PerLanguageCount,
     /// Multi-level cache statistics (if multi-level caching is enabled)
     pub cache_multi_level: Option<MultiLevelStats>,
-    // /// Multi-level preprocessor cache statistics (if multi-level caching is enabled)
-    // pub preprocessor_multi_level: Option<MultiLevelStats>,
 }
 
 impl std::ops::AddAssign for ServerStats {
@@ -2172,9 +2114,7 @@ impl std::ops::AddAssign for ServerStats {
         self.requests_not_cacheable += rhs.requests_not_cacheable;
         self.requests_executed += rhs.requests_executed;
         self.cache_hits += rhs.cache_hits;
-        // self.preprocessor_cache_hits += rhs.preprocessor_cache_hits;
         self.cache_misses += rhs.cache_misses;
-        // self.preprocessor_cache_misses += rhs.preprocessor_cache_misses;
         self.cache_timeouts += rhs.cache_timeouts;
         self.cache_read_errors += rhs.cache_read_errors;
         self.non_cacheable_compilations += rhs.non_cacheable_compilations;
@@ -2185,8 +2125,6 @@ impl std::ops::AddAssign for ServerStats {
         self.cache_read_hit_duration += rhs.cache_read_hit_duration;
         self.hashed += rhs.hashed;
         self.compilations += rhs.compilations;
-        // self.preprocessor_cache_hit_duration += rhs.preprocessor_cache_hit_duration;
-        // self.preprocessor_cache_miss_duration += rhs.preprocessor_cache_miss_duration;
         self.hasher_duration += rhs.hasher_duration;
         self.compiler_write_duration += rhs.compiler_write_duration;
         self.compile_fails += rhs.compile_fails;
@@ -2206,17 +2144,6 @@ impl std::ops::AddAssign for ServerStats {
             (a, None) => a,
             (None, b) => b,
         };
-        // self.preprocessor_multi_level = match (
-        //     self.preprocessor_multi_level.take(),
-        //     rhs.preprocessor_multi_level,
-        // ) {
-        //     (Some(mut a), Some(b)) => {
-        //         a += b;
-        //         Some(a)
-        //     }
-        //     (a, None) => a,
-        //     (None, b) => b,
-        // };
     }
 }
 
@@ -2227,10 +2154,6 @@ pub struct ServerInfo {
     pub cache_location: String,
     pub cache_size: Option<u64>,
     pub max_cache_size: Option<u64>,
-    // pub preprocessor_cache_location: String,
-    // pub preprocessor_cache_size: Option<u64>,
-    // pub preprocessor_max_cache_size: Option<u64>,
-    // pub use_preprocessor_cache_mode: bool,
     pub version: String,
     pub basedirs: Vec<String>,
 }
@@ -2259,9 +2182,7 @@ impl Default for ServerStats {
             requests_not_cacheable: u64::default(),
             requests_executed: u64::default(),
             cache_hits: PerLanguageCount::new(),
-            // preprocessor_cache_hits: PerLanguageCount::new(),
             cache_misses: PerLanguageCount::new(),
-            // preprocessor_cache_misses: PerLanguageCount::new(),
             cache_timeouts: u64::default(),
             cache_read_errors: u64::default(),
             non_cacheable_compilations: u64::default(),
@@ -2272,8 +2193,6 @@ impl Default for ServerStats {
             cache_read_hit_duration: Duration::new(0, 0),
             hashed: u64::default(),
             compilations: u64::default(),
-            // preprocessor_cache_hit_duration: Duration::new(0, 0),
-            // preprocessor_cache_miss_duration: Duration::new(0, 0),
             hasher_duration: Duration::new(0, 0),
             compiler_write_duration: Duration::new(0, 0),
             compile_fails: u64::default(),
@@ -2282,7 +2201,6 @@ impl Default for ServerStats {
             dist_errors: u64::default(),
             fatal_errors: PerLanguageCount::new(),
             cache_multi_level: None,
-            // preprocessor_multi_level: None,
         }
     }
 }
@@ -2375,21 +2293,7 @@ impl ServerStats {
             "Compile request errors"
         );
         set_counted_stat!(stats_vec, self.cache_hits, "Cache hits");
-        // if use_preprocessor_cache_mode {
-        //     set_counted_stat!(
-        //         stats_vec,
-        //         self.preprocessor_cache_hits,
-        //         "Preprocessor cache hits"
-        //     );
-        // }
         set_counted_stat!(stats_vec, self.cache_misses, "Cache misses");
-        // if use_preprocessor_cache_mode {
-        //     set_counted_stat!(
-        //         stats_vec,
-        //         self.preprocessor_cache_misses,
-        //         "Preprocessor cache misses"
-        //     );
-        // }
 
         self.set_percentage_stats(&mut stats_vec, advanced);
 
@@ -2438,22 +2342,6 @@ impl ServerStats {
             self.cache_writes,
             "Average cache write"
         );
-        // if use_preprocessor_cache_mode && self.preprocessor_cache_hits.all() > 0 {
-        //     set_duration_stat!(
-        //         stats_vec,
-        //         self.preprocessor_cache_hit_duration,
-        //         self.preprocessor_cache_hits.all(),
-        //         "Average preprocessor cache hit"
-        //     );
-        // }
-        // if use_preprocessor_cache_mode && self.preprocessor_cache_misses.all() > 0 {
-        //     set_duration_stat!(
-        //         stats_vec,
-        //         self.preprocessor_cache_miss_duration,
-        //         self.preprocessor_cache_misses.all(),
-        //         "Average preprocessor cache miss"
-        //     );
-        // }
         if self.hashed > 0 {
             set_duration_stat!(
                 stats_vec,
@@ -2512,20 +2400,6 @@ impl ServerStats {
             }
             write_stats_vec!(stats_vec);
         }
-
-        // if let Some(ref ml_stats) = self.preprocessor_multi_level {
-        //     let mut stats_vec = vec![];
-        //     let ml_stats = ml_stats.format_stats();
-        //     for (idx, (name, value, suffix_type)) in ml_stats.iter().enumerate() {
-        //         let name = if idx == 0 {
-        //             "Multi-level preprocessor cache levels"
-        //         } else {
-        //             name.as_str()
-        //         };
-        //         stats_vec.push((name, value, suffix_type));
-        //     }
-        //     write_stats_vec!(stats_vec);
-        // }
 
         // Compare values. If equal, compare keys to have a fully deterministic order.
         let sort_func =
@@ -2644,11 +2518,7 @@ fn set_percentage_stat(
 }
 
 impl ServerInfo {
-    pub async fn new(
-        stats: ServerStats,
-        storage: Option<&dyn Storage>,
-        // preprocessor_storage: Option<&dyn Storage>,
-    ) -> Result<Self> {
+    pub async fn new(stats: ServerStats, storage: Option<&dyn Storage>) -> Result<Self> {
         use crate::cache::multilevel::MultiLevelStats;
         async fn storage_info(
             storage: Option<&dyn Storage>,
@@ -2682,32 +2552,16 @@ impl ServerInfo {
 
         let (cache_size, max_cache_size, cache_location, cache_multi_level, basedirs) =
             storage_info(storage).await;
-        // let (
-        //     preprocessor_cache_size,
-        //     preprocessor_max_cache_size,
-        //     preprocessor_cache_location,
-        //     preprocessor_multi_level,
-        //     _,
-        // ) = storage_info(preprocessor_storage).await;
-
-        // let use_preprocessor_cache_mode = preprocessor_storage
-        //     .map(|s| s.enabled())
-        //     .unwrap_or_default();
 
         let version = env!("CARGO_PKG_VERSION").to_string();
         Ok(ServerInfo {
             stats: ServerStats {
                 cache_multi_level,
-                // preprocessor_multi_level,
                 ..stats
             },
             cache_location,
             cache_size,
             max_cache_size,
-            // preprocessor_cache_location,
-            // preprocessor_cache_size,
-            // preprocessor_max_cache_size,
-            // use_preprocessor_cache_mode,
             version,
             basedirs,
         })
@@ -2715,11 +2569,7 @@ impl ServerInfo {
 
     /// Print info to stdout in a human-readable format.
     pub fn print(&self, advanced: bool) {
-        let (name_width, stat_width) = self.stats.print(
-            &mut StdoutServerStatsWriter,
-            advanced,
-            // self.use_preprocessor_cache_mode,
-        );
+        let (name_width, stat_width) = self.stats.print(&mut StdoutServerStatsWriter, advanced);
         println!(
             "{:<name_width$} {}",
             "Cache location:",
@@ -2737,35 +2587,6 @@ impl ServerInfo {
             }
         }
 
-        // println!(
-        //     "{:<name_width$} {}",
-        //     "Use direct/preprocessor mode?",
-        //     if self.use_preprocessor_cache_mode {
-        //         "yes"
-        //     } else {
-        //         "no"
-        //     },
-        //     name_width = name_width
-        // );
-
-        // if self.use_preprocessor_cache_mode {
-        //     println!(
-        //         "{:<name_width$} {}",
-        //         "Preprocessor cache location:",
-        //         self.preprocessor_cache_location,
-        //         name_width = name_width
-        //     );
-        //     if let Some(ref ml_stats) = self.stats.preprocessor_multi_level {
-        //         for level in &ml_stats.0 {
-        //             println!(
-        //                 "{:<name_width$} {}",
-        //                 format!("  {}", level.name),
-        //                 level.location,
-        //                 name_width = name_width
-        //             );
-        //         }
-        //     }
-        // }
         println!(
             "{:<name_width$} {}",
             "Base directories",

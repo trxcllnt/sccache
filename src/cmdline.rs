@@ -109,7 +109,6 @@ pub enum Command {
         /// The environment variables to use for execution.
         env_vars: Vec<(OsString, OsString)>,
     },
-    // DebugPreprocessorCacheEntries(String),
 }
 
 fn flag_infer_long_and_short(name: &'static str) -> Arg {
@@ -153,7 +152,7 @@ fn get_clap_command() -> clap::Command {
             "\n",
             "    COS:       ",
             cfg!(feature = "cos"),
-            "\n"
+            "\n",
         ))
         .args(&[
             flag_infer_long("show-config")
@@ -320,12 +319,6 @@ pub fn try_parse() -> Result<Command> {
                 Ok(Command::ShowStats(fmt, true))
             } else if matches.get_flag("start-server") {
                 Ok(Command::StartServer)
-            // } else if matches.contains_id("debug-preprocessor-cache") {
-            //     let preprocessor_key = matches
-            //         .get_one("debug-preprocessor-cache")
-            //         .cloned()
-            //         .expect("`debug-preprocessor-cache` requires a preprocessor cache entry key");
-            //     Ok(Command::DebugPreprocessorCacheEntries(preprocessor_key))
             } else if matches.get_flag("stop-server") {
                 Ok(Command::StopServer)
             } else if matches.get_flag("zero-stats") {

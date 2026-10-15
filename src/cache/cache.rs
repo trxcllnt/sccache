@@ -633,7 +633,7 @@ impl From<config::cache::Disk> for StorageBuilder {
             .rw_mode(Some(rw_mode))
             .create_storage(
                 move |storage_kind, basedirs| {
-                    let dir = dir.join(storage_kind.key_prefix(&key_prefix));
+                    let dir = dir.join(&key_prefix);
 
                     debug!("Init disk {storage_kind} cache with dir={dir:?}, size={size}, rw_mode={rw_mode:?}, basedirs={:?})", basedirs.iter().map(|b| String::from_utf8_lossy(b)).collect::<Vec<_>>());
 
@@ -678,8 +678,6 @@ impl From<config::cache::Azure> for StorageBuilder {
             .enabled(enabled)
             .rw_mode(Some(rw_mode))
             .create_storage(move |storage_kind, basedirs| {
-                let key_prefix = storage_kind.key_prefix(&key_prefix);
-
                 debug!("Init azure {storage_kind} cache with container={container:?}, key_prefix={key_prefix:?}, storage_account={storage_account:?}, endpoint={endpoint:?}");
 
                 cache::azure::AzureBlobCache::build(connection_string.as_deref(), &container, &key_prefix, storage_account.as_deref(), endpoint.as_deref())
@@ -707,8 +705,6 @@ impl From<config::cache::GCS> for StorageBuilder {
             .enabled(enabled)
             .rw_mode(Some(rw_mode))
             .create_storage(move |storage_kind, basedirs| {
-                let key_prefix = storage_kind.key_prefix(&key_prefix);
-
                 debug!(
                     "Init gcs {storage_kind} cache with bucket={bucket:?}, key_prefix={key_prefix:?}, cred_path={cred_path:?}, service_account={service_account:?}, credential_url={credential_url:?}"
                 );
@@ -744,8 +740,6 @@ impl From<config::cache::GHA> for StorageBuilder {
             .enabled(enabled)
             .rw_mode(Some(rw_mode))
             .create_storage(move |storage_kind, basedirs| {
-                let key_prefix = storage_kind.key_prefix(&key_prefix);
-
                 debug!(
                     "Init gha {storage_kind} cache with version={version:?}, key_prefix={key_prefix:?}"
                 );
@@ -780,8 +774,6 @@ impl From<config::cache::Memcached> for StorageBuilder {
             .enabled(enabled)
             .rw_mode(Some(rw_mode))
             .create_storage(move |storage_kind, basedirs| {
-                let key_prefix = storage_kind.key_prefix(&key_prefix);
-
                 debug!("Init memcached {storage_kind} cache with url={url:?}");
 
                 cache::memcached::MemcachedCache::build(
@@ -825,8 +817,6 @@ impl From<config::cache::Redis> for StorageBuilder {
             .enabled(enabled)
             .rw_mode(Some(rw_mode))
             .create_storage(move |storage_kind, basedirs| {
-                let key_prefix = storage_kind.key_prefix(&key_prefix);
-
                 match (&endpoint, &cluster_endpoints, &url) {
                     (Some(url), None, None) => {
                         debug!("Init redis single-node {storage_kind} cache with url={url:?}");
@@ -921,11 +911,9 @@ impl From<config::cache::S3> for StorageBuilder {
             .enabled(enabled)
             .rw_mode(Some(rw_mode))
             .create_storage(move |storage_kind, basedirs| {
-                let key_prefix = storage_kind.key_prefix(&key_prefix);
-
                 debug!("Init s3 {storage_kind} cache with endpoint={endpoint:?}, bucket={bucket:?}, key_prefix={key_prefix:?}");
 
-                cache::s3::S3Cache::new(bucket.clone(), key_prefix, no_credentials)
+                cache::s3::S3Cache::new(bucket.clone(), key_prefix.clone(), no_credentials)
                     .with_region(region.clone())
                     .with_endpoint(endpoint.clone())
                     .with_use_ssl(use_ssl)
@@ -969,8 +957,6 @@ impl From<config::cache::Webdav> for StorageBuilder {
             .enabled(enabled)
             .rw_mode(Some(rw_mode))
             .create_storage(move |storage_kind, basedirs| {
-                let key_prefix = storage_kind.key_prefix(&key_prefix);
-
                 debug!("Init webdav {storage_kind} cache with endpoint {endpoint}");
 
                 cache::webdav::WebdavCache::build(
@@ -1003,8 +989,6 @@ impl From<config::cache::OSS> for StorageBuilder {
             .enabled(enabled)
             .rw_mode(Some(rw_mode))
             .create_storage(move |storage_kind, basedirs| {
-                let key_prefix = storage_kind.key_prefix(&key_prefix);
-
                 debug!("Init oss {storage_kind} cache with bucket {bucket}, endpoint {endpoint:?}");
 
                 cache::oss::OSSCache::build(
@@ -1035,8 +1019,6 @@ impl From<config::cache::COS> for StorageBuilder {
             .enabled(enabled)
             .rw_mode(Some(rw_mode))
             .create_storage(move |storage_kind, basedirs| {
-                let key_prefix = storage_kind.key_prefix(&key_prefix);
-
                 debug!("Init cos {storage_kind} cache with bucket {bucket}, endpoint {endpoint:?}");
 
                 cache::cos::COSCache::build(&bucket, &key_prefix, endpoint.as_deref())
@@ -1052,14 +1034,12 @@ impl From<config::cache::COS> for StorageBuilder {
 pub enum StorageKind {
     #[default]
     Compilations,
-    Preprocessor,
 }
 
 impl fmt::Display for StorageKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Compilations => write!(f, "object"),
-            Self::Preprocessor => write!(f, "preprocessor"),
         }
     }
 }
@@ -1216,15 +1196,6 @@ impl StorageKind {
         };
 
         Ok(storage)
-    }
-
-    fn key_prefix<K: AsRef<str>>(&self, key_prefix: K) -> String {
-        let key_prefix = key_prefix.as_ref();
-        if key_prefix.is_empty() && matches!(self, StorageKind::Preprocessor) {
-            "preprocessor".into()
-        } else {
-            key_prefix.into()
-        }
     }
 }
 

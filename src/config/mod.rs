@@ -35,7 +35,7 @@ pub use cache::{
     WriteErrorPolicy,   //
 };
 
-pub use client::{CachedConfig, CachedFileConfig, Config as ClientConfig, PreprocessorCaches};
+pub use client::{CachedConfig, CachedFileConfig, Config as ClientConfig};
 
 const ORGANIZATION: &str = "Mozilla";
 const APP_NAME: &str = "sccache";

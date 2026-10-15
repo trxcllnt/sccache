@@ -9,7 +9,7 @@ use std::{
 };
 
 use sccache::{
-    config::{self, CacheType, ClientConfig, PreprocessorCaches},
+    config::{self, CacheType, ClientConfig},
     server::{ServerInfo, ServerStats},
 };
 
@@ -17,9 +17,7 @@ use crate::harness::write_json_cfg;
 
 use super::{TC_CACHE_SIZE, prune_command};
 
-pub fn make_sccache_client(
-    preprocessor_cache_mode: bool,
-) -> (Option<tempfile::TempDir>, PathBuf, SccacheClient) {
+pub fn make_sccache_client() -> (Option<tempfile::TempDir>, PathBuf, SccacheClient) {
     let tempdir = tempfile::Builder::new()
         .prefix("sccache_system_test")
         .tempdir()
@@ -35,7 +33,6 @@ pub fn make_sccache_client(
     // Create the configurations
     let sccache_cfg = sccache_client_cfg(
         &tempdir_path,
-        preprocessor_cache_mode,
         sccache::config::defaults::default_disk_cache_size(),
     );
     write_json_cfg(&tempdir_path, "sccache-cfg.json", &sccache_cfg);
@@ -49,11 +46,7 @@ pub fn make_sccache_client(
     (maybe_tempdir, tempdir_path, client)
 }
 
-pub fn sccache_client_cfg(
-    data_dir: &Path,
-    preprocessor_cache_mode: bool,
-    size: u64,
-) -> ClientConfig {
+pub fn sccache_client_cfg(data_dir: &Path, size: u64) -> ClientConfig {
     let disk_cache_dir = data_dir.join("cache");
     let toolchains_dir = data_dir.join("toolchains");
     fs::create_dir_all(&disk_cache_dir).unwrap();
@@ -67,17 +60,6 @@ pub fn sccache_client_cfg(
 
     ClientConfig {
         cache: vec![disk.clone().into()].into(),
-        preprocessor: PreprocessorCaches {
-            cache: vec![
-                config::cache::Disk {
-                    dir: disk_cache_dir.join("preprocessor"),
-                    enabled: preprocessor_cache_mode,
-                    ..disk
-                }
-                .into(),
-            ]
-            .into(),
-        },
         dist: config::client::dist::Config {
             auth: Default::default(), // dangerously_insecure
             url: None,
@@ -238,34 +220,8 @@ impl SccacheClient {
             .unwrap_or_default()
     }
 
-    pub fn preprocessor_cache(&self) -> config::cache::Disk {
-        self.config()
-            .preprocessor
-            .cache
-            .configs
-            .iter()
-            .find_map(|(_, c)| match c {
-                CacheType::Disk(c) => Some(c.clone()),
-                _ => None,
-            })
-            .unwrap_or_default()
-    }
-
-    pub fn clear_disk_cache(&self) -> sccache::errors::Result<(PathBuf, PathBuf)> {
-        Ok((
-            self.clear_compilations_cache()?,
-            self.clear_preprocessor_cache()?,
-        ))
-    }
-
-    pub fn clear_preprocessor_cache(&self) -> sccache::errors::Result<PathBuf> {
-        let disk_cache = self.preprocessor_cache();
-        let preprocessor_cache_dir = disk_cache.dir;
-        println!("clear_preprocessor_cache: {preprocessor_cache_dir:?}");
-        if preprocessor_cache_dir.is_dir() {
-            fs::remove_dir_all(&preprocessor_cache_dir)?;
-        }
-        Ok(preprocessor_cache_dir)
+    pub fn clear_disk_cache(&self) -> sccache::errors::Result<PathBuf> {
+        self.clear_compilations_cache()
     }
 
     pub fn clear_compilations_cache(&self) -> sccache::errors::Result<PathBuf> {

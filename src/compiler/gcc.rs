@@ -3080,8 +3080,7 @@ mod test {
         let runtime = single_threaded_runtime();
         let storage = MockStorage::new(None, true);
         let storage: std::sync::Arc<MockStorage> = std::sync::Arc::new(storage);
-        let service =
-            SccacheService::mock_with_storage(storage.clone(), storage, runtime.handle().clone());
+        let service = SccacheService::mock_with_storage(storage, runtime.handle().clone());
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
@@ -3126,8 +3125,7 @@ mod test {
         let runtime = single_threaded_runtime();
         let storage = MockStorage::new(None, true);
         let storage: std::sync::Arc<MockStorage> = std::sync::Arc::new(storage);
-        let service =
-            SccacheService::mock_with_storage(storage.clone(), storage, runtime.handle().clone());
+        let service = SccacheService::mock_with_storage(storage, runtime.handle().clone());
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
@@ -3170,8 +3168,7 @@ mod test {
         let runtime = single_threaded_runtime();
         let storage = MockStorage::new(None, true);
         let storage: std::sync::Arc<MockStorage> = std::sync::Arc::new(storage);
-        let service =
-            SccacheService::mock_with_storage(storage.clone(), storage, runtime.handle().clone());
+        let service = SccacheService::mock_with_storage(storage, runtime.handle().clone());
         let compiler = &f.bins[0];
         // Compiler invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
@@ -3319,30 +3316,13 @@ mod test {
     // }
 
     #[test]
-    fn test_too_hard_for_preprocessor_cache_mode() {
+    fn test_hard_preprocessor_args() {
         let args = stringvec!["-c", "foo.c", "-o", "foo.o"];
         let parsed_args = match parse_arguments_(args, false) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {o:?}"),
         };
         assert!(parsed_args.preprocessor_args.is_empty());
-
-        // let args = stringvec!["-c", "foo.c", "-o", "foo.o", "-Xpreprocessor", "-M"];
-        // assert_eq!(
-        //     parse_arguments_(args, false),
-        //     CompilerArguments::CannotCache(
-        //         "-Xpreprocessor",
-        //         Some("Arg '-Xpreprocessor,-M' is too hard".into())
-        //     ),
-        // );
-        // let parsed_args = match parse_arguments_(args, false) {
-        //     CompilerArguments::Ok(args) => args,
-        //     o => panic!("Got unexpected parse result: {o:?}"),
-        // };
-        // assert_eq!(
-        //     parsed_args.too_hard_for_preprocessor_cache_mode,
-        //     vec!["-Xpreprocessor", "-M"]
-        // );
 
         let args = stringvec!["-c", "foo.c", "-o", "foo.o", r#"-Wp,-DFOO="something""#];
         let parsed_args = match parse_arguments_(args, false) {

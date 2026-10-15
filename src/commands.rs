@@ -727,14 +727,12 @@ where
     trace!("do_compile_client_side");
     let exe_path = which_in(exe, path, cwd)?;
     let conn = Arc::new(std::sync::Mutex::new(conn));
-    let compilations_storage = IpcStorage::connect(conn.clone(), StorageKind::Compilations)?;
-    let preprocessor_storage = IpcStorage::connect(conn.clone(), StorageKind::Preprocessor)?;
+    let storage = IpcStorage::connect(conn.clone())?;
     let (tx, _rx) = futures::channel::mpsc::channel(1);
     let (_, info) = server::WaitUntilZero::new();
     let service = server::SccacheService::<C>::new(
         server::DistClientContainer::new_disabled(),
-        Arc::new(compilations_storage),
-        Arc::new(preprocessor_storage),
+        Arc::new(storage),
         Duration::from_secs(60),
         None,
         jobserver,
@@ -795,15 +793,9 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                         let compilations_storage = StorageKind::Compilations
                             .create(&config.cache, &config.basedirs)
                             .await?;
-                        // let (compilations_storage, preprocessor_storage) = tokio::try_join!(
-                        //     StorageKind::Compilations.create(&config.cache, &config.basedirs),
-                        //     StorageKind::Preprocessor
-                        //         .create(&config.preprocessor.cache, &config.basedirs),
-                        // )?;
                         ServerInfo::new(
                             ServerStats::default(),
                             Some(compilations_storage).as_deref(),
-                            // Some(preprocessor_storage).as_deref(),
                         )
                         .await
                     })?
@@ -814,32 +806,6 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 StatsFormat::Json => serde_json::to_writer(&mut io::stdout(), &stats)?,
             }
         }
-        // Command::DebugPreprocessorCacheEntries(key) => {
-        //     trace!("Command::DebugPreprocessorCacheEntries");
-        //     let config = ClientConfig::load()?;
-        //     let runtime = Runtime::new()?;
-        //     runtime.block_on(async {
-        //         let storage = StorageKind::Preprocessor
-        //             .create(&config.preprocessor.cache, &config.basedirs)
-        //             .await?;
-        //         match crate::compiler::PreprocessorCacheEntry::get(storage.as_ref(), &key).await {
-        //             Err(err) => {
-        //                 eprintln!("Err retrieving preprocessor entry for key {key:?}: {err:#?}");
-        //             }
-        //             Ok(crate::cache::Cache::Miss) => {
-        //                 eprintln!("No preprocessor entry for key {key:?}");
-        //             }
-        //             Ok(crate::cache::Cache::Hit(entry)) => {
-        //                 println!("=========================");
-        //                 println!("Showing preprocessor entry for key {key:?}");
-        //                 println!("{entry:?}");
-        //                 println!("=========================");
-        //             }
-        //         }
-
-        //         Ok::<(), anyhow::Error>(())
-        //     })?;
-        // }
         Command::InternalStartServer => {
             trace!("Command::InternalStartServer");
             match create_error_log() {

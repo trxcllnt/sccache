@@ -110,17 +110,6 @@ mod test {
     }
 
     #[test]
-    fn readonly_storage_forwards_preprocessor_cache_mode_config() {
-        let storage_no_preprocessor_cache =
-            ReadOnlyStorage(Arc::new(MockStorage::new(None, false)));
-        assert!(!storage_no_preprocessor_cache.enabled());
-
-        let storage_with_preprocessor_cache =
-            ReadOnlyStorage(Arc::new(MockStorage::new(None, true)));
-        assert!(storage_with_preprocessor_cache.enabled());
-    }
-
-    #[test]
     fn readonly_storage_forwards_basedirs() {
         let tempdir = tempfile::Builder::new()
             .prefix("readonly_storage_forwards_basedirs")
