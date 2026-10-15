@@ -168,6 +168,8 @@ pub struct ParsedArguments {
     pub extra_hash_files: Vec<PathBuf>,
     /// Whether the compiler runs a separate assembler to produce the object file.
     pub uses_external_assembler: bool,
+    /// The -sourceDependencies:directives depfile in MSVC
+    pub msvc_directives_depfile: Option<PathBuf>,
     /// Whether or not the `-showIncludes` argument is passed on MSVC
     pub msvc_show_includes: bool,
     /// Whether the compilation is generating profiling or coverage data.
@@ -199,6 +201,7 @@ impl std::cmp::PartialEq for ParsedArguments {
             extra_dist_files,
             extra_hash_files,
             uses_external_assembler,
+            msvc_directives_depfile,
             msvc_show_includes,
             profile_generate,
             color_mode,
@@ -220,6 +223,7 @@ impl std::cmp::PartialEq for ParsedArguments {
             && extra_dist_files == &other.extra_dist_files
             && extra_hash_files == &other.extra_hash_files
             && uses_external_assembler == &other.uses_external_assembler
+            && msvc_directives_depfile == &other.msvc_directives_depfile
             && msvc_show_includes == &other.msvc_show_includes
             && profile_generate == &other.profile_generate
             && color_mode == &other.color_mode

@@ -240,8 +240,13 @@ ArgData! {
     ShowIncludes,
     Output(PathBuf),
     DepFile(PathBuf),
+    DirectivesDepFile(PathBuf),
     ProgramDatabase(PathBuf),
     DebugInfo,
+    LanguageC,
+    LanguageCWithPath(PathBuf),
+    LanguageCxx,
+    LanguageCxxWithPath(PathBuf),
     PassThrough, // Miscellaneous flags that don't prevent caching.
     PassThroughWithPath(PathBuf), // As above, recognised by prefix.
     PassThroughWithSuffix(OsString), // As above, recognised by prefix.
@@ -274,9 +279,9 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("Brepro", PassThrough),
     msvc_flag!("C", PassThrough), // Ignored unless a preprocess-only flag is specified.
     msvc_take_arg!("D", OsString, CanBeSeparated, PreprocessorArgument),
-    msvc_flag!("E", SuppressCompilation),
+    msvc_flag!("E", DoCompilation),
     msvc_take_arg!("EH", OsString, Concatenated, PassThroughWithSuffix), // /EH[acsr\-]+ - TODO: use a regex?
-    msvc_flag!("EP", SuppressCompilation),
+    msvc_flag!("EP", DoCompilation),
     msvc_take_arg!("F", OsString, Concatenated, PassThroughWithSuffix),
     msvc_take_arg!("FA", OsString, Concatenated, TooHard),
     msvc_flag!("FC", PassThrough), // Use absolute paths in error messages, does not affect caching, only the debug output of the build
@@ -287,7 +292,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_take_arg!("Fa", PathBuf, Concatenated, TooHardPath),
     msvc_take_arg!("Fd", PathBuf, Concatenated, ProgramDatabase),
     msvc_take_arg!("Fe", PathBuf, Concatenated, TooHardPath),
-    msvc_take_arg!("Fi", PathBuf, Concatenated, TooHardPath),
+    msvc_take_arg!("Fi", PathBuf, Concatenated, Output),
     msvc_take_arg!("Fm", PathBuf, Concatenated, PassThroughWithPath), // No effect if /c is specified.
     msvc_take_arg!("Fo", PathBuf, Concatenated, Output),
     msvc_take_arg!("Fp", PathBuf, Concatenated, TooHardPath), // allows users to specify the name for a PCH (when using /Yu or /Yc), PCHs are not supported in sccache.
@@ -352,7 +357,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     // msvc_flag!("Ox", PassThrough),
     // msvc_flag!("Oy", PassThrough),
     // msvc_flag!("Oy-", PassThrough),
-    msvc_flag!("P", SuppressCompilation),
+    msvc_flag!("P", DoCompilation),
     msvc_flag!("PD", PassThrough),
     msvc_flag!("PH", PassThrough),
     msvc_flag!("QIfist", PassThrough),
@@ -371,8 +376,10 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("Qvec-report:1", PassThrough),
     msvc_flag!("Qvec-report:2", PassThrough),
     msvc_take_arg!("RTC", OsString, Concatenated, PassThroughWithSuffix),
-    msvc_flag!("TC", PassThrough), // TODO: disable explicit language check, hope for the best for now? Also, handle /Tc & /Tp.
-    msvc_flag!("TP", PassThrough), // As above.
+    msvc_flag!("TC", LanguageC),
+    msvc_flag!("TP", LanguageCxx),
+    msvc_take_arg!("Tc", PathBuf, CanBeSeparated, LanguageCWithPath),
+    msvc_take_arg!("Tp", PathBuf, CanBeSeparated, LanguageCxxWithPath),
     msvc_take_arg!("U", OsString, Concatenated, PreprocessorArgument),
     msvc_take_arg!("V", OsString, Concatenated, PassThroughWithSuffix),
     msvc_flag!("W0", PassThrough),
@@ -496,6 +503,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("showIncludes", ShowIncludes),
     msvc_take_arg!("source-charset:", OsString, Concatenated, PassThroughWithSuffix),
     msvc_take_arg!("sourceDependencies", PathBuf, CanBeSeparated, DepFile),
+    msvc_take_arg!("sourceDependencies:directives", PathBuf, CanBeSeparated, DirectivesDepFile),
     msvc_take_arg!("std:", OsString, Concatenated, PassThroughWithSuffix),
     msvc_take_arg!("stdIfcDir", PathBuf, Separated, TooHardPath),
     msvc_flag!("u", PassThrough),
@@ -549,6 +557,7 @@ pub fn parse_arguments(
     let mut debug_info = false;
     let mut pdb = None;
     let mut depfile = None;
+    let mut directives_depfile = None;
     let mut show_includes = false;
     let mut xclangs: Vec<OsString> = vec![];
     let mut clangs: Vec<OsString> = vec![];
@@ -556,6 +565,7 @@ pub fn parse_arguments(
     let mut multiple_input = false;
     let mut multiple_input_files = Vec::new();
     let mut too_hard_if_fd_is_present = None;
+    let mut language = None;
 
     // Custom iterator to expand `@` arguments which stand for reading a file
     // and interpreting it as a list of more arguments.
@@ -570,6 +580,20 @@ pub fn parse_arguments(
             Some(PassThrough) | Some(PassThroughWithPath(_)) | Some(PassThroughWithSuffix(_)) => {}
             Some(TooHardFlag) | Some(TooHard(_)) | Some(TooHardPath(_)) => {
                 cannot_cache!(arg.flag_str().expect("Can't be Argument::Raw/UnknownFlag",))
+            }
+            Some(LanguageC) => {
+                language = Some(Language::C);
+            }
+            Some(LanguageCWithPath(path)) => {
+                language = Some(Language::C);
+                input_arg = Some(path.into());
+            }
+            Some(LanguageCxx) => {
+                language = Some(Language::Cxx);
+            }
+            Some(LanguageCxxWithPath(path)) => {
+                language = Some(Language::Cxx);
+                input_arg = Some(path.into());
             }
             Some(DoCompilation) => {
                 compilation = true;
@@ -590,6 +614,10 @@ pub fn parse_arguments(
             }
             Some(DepFile(p)) => {
                 depfile = Some(p.clone());
+                dependency_args.extend(arg.iter_os_strings());
+            }
+            Some(DirectivesDepFile(p)) => {
+                directives_depfile = Some(p.clone());
                 dependency_args.extend(arg.iter_os_strings());
             }
             Some(ProgramDatabase(p)) => pdb = Some(p.clone()),
@@ -640,6 +668,10 @@ pub fn parse_arguments(
             Some(ProgramDatabase(_))
             | Some(DebugInfo)
             | Some(PassThrough)
+            | Some(LanguageC)
+            | Some(LanguageCxx)
+            | Some(LanguageCWithPath(_))
+            | Some(LanguageCxxWithPath(_))
             | Some(PassThroughWithPath(_))
             | Some(PassThroughWithSuffix(_)) => common_args.extend(
                 arg.normalize(NormalizedDisposition::Concatenated)
@@ -804,13 +836,17 @@ pub fn parse_arguments(
         cannot_cache!("multiple input files", format!("{multiple_input_files:?}"));
     }
 
-    let (input, language) = match input_arg {
-        Some(i) => match Language::from_file_name(Path::new(&i)) {
-            Some(language) => (i.clone(), language),
-            None => cannot_cache!("unknown source language"),
-        },
+    let Some(input) = input_arg else {
         // We can't cache compilation without an input.
-        None => cannot_cache!("no input file"),
+        cannot_cache!("no input file")
+    };
+
+    let language = if let Some(language) = language {
+        language
+    } else if let Some(language) = Language::from_file_name(Path::new(&input)) {
+        language
+    } else {
+        cannot_cache!("unknown source language")
     };
 
     let mut outputs = HashMap::new();
@@ -952,6 +988,7 @@ pub fn parse_arguments(
         language,
         compilation_flag,
         depfile,
+        msvc_directives_depfile: directives_depfile,
         outputs,
         dependency_args,
         preprocessor_args,
@@ -985,6 +1022,9 @@ async fn generate_dependencies<
 where
     T: CommandCreatorSync,
 {
+    let depfile = parsed_args.depfile.as_deref().filter(|_| !is_clang);
+    let directives_depfile = parsed_args.msvc_directives_depfile.as_deref();
+
     let args = std::iter::empty()
         .chain(
             std::iter::empty()
@@ -994,9 +1034,21 @@ where
                 .map(|arg| arg.as_os_str()),
         )
         .filter(|&arg| arg != parsed_args.compilation_flag)
-        .filter(|&arg| !arg.contains("sourceDependencies"))
-        .chain([OsStr::new("/nologo"), OsStr::new("/sourceDependencies-")])
-        .chain((!parsed_args.msvc_show_includes).then_some(OsStr::new("/showIncludes")))
+        .chain([
+            OsStr::new("/WX-"),
+            OsStr::new("/nologo"),
+            OsStr::new("/showIncludes"),
+            // Write to the user's /sourceDependencies file or to stdout
+            OsStr::new("/sourceDependencies"),
+            depfile.map(|p| p.as_os_str()).unwrap_or(OsStr::new("-")),
+            // Write to the user's /sourceDependencies:directives file or to stdout.
+            // MSVC emits errors in CUDA headers and exits uncleanly if we omit this,
+            // so always include it.
+            OsStr::new("/sourceDependencies:directives"),
+            directives_depfile
+                .map(|p| p.as_os_str())
+                .unwrap_or(OsStr::new("-")),
+        ])
         .chain(parsed_args.double_dash_input.then_some(OsStr::new("--")))
         .chain(std::iter::once(parsed_args.input.as_os_str()))
         .collect::<Vec<_>>();
@@ -1010,83 +1062,46 @@ where
 
     trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
-    let mut output = run_input_output(cmd, None).await?;
+    let output = run_input_output(cmd, None).await?;
 
-    // Parse and remove the /showIncludes lines from stdout
-    let dependencies = parse_dependencies_from_showincludes(
-        &mut output.stdout,
-        &parsed_args.input,
-        includes_prefix,
-    )?;
+    // Parse the /showIncludes lines from stdout
+    let dependencies = parse_dependencies_from_showincludes(&output.stderr, includes_prefix)?;
 
-    if let Some(depfile) = parsed_args
-        .depfile
-        .as_deref()
-        .filter(|depfile| depfile.as_os_str() != "-")
+    // Synthesize the clang-cl -deps file
+    if is_clang
+        && let Some(obj) = parsed_args.outputs.get("obj")
+        && let Some(depfile) = parsed_args
+            .depfile
+            .as_deref()
+            .filter(|depfile| depfile.as_os_str() != "-")
     {
-        if is_clang {
-            if let Some(obj) = parsed_args.outputs.get("obj") {
-                write_clang_dependencies_file(
-                    &cwd.join(&parsed_args.input),
-                    &cwd.join(&obj.path),
-                    &cwd.join(depfile),
-                    &dependencies,
-                )
-                .await?;
-            }
-        } else {
-            // The remaining lines in stdout should be the /sourceDependencies- JSON
-            tokio::io::BufWriter::new(tokio::fs::File::create(depfile).await?)
-                .write_all(&output.stdout)
-                .await?;
-        }
+        write_clang_dependencies_file(
+            &cwd.join(&parsed_args.input),
+            &cwd.join(&obj.path),
+            &cwd.join(depfile),
+            &dependencies,
+        )
+        .await?;
     }
-
-    // trace!(
-    //     "dependencies:\n{}",
-    //     dependencies.iter().map(|p| p.display()).join("\n")
-    // );
 
     Ok(dependencies)
 }
 
 fn parse_dependencies_from_showincludes(
-    stdout: &mut Vec<u8>,
-    input: &Path,
+    stderr: &[u8],
     includes_prefix: &str,
 ) -> Result<Vec<PathBuf>> {
-    let mut lines = vec![];
-    let mut paths = vec![];
-    let file_name = input.file_name().unwrap();
-
-    for line in bytes_to_str(&stdout[..])
-        .context("Failed to convert preprocessor stdout")?
+    Ok(bytes_to_str(stderr)
+        .context("Failed to convert preprocessor stderr")?
         .split("\n")
-    {
-        let line = line.trim_end_matches("\n").trim_end_matches("\r");
-
-        if let Some(path) = line.strip_prefix(includes_prefix) {
-            // trace!("showIncludes removing line: '{line}'");
-            paths.push(PathBuf::from(path.trim()));
-        } else if line == file_name {
-            // trace!("showIncludes removing line: '{line}'");
-            continue;
-        } else {
-            // trace!("showIncludes keeping line:  '{line}'");
-            lines.extend_from_slice(line.as_bytes());
-            lines.push(b'\n');
-        }
-    }
-
-    *stdout = lines;
-
-    Ok(paths)
+        .filter_map(|line| line.strip_prefix(includes_prefix))
+        .map(|path| PathBuf::from(path.trim()))
+        .collect())
 }
 
 #[allow(unused)]
 fn parse_dependencies_from_sourcedependencies(stdout: &[u8]) -> Result<Vec<PathBuf>> {
     let json = bytes_to_str(stdout).context("Failed to convert preprocessor stdout")?;
-    // trace!("sourceDependencies JSON:\n{json}");
     // Parse the JSON file
     let json = serde_json::from_str::<SourceDependencies>(&json)
         .context("Failed to parse /sourceDependencies json")?;
@@ -1096,7 +1111,7 @@ fn parse_dependencies_from_sourcedependencies(stdout: &[u8]) -> Result<Vec<PathB
         .into_iter()
         // Map includes into PathBufs
         .map(PathBuf::from)
-        .collect::<Vec<_>>())
+        .collect())
 }
 
 #[allow(non_snake_case, unused)]
@@ -1243,7 +1258,7 @@ fn generate_compile_commands(
     }
 
     match parsed_args.compilation_flag.to_str() {
-        Some("-E" | "/E") => {
+        Some("-P" | "/P") => {
             let mut fi = OsString::from("-Fi");
             fi.push(output);
             arguments.push(fi);
