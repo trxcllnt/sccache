@@ -1184,7 +1184,7 @@ where
                 std::iter::once(OsStr::new("-MM"))
                     .chain(parsed_args.dependency_args.iter().map(|arg| {
                         // Map all depflags to `-MM`
-                        if arg.contains("-M")
+                        if arg.ends_with("-M")
                             || arg.contains("-MD")
                             || arg.contains("-MMD")
                             || arg.contains("--dependencies")
@@ -1250,7 +1250,7 @@ where
                             .filter(|_| depfile.is_some())
                             .map(|arg| {
                                 // Map all depflags to `-M`
-                                if arg.contains("-MM")
+                                if arg.ends_with("-MM")
                                     || arg.contains("-MD")
                                     || arg.contains("-MMD")
                                     || arg.contains("--dependencies")

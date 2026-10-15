@@ -678,11 +678,11 @@ where
         debug!(
             "[{out_pretty}]: get_cached_or_compile: {}",
             SingleCompileCommand {
-                arguments: arguments[1..].to_vec(),
+                arguments: arguments.clone(),
                 cwd: cwd.clone(),
                 env_vars: env_vars.clone(),
-                executable: arguments[0].clone().into(),
-                out_pretty: String::new(),
+                executable: self.get_executable().to_owned(),
+                out_pretty: out_pretty.clone(),
                 share_jobserver: false
             }
         );
