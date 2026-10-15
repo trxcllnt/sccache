@@ -19,7 +19,7 @@ use crate::{
         args::*,
         c::{
             ArtifactDescriptor, CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs,
-            GenerateDependenciesArgs, ParseArgs, ParsedArguments,
+            GenerateDependenciesArgs, P1689r5_JSON, ParseArgs, ParsedArguments,
         },
         clang,
     },
@@ -32,7 +32,7 @@ use async_trait::async_trait;
 use fs_err as fs;
 use itertools::Itertools;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     ffi::{OsStr, OsString},
     io::Read,
@@ -1146,37 +1146,6 @@ pub async fn generate_dependencies<
 where
     T: CommandCreatorSync,
 {
-    let dependencies = generate_dependencies_with_compiler(
-        creator,
-        executable.as_ref(),
-        parsed_args,
-        cwd.as_ref(),
-        env_vars,
-        kind,
-    )
-    .await?;
-
-    Ok(dependencies)
-}
-
-pub async fn generate_dependencies_with_compiler<
-    T,
-    Cwd: AsRef<Path>,
-    Exe: AsRef<Path>,
-    Key: AsRef<OsStr>,
-    Var: AsRef<OsStr>,
-    Envs: Iterator<Item = (Key, Var)> + Clone,
->(
-    creator: &T,
-    executable: Exe,
-    parsed_args: &ParsedArguments,
-    cwd: Cwd,
-    env_vars: Envs,
-    kind: CCompilerKind,
-) -> Result<Vec<PathBuf>>
-where
-    T: CommandCreatorSync,
-{
     let generate_user_dependencies = parsed_args.dependency_args.iter().any(|arg| {
         arg.contains("-MMD")
             || arg.contains("--write-user-dependencies")
@@ -1336,6 +1305,7 @@ where
 
     parse_dependencies(
         &parsed_args.input,
+        parsed_args.depfile_format.as_deref(),
         &if let Some(depfile) = depfile {
             read_depfile(cwd.as_ref().join(depfile)).await?
         } else {
@@ -1355,33 +1325,69 @@ pub async fn read_depfile<'a, P: AsRef<Path>>(depfile: P) -> Result<std::borrow:
 
 pub fn parse_dependencies<P: AsRef<Path>, S: AsRef<str>>(
     input: P,
+    format: Option<&OsStr>,
+    depfile: S,
+) -> Result<Vec<PathBuf>> {
+    if format.unwrap_or_default() == "p1689r5" {
+        parse_p1689r5_dependenices(depfile)
+    } else {
+        parse_makefile_dependencies(input, depfile)
+    }
+}
+
+pub fn parse_p1689r5_dependenices<S: AsRef<str>>(depfile: S) -> Result<Vec<PathBuf>> {
+    serde_json::from_str::<P1689r5_JSON>(depfile.as_ref())
+        .with_context(|| "Failed to parse p1689r5 json")
+        .map(|json| {
+            json.rules
+                .iter()
+                .flat_map(|rule| {
+                    rule.requires
+                        .iter()
+                        .filter_map(|dep| {
+                            if dep.source_path.is_empty() {
+                                None
+                            } else {
+                                Some(PathBuf::from(&dep.source_path))
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        })
+}
+
+pub fn parse_makefile_dependencies<P: AsRef<Path>, S: AsRef<str>>(
+    input: P,
     depfile_lines: S,
 ) -> Result<Vec<PathBuf>> {
+    // trace!("lines:\n{}", depfile_lines.as_ref());
+
     let input_path = input.as_ref();
 
     let lines = depfile_lines
         .as_ref()
         .split("\n")
-        .enumerate()
         // The path to the left of the colon is the `-MT <path>`, so take everything to the right.
-        .map(|(idx, line)| {
-            if idx == 0 {
-                if let Some((_, rest)) = line.split_once(":") {
-                    rest
-                } else {
-                    line
-                }
+        .filter_map(|line| {
+            let line = if let Some((_, rest)) = line.split_once(":") {
+                rest
             } else {
                 line
             }
-        })
-        .map(|line| {
             // Trim whitespace and trailing backslashes + colons
-            line.trim().trim_end_matches(r"\").trim_end_matches(r":")
-        })
-        .filter(|line| !line.is_empty());
+            .trim()
+            .trim_end_matches(r"\")
+            .trim_end_matches(r":")
+            .trim();
+
+            (!line.is_empty()).then_some(line)
+        });
 
     let paths = lines
+        // .inspect(|line| trace!("line: {line}"))
         .flat_map(|line| shlex::split(line).unwrap_or_default())
         .map(PathBuf::from);
 

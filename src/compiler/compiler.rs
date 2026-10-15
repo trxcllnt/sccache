@@ -2785,7 +2785,7 @@ compiler_version=__VERSION__
 
                 return CCompiler::new(
                     Msvc {
-                        _includes_prefix: includes_prefix,
+                        includes_prefix,
                         is_clang,
                         version,
                     },

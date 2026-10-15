@@ -19,7 +19,7 @@ use crate::{
         args::*,
         c::{
             ArtifactDescriptor, CCompilerImpl, CCompilerKind, GenerateCompileCommandsArgs,
-            GenerateDependenciesArgs, P1689r5_JSON, ParseArgs, ParsedArguments,
+            GenerateDependenciesArgs, ParseArgs, ParsedArguments,
         },
         clang, gcc, write_temp_file,
     },
@@ -46,7 +46,7 @@ use tokio::io::AsyncWriteExt;
 #[derive(Clone, Debug, Default)]
 pub struct Msvc {
     /// The prefix used in the output of `-showIncludes`.
-    pub _includes_prefix: String,
+    pub includes_prefix: String,
     pub is_clang: bool,
     pub version: Option<String>,
 }
@@ -128,7 +128,7 @@ impl CCompilerImpl for Msvc {
                 .iter()
                 .filter(|(k, _)| k != "CL" && k != "_CL_")
                 .cloned(),
-            // &self.includes_prefix,
+            &self.includes_prefix,
             self.is_clang,
         )
         .await
@@ -979,61 +979,51 @@ async fn generate_dependencies<
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: Envs,
-    // includes_prefix: &str,
+    includes_prefix: &str,
     is_clang: bool,
 ) -> Result<Vec<PathBuf>>
 where
     T: CommandCreatorSync,
 {
+    let args = std::iter::empty()
+        .chain(
+            std::iter::empty()
+                .chain(parsed_args.preprocessor_args.iter())
+                .chain(parsed_args.common_args.iter())
+                .chain(parsed_args.arch_args.iter())
+                .map(|arg| arg.as_os_str()),
+        )
+        .filter(|&arg| arg != parsed_args.compilation_flag)
+        .filter(|&arg| !arg.contains("sourceDependencies"))
+        .chain([OsStr::new("/nologo"), OsStr::new("/sourceDependencies-")])
+        .chain((!parsed_args.msvc_show_includes).then_some(OsStr::new("/showIncludes")))
+        .chain(parsed_args.double_dash_input.then_some(OsStr::new("--")))
+        .chain(std::iter::once(parsed_args.input.as_os_str()))
+        .collect::<Vec<_>>();
+
     let mut cmd = creator.clone().new_command_sync(executable);
-    cmd.env_clear()
-        .envs(env_vars)
-        .current_dir(cwd)
-        .arg("/nologo")
-        .arg("/translateInclude")
-        .arg("/scanDependencies-")
-        .args(&parsed_args.preprocessor_args)
-        .args(&parsed_args.common_args)
-        .args(&parsed_args.arch_args)
-        .args(
-            &std::iter::empty()
-                .chain(parsed_args.double_dash_input.then_some(OsStr::new("--")))
-                .chain(std::iter::once(parsed_args.input.as_os_str()))
-                .collect::<Vec<_>>(),
-        );
+    cmd.current_dir(cwd).env_clear().envs(env_vars);
+
+    for arg in args {
+        cmd.arg(arg);
+    }
 
     trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
-    let output = run_input_output(cmd, None).await?;
-    // Parse the JSON on stdout
-    let deps_json = bytes_to_str(output.stdout)
-        .and_then(|json| {
-            trace!(
-                "[{}] scanDependencies json:\n{json}",
-                parsed_args.output_pretty()
-            );
-            serde_json::from_str::<P1689r5_JSON>(&json).map_err(Into::into)
-        })
-        .with_context(|| "Failed to parse /scanDependencies json")?;
+    let mut output = run_input_output(cmd, None).await?;
 
-    let dependencies = deps_json
-        .rules
-        .iter()
-        .flat_map(|rule| {
-            rule.requires
-                .iter()
-                .filter_map(|dep| {
-                    if dep.source_path.is_empty() {
-                        None
-                    } else {
-                        Some(PathBuf::from(&dep.source_path))
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
+    // Parse and remove the /showIncludes lines from stdout
+    let dependencies = parse_dependencies_from_showincludes(
+        &mut output.stdout,
+        &parsed_args.input,
+        includes_prefix,
+    )?;
 
-    if let Some(depfile) = parsed_args.depfile.as_deref() {
+    if let Some(depfile) = parsed_args
+        .depfile
+        .as_deref()
+        .filter(|depfile| depfile.as_os_str() != "-")
+    {
         if is_clang {
             if let Some(obj) = parsed_args.outputs.get("obj") {
                 write_clang_dependencies_file(
@@ -1045,22 +1035,78 @@ where
                 .await?;
             }
         } else {
-            // TODO: convert and write P1689r5_JSON -> SourceDependencies
-            let _: Option<SourceDependencies> = None;
+            // The remaining lines in stdout should be the /sourceDependencies- JSON
+            tokio::io::BufWriter::new(tokio::fs::File::create(depfile).await?)
+                .write_all(&output.stdout)
+                .await?;
         }
     }
+
+    // trace!(
+    //     "dependencies:\n{}",
+    //     dependencies.iter().map(|p| p.display()).join("\n")
+    // );
 
     Ok(dependencies)
 }
 
-#[allow(non_snake_case)]
+fn parse_dependencies_from_showincludes(
+    stdout: &mut Vec<u8>,
+    input: &Path,
+    includes_prefix: &str,
+) -> Result<Vec<PathBuf>> {
+    let mut lines = vec![];
+    let mut paths = vec![];
+    let file_name = input.file_name().unwrap();
+
+    for line in bytes_to_str(&stdout[..])
+        .context("Failed to convert preprocessor stdout")?
+        .split("\n")
+    {
+        let line = line.trim_end_matches("\n").trim_end_matches("\r");
+
+        if let Some(path) = line.strip_prefix(includes_prefix) {
+            // trace!("showIncludes removing line: '{line}'");
+            paths.push(PathBuf::from(path.trim()));
+        } else if line == file_name {
+            // trace!("showIncludes removing line: '{line}'");
+            continue;
+        } else {
+            // trace!("showIncludes keeping line:  '{line}'");
+            lines.extend_from_slice(line.as_bytes());
+            lines.push(b'\n');
+        }
+    }
+
+    *stdout = lines;
+
+    Ok(paths)
+}
+
+#[allow(unused)]
+fn parse_dependencies_from_sourcedependencies(stdout: &[u8]) -> Result<Vec<PathBuf>> {
+    let json = bytes_to_str(stdout).context("Failed to convert preprocessor stdout")?;
+    // trace!("sourceDependencies JSON:\n{json}");
+    // Parse the JSON file
+    let json = serde_json::from_str::<SourceDependencies>(&json)
+        .context("Failed to parse /sourceDependencies json")?;
+    Ok(json
+        .Data
+        .Includes
+        .into_iter()
+        // Map includes into PathBufs
+        .map(PathBuf::from)
+        .collect::<Vec<_>>())
+}
+
+#[allow(non_snake_case, unused)]
 #[derive(Deserialize, Serialize)]
 struct SourceDependencies {
     Version: String,
     Data: SourceDependenciesData,
 }
 
-#[allow(non_snake_case)]
+#[allow(non_snake_case, unused)]
 #[derive(Deserialize, Serialize)]
 struct SourceDependenciesData {
     Source: String,
@@ -1073,14 +1119,14 @@ struct SourceDependenciesData {
     ImportedHeaderUnits: Vec<SourceDependenciesImportedHeaderUnit>,
 }
 
-#[allow(non_snake_case)]
+#[allow(non_snake_case, unused)]
 #[derive(Deserialize, Serialize)]
 struct SourceDependenciesImportedModule {
     Name: String,
     BMI: String,
 }
 
-#[allow(non_snake_case)]
+#[allow(non_snake_case, unused)]
 #[derive(Deserialize, Serialize)]
 struct SourceDependenciesImportedHeaderUnit {
     Header: String,

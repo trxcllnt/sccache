@@ -320,6 +320,7 @@ where
 
     gcc::parse_dependencies(
         &parsed_args.input,
+        parsed_args.depfile_format.as_deref(),
         &if let Some(depfile) = parsed_args.depfile.as_deref() {
             gcc::read_depfile(cwd.join(depfile)).await?
         } else {

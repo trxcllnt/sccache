@@ -454,6 +454,7 @@ where
 
     gcc::parse_dependencies(
         &parsed_args.input,
+        parsed_args.depfile_format.as_deref(),
         &if let Some(depfile) = depfile {
             gcc::read_depfile(cwd.join(depfile)).await?
         } else {
