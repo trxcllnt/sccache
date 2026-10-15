@@ -326,7 +326,7 @@ impl fmt::Display for AsyncCommand {
             }
             write!(f, r#""{}""#, cmd.get_program().display())?;
             for arg in cmd.get_args() {
-                write!(f, r#" "{}""#, arg.display())?;
+                write!(f, " {arg:?}")?;
             }
             fmt::Result::Ok(())
         } else {

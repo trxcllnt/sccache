@@ -206,7 +206,7 @@ where
         let path = path.as_ref();
 
         let mut file = File::open(path)
-            .inspect_err(|e| debug!("Couldn't open config file: {e}"))
+            .inspect_err(|e| trace!("Couldn't open config file: {e}"))
             .ok()?;
 
         let mut data = String::new();

@@ -677,17 +677,13 @@ where
         // [<file>] get_cached_or_compile: "/path/to/exe <args...>"
         debug!(
             "[{out_pretty}]: get_cached_or_compile: {}",
-            if !cfg!(test) {
-                format!(
-                    "{}",
-                    creator
-                        .clone()
-                        .new_command_sync(self.get_executable())
-                        .args(&arguments)
-                        .current_dir(&cwd)
-                )
-            } else {
-                format!("{arguments:?}")
+            SingleCompileCommand {
+                arguments: arguments[1..].to_vec(),
+                cwd: cwd.clone(),
+                env_vars: env_vars.clone(),
+                executable: arguments[0].clone().into(),
+                out_pretty: String::new(),
+                share_jobserver: false
             }
         );
 
