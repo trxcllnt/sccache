@@ -239,8 +239,7 @@ ArgData! {
     DoCompilation,
     ShowIncludes,
     Output(PathBuf),
-    DepFile(PathBuf),
-    DirectivesDepFile(PathBuf),
+    DepFile(OsString),
     ProgramDatabase(PathBuf),
     DebugInfo,
     LanguageC,
@@ -433,7 +432,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_take_arg!("constexpr:", OsString, Concatenated, PassThroughWithSuffix),
     msvc_flag!("d1nodatetime", PassThrough),
     msvc_flag!("d20bforceinline", PassThrough),
-    msvc_take_arg!("deps", PathBuf, Concatenated, DepFile),
+    msvc_take_arg!("deps", OsString, Concatenated, DepFile),
     msvc_take_arg!("diagnostics:", OsString, Concatenated, PassThroughWithSuffix),
     msvc_take_arg!("doc", PathBuf, Concatenated, TooHardPath), // Creates an .xdc file.
     msvc_flag!("dynamicdeopt", TooHardFlag), // Dynamic deoptimization is not supported.
@@ -502,8 +501,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("sdl-", PassThrough),
     msvc_flag!("showIncludes", ShowIncludes),
     msvc_take_arg!("source-charset:", OsString, Concatenated, PassThroughWithSuffix),
-    msvc_take_arg!("sourceDependencies", PathBuf, CanBeSeparated, DepFile),
-    msvc_take_arg!("sourceDependencies:directives", PathBuf, CanBeSeparated, DirectivesDepFile),
+    msvc_take_arg!("sourceDependencies", OsString, Concatenated, DepFile),
     msvc_take_arg!("std:", OsString, Concatenated, PassThroughWithSuffix),
     msvc_take_arg!("stdIfcDir", PathBuf, Separated, TooHardPath),
     msvc_flag!("u", PassThrough),
@@ -613,11 +611,12 @@ pub fn parse_arguments(
                 }
             }
             Some(DepFile(p)) => {
-                depfile = Some(p.clone());
-                dependency_args.extend(arg.iter_os_strings());
-            }
-            Some(DirectivesDepFile(p)) => {
-                directives_depfile = Some(p.clone());
+                // Handle /sourceDependencies:directives
+                if let Some(p) = p.strip_prefix(":directives") {
+                    directives_depfile = Some(PathBuf::from(p));
+                } else {
+                    depfile = Some(PathBuf::from(p));
+                }
                 dependency_args.extend(arg.iter_os_strings());
             }
             Some(ProgramDatabase(p)) => pdb = Some(p.clone()),
@@ -1867,23 +1866,28 @@ mod test {
                 "-c",
                 "foo.c",
                 "/Fofoo.obj",
-                "/sourceDependenciesfoo.obj.json"
+                "/sourceDependenciesfoo.obj.json",
+                "/sourceDependencies:directivesfoo_modules.obj.json"
             ],
             ovec![
                 "-c",
                 "foo.c",
                 "/Fofoo.obj",
-                "/sourceDependencies",
-                "foo.obj.json"
+                "/sourceDependenciesfoo.obj.json",
+                "/sourceDependencies:directivesfoo_modules.obj.json"
             ],
         ];
 
         for args in arg_sets {
+            let sourcedependencies_directives = args
+                .iter()
+                .any(|arg| arg.contains("sourceDependencies:directives"));
             let ParsedArguments {
                 input,
                 language,
                 outputs,
                 preprocessor_args,
+                msvc_directives_depfile,
                 msvc_show_includes,
                 common_args,
                 depfile,
@@ -1895,6 +1899,12 @@ mod test {
             assert_eq!(Some("foo.c"), input.to_str());
             assert_eq!(Language::C, language);
             assert_eq!(Some("foo.obj.json"), depfile.unwrap().to_str());
+            if sourcedependencies_directives {
+                assert_eq!(
+                    Some("foo_modules.obj.json"),
+                    msvc_directives_depfile.unwrap().to_str()
+                );
+            }
             assert_map_contains!(
                 outputs,
                 (
