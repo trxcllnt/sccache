@@ -60,11 +60,10 @@ impl Clang {
     }
 
     pub fn find_extra_gcc_toolchain_markers(exe: &Path) -> Vec<PathBuf> {
-        use crate::compiler::c::CToolchainPackager;
-        if let Some(path) = CToolchainPackager::named_file(exe, "-print-file-name=crtbegin.o") {
+        use crate::compiler::c::named_file;
+        if let Some(path) = named_file(exe, "-print-file-name=crtbegin.o") {
             vec![path]
-        } else if let Some(path) = CToolchainPackager::named_file(exe, "-print-file-name=libgcc.a")
-        {
+        } else if let Some(path) = named_file(exe, "-print-file-name=libgcc.a") {
             vec![path]
         } else {
             vec![]

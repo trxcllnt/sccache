@@ -1005,9 +1005,10 @@ where
 
         let mut path_transformer = dist::PathTransformer::new();
 
-        let (compile_cmd, _dist_compile_cmd, cacheable) = compilation
-            .generate_compile_commands(&mut path_transformer, &hash_key)
-            .context("Failed to generate compile commands")?;
+        let (compile_cmd, _dist_compile_cmd, cacheable) =
+            compilation
+                .generate_compile_commands()
+                .context("Failed to generate compile commands")?;
 
         Ok(Compile {
             command_creator,

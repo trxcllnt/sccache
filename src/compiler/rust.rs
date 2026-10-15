@@ -18,6 +18,7 @@ use {
         compiler::{DistPackagers, OutputsRewriter},
         dist::pkg,
         lru_disk_cache::{LruCache, Meter},
+        util::{path_to_str, simplify_path},
     },
     semver::Version,
     std::{
@@ -25,12 +26,10 @@ use {
         collections::hash_map::RandomState,
         env::consts::{DLL_PREFIX, EXE_EXTENSION},
         io,
-        sync::Mutex,
+        sync::{Arc, Mutex},
     },
 };
 
-#[cfg(feature = "dist-client")]
-use crate::util::path_to_str;
 use crate::{
     cache::FileObjectSource,
     compiler::args::*,
@@ -63,7 +62,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     process,
-    sync::{Arc, LazyLock},
+    sync::LazyLock,
     time,
 };
 
@@ -1793,7 +1792,6 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
         // Ignore unused variables
         #[cfg(not(feature = "dist-client"))]
         {
-            let _ = _path_transformer;
             let _ = host;
             let _ = sysroot;
         }
@@ -2116,7 +2114,7 @@ impl pkg::InputsPackager for RustInputsPackager {
 
         let mut tar_inputs = vec![];
         for input_path in inputs {
-            let input_path = pkg::simplify_path(&input_path)?;
+            let input_path = simplify_path(&input_path)?;
             if let Some(ext) = input_path.extension() {
                 if !super::CAN_DIST_DYLIBS && ext == DLL_EXTENSION {
                     bail!(
@@ -2167,7 +2165,7 @@ impl pkg::InputsPackager for RustInputsPackager {
         // crate, otherwise we need to send everything.
         let mut tar_crate_libs = vec![];
         for crate_link_path in crate_link_paths {
-            let crate_link_path = pkg::simplify_path(&crate_link_path)?;
+            let crate_link_path = simplify_path(&crate_link_path)?;
             let dir_entries = match fs::read_dir(crate_link_path) {
                 Ok(iter) => iter,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,

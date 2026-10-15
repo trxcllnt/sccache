@@ -28,7 +28,6 @@ use crate::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
@@ -886,6 +885,40 @@ impl<I: CCompilerImpl> pkg::InputsPackager for CCompilation<I> {
     }
 }
 
+// Helper to use -print-file-name and -print-prog-name to look up
+// files by path.
+pub fn named_file<P: AsRef<Path>>(exe: P, arg: &str) -> Option<PathBuf> {
+    let executable = exe.as_ref();
+    let mut output = std::process::Command::new(executable)
+        .arg(arg)
+        .output()
+        .ok()?;
+    debug!(
+        "{} {arg} output:\n{}\n===\n{}",
+        executable.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    if !output.status.success() {
+        debug!("exit failure");
+        return None;
+    }
+
+    // Remove the trailing newline (if present)
+    if output.stdout.last() == Some(&b'\n') {
+        output.stdout.pop();
+    }
+
+    // Create our PathBuf from the raw bytes.  Assume that relative
+    // paths can be found via PATH.
+    let path = crate::util::bytes_to_path(output.stdout).ok()?;
+    if path.is_absolute() {
+        Some(path.into_owned())
+    } else {
+        which::which(path.as_ref()).ok()
+    }
+}
+
 #[cfg(feature = "dist-client")]
 #[allow(unused)]
 pub(crate) struct CToolchainPackager {
@@ -896,39 +929,10 @@ pub(crate) struct CToolchainPackager {
 }
 
 #[cfg(feature = "dist-client")]
+#[allow(unused)]
 impl CToolchainPackager {
-    // Helper to use -print-file-name and -print-prog-name to look up
-    // files by path.
     pub fn named_file<P: AsRef<Path>>(exe: P, arg: &str) -> Option<PathBuf> {
-        let executable = exe.as_ref();
-        let mut output = std::process::Command::new(executable)
-            .arg(arg)
-            .output()
-            .ok()?;
-        debug!(
-            "{} {arg} output:\n{}\n===\n{}",
-            executable.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-        if !output.status.success() {
-            debug!("exit failure");
-            return None;
-        }
-
-        // Remove the trailing newline (if present)
-        if output.stdout.last() == Some(&b'\n') {
-            output.stdout.pop();
-        }
-
-        // Create our PathBuf from the raw bytes.  Assume that relative
-        // paths can be found via PATH.
-        let path = crate::util::bytes_to_path(output.stdout).ok()?;
-        if path.is_absolute() {
-            Some(path.into_owned())
-        } else {
-            which::which(path.as_ref()).ok()
-        }
+        named_file(exe, arg)
     }
 }
 
@@ -966,6 +970,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
     ) -> Result<Arc<dyn pkg::ArchivePackager>> {
+        use itertools::Itertools;
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
         debug!(

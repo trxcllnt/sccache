@@ -40,9 +40,9 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
-use std::process::Command;
 use std::str;
 use std::time::{Duration, SystemTime};
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 use test_case::test_case;
 
 fn adv_key_kind(lang: &str, compiler: &str) -> String {
@@ -773,6 +773,7 @@ fn run_sccache_command_tests(client: &SccacheClient, compiler: &Compiler, tempdi
     test_clang_cache_whitespace_normalization(client, compiler, tempdir, false);
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 fn assert_stats_eq(
     expected_stats: &sccache::server::ServerStats,
     actual_stats: &sccache::server::ServerStats,
@@ -2916,6 +2917,7 @@ fn find_hip_compiler() -> Option<Compiler> {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn test_assembler_affects_cache() -> std::result::Result<(), anyhow::Error> {
     use fs_err::os::unix::fs::OpenOptionsExt;
+    use std::process::Command;
     use which::which_in;
 
     drop(env_logger::try_init());
@@ -3125,6 +3127,8 @@ fn test_hip_sccache_command() {
 #[serial]
 #[cfg(unix)]
 fn test_symlinked_exe() {
+    use std::process::Command;
+
     let compilers = find_compilers();
     if compilers.is_empty() {
         warn!("No compilers found, skipping test");

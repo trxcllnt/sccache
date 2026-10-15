@@ -1903,6 +1903,69 @@ where
     }
 }
 
+/// Simplify a path to one without any relative components, erroring if it looks
+/// like there could be any symlink complexity that means a simplified path is not
+/// equivalent to the original (see the documentation of `fs::canonicalize` for an
+/// example).
+///
+/// So why avoid resolving symlinks? Any path that we are trying to simplify has
+/// (usually) been added to an archive because something will try access it, but
+/// resolving symlinks (be they for the actual file or directory components) can
+/// make the accessed path 'disappear' in favour of the canonical path.
+pub fn simplify_path<P: AsRef<Path>>(path: P) -> Result<PathBuf> {
+    SimplifyPath {
+        dirs: None,
+        resolved_symlinks: None,
+    }
+    .simplify(path.as_ref())
+}
+
+pub struct SimplifyPath<'a> {
+    pub dirs: Option<&'a mut std::collections::BTreeSet<PathBuf>>,
+    pub resolved_symlinks: Option<&'a mut std::collections::BTreeMap<PathBuf, PathBuf>>,
+}
+
+impl SimplifyPath<'_> {
+    pub fn simplify<P: AsRef<Path>>(&mut self, path: P) -> Result<PathBuf> {
+        use std::path::Component;
+
+        let mut final_path = PathBuf::new();
+        for component in path.as_ref().components() {
+            match component {
+                c @ Component::RootDir | c @ Component::Prefix(_) | c @ Component::Normal(_) => {
+                    final_path.push(c);
+                    if self.resolved_symlinks.is_some() && final_path.is_symlink() {
+                        let parent = final_path.parent().expect("symlinks have parents");
+                        let link_target = final_path.read_link()?;
+                        let new_final_path = self.simplify(parent.join(&link_target))?;
+                        let old_final_path =
+                            std::mem::replace(&mut final_path, new_final_path.clone());
+                        #[allow(clippy::unnecessary_unwrap)]
+                        self.resolved_symlinks
+                            .as_mut()
+                            .unwrap()
+                            .insert(old_final_path, new_final_path);
+                    }
+                }
+                Component::ParentDir => {
+                    // If the path is doing funny symlink traversals, just give up.
+                    //
+                    // This case should only occur if `resolved_symlinks` is `None`.
+                    if final_path.is_symlink() {
+                        bail!("Cannot handle symlinks in parent paths")
+                    }
+                    if let Some(dirs) = self.dirs.as_mut() {
+                        dirs.insert(final_path.clone());
+                    }
+                    final_path.pop();
+                }
+                Component::CurDir => continue,
+            }
+        }
+        Ok(final_path)
+    }
+}
+
 /// Strip base directories from absolute paths in preprocessor output.
 ///
 /// This function searches for basedir paths in the preprocessor output and
@@ -2180,7 +2243,6 @@ pub fn apply_basedirs_to_args<P: AsRef<Path>>(
         return Ok(());
     }
 
-    use crate::dist::pkg::SimplifyPath;
     use itertools::Itertools;
     use std::collections::{BTreeMap, BTreeSet};
 

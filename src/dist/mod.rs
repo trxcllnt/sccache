@@ -144,7 +144,7 @@ pub mod pkg;
 #[cfg(not(feature = "dist-client"))]
 mod pkg {
     pub trait ToolchainPackager {}
-    pub trait PackagedToolchain {}
+    pub trait ArchivePackager {}
     #[allow(dead_code)]
     pub trait InputsPackager {}
 }

@@ -15,15 +15,11 @@
 
 use crate::{
     errors::*,
-    jobserver,
     lru_disk_cache::LruCache,
-    mock_command::{AsyncCommand, RunCommand},
-    util::{Digest, MetadataCtimeExt, SCCACHE_TMPDIR, Timestamp, run_input_output},
+    util::{Digest, MetadataCtimeExt, Timestamp},
 };
-use fs_err as fs;
 use futures::lock::Mutex;
 use std::{
-    ffi::OsStr,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -143,13 +139,20 @@ impl SourceFileCache {
 #[cfg(unix)]
 pub async fn build_gcc_pragma_once_fix<
     Exe: AsRef<Path>,
-    Key: AsRef<OsStr>,
-    Var: AsRef<OsStr>,
+    Key: AsRef<std::ffi::OsStr>,
+    Var: AsRef<std::ffi::OsStr>,
     Envs: Iterator<Item = (Key, Var)> + Clone,
 >(
     exe: Exe,
     env_vars: Envs,
 ) -> Result<PathBuf> {
+    use crate::{
+        jobserver,
+        mock_command::{AsyncCommand, RunCommand},
+        util::{Digest, SCCACHE_TMPDIR, run_input_output},
+    };
+    use fs_err as fs;
+
     let temp = SCCACHE_TMPDIR.as_ref()?;
     let hash = Digest::from_file(exe.as_ref()).await?.finish();
     let path = temp.join(format!("pragma_once_fix_{hash}.so"));
