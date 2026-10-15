@@ -250,8 +250,8 @@ impl OverlayBuilder {
         children: &OverlayChildren,
     ) -> BuildResult {
         tracing::trace!("[perform_build({job_id})]: Compile environment: {env_vars:?}");
-        tracing::trace!("[perform_build({job_id})]: Compile command: {executable:?} {arguments:?}");
-        tracing::trace!("[perform_build({job_id})]: Output paths: {output_paths:?}");
+        tracing::debug!("[perform_build({job_id})]: Compile command: {executable:?} {arguments:?}");
+        tracing::debug!("[perform_build({job_id})]: Output paths: {output_paths:?}");
 
         if output_paths.is_empty() {
             return Err(BuildError::Unknown(anyhow!("Output paths is empty")));
@@ -276,7 +276,7 @@ impl OverlayBuilder {
                 let inputs_dir = build_dir.join("inputs");
                 let toolchain_dir = overlay_1.toolchain_dir;
 
-                tracing::trace!("[perform_build({job_id})]: copying in inputs");
+                tracing::debug!("[perform_build({job_id})]: copying in inputs");
                 // Note that we don't unpack directly into the upperdir since there overlayfs has some
                 // special marker files that we don't want to create by accident (or malicious intent)
                 tar::Archive::new(flate2::read::ZlibDecoder::new(inputs.reader()))
@@ -286,7 +286,7 @@ impl OverlayBuilder {
 
                 let cwd = Path::new(&cwd);
 
-                tracing::trace!("[perform_build({job_id})]: creating output directories");
+                tracing::debug!("[perform_build({job_id})]: creating output directories");
 
                 // Canonicalize output path as either absolute or relative to cwd
                 let output_paths_absolute = output_paths
@@ -296,7 +296,7 @@ impl OverlayBuilder {
 
                 {
                     let h_cwd = join_suffix(&inputs_dir, cwd);
-                    tracing::trace!("[perform_build({job_id})]: creating dir: {h_cwd:?}");
+                    tracing::debug!("[perform_build({job_id})]: creating dir: {h_cwd:?}");
                     fs::create_dir_all(&h_cwd).map_err(|e| BuildError::MakeOutputDir(h_cwd, e))?;
                 }
 
@@ -304,13 +304,13 @@ impl OverlayBuilder {
                     // If it doesn't have a parent, nothing needs creating
                     if let Some(path) = path.parent() {
                         let h_path = join_suffix(&inputs_dir, path);
-                        tracing::trace!("[perform_build({job_id})]: creating dir: {h_path:?}");
+                        tracing::debug!("[perform_build({job_id})]: creating dir: {h_path:?}");
                         fs::create_dir_all(&h_path)
                             .map_err(|e| BuildError::MakeOutputDir(h_path, e))?;
                     }
                 }
 
-                tracing::trace!("[perform_build({job_id})]: Creating overlayfs");
+                tracing::debug!("[perform_build({job_id})]: Creating overlayfs");
 
                 // Automatically unmount or destroy file system mounts when this thread dies
                 nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS)
@@ -352,7 +352,7 @@ impl OverlayBuilder {
                 // This error is unfortunately not Send+Sync
                 .map_err(|e| BuildError::MountOverlayFS(anyhow!("{e}")))?;
 
-                tracing::trace!("[perform_build({job_id})]: creating compile command");
+                tracing::debug!("[perform_build({job_id})]: creating compile command");
 
                 // Bubblewrap notes:
                 // - We're running as uid 0 (to do the mounts above), and so bubblewrap is run as uid 0
@@ -405,6 +405,7 @@ impl OverlayBuilder {
                 cmd.args(exec_cmd.as_ref());
                 cmd.arg(&executable);
                 cmd.args(arguments);
+                cmd.stdin(Stdio::null());
                 cmd.stdout(Stdio::piped());
                 cmd.stderr(Stdio::piped());
                 cmd.kill_on_drop(true);
@@ -414,7 +415,7 @@ impl OverlayBuilder {
                     job_queue.acquire().await.map_err(|_| BuildError::Cancelled)
                 })?;
 
-                tracing::trace!("[perform_build({job_id})]: performing compile");
+                tracing::debug!("[perform_build({job_id})]: performing compile");
                 tracing::trace!("[perform_build({job_id})]: bubblewrap command: {cmd:?}");
 
                 let output = runtime.block_on(async move {
@@ -486,7 +487,7 @@ impl OverlayBuilder {
 
                 if !output.success() {
                     if output.exit() {
-                        tracing::trace!("[perform_build({job_id})]: compile failure: {output:?}");
+                        tracing::debug!("[perform_build({job_id})]: compile failure: {output:?}");
                     } else {
                         // Warn on abnormal terminations (i.e. SIGTERM, SIGKILL)
                         tracing::warn!(
@@ -495,8 +496,8 @@ impl OverlayBuilder {
                         );
                     }
                 } else {
-                    tracing::trace!("[perform_build({job_id})]: compile success: {output:?}");
-                    tracing::trace!("[perform_build({job_id})]: retrieving {output_paths:?}");
+                    tracing::debug!("[perform_build({job_id})]: compile success: {output:?}");
+                    tracing::debug!("[perform_build({job_id})]: retrieving {output_paths:?}");
 
                     for (path, abs_path) in output_paths.into_iter().zip(output_paths_absolute) {
                         let host_path = join_suffix(&output_dir, &abs_path);

@@ -146,15 +146,15 @@ mod operator {
                 RetryError::permanent(err)
             }
             opendal::ErrorKind::RateLimited => {
-                trace!("cache {kind} error (transient): {err}");
+                debug!("cache {kind} error (transient): {err}");
                 RetryError::transient(err)
             }
             opendal::ErrorKind::Unsupported => {
-                trace!("cache {kind} error (permanent): {err}");
+                debug!("cache {kind} error (permanent): {err}");
                 RetryError::permanent(err)
             }
             opendal::ErrorKind::Unexpected if err.is_temporary() => {
-                debug!("cache {kind} error (transient): {err}");
+                warn!("cache {kind} error (transient): {err}");
                 RetryError::transient(err)
             }
             _ => {
