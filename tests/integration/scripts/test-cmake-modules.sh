@@ -11,6 +11,7 @@ echo "=========================================="
 cp -r /sccache/tests/integration/cmake-modules /build/cmake-modules
 
 # Start sccache server
+rm -f "$SCCACHE_ERROR_LOG"
 "$SCCACHE" --start-server || true
 
 echo "Build 1: Cache miss expected"

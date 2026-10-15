@@ -9,6 +9,10 @@ echo "=========================================="
 echo "Testing: $TEST_NAME"
 echo "=========================================="
 
+# Start sccache server
+rm -f "$SCCACHE_ERROR_LOG"
+"$SCCACHE" --start-server || true
+
 echo "Copying test crate to writable location..."
 cp -r /sccache/tests/test-crate /build/
 

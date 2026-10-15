@@ -9,6 +9,7 @@ echo "Testing: GCC Compiler"
 echo "=========================================="
 
 # Start sccache server
+rm -f "$SCCACHE_ERROR_LOG"
 "$SCCACHE" --start-server || true
 
 echo "Test 1: Compile C++ file (cache miss)"

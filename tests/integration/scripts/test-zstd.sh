@@ -18,6 +18,7 @@ echo "=========================================="
 
 TEST_ENV_VAR="test_value_$(date +%s)" && export TEST_ENV_VAR
 export SCCACHE_DIR=/build/zstd-level/default
+rm -f "$SCCACHE_ERROR_LOG"
 "$SCCACHE" --start-server || true
 
 echo "Build with default compression (cache miss)..."
@@ -52,6 +53,7 @@ sleep 1
 
 export SCCACHE_DIR=/build/zstd-level/10
 export SCCACHE_CACHE_ZSTD_LEVEL=10
+rm -f "$SCCACHE_ERROR_LOG"
 "$SCCACHE" --start-server || true
 
 cargo clean

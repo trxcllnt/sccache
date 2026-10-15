@@ -16,6 +16,7 @@ cp -r /sccache/tests/test-crate /build/
 cd /build/test-crate
 
 # Start sccache server
+rm -f "$SCCACHE_ERROR_LOG"
 "$SCCACHE" --start-server || true
 
 echo "Build 1: Cache miss expected (with coverage instrumentation)"

@@ -20,6 +20,7 @@ restart_server() {
     "$SCCACHE" --stop-server &>/dev/null || true
     rm -rf /build/sccache
     mkdir -p /build/sccache
+    rm -f "$SCCACHE_ERROR_LOG"
     "$SCCACHE" --start-server
 }
 
@@ -44,11 +45,14 @@ check_stats() {
 # -ffile-prefix-map names the checkout so that the object file does not depend
 # on where it lives: the two calls below must produce identical objects.
 compile() {
-    local dir="$1" out="$2"
+    local dir="$1" out="$2" code=0
     shift 2
     rm -f "$out"
+    pushd "$dir"
     "$SCCACHE" g++ -c "$dir/main.cpp" -I"$dir/include" \
-        "-ffile-prefix-map=$dir=." -g -o "$out" "$@"
+        "-ffile-prefix-map=$dir=." -g -o "$out" "$@" || code=$?
+    popd
+    return $code
 }
 
 echo ""

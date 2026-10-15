@@ -39,6 +39,7 @@ test_backend() {
     export SCCACHE_BASEDIRS="/build/dir1:/build/dir2"
 
     # Start sccache server
+    rm -f "$SCCACHE_ERROR_LOG"
     "$SCCACHE" --start-server
 
     echo "Test 1: Compile from first directory (cache miss)"
@@ -149,6 +150,7 @@ test_multilevel_backend() {
     mkdir -p /build/sccache-ml-basedirs
 
     # Start sccache server
+    rm -f "$SCCACHE_ERROR_LOG"
     "$SCCACHE" --start-server
 
     # Verify multi-level is active
@@ -190,6 +192,7 @@ test_multilevel_backend() {
     mkdir -p /build/sccache-ml-basedirs
     rm -rf /build/dir1
     cp -r /sccache/tests/integration/basedirs-autotools /build/dir1
+    rm -f "$SCCACHE_ERROR_LOG"
     "$SCCACHE" --start-server
 
     autotools /build/dir1

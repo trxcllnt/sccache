@@ -70,8 +70,7 @@ test_multilevel_backend() {
 
     # Start sccache server with logging
     rm -f "$SCCACHE_ERROR_LOG"
-    SCCACHE_LOG=trace \
-      "$SCCACHE" --start-server &>/dev/null
+    "$SCCACHE" --start-server &>/dev/null
 
     echo "Build 1: Initial cache miss (populating both levels)"
     TEST_ENV_VAR="test_value_$(date +%s)" && export TEST_ENV_VAR
@@ -149,8 +148,8 @@ for l in levels:
     "$SCCACHE" --stop-server &>/dev/null || true
     rm -rf /build/sccache-disk
     mkdir -p /build/sccache-disk
-    SCCACHE_LOG=trace \
-      "$SCCACHE" --start-server &>/dev/null
+    rm -f "$SCCACHE_ERROR_LOG"
+    "$SCCACHE" --start-server &>/dev/null
     sleep 1
 
     echo "Build 3: Should hit L2 ($backend_name) and backfill to L1 (disk)"

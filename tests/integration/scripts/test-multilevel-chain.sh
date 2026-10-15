@@ -46,7 +46,7 @@ sleep 1
 # Setup: 4-level cache hierarchy
 # L0: disk (fastest, smallest)
 # L1: redis (fast, medium)
-# L2: memcached (medium, medium)  
+# L2: memcached (medium, medium)
 # L3: s3 (slowest, largest)
 
 export SCCACHE_MULTILEVEL_CHAIN="disk,redis,memcached,s3"
@@ -85,7 +85,7 @@ cd /build/test-crate-chain
 
 # Start sccache server
 rm -f "$SCCACHE_ERROR_LOG"
-SCCACHE_LOG=debug "$SCCACHE" --start-server &>/dev/null
+"$SCCACHE" --start-server &>/dev/null
 
 # Verify multi-level configuration
 STATS_JSON=$("$SCCACHE" --show-stats --stats-format=json)
@@ -131,7 +131,8 @@ rm -rf "${SCCACHE_DIR:?}"/*
 echo "✓ Cleared L0 (disk)"
 
 # Restart server
-SCCACHE_LOG=debug "$SCCACHE" --start-server &>/dev/null
+rm -f "$SCCACHE_ERROR_LOG"
+"$SCCACHE" --start-server &>/dev/null
 cargo clean
 cargo build --release
 
@@ -171,7 +172,8 @@ SCCACHE_REDIS_KEY_PREFIX="/chain-test-l1-$(date +%s%N)/"
 echo "✓ Cleared L0 (disk) and L1 (redis prefix changed)"
 
 # Restart server
-SCCACHE_LOG=debug "$SCCACHE" --start-server &>/dev/null
+rm -f "$SCCACHE_ERROR_LOG"
+"$SCCACHE" --start-server &>/dev/null
 cargo clean
 cargo build --release
 
@@ -217,7 +219,8 @@ export SCCACHE_REDIS_KEY_PREFIX SCCACHE_MEMCACHED_KEY_PREFIX
 echo "✓ Cleared L0 (disk), L1 (redis prefix changed), L2 (memcached prefix changed)"
 
 # Restart server
-SCCACHE_LOG=debug "$SCCACHE" --start-server &>/dev/null
+rm -f "$SCCACHE_ERROR_LOG"
+"$SCCACHE" --start-server &>/dev/null
 cargo clean
 cargo build --release
 
@@ -254,7 +257,8 @@ echo ""
 echo "=== Scenario 5: Final build → should hit L0 (fastest) ==="
 export SCCACHE_MULTILEVEL_CHAIN="disk"
 "$SCCACHE" --stop-server &>/dev/null || true
-SCCACHE_LOG=debug "$SCCACHE" --start-server &>/dev/null
+rm -f "$SCCACHE_ERROR_LOG"
+"$SCCACHE" --start-server &>/dev/null
 cargo clean
 cargo build --release
 
