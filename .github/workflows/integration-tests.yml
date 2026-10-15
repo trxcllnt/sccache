@@ -352,6 +352,7 @@ jobs:
     runs-on: macos-latest
     env:
       SCCACHE_PATH: target/debug/sccache
+      SCCACHE_ERROR_LOG: "${{ github.workspace }}/sccache.log"
     steps:
       - name: Clone repository
         uses: actions/checkout@v5
