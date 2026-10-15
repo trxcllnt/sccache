@@ -55,16 +55,16 @@ PROFILES_webdav := webdav
 PROFILES_zstd := zstd
 
 # Map backends to their services
-SERVICES_autotools :=
+SERVICES_autotools := noop
 SERVICES_azblob := azurite azurite-setup
 SERVICES_basedirs := redis memcached silo silo-setup azurite azurite-setup webdav
-SERVICES_clang :=
-SERVICES_cmake :=
-SERVICES_cmake-modules :=
-SERVICES_cmake-modules-v4 :=
-SERVICES_coverage :=
-SERVICES_file-prefix-map :=
-SERVICES_gcc :=
+SERVICES_clang := noop
+SERVICES_cmake := noop
+SERVICES_cmake-modules := noop
+SERVICES_cmake-modules-v4 := noop
+SERVICES_coverage := noop
+SERVICES_file-prefix-map := noop
+SERVICES_gcc := noop
 SERVICES_memcached := memcached
 SERVICES_memcached-deprecated := memcached
 SERVICES_multilevel := redis memcached silo silo-setup azurite azurite-setup webdav
@@ -73,7 +73,7 @@ SERVICES_redis := redis
 SERVICES_redis-deprecated := redis
 SERVICES_s3 := silo silo-setup
 SERVICES_webdav := webdav
-SERVICES_zstd :=
+SERVICES_zstd := noop
 
 help:
 	@echo "sccache Integration Tests"

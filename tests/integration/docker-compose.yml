@@ -25,6 +25,21 @@ x-health-check: &healthcheck
   retries: 10
 
 services:
+  noop:
+    image: busybox:latest
+    profiles:
+      - test
+      - autotools
+      - clang
+      - cmake
+      - cmake-modules
+      - cmake-modules-v4
+      - coverage
+      - file-prefix-map
+      - gcc
+      - zstd
+    command: ["sh", "-c", "echo noop"]
+
   redis:
     image: redis:7-alpine
     ports:
