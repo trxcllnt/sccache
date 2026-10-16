@@ -851,6 +851,31 @@ impl<I: CCompilerImpl> pkg::InputsPackager for CCompilation<I> {
         // Finish and compress the archive
         package.build()?.compress(compressor)
     }
+
+    async fn write_inputs_async(
+        self: Box<Self>,
+        path_transformer: &mut dist::PathTransformer,
+        sink: &mut (dyn futures::io::AsyncWrite + Unpin + Send + Sync),
+    ) -> Result<()> {
+        let CCompilation {
+            parsed_args,
+            dist_files,
+            env_vars,
+            ..
+        } = *self;
+
+        let mut package = pkg::ArchiveBuilder::new(path_transformer);
+
+        // Add the input files and dependencies
+        for paths in [&dist_files[..], &parsed_args.extra_dist_files[..]] {
+            for path in paths {
+                package.add_path(&env_vars, path)?;
+            }
+        }
+
+        // Finish and compress the archive
+        package.build()?.build_async(sink).await
+    }
 }
 
 // Helper to use -print-file-name and -print-prog-name to look up

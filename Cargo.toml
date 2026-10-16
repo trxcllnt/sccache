@@ -47,6 +47,7 @@ async-compression = { version = "0.4", features = [
   "zlib",
 ] }
 async-stream = "0.3"
+async-tar = "0.6"
 async-trait = "0.1.89"
 backon = { version = "1", default-features = false, features = [
   "std-blocking-sleep",

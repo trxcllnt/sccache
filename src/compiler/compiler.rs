@@ -1292,6 +1292,7 @@ where
         service: &server::SccacheService<T>,
     ) -> Result<(DistType, ProcessOutput)> {
         use dist::RunJobResponse;
+        use futures::AsyncWriteExt;
         use itertools::Itertools;
         use std::io;
         use tokio_retry2::strategy::FibonacciBackoff;
@@ -1320,33 +1321,30 @@ where
             // and we don't want to OOM the server during parallel builds.
             let job_inputs = crate::util::tempfile()?;
 
-            let mut inputs_writer = flate2::write::ZlibEncoder::new(
-                job_inputs.reopen()?,
-                // // Optimize for size since bandwidth costs more than client CPU cycles
-                // flate2::Compression::best(),
-                flate2::Compression::default(),
+            let mut inputs_writer = async_compression::futures::write::ZlibEncoder::with_quality(
+                futures::io::AllowStdIo::new(job_inputs.reopen()?),
+                async_compression::core::Level::Default,
             );
 
-            path_transformer = tokio::task::spawn_blocking(move || {
-                inputs_packager
-                    .write_inputs(&mut path_transformer, &mut inputs_writer)
-                    .and_then(|_| {
-                        inputs_writer
-                            .flush()
-                            .context("failed to flush compressor")?;
-                        trace!(
-                            "Compressed inputs from {} MiB -> {} MiB",
-                            (inputs_writer.total_in() as f64 / (1024.0 * 1024.0)),
-                            (inputs_writer.total_out() as f64 / (1024.0 * 1024.0))
-                        );
-                        inputs_writer
-                            .finish()
-                            .context("failed to finish compressor")
-                    })
-                    .context("Could not write inputs for compilation")
-                    .map(|_| path_transformer)
-            })
-            .await??;
+            inputs_packager
+                .write_inputs_async(&mut path_transformer, &mut inputs_writer)
+                .await?;
+
+            inputs_writer
+                .flush()
+                .await
+                .context("failed to flush compressor")?;
+
+            trace!(
+                "Compressed inputs from {} MiB -> {} MiB",
+                (inputs_writer.total_in() as f64 / (1024.0 * 1024.0)),
+                (inputs_writer.total_out() as f64 / (1024.0 * 1024.0))
+            );
+
+            inputs_writer
+                .close()
+                .await
+                .context("failed to finish compressor")?;
 
             job_inputs
         };
@@ -4821,6 +4819,12 @@ mod test_dist {
         }
         fn write_tar_gz(&self, _: &mut (dyn Write + Send)) -> Result<()> {
             panic!("ArchivePackager::write_compressed_tar should not have called packager")
+        }
+        async fn build_async(
+            &self,
+            _: &mut (dyn futures::AsyncWrite + Unpin + Send + Sync),
+        ) -> Result<()> {
+            panic!("ArchivePackager::package should not have called build_async")
         }
     }
 

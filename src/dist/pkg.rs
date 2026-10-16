@@ -46,6 +46,10 @@ pub trait ArchivePackager: Send + Sync {
     async fn compute_hash(&self) -> Result<String>;
     fn compress(&self, writer: &mut (dyn Write + Send)) -> Result<()>;
     fn write_tar_gz(&self, writer: &mut (dyn Write + Send)) -> Result<()>;
+    async fn build_async(
+        &self,
+        sink: &mut (dyn futures::io::AsyncWrite + Unpin + Send + Sync),
+    ) -> Result<()>;
 }
 
 #[async_trait]
@@ -54,6 +58,11 @@ pub trait InputsPackager: Send {
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
         inputs_writer: &mut (dyn Write + Send),
+    ) -> Result<()>;
+    async fn write_inputs_async(
+        self: Box<Self>,
+        path_transformer: &mut dist::PathTransformer,
+        sink: &mut (dyn futures::io::AsyncWrite + Unpin + Send + Sync),
     ) -> Result<()>;
 }
 
@@ -376,6 +385,37 @@ impl ArchivePackager for ArchivePackagerImpl {
                     .from_borrowed_writer(writer, scope),
             )
         })
+    }
+
+    async fn build_async(
+        &self,
+        sink: &mut (dyn futures::io::AsyncWrite + Unpin + Send + Sync),
+    ) -> Result<()> {
+        let mut builder = async_tar::Builder::new(sink);
+
+        builder.follow_symlinks(false);
+        builder.mode(async_tar::HeaderMode::Deterministic);
+
+        // Add directories before symlinks to ensure the dirs exist
+        // before symlinks that may point at them are unpacked
+        for (tar_path, dir_path) in self.dirs_set.iter() {
+            // trace!("dir: '{}'", dir_path.display());
+            builder.append_dir(tar_path, dir_path).await?;
+        }
+        // Add symlinks before files to ensure the symlinks exist
+        // before files are unpacked to paths that may traverse them
+        for (src_path, _dst_path) in self.symlinks.iter() {
+            // trace!("link: '{}' -> '{}'", src_path.display(), dst_path.display());
+            builder
+                .append_path_with_name(src_path, tar_safe_path(src_path))
+                .await?;
+        }
+        for (tar_path, file_path) in self.file_set.iter() {
+            // trace!("file: '{}'", file_path.display());
+            builder.append_path_with_name(file_path, tar_path).await?;
+        }
+
+        builder.finish().await.map_err(anyhow::Error::new)
     }
 }
 
