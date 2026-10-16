@@ -1055,14 +1055,30 @@ where
             // Write to the user's /sourceDependencies file or to stdout
             OsStr::new("/sourceDependencies"),
             depfile.map(|p| p.as_os_str()).unwrap_or(OsStr::new("-")),
-            // Write to the user's /sourceDependencies:directives file or to stdout.
-            // MSVC emits errors in CUDA headers and exits uncleanly if we omit this,
-            // so always include it.
-            OsStr::new("/sourceDependencies:directives"),
-            directives_depfile
-                .map(|p| p.as_os_str())
-                .unwrap_or(OsStr::new("-")),
         ])
+        .chain(
+            if depfile.is_some()
+                && matches!(
+                    parsed_args.language,
+                    Language::C | Language::CHeader | Language::CPreprocessed
+                )
+            {
+                // If the user passed /sourceDependencies for a C compilation, we have to
+                // do a full preprocess with `-E`.
+                // Dependency generation w/o preprocessing is only available to C++ compilations.
+                vec![OsStr::new("/E")]
+            } else {
+                vec![
+                    // Write to the user's /sourceDependencies:directives file or to stdout.
+                    // MSVC emits errors in CUDA headers and exits uncleanly if we omit this,
+                    // so always include it.
+                    OsStr::new("/sourceDependencies:directives"),
+                    directives_depfile
+                        .map(|p| p.as_os_str())
+                        .unwrap_or(OsStr::new("-")),
+                ]
+            },
+        )
         .chain(parsed_args.double_dash_input.then_some(OsStr::new("--")))
         .chain(std::iter::once(parsed_args.input.as_os_str()))
         .collect::<Vec<_>>();
