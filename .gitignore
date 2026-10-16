@@ -2,7 +2,8 @@ target
 *~
 
 *.log
-.cargo
+.cargo/*
+!.cargo/config.toml
 *.pyc
 
 # snapcraft artifacts
