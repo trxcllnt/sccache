@@ -32,6 +32,7 @@ use async_trait::async_trait;
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 /// A unit struct on which to implement `CCompilerImpl`.
@@ -168,7 +169,7 @@ impl CCompilerImpl for Nvhpc {
             env_vars,
             ..
         }: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Vec<PathBuf>>
+    ) -> Result<(Vec<PathBuf>, Duration)>
     where
         T: CommandCreatorSync,
     {

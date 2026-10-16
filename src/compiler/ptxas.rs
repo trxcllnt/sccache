@@ -28,7 +28,7 @@ use crate::{
 
 use async_trait::async_trait;
 
-use std::{ffi::OsString, path::PathBuf};
+use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use crate::errors::*;
 
@@ -58,11 +58,11 @@ impl CCompilerImpl for Ptxas {
     async fn generate_dependencies<T>(
         &self,
         GenerateDependenciesArgs { .. }: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Vec<PathBuf>>
+    ) -> Result<(Vec<PathBuf>, Duration)>
     where
         T: CommandCreatorSync,
     {
-        Ok(Vec::with_capacity(0))
+        Ok((Vec::with_capacity(0), Duration::default()))
     }
     fn generate_compile_commands(
         &self,

@@ -32,6 +32,7 @@ use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 /// A unit struct on which to implement `CCompilerImpl`.
@@ -60,11 +61,11 @@ impl CCompilerImpl for Cicc {
     async fn generate_dependencies<T>(
         &self,
         GenerateDependenciesArgs { .. }: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Vec<PathBuf>>
+    ) -> Result<(Vec<PathBuf>, Duration)>
     where
         T: CommandCreatorSync,
     {
-        Ok(Vec::with_capacity(0))
+        Ok((Vec::with_capacity(0), Duration::default()))
     }
     fn generate_compile_commands(
         &self,

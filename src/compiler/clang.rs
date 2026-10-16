@@ -29,6 +29,7 @@ use async_trait::async_trait;
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use crate::errors::*;
@@ -118,7 +119,7 @@ impl CCompilerImpl for Clang {
             env_vars,
             ..
         }: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Vec<PathBuf>>
+    ) -> Result<(Vec<PathBuf>, Duration)>
     where
         T: CommandCreatorSync,
     {

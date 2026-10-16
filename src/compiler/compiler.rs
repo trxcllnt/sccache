@@ -37,7 +37,7 @@ use crate::{
     },
     counted_array, dist,
     errors::*,
-    mock_command::{CommandChild, CommandCreatorSync, ProcessOutput, RunCommand},
+    mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     server,
     util::{
         Digest, bytes_to_str, fmt_duration_as_secs, resolve_compiler_avoiding_wrapper,
@@ -267,20 +267,10 @@ impl CompileCommandImpl for SingleCompileCommand {
             cmd.share_jobserver();
         }
 
-        let child = cmd
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .await?;
-
         // Increment active_compilations after spawn() acquires the jobserver token
         let _active = service.increment_active_compilations();
 
-        let output = child.wait_with_output().await?;
-
-        // ProcessOutput -> Result<ProcessOutput, ProcessError>
-        output.into()
+        run_input_output(cmd, None).await
     }
 }
 
@@ -651,7 +641,7 @@ where
         env_vars: Vec<(OsString, OsString)>,
         pool: &tokio::runtime::Handle,
         cache_control: CacheControl,
-    ) -> Result<HashResult<T>>;
+    ) -> Result<(HashResult<T>, Duration)>;
 
     /// Return the state of any `--color` option passed to the compiler.
     fn color_mode(&self) -> ColorMode;
@@ -687,7 +677,7 @@ where
             }
         );
 
-        let hash_time = Instant::now();
+        let hash_wait_time = Instant::now();
 
         let dist_client = dist_client.filter(|_| {
             // Clients might want to set this when configuring
@@ -702,23 +692,23 @@ where
             .generate_hash_key(&creator, cwd.clone(), env_vars, &runtime, cache_control)
             .await;
 
-        let hash_time = hash_time.elapsed();
+        let hash_wait_time = hash_wait_time.elapsed();
 
         debug!(
             "[{out_pretty}]: generate_hash_key took {}",
-            fmt_duration_as_secs(&hash_time)
+            fmt_duration_as_secs(&hash_wait_time)
         );
 
         // Decrement pending_compilations as soon as we're done preprocessing
         drop(pending);
 
-        let hash_result = match hash_result {
-            Ok(hash_result) => hash_result,
+        let (hash_result, hash_time) = match hash_result {
+            Ok((hash_result, hash_time)) => (hash_result, hash_time),
             Err(err) => {
                 return match err.downcast::<ProcessError>() {
                     Ok(ProcessError(output)) => {
                         debug!("[{out_pretty}]: process error: {output:?}");
-                        Ok((CompileResult::Error(hash_time), output))
+                        Ok((CompileResult::Error(hash_wait_time), output))
                     }
                     Err(e) => Err(e),
                 };
@@ -2671,9 +2661,7 @@ compiler_version=__VERSION__
         .arg("-E")
         .arg(&src);
 
-    let child = cmd.spawn().await?;
-    let output = child
-        .wait_with_output()
+    let output = run_input_output(cmd, None)
         .await
         .context("failed to read child output")?;
 
@@ -3572,6 +3560,7 @@ LLVM version: 6.0",
                     )
                     .wait()
                     .unwrap()
+                    .0
             })
             .collect();
         assert_eq!(results.len(), 2);
@@ -3628,6 +3617,7 @@ LLVM version: 6.0",
                 )
                 .wait()
                 .unwrap()
+                .0
                 .key
         };
 
@@ -3721,6 +3711,7 @@ LLVM version: 6.0",
                     )
                     .wait()
                     .unwrap()
+                    .0
             })
             .collect();
 
@@ -3782,6 +3773,7 @@ LLVM version: 6.0",
                     )
                     .wait()
                     .unwrap()
+                    .0
             })
             .collect();
         assert_eq!(results.len(), 2);

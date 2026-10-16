@@ -40,6 +40,7 @@ use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
+    time::Duration,
 };
 use which::which_in;
 
@@ -560,7 +561,7 @@ impl CCompilerImpl for Nvcc {
             env_vars,
             ..
         }: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Vec<PathBuf>>
+    ) -> Result<(Vec<PathBuf>, Duration)>
     where
         T: CommandCreatorSync,
     {

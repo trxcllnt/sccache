@@ -650,7 +650,11 @@ where
                 let _ = stdin.await;
             }
 
-            child.wait().await.context("failed to wait for child")
+            child
+                .wait()
+                .await
+                .map(|(status, _)| status)
+                .context("failed to wait for child")
         },
         stdout,
         stderr,
@@ -661,7 +665,10 @@ where
 ///
 /// This was lifted from `std::process::Child::wait_with_output` and modified
 /// to also write to stdin.
-async fn wait_with_input_output<T>(mut child: T, input: Option<Vec<u8>>) -> Result<ProcessOutput>
+async fn wait_with_input_output<T>(
+    mut child: T,
+    input: Option<Vec<u8>>,
+) -> Result<(ProcessOutput, Duration)>
 where
     T: CommandChild + 'static,
 {
@@ -710,14 +717,18 @@ where
         child.wait().await.context("failed to wait for child")
     };
 
-    let (status, stdout, stderr) = futures::future::try_join3(status, stdout, stderr).await?;
+    let ((status, duration), stdout, stderr) =
+        futures::future::try_join3(status, stdout, stderr).await?;
 
-    Ok(process::Output {
-        status,
-        stdout: stdout.unwrap_or_default(),
-        stderr: stderr.unwrap_or_default(),
-    }
-    .into())
+    Ok((
+        process::Output {
+            status,
+            stdout: stdout.unwrap_or_default(),
+            stderr: stderr.unwrap_or_default(),
+        }
+        .into(),
+        duration,
+    ))
 }
 
 /// Run `command`, writing `input` to its stdin if it is `Some` and return the exit status and output.
@@ -741,7 +752,42 @@ where
 
     wait_with_input_output(child, input)
         .await
-        .and_then(|output| output.into())
+        .and_then(|(output, _)| output.into())
+}
+
+/// Run `command`, writing `input` to its stdin if it is `Some` and return the exit status and output.
+///
+/// If the command returns a non-successful exit status, an error of `SccacheError::ProcessError`
+/// will be returned containing the process output.
+pub async fn run_input_output_timed<C>(
+    mut command: C,
+    input: Option<Vec<u8>>,
+) -> std::result::Result<(ProcessOutput, Duration), (anyhow::Error, Duration)>
+where
+    C: RunCommand,
+{
+    let child = command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .await
+        .map_err(|err| (err, Duration::default()))?;
+
+    match wait_with_input_output(child, input).await {
+        Ok((out, duration)) => {
+            if out.success() {
+                Ok((out, duration))
+            } else {
+                Err((ProcessError(out).into(), duration))
+            }
+        }
+        Err(err) => Err((err, Duration::default())),
+    }
 }
 
 /// Run a command and return a Stream of Result<BytesMut>.

@@ -29,13 +29,14 @@ use crate::{
     counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
-    util::{bytes_to_str, run_input_output},
+    util::{bytes_to_str, run_input_output_timed},
 };
 use async_trait::async_trait;
 use std::{
     collections::HashMap,
     ffi::OsString,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 #[derive(Clone, Debug)]
@@ -72,7 +73,7 @@ impl CCompilerImpl for TaskingVX {
             env_vars,
             ..
         }: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Vec<PathBuf>>
+    ) -> Result<(Vec<PathBuf>, Duration)>
     where
         T: CommandCreatorSync,
     {
@@ -288,7 +289,7 @@ async fn generate_dependencies<T>(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-) -> Result<Vec<PathBuf>>
+) -> Result<(Vec<PathBuf>, Duration)>
 where
     T: CommandCreatorSync,
 {
@@ -316,7 +317,9 @@ where
 
     trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
-    let output = run_input_output(cmd, None).await?;
+    let (output, elapsed) = run_input_output_timed(cmd, None)
+        .await
+        .map_err(|(err, _)| err)?;
 
     gcc::parse_dependencies(
         &parsed_args.input,
@@ -327,6 +330,7 @@ where
             bytes_to_str(output.stdout)?
         },
     )
+    .map(|dependencies| (dependencies, elapsed))
 }
 
 fn generate_compile_commands(

@@ -30,7 +30,7 @@ use crate::{
     counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
-    util::{OsStrExt, bytes_to_str, run_input_output},
+    util::{OsStrExt, bytes_to_str, run_input_output_timed},
 };
 use async_trait::async_trait;
 use fs_err as fs;
@@ -40,6 +40,7 @@ use std::{
     ffi::{OsStr, OsString},
     io::Read,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 #[derive(Clone, Debug)]
@@ -78,7 +79,7 @@ impl CCompilerImpl for Diab {
             env_vars,
             ..
         }: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Vec<PathBuf>>
+    ) -> Result<(Vec<PathBuf>, Duration)>
     where
         T: CommandCreatorSync,
     {
@@ -332,10 +333,12 @@ async fn generate_dependencies<T>(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-) -> Result<Vec<PathBuf>>
+) -> Result<(Vec<PathBuf>, Duration)>
 where
     T: CommandCreatorSync,
 {
+    let mut elapsed = Duration::default();
+
     let generate_user_dependencies = parsed_args.dependency_args.iter().any(|arg| {
         if (arg.contains("-X156=") || arg.contains("-Xmake-dependency="))
             && let Some((_, mask)) = arg.split_once("=")
@@ -399,7 +402,11 @@ where
             parsed_args.output_pretty(),
         );
 
-        run_input_output(cmd, None).await?;
+        let (_, duration) = run_input_output_timed(cmd, None)
+            .await
+            .map_err(|(err, _)| err)?;
+
+        elapsed += duration;
     }
 
     let depfile = parsed_args
@@ -450,7 +457,11 @@ where
 
     trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
-    let output = run_input_output(cmd, None).await?;
+    let (output, duration) = run_input_output_timed(cmd, None)
+        .await
+        .map_err(|(err, _)| err)?;
+
+    elapsed += duration;
 
     gcc::parse_dependencies(
         &parsed_args.input,
@@ -461,6 +472,7 @@ where
             bytes_to_str(output.stdout)?
         },
     )
+    .map(|dependencies| (dependencies, elapsed))
 }
 
 pub fn generate_compile_commands(

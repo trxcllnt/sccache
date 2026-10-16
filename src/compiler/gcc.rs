@@ -26,7 +26,7 @@ use crate::{
     counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
-    util::{OsStrExt, bytes_to_str, run_input_output},
+    util::{OsStrExt, bytes_to_str, run_input_output, run_input_output_timed},
 };
 use async_trait::async_trait;
 use fs_err as fs;
@@ -38,6 +38,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 /// A struct on which to implement `CCompilerImpl`.
@@ -251,7 +252,7 @@ impl CCompilerImpl for Gcc {
             env_vars,
             ..
         }: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Vec<PathBuf>>
+    ) -> Result<(Vec<PathBuf>, Duration)>
     where
         T: CommandCreatorSync,
     {
@@ -1142,10 +1143,12 @@ pub async fn generate_dependencies<
     cwd: Cwd,
     env_vars: Envs,
     kind: CCompilerKind,
-) -> Result<Vec<PathBuf>>
+) -> Result<(Vec<PathBuf>, Duration)>
 where
     T: CommandCreatorSync,
 {
+    let mut elapsed = Duration::default();
+
     let generate_user_dependencies = parsed_args.dependency_args.iter().any(|arg| {
         arg.contains("-MMD")
             || arg.contains("--write-user-dependencies")
@@ -1218,17 +1221,21 @@ where
             parsed_args.output_pretty(),
         );
 
-        let _ = run_input_output(cmd, None).await.or_else(|err| {
-            // nvc++ exits with an error even though it generated dependencies
-            if matches!(kind, CCompilerKind::Nvhpc) {
-                match err.downcast::<ProcessError>() {
-                    Ok(ProcessError(output)) => Ok(output),
-                    Err(err) => Err(err),
-                }
-            } else {
-                Err(err)
-            }
-        })?;
+        let (_, duration) =
+            run_input_output_timed(cmd, None)
+                .await
+                .or_else(|(err, duration)| {
+                    // nvc++ exits with an error even though it generated dependencies
+                    if matches!(kind, CCompilerKind::Nvhpc) {
+                        match err.downcast::<ProcessError>() {
+                            Ok(ProcessError(out)) => Ok((out, duration)),
+                            Err(err) => Err(err),
+                        }
+                    } else {
+                        Err(err)
+                    }
+                })?;
+        elapsed += duration;
     }
 
     let depfile = parsed_args
@@ -1286,17 +1293,22 @@ where
 
     trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
-    let output = run_input_output(cmd, None).await.or_else(|err| {
-        // nvc++ exits with an error even though it generated dependencies
-        if matches!(kind, CCompilerKind::Nvhpc) {
-            match err.downcast::<ProcessError>() {
-                Ok(ProcessError(output)) => Ok(output),
-                Err(err) => Err(err),
-            }
-        } else {
-            Err(err)
-        }
-    })?;
+    let (output, duration) =
+        run_input_output_timed(cmd, None)
+            .await
+            .or_else(|(err, duration)| {
+                // nvc++ exits with an error even though it generated dependencies
+                if matches!(kind, CCompilerKind::Nvhpc) {
+                    match err.downcast::<ProcessError>() {
+                        Ok(ProcessError(out)) => Ok((out, duration)),
+                        Err(err) => Err(err),
+                    }
+                } else {
+                    Err(err)
+                }
+            })?;
+
+    elapsed += duration;
 
     parse_dependencies(
         &parsed_args.input,
@@ -1307,6 +1319,7 @@ where
             bytes_to_str(output.stdout)?
         },
     )
+    .map(|dependencies| (dependencies, elapsed))
 }
 
 pub async fn read_depfile<'a, P: AsRef<Path>>(depfile: P) -> Result<std::borrow::Cow<'a, str>> {

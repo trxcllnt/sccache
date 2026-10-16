@@ -26,7 +26,10 @@ use crate::{
     counted_array, dist,
     errors::*,
     mock_command::{CommandCreatorSync, RunCommand},
-    util::{OsStrExt, bytes_to_str, os_str_to_str, path_to_bytes, path_to_str, run_input_output},
+    util::{
+        OsStrExt, bytes_to_str, os_str_to_str, path_to_bytes, path_to_str, run_input_output,
+        run_input_output_timed,
+    },
 };
 use async_trait::async_trait;
 use fs_err::File;
@@ -37,6 +40,7 @@ use std::{
     ffi::{OsStr, OsString},
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -115,7 +119,7 @@ impl CCompilerImpl for Msvc {
             env_vars,
             ..
         }: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Vec<PathBuf>>
+    ) -> Result<(Vec<PathBuf>, Duration)>
     where
         T: CommandCreatorSync,
     {
@@ -1032,7 +1036,7 @@ async fn generate_dependencies<
     env_vars: Envs,
     includes_prefix: &str,
     is_clang: bool,
-) -> Result<Vec<PathBuf>>
+) -> Result<(Vec<PathBuf>, Duration)>
 where
     T: CommandCreatorSync,
 {
@@ -1092,7 +1096,9 @@ where
 
     trace!("[{}]: dependencies: {cmd}", parsed_args.output_pretty());
 
-    let output = run_input_output(cmd, None).await?;
+    let (output, elapsed) = run_input_output_timed(cmd, None)
+        .await
+        .map_err(|(err, _)| err)?;
 
     // Parse the /showIncludes lines from stdout
     let dependencies = parse_dependencies_from_showincludes(&output.stderr, includes_prefix)?;
@@ -1114,7 +1120,7 @@ where
         .await?;
     }
 
-    Ok(dependencies)
+    Ok((dependencies, elapsed))
 }
 
 fn parse_dependencies_from_showincludes(

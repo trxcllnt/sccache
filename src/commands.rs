@@ -652,6 +652,7 @@ where
         child
             .wait()
             .await
+            .map(|(status, _)| status)
             .with_context(|| "failed to wait for a child")
     })?;
 

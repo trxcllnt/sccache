@@ -57,6 +57,7 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 
@@ -77,9 +78,9 @@ pub trait CommandChild {
     /// Take the stderr object from the process, if available.
     fn take_stderr(&mut self) -> Option<Self::E>;
     /// Wait for the process to complete and return its exit status.
-    async fn wait(self) -> io::Result<ExitStatus>;
+    async fn wait(self) -> io::Result<(ExitStatus, Duration)>;
     /// Wait for the process to complete and return its output.
-    async fn wait_with_output(self) -> io::Result<ProcessOutput>;
+    async fn wait_with_output(self) -> io::Result<(ProcessOutput, Duration)>;
 }
 
 /// A trait that provides a subset of the methods of `std::process::Command`.
@@ -161,6 +162,7 @@ pub trait CommandCreatorSync: Clone + Send + Sync + 'static {
 
 pub struct Child {
     inner: tokio::process::Child,
+    start: Instant,
     token: Acquired,
 }
 
@@ -181,18 +183,28 @@ impl CommandChild for Child {
         self.inner.stderr.take()
     }
 
-    async fn wait(self) -> io::Result<ExitStatus> {
-        let Child { mut inner, token } = self;
-        inner.wait().await.inspect(|_ret| {
+    async fn wait(self) -> io::Result<(ExitStatus, Duration)> {
+        let Child {
+            mut inner,
+            start,
+            token,
+        } = self;
+        inner.wait().await.map(|status| {
             drop(token);
+            (status, start.elapsed())
         })
     }
 
-    async fn wait_with_output(self) -> io::Result<ProcessOutput> {
-        let Child { inner, token } = self;
-        inner.wait_with_output().await.map(|ret| {
+    async fn wait_with_output(self) -> io::Result<(ProcessOutput, Duration)> {
+        let Child {
+            inner,
+            start,
+            token,
+        } = self;
+        inner.wait_with_output().await.map(|out| {
             drop(token);
-            ret.into()
+            let out: ProcessOutput = out.into();
+            (out, start.elapsed())
         })
     }
 }
@@ -278,6 +290,7 @@ impl RunCommand for AsyncCommand {
             .wait_with_output()
             .await
             .context("failed to wait for child")
+            .map(|(output, _)| output)
     }
     fn share_jobserver(&mut self) -> &mut AsyncCommand {
         self.share_jobserver = true;
@@ -302,6 +315,7 @@ impl RunCommand for AsyncCommand {
         // *we* run, which is separate from whether the child can acquire
         // tokens of its own.
         let token = self.jobserver.acquire().await?;
+        let start = Instant::now();
         let mut inner = tokio::process::Command::from(inner);
         let child = inner
             .kill_on_drop(true)
@@ -310,6 +324,7 @@ impl RunCommand for AsyncCommand {
 
         Ok(Child {
             inner: child,
+            start,
             token,
         })
     }
@@ -478,11 +493,14 @@ impl CommandChild for MockChild {
         self.stderr.take()
     }
 
-    async fn wait(mut self) -> io::Result<ExitStatus> {
-        self.wait_result.take().unwrap()
+    async fn wait(mut self) -> io::Result<(ExitStatus, Duration)> {
+        self.wait_result
+            .take()
+            .unwrap()
+            .map(|status| (status, Duration::default()))
     }
 
-    async fn wait_with_output(self) -> io::Result<ProcessOutput> {
+    async fn wait_with_output(self) -> io::Result<(ProcessOutput, Duration)> {
         let MockChild {
             stdout,
             stderr,
@@ -491,12 +509,12 @@ impl CommandChild for MockChild {
         } = self;
 
         wait_result.unwrap().map(|status| {
-            std::process::Output {
+            let output = std::process::Output {
                 status,
                 stdout: stdout.map(|c| c.into_inner()).unwrap_or_else(Vec::new),
                 stderr: stderr.map(|c| c.into_inner()).unwrap_or_else(Vec::new),
-            }
-            .into()
+            };
+            (output.into(), Duration::default())
         })
     }
 }
@@ -582,6 +600,7 @@ impl RunCommand for MockCommand {
             .wait_with_output()
             .await
             .context("failed to wait for child")
+            .map(|(output, _)| output)
     }
 }
 
@@ -718,12 +737,28 @@ impl From<std::process::Output> for ProcessOutput {
 }
 
 impl From<ProcessOutput> for Result<ProcessOutput> {
-    fn from(res: ProcessOutput) -> Self {
-        if res.success() {
-            Ok(res)
+    fn from(output: ProcessOutput) -> Self {
+        if output.success() {
+            Ok(output)
         } else {
-            Err(ProcessError(res).into())
+            Err(ProcessError(output).into())
         }
+    }
+}
+
+impl From<ProcessOutput> for std::result::Result<ProcessOutput, ProcessError> {
+    fn from(output: ProcessOutput) -> Self {
+        if output.success() {
+            Ok(output)
+        } else {
+            Err(ProcessError(output))
+        }
+    }
+}
+
+impl From<anyhow::Error> for ProcessError {
+    fn from(err: anyhow::Error) -> Self {
+        Self(ProcessOutput::new(1, vec![], err.to_string().into_bytes()))
     }
 }
 
@@ -886,14 +921,20 @@ mod test {
         creator: &mut T,
         program: S,
     ) -> Result<ExitStatus> {
-        Ok(spawn_command(creator, program)?.wait().wait()?)
+        Ok(spawn_command(creator, program)?
+            .wait()
+            .wait()
+            .map(|(output, _)| output)?)
     }
 
     fn spawn_output_command<T: CommandCreator, S: AsRef<OsStr>>(
         creator: &mut T,
         program: S,
     ) -> Result<ProcessOutput> {
-        Ok(spawn_command(creator, program)?.wait_with_output().wait()?)
+        Ok(spawn_command(creator, program)?
+            .wait_with_output()
+            .wait()
+            .map(|(output, _)| output)?)
     }
 
     fn spawn_on_thread<T: CommandCreatorSync + Send + 'static>(
@@ -908,6 +949,7 @@ mod test {
                     .unwrap()
                     .wait()
                     .wait()
+                    .map(|(output, _)| output)
                     .unwrap()
             } else {
                 exit_status(1)

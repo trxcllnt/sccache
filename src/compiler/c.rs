@@ -37,6 +37,7 @@ use std::{
     hash::Hash,
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
+    time::{Duration, Instant},
 };
 
 #[cfg(feature = "dist-client")]
@@ -337,7 +338,7 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
     async fn generate_dependencies<T>(
         &self,
         args: GenerateDependenciesArgs<'_, T>,
-    ) -> Result<Vec<PathBuf>>
+    ) -> Result<(Vec<PathBuf>, Duration)>
     where
         T: CommandCreatorSync;
 
@@ -574,7 +575,7 @@ where
         env_vars: Vec<(OsString, OsString)>,
         _runtime: &tokio::runtime::Handle,
         cache_control: CacheControl,
-    ) -> Result<HashResult<T>> {
+    ) -> Result<(HashResult<T>, Duration)> {
         let CCompilerHasher {
             compiler,
             executable,
@@ -582,6 +583,8 @@ where
             parsed_args,
             ..
         } = *self;
+
+        let mut elapsed = Duration::default();
 
         // A compiler binary may be a symlink to another and so has the same digest, but that means
         // the toolchain will not contain the correct path to invoke the compiler! Add the compiler
@@ -592,17 +595,18 @@ where
 
         // Only get dependencies if the file requires preprocessing
         if parsed_args.language.needs_c_preprocessing() {
-            dist_files.extend(
-                compiler
-                    .generate_dependencies(GenerateDependenciesArgs {
-                        creator,
-                        executable: &executable,
-                        parsed_args: &parsed_args,
-                        cwd: &cwd,
-                        env_vars: &env_vars,
-                    })
-                    .await?,
-            );
+            let (dependencies, duration) = compiler
+                .generate_dependencies(GenerateDependenciesArgs {
+                    creator,
+                    executable: &executable,
+                    parsed_args: &parsed_args,
+                    cwd: &cwd,
+                    env_vars: &env_vars,
+                })
+                .await?;
+
+            elapsed += duration;
+            dist_files.extend(dependencies);
         }
 
         let key = if CacheControl::ForceNoCache == cache_control {
@@ -610,6 +614,7 @@ where
             // In this mode, the cache key doesn't matter, so return empty string
             String::new()
         } else {
+            let start = Instant::now();
             // If the compiler has support for it, the expansion of __DATE__ will change
             // according to the value of SOURCE_DATE_EPOCH. If the compiler doesn't support
             // it (i.e. MSVC), this envvar shouldn't be defined.
@@ -621,7 +626,7 @@ where
                 .and_then(DateTime::from_timestamp_secs)
                 .unwrap_or_else(Utc::now);
 
-            HashKeyParams::new(&parsed_args)
+            let key = HashKeyParams::new(&parsed_args)
                 .with_compile_timestamp(compile_timestamp)
                 .with_cwd(&cwd)
                 .with_env_vars(&env_vars)
@@ -641,22 +646,29 @@ where
                 .with_plusplus(compiler.plusplus())
                 .compute()
                 .await?
-                .unwrap_or_default()
+                .unwrap_or_default();
+
+            elapsed += start.elapsed();
+
+            key
         };
 
-        return Ok(HashResult {
-            key,
-            compilation: Box::new(CCompilation {
-                compiler,
-                cwd,
-                dist_files,
-                env_vars,
-                executable,
-                is_locally_preprocessed: true,
-                parsed_args,
-            }),
-            weak_toolchain_key,
-        });
+        return Ok((
+            HashResult {
+                key,
+                compilation: Box::new(CCompilation {
+                    compiler,
+                    cwd,
+                    dist_files,
+                    env_vars,
+                    executable,
+                    is_locally_preprocessed: true,
+                    parsed_args,
+                }),
+                weak_toolchain_key,
+            },
+            elapsed,
+        ));
     }
 
     fn color_mode(&self) -> ColorMode {
