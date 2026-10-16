@@ -90,6 +90,7 @@ pub struct Nvcc {
     pub host_compiler: NvccHostCompiler,
     pub host_compiler_version: Option<String>,
     pub version: Option<String>,
+    pragma_once_fix: Arc<PathBuf>,
 }
 
 impl Nvcc {
@@ -113,6 +114,17 @@ impl Nvcc {
     where
         C: CommandCreatorSync,
     {
+        #[cfg(unix)]
+        let pragma_once_fix = Arc::new(if matches!(host_compiler, NvccHostCompiler::Gcc) {
+            crate::compiler::util::build_gcc_pragma_once_fix(executable.as_ref(), env_vars.clone())
+                .await
+                .unwrap_or_else(|_| PathBuf::new())
+        } else {
+            PathBuf::new()
+        });
+        #[cfg(not(unix))]
+        let pragma_once_fix = Arc::new(PathBuf::new());
+
         let archs_all = Self::read_all_archs(
             creator,
             executable.as_ref(),
@@ -160,6 +172,7 @@ impl Nvcc {
             host_compiler,
             host_compiler_version,
             version,
+            pragma_once_fix,
         })
     }
 
@@ -556,7 +569,22 @@ impl CCompilerImpl for Nvcc {
             executable,
             parsed_args,
             cwd,
-            env_vars.iter().cloned(),
+            [("LD_PRELOAD".into(), "".into())]
+                .iter()
+                .chain(env_vars.iter())
+                .cloned()
+                .map(|(key, mut val)| {
+                    //
+                    if key == "LD_PRELOAD" {
+                        if !val.is_empty() {
+                            val.push(":");
+                        }
+                        if !self.pragma_once_fix.as_os_str().is_empty() {
+                            val.push(self.pragma_once_fix.as_os_str());
+                        }
+                    }
+                    (key, val)
+                }),
             self.kind(),
         )
         .await

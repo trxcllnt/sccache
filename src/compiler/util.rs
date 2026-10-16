@@ -149,15 +149,15 @@ pub async fn build_gcc_pragma_once_fix<
     use crate::{
         jobserver,
         mock_command::{AsyncCommand, RunCommand},
-        util::{Digest, SCCACHE_TMPDIR, run_input_output},
+        util::{SCCACHE_TMPDIR, run_input_output},
     };
     use fs_err as fs;
 
     let temp = SCCACHE_TMPDIR.as_ref()?;
-    let hash = Digest::from_file(exe.as_ref()).await?.finish();
-    let path = temp.join(format!("pragma_once_fix_{hash}.so"));
+    let path = temp.join("pragma_once_fix.so");
     let temp = path.clone().with_added_extension("1");
     let mut file = fs::File::options().write(true).create(true).open(&path)?;
+
     file.lock()?;
 
     if file.metadata()?.len() > 0 {
