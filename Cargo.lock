@@ -801,7 +801,7 @@ dependencies = [
 [[package]]
 name = "celery"
 version = "0.5.5"
-source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=fix%2Fretries#0cac2323c2f32beb0d903ff847a80fa90b0aa2a3"
+source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=fix%2Fretries#1ae4fab805a417cfa7fc39c8b03c538256e83ca6"
 dependencies = [
  "async-rs",
  "async-trait",
@@ -833,7 +833,7 @@ dependencies = [
 [[package]]
 name = "celery-codegen"
 version = "0.5.5"
-source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=fix%2Fretries#0cac2323c2f32beb0d903ff847a80fa90b0aa2a3"
+source = "git+https://github.com/trxcllnt/rusty-celery.git?branch=fix%2Fretries#1ae4fab805a417cfa7fc39c8b03c538256e83ca6"
 dependencies = [
  "proc-macro2",
  "quote",
