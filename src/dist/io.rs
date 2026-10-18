@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use bytes::Buf;
+
 use crate::{
     cache::{Cache, Storage},
     dist::{
@@ -168,11 +170,15 @@ impl Jobs {
 
         if let Some(buffer) = result {
             // Deserialize the status
-            bincode_deserialize(buffer).await.map(Some).map_err(|err| {
-                self.metrics.inc_get_job_status_error_count();
-                tracing::warn!("[get_job_status({job_id})]: Error deserializing status: {err:?}");
-                err
-            })
+            bincode::deserialize_from(buffer.reader())
+                .map(Some)
+                .map_err(|err| {
+                    self.metrics.inc_get_job_status_error_count();
+                    tracing::warn!(
+                        "[get_job_status({job_id})]: Error deserializing status: {err:?}"
+                    );
+                    err.into()
+                })
         } else {
             Ok(None)
         }

@@ -830,8 +830,7 @@ mod scheduler {
                                     .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid toolchain"))
                                     .map_err(IntoResponse::into_response)?;
 
-                                let toolchain = bincode_deserialize(bincode.into())
-                                    .await
+                                let toolchain = bincode::deserialize(&bincode)
                                     .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid toolchain"))
                                     .map_err(IntoResponse::into_response)?;
 
@@ -1043,9 +1042,11 @@ mod client {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::super::cache;
-    use super::common::{ReqwestRequestBuilderExt, bincode_req_fut};
-    use super::{bincode_serialize, urls};
+    use super::{
+        super::cache,
+        common::{ReqwestRequestBuilderExt, bincode_req_fut},
+        urls,
+    };
     use crate::{
         config,
         dist::{
@@ -1242,7 +1243,7 @@ mod client {
                     .header(http::header::ACCEPT, "application/octet-stream")
                     .bearer_auth(self.auth_token.clone())
                     .body(Body::wrap_stream({
-                        let bincode = bincode_serialize(toolchain).await?;
+                        let bincode = bincode::serialize(&toolchain)?;
                         let (body, mut writer) = tokio::io::simplex(bincode.len() + 4);
                         writer
                             .write_u32(bincode.len() as u32)
