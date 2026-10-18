@@ -623,6 +623,15 @@ impl<T: CommandCreatorSync> Clone for Box<dyn CompilerProxy<T>> {
     }
 }
 
+pub struct GenerateHashKeyArgs<'a, T: CommandCreatorSync> {
+    pub cache_control: CacheControl,
+    pub creator: &'a T,
+    pub cwd: &'a Path,
+    pub env_vars: &'a [(OsString, OsString)],
+    pub runtime: &'a tokio::runtime::Handle,
+    pub service: &'a server::SccacheService<T>,
+}
+
 /// An interface to a compiler for hash key generation, the result of
 /// argument parsing.
 #[async_trait]
@@ -633,15 +642,13 @@ where
     /// Given information about a compiler command, generate a hash key
     /// that can be used for cache lookups, as well as any additional
     /// information that can be reused for compilation if necessary.
-    #[allow(clippy::too_many_arguments)]
     async fn generate_hash_key(
         self: Box<Self>,
-        creator: &T,
-        cwd: PathBuf,
-        env_vars: Vec<(OsString, OsString)>,
-        pool: &tokio::runtime::Handle,
-        cache_control: CacheControl,
-    ) -> Result<(HashResult<T>, Duration)>;
+        args: GenerateHashKeyArgs<'_, T>,
+    ) -> Result<(
+        HashResult<T>,
+        Pin<Box<dyn Future<Output = Result<Duration>> + Send>>,
+    )>;
 
     /// Return the state of any `--color` option passed to the compiler.
     fn color_mode(&self) -> ColorMode;
@@ -654,7 +661,6 @@ where
         service: &server::SccacheService<T>,
         dist_client: Option<Arc<dyn dist::Client>>,
         creator: T,
-        compilations_storage: Arc<dyn Storage>,
         arguments: Vec<OsString>,
         cwd: PathBuf,
         env_vars: Vec<(OsString, OsString)>,
@@ -689,7 +695,14 @@ where
         });
 
         let hash_result = self
-            .generate_hash_key(&creator, cwd.clone(), env_vars, &runtime, cache_control)
+            .generate_hash_key(GenerateHashKeyArgs {
+                cache_control,
+                creator: &creator,
+                cwd: cwd.as_path(),
+                env_vars: &env_vars,
+                runtime: &runtime,
+                service,
+            })
             .await;
 
         let hash_wait_time = hash_wait_time.elapsed();
@@ -702,8 +715,26 @@ where
         // Decrement pending_compilations as soon as we're done preprocessing
         drop(pending);
 
-        let (hash_result, hash_time) = match hash_result {
-            Ok((hash_result, hash_time)) => (hash_result, hash_time),
+        let (hash_result, deps_cache_write) = match hash_result {
+            Ok((hash_result, deps_cache_write)) => (
+                hash_result,
+                runtime.spawn({
+                    let stats = service.stats.clone();
+                    async move {
+                        // Immediately drive the dependency cache write so it
+                        // runs concurrently to cache lookups and compilations
+                        if let Ok(hash_time) = deps_cache_write.await
+                            && cache_control != CacheControl::ForceNoCache
+                        {
+                            // Track how long generate_hash_key took
+                            let mut stats = stats.lock().await;
+                            stats.hashed += 1;
+                            stats.hasher_duration += hash_time;
+                        }
+                        Ok::<_, anyhow::Error>(())
+                    }
+                }),
+            ),
             Err(err) => {
                 return match err.downcast::<ProcessError>() {
                     Ok(ProcessError(output)) => {
@@ -714,13 +745,6 @@ where
                 };
             }
         };
-
-        if cache_control != CacheControl::ForceNoCache {
-            // Track how long generate_hash_key took
-            let mut stats = service.stats.lock().await;
-            stats.hashed += 1;
-            stats.hasher_duration += hash_time;
-        }
 
         // Instance to perform the cache lookup and prepare to compile
         let lookup_or_compile = CacheLookupOrCompile::new(
@@ -736,7 +760,7 @@ where
 
         let lookup = lookup_or_compile
             .cache_lookup(
-                compilations_storage.as_ref(),
+                service.storage.as_ref(),
                 // Maximum time limit for the cache to respond before we
                 // forge ahead ourselves with a compilation.
                 service.cache_read_timeout,
@@ -747,6 +771,7 @@ where
         match lookup? {
             // Cache hit
             CacheLookupResult::Success(compile_result, output) => {
+                let _ = deps_cache_write.await;
                 Ok::<_, Error>((compile_result, output))
             }
             // Cache miss, compile
@@ -800,12 +825,13 @@ where
                 );
 
                 let out_pretty2 = out_pretty.clone();
+                let storage = service.storage.clone();
                 // Try to finish storing the newly-written cache
                 // entry. We'll get the result back elsewhere.
                 let cache_write: Pin<Box<dyn Future<Output = Result<CacheWriteInfo>> + Send>> =
                     Box::pin(async move {
                         let start = Instant::now();
-                        match compilations_storage.put(&hash_key, entry.into()).await {
+                        match storage.put(&hash_key, entry.into()).await {
                             Ok(_) => {
                                 trace!("[{out_pretty2}]: Stored in cache successfully!");
                                 Ok(CacheWriteInfo {
@@ -835,6 +861,12 @@ where
                 } else {
                     cache_write
                 };
+
+                let cache_write = Box::pin(async move {
+                    // the deps cache write is allowed to error,
+                    // we only care about the object cache write
+                    futures::future::join(deps_cache_write, cache_write).await.1
+                });
 
                 Ok((
                     CompileResult::CacheMiss(miss_type, dist_type, duration, cache_write),
@@ -912,7 +944,7 @@ where
             // file - just leave that one alone and don't overwrite it from the cache.
             outputs
                 .iter()
-                .filter(|fobj_source| fobj_source.key != "dep") // key "dep" means dependency file
+                .filter(|fobj_source| !fobj_source.key.starts_with("dep")) // key "dep" means dependency file
                 .cloned()
                 .collect()
         } else {
@@ -1309,6 +1341,8 @@ where
 
         use crate::util::path_to_str;
 
+        let pending = service.increment_pending_compilations();
+
         let mut dist_compile_cmd = dist_compile_cmd.as_dist(&mut path_transformer)?;
 
         let (inputs_packager, toolchain_packager, outputs_rewriter) =
@@ -1415,11 +1449,15 @@ where
             .max_delay(Duration::from_secs(10))
             .map(tokio_retry2::strategy::jitter);
 
+        drop(pending);
+
         let dist_compile_res = loop {
             use futures::TryStreamExt;
 
             let job_id: &String;
             let timeout: u32;
+
+            let active = service.increment_active_compilations();
 
             macro_rules! retry_or_bail {
                 ($err:ident, $job_id:expr, $server_id:expr) => {{
@@ -1501,8 +1539,8 @@ where
                 dist_output_paths.clone(),
             );
 
-            let active = service.increment_active_compilations();
             let run_job = run_job.await;
+
             drop(active);
 
             let (build_result, server_id) = match run_job {
@@ -2860,6 +2898,7 @@ mod test {
         compiler::c::ParseArgs,
         config::CacheMode,
         mock_command::*,
+        server::SccacheService,
         test::{mock_storage::MockStorage, utils::*},
     };
     use fs::File;
@@ -3513,9 +3552,11 @@ LLVM version: 6.0",
         let creator = new_creator();
         let runtime = single_threaded_runtime();
         let pool = runtime.handle();
+        let storage = Arc::new(MockStorage::new(None, true));
+        let service = SccacheService::mock_with_storage(storage, pool.clone());
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o", "-MD"];
         let cwd = f.tempdir.path();
-        // Write a dummy input file so the preprocessor cache mode can work
+        // Write a dummy input file so the dependencies cache can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
 
         let results: Vec<_> = [11, 12]
@@ -3549,13 +3590,14 @@ LLVM version: 6.0",
                     o => panic!("Bad result from parse_arguments: {o:?}"),
                 };
                 hasher
-                    .generate_hash_key(
-                        &creator,
-                        cwd.to_path_buf(),
-                        vec![],
-                        pool,
-                        CacheControl::Default,
-                    )
+                    .generate_hash_key(GenerateHashKeyArgs {
+                        cache_control: CacheControl::Default,
+                        creator: &creator,
+                        cwd,
+                        env_vars: &[],
+                        runtime: pool,
+                        service: &service,
+                    })
                     .wait()
                     .unwrap()
                     .0
@@ -3573,8 +3615,10 @@ LLVM version: 6.0",
         let creator = new_creator();
         let runtime = single_threaded_runtime();
         let pool = runtime.handle();
+        let storage = Arc::new(MockStorage::new(None, true));
+        let service = SccacheService::mock_with_storage(storage, pool.clone());
         let cwd = f.tempdir.path();
-        // Write a dummy input file so the preprocessor cache mode can work
+        // Write a dummy input file so the dependencies cache can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
 
         let key = |version: &str, path: &str, arguments: &[OsString]| {
@@ -3601,18 +3645,19 @@ LLVM version: 6.0",
             .0;
             // Generate dependencies
             next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
-            let hasher = match c.parse_arguments(arguments, ".".as_ref(), &[], &[]) {
+            let hasher = match c.parse_arguments(arguments, cwd, &[], &[]) {
                 CompilerArguments::Ok(h) => h,
                 o => panic!("Bad result from parse_arguments: {:?}", o),
             };
             hasher
-                .generate_hash_key(
-                    &creator,
-                    cwd.to_path_buf(),
-                    vec![],
-                    pool,
-                    CacheControl::Default,
-                )
+                .generate_hash_key(GenerateHashKeyArgs {
+                    cache_control: CacheControl::Default,
+                    creator: &creator,
+                    cwd,
+                    env_vars: &[],
+                    runtime: pool,
+                    service: &service,
+                })
                 .wait()
                 .unwrap()
                 .0
@@ -3657,6 +3702,8 @@ LLVM version: 6.0",
         let creator = new_creator();
         let runtime = single_threaded_runtime();
         let pool = runtime.handle();
+        let storage = Arc::new(MockStorage::new(None, true));
+        let service = SccacheService::mock_with_storage(storage, pool.clone());
         let output = "compiler_id=clang\ncompiler_version=\"16.0.0\"";
         let arguments = [
             ovec!["-c", "foo.c", "-o", "foo.o", "-DHELLO"],
@@ -3665,7 +3712,7 @@ LLVM version: 6.0",
         ];
         let cwd = f.tempdir.path();
 
-        // Write a dummy input file so the preprocessor cache mode can work
+        // Write a dummy input file so the dependencies cache can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
 
         let results: Vec<_> = arguments
@@ -3700,13 +3747,14 @@ LLVM version: 6.0",
                     o => panic!("Bad result from parse_arguments: {o:?}"),
                 };
                 hasher
-                    .generate_hash_key(
-                        &creator,
-                        cwd.to_path_buf(),
-                        vec![],
-                        pool,
-                        CacheControl::Default,
-                    )
+                    .generate_hash_key(GenerateHashKeyArgs {
+                        cache_control: CacheControl::Default,
+                        creator: &creator,
+                        cwd,
+                        env_vars: &[],
+                        runtime: pool,
+                        service: &service,
+                    })
                     .wait()
                     .unwrap()
                     .0
@@ -3727,6 +3775,8 @@ LLVM version: 6.0",
         let creator = new_creator();
         let runtime = single_threaded_runtime();
         let pool = runtime.handle();
+        let storage = Arc::new(MockStorage::new(None, true));
+        let service = SccacheService::mock_with_storage(storage, pool.clone());
         let output = "compiler_id=clang\ncompiler_version=\"16.0.0\"";
         let cwd = f.tempdir.path();
 
@@ -3735,7 +3785,7 @@ LLVM version: 6.0",
             .map(|file| {
                 let arguments = ovec!["-c", file, "-o", "foo.o"];
 
-                // Write a dummy input file so the preprocessor cache mode can work
+                // Write a dummy input file so the dependencies cache can work
                 std::fs::write(f.tempdir.path().join(file), "int foo(void) { return 0; }").unwrap();
 
                 next_command(&creator, Ok(MockChild::new(exit_status(0), output, "")));
@@ -3757,18 +3807,19 @@ LLVM version: 6.0",
                 if !file.ends_with("i") {
                     next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
                 }
-                let hasher = match c.parse_arguments(&arguments, ".".as_ref(), &[], &[]) {
+                let hasher = match c.parse_arguments(&arguments, cwd, &[], &[]) {
                     CompilerArguments::Ok(h) => h,
                     o => panic!("Bad result from parse_arguments: {o:?}"),
                 };
                 hasher
-                    .generate_hash_key(
-                        &creator,
-                        cwd.to_path_buf(),
-                        vec![],
-                        pool,
-                        CacheControl::Default,
-                    )
+                    .generate_hash_key(GenerateHashKeyArgs {
+                        cache_control: CacheControl::Default,
+                        creator: &creator,
+                        cwd,
+                        env_vars: &[],
+                        runtime: pool,
+                        service: &service,
+                    })
                     .wait()
                     .unwrap()
                     .0
@@ -3834,9 +3885,9 @@ LLVM version: 6.0",
             CacheMode::ReadWrite,
             vec![],
         ));
-        // Write a dummy input file so the preprocessor cache mode can work
+        // Write a dummy input file so the dependencies cache can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
-        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
+        let service = SccacheService::mock_with_storage(storage.clone(), pool.clone());
 
         // Pretend to be GCC.
         next_command(
@@ -3913,7 +3964,6 @@ LLVM version: 6.0",
                         &service,
                         None,
                         creator.clone(),
-                        storage.clone(),
                         arguments.clone(),
                         cwd.to_path_buf(),
                         vec![],
@@ -3951,7 +4001,6 @@ LLVM version: 6.0",
                         &service,
                         None,
                         creator,
-                        storage.clone(),
                         arguments,
                         cwd.to_path_buf(),
                         vec![],
@@ -3987,7 +4036,7 @@ LLVM version: 6.0",
             CacheMode::ReadWrite,
             vec![],
         ));
-        // Write a dummy input file so the preprocessor cache mode can work
+        // Write a dummy input file so the dependencies cache can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
         // Pretend to be GCC.
         next_command(
@@ -4071,7 +4120,6 @@ LLVM version: 6.0",
                         &service,
                         Some(dist_client.clone()),
                         creator.clone(),
-                        storage.clone(),
                         arguments.clone(),
                         cwd.to_path_buf(),
                         vec![],
@@ -4115,7 +4163,6 @@ LLVM version: 6.0",
                         &service,
                         Some(dist_client.clone()),
                         creator,
-                        storage.clone(),
                         arguments,
                         cwd.to_path_buf(),
                         vec![],
@@ -4146,9 +4193,9 @@ LLVM version: 6.0",
         let runtime = Runtime::new().unwrap();
         let pool = runtime.handle().clone();
         let storage = Arc::new(MockStorage::new(None, true));
-        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
+        let service = SccacheService::mock_with_storage(storage.clone(), pool.clone());
 
-        // Write a dummy input file so the preprocessor cache mode can work
+        // Write a dummy input file so the dependencies cache can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
         // Pretend to be GCC.
         next_command(
@@ -4218,13 +4265,13 @@ LLVM version: 6.0",
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
         // The cache will return an error.
-        storage.next_get(Err(anyhow!("Some Error")));
+        storage.next_get(Err(anyhow!("Source Error")));
+        storage.next_get(Err(anyhow!("Object Error")));
         let (cached, res) = runtime
             .block_on(hasher.get_cached_or_compile(
                 &service,
                 None,
                 creator,
-                storage,
                 arguments.clone(),
                 cwd.to_path_buf(),
                 vec![],
@@ -4260,12 +4307,12 @@ LLVM version: 6.0",
         let gcc = f.mk_bin("gcc").unwrap();
         let runtime = Runtime::new().unwrap();
         let pool = runtime.handle().clone();
-        // Write a dummy input file so the preprocessor cache mode can work
+        // Write a dummy input file so the dependencies cache can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
         // Make our storage wait 2ms for each get/put operation.
         let storage_delay = Duration::from_millis(2);
         let storage = Arc::new(MockStorage::new(Some(storage_delay), true));
-        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
+        let service = SccacheService::mock_with_storage(storage.clone(), pool.clone());
         // Pretend to be GCC.
         next_command(
             &creator,
@@ -4340,13 +4387,13 @@ LLVM version: 6.0",
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {o:?}"),
         };
+        storage.next_get(Err(anyhow!("Source error")));
         storage.next_get(Ok(Cache::Hit(entry.into())));
         let (cached, _res) = runtime
             .block_on(hasher.get_cached_or_compile(
                 &service,
                 None,
                 creator,
-                storage,
                 arguments.clone(),
                 cwd.to_path_buf(),
                 vec![],
@@ -4384,8 +4431,8 @@ LLVM version: 6.0",
             CacheMode::ReadWrite,
             vec![],
         ));
-        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
-        // Write a dummy input file so the preprocessor cache mode can work
+        let service = SccacheService::mock_with_storage(storage.clone(), pool.clone());
+        // Write a dummy input file so the dependencies cache can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
         // Pretend to be GCC.
         next_command(
@@ -4466,7 +4513,6 @@ LLVM version: 6.0",
                         &service,
                         None,
                         creator.clone(),
-                        storage.clone(),
                         arguments.clone(),
                         cwd.to_path_buf(),
                         vec![],
@@ -4499,7 +4545,6 @@ LLVM version: 6.0",
                 &service,
                 None,
                 creator,
-                storage.clone(),
                 arguments,
                 cwd.to_path_buf(),
                 vec![],
@@ -4540,12 +4585,12 @@ LLVM version: 6.0",
             CacheMode::ReadWrite,
             vec![],
         ));
-        let service = server::SccacheService::mock_with_storage(storage.clone(), pool.clone());
+        let service = SccacheService::mock_with_storage(storage.clone(), pool.clone());
 
         // Pretend to be GCC.  Also inject a fake object file that the subsequent
         // preprocessor failure should remove.
         // let obj = f.tempdir.path().join("foo.o");
-        // Write a dummy input file so the preprocessor cache mode can work
+        // Write a dummy input file so the dependencies cache can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
         // let o = obj.clone();
         next_command_calls(&creator, move |_| {
@@ -4606,7 +4651,6 @@ LLVM version: 6.0",
                         &service,
                         None,
                         creator,
-                        storage.clone(),
                         arguments,
                         cwd.to_path_buf(),
                         vec![],
@@ -4645,7 +4689,7 @@ LLVM version: 6.0",
             test_dist::ErrorSubmitToolchainClient::new(),
             test_dist::ErrorRunJobClient::new(),
         ];
-        // Write a dummy input file so the preprocessor cache mode can work
+        // Write a dummy input file so the dependencies cache can work
         std::fs::write(f.tempdir.path().join("foo.c"), "whatever").unwrap();
         let storage = Arc::new(DiskCache::new(
             f.tempdir.path().join("cache"),
@@ -4751,7 +4795,6 @@ LLVM version: 6.0",
                     &service,
                     Some(dist_client.clone()),
                     creator.clone(),
-                    storage.clone(),
                     arguments.clone(),
                     cwd.to_path_buf(),
                     vec![],

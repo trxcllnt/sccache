@@ -501,6 +501,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("permissive-", PassThrough),
     msvc_flag!("presetPadding", PassThrough),
     msvc_take_arg!("reference", OsString, Separated, TooHard),
+    msvc_take_arg!("scanDependencies", OsString, CanBeSeparated, DepFile),
     msvc_flag!("sdl", PassThrough),
     msvc_flag!("sdl-", PassThrough),
     msvc_flag!("showIncludes", ShowIncludes),
@@ -559,6 +560,7 @@ pub fn parse_arguments(
     let mut debug_info = false;
     let mut pdb = None;
     let mut depfile = None;
+    let mut scan_depfile = None;
     let mut directives_depfile = None;
     let mut show_includes = false;
     let mut xclangs: Vec<OsString> = vec![];
@@ -616,8 +618,17 @@ pub fn parse_arguments(
                 }
             }
             Some(DepFile(p)) => {
+                // Handle /scanDependencies
+                if arg
+                    .flag_str()
+                    .unwrap_or_default()
+                    .contains("scanDependencies")
+                {
+                    scan_depfile = Some(PathBuf::from(p));
+                    dependency_args.extend(arg.iter_os_strings());
+                }
                 // Handle /sourceDependencies:directives
-                if let Some(p) = p.strip_prefix(":directives") {
+                else if let Some(p) = p.strip_prefix(":directives") {
                     if p.is_empty() {
                         next_raw_arg_is_directives_depfile = true;
                     } else {
@@ -990,9 +1001,29 @@ pub fn parse_arguments(
         };
     }
 
+    if let Some(ref p) = scan_depfile {
+        outputs.insert(
+            "dep:scanDependencies",
+            ArtifactDescriptor {
+                path: p.clone(),
+                optional: false,
+            },
+        );
+    }
+
     if let Some(ref p) = depfile {
         outputs.insert(
-            "dep",
+            "dep:sourceDependencies",
+            ArtifactDescriptor {
+                path: p.clone(),
+                optional: false,
+            },
+        );
+    }
+
+    if let Some(ref p) = directives_depfile {
+        outputs.insert(
+            "dep:sourceDependencies:directives",
             ArtifactDescriptor {
                 path: p.clone(),
                 optional: false,
@@ -1006,6 +1037,7 @@ pub fn parse_arguments(
         language,
         compilation_flag,
         depfile,
+        msvc_scan_depfile: scan_depfile,
         msvc_directives_depfile: directives_depfile,
         outputs,
         dependency_args,
@@ -1068,9 +1100,9 @@ where
                 )
             {
                 // If the user passed /sourceDependencies for a C compilation, we have to
-                // do a full preprocess with `-E`.
+                // do a full preprocess with `/EP`.
                 // Dependency generation w/o preprocessing is only available to C++ compilations.
-                vec![OsStr::new("/E")]
+                vec![OsStr::new("/EP")]
             } else {
                 vec![
                     // Write to the user's /sourceDependencies:directives file or to stdout.
@@ -1943,24 +1975,49 @@ mod test {
                     Some("foo_modules.obj.json"),
                     msvc_directives_depfile.unwrap().to_str()
                 );
+                assert_map_contains!(
+                    outputs,
+                    (
+                        "obj",
+                        ArtifactDescriptor {
+                            path: PathBuf::from("foo.obj"),
+                            optional: false,
+                        }
+                    ),
+                    (
+                        "dep:sourceDependencies",
+                        ArtifactDescriptor {
+                            path: "foo.obj.json".into(),
+                            optional: false,
+                        }
+                    ),
+                    (
+                        "dep:sourceDependencies:directives",
+                        ArtifactDescriptor {
+                            path: "foo_modules.obj.json".into(),
+                            optional: false,
+                        }
+                    )
+                );
+            } else {
+                assert_map_contains!(
+                    outputs,
+                    (
+                        "obj",
+                        ArtifactDescriptor {
+                            path: PathBuf::from("foo.obj"),
+                            optional: false,
+                        }
+                    ),
+                    (
+                        "dep:sourceDependencies",
+                        ArtifactDescriptor {
+                            path: "foo.obj.json".into(),
+                            optional: false,
+                        }
+                    )
+                );
             }
-            assert_map_contains!(
-                outputs,
-                (
-                    "obj",
-                    ArtifactDescriptor {
-                        path: PathBuf::from("foo.obj"),
-                        optional: false,
-                    }
-                ),
-                (
-                    "dep",
-                    ArtifactDescriptor {
-                        path: "foo.obj.json".into(),
-                        optional: false,
-                    }
-                )
-            );
             assert!(preprocessor_args.is_empty());
             assert!(common_args.is_empty());
             assert!(!msvc_show_includes);

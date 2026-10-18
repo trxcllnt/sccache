@@ -950,7 +950,7 @@ where
     dist_client: Arc<DistClientContainer>,
 
     /// Cache storage.
-    storage: Arc<dyn Storage>,
+    pub storage: Arc<dyn Storage>,
 
     /// Limits the number of concurrent pending compilations
     pending_compilations_limit: u64,
@@ -1640,7 +1640,6 @@ where
                             &me,
                             client,
                             me.creator.clone(),
-                            me.storage.clone(),
                             arguments,
                             cwd,
                             env_vars,

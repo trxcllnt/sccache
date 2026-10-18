@@ -807,6 +807,31 @@ pub fn run_command(cmd: Command) -> Result<i32> {
                 StatsFormat::Json => serde_json::to_writer(&mut io::stdout(), &stats)?,
             }
         }
+        Command::DebugDependenciesCacheEntries(key) => {
+            trace!("Command::DebugDependenciesCacheEntries");
+            let config = ClientConfig::load()?;
+            let runtime = Runtime::new()?;
+            runtime.block_on(async {
+                let storage = StorageKind::Compilations
+                    .create(&config.cache, &config.basedirs)
+                    .await?;
+                match crate::compiler::SourceFileDeps::get(storage.as_ref(), &key).await {
+                    Err(err) => {
+                        eprintln!(
+                            "Err retrieving dependencies cache entry for key {key:?}: {err:#?}"
+                        );
+                    }
+                    Ok(crate::cache::Cache::Miss) => {
+                        eprintln!("No dependencies cache entry for key {key:?}");
+                    }
+                    Ok(crate::cache::Cache::Hit(entry)) => {
+                        println!("{entry:?}");
+                    }
+                }
+
+                Ok::<(), anyhow::Error>(())
+            })?;
+        }
         Command::InternalStartServer => {
             trace!("Command::InternalStartServer");
             match create_error_log() {

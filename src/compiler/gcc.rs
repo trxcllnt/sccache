@@ -720,8 +720,9 @@ where
             Some(PreprocessorArgument(val)) => {
                 let flag = arg.flag_str().unwrap_or_default();
                 if matches!(flag, "-Xpreprocessor" | "-Wp") {
-                    // `-Wp,-MD`, `-Wp,-MT`, and `-Wp,-MF` are not too hard for preprocessor cache mode.
-                    // Instead, parse out the dependency file and target names, for example:
+                    // Parse out the dependency file and target names from
+                    // `-Wp,-MD`, `-Wp,-MT`, and `-Wp,-MF`.
+                    // Example:
                     //  * `-Wp,-MD,CMakeFiles/foo.dir/foo.cpp.o.d`
                     //  * `-Wp,-MT,CMakeFiles/foo.dir/foo.cpp.o`
                     //  * `-Wp,-MF,CMakeFiles/foo.dir/foo.cpp.o.d`

@@ -13,11 +13,12 @@
 // limitations under the License.
 
 use crate::{
-    cache::FileObjectSource,
+    cache::{Cache, FileObjectSource, Storage},
     compiler::{
         CacheControl, Cacheable, ColorMode, Compilation, CompileCommand, CompileCommandImpl,
-        Compiler, CompilerArguments, CompilerHasher, CompilerKind, HashResult, Language,
-        util::SourceFileCache,
+        Compiler, CompilerArguments, CompilerHasher, CompilerKind, GenerateHashKeyArgs, HashResult,
+        Language,
+        util::{Dependencies, SourceFileCache, SourceFileDeps},
     },
     dist,
     errors::*,
@@ -31,14 +32,16 @@ use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     ffi::{OsStr, OsString},
     fmt,
     hash::Hash,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
+use tokio::io::AsyncWriteExt;
 
 #[cfg(feature = "dist-client")]
 use crate::{
@@ -139,6 +142,8 @@ pub struct GenerateCompileCommandsArgs<'a> {
 pub struct ParsedArguments {
     /// The input source file.
     pub input: PathBuf,
+    /// The input source file absolute path.
+    pub input_absolute: PathBuf,
     /// Whether to prepend the input with `--`
     pub double_dash_input: bool,
     /// The type of language used in the input source file.
@@ -169,6 +174,8 @@ pub struct ParsedArguments {
     pub extra_hash_files: Vec<PathBuf>,
     /// Whether the compiler runs a separate assembler to produce the object file.
     pub uses_external_assembler: bool,
+    /// The -scanDependencies depfile in MSVC
+    pub msvc_scan_depfile: Option<PathBuf>,
     /// The -sourceDependencies:directives depfile in MSVC
     pub msvc_directives_depfile: Option<PathBuf>,
     /// Whether or not the `-showIncludes` argument is passed on MSVC
@@ -187,6 +194,7 @@ impl std::cmp::PartialEq for ParsedArguments {
     fn eq(&self, other: &Self) -> bool {
         let ParsedArguments {
             input,
+            input_absolute,
             double_dash_input,
             language,
             compilation_flag,
@@ -202,6 +210,7 @@ impl std::cmp::PartialEq for ParsedArguments {
             extra_dist_files,
             extra_hash_files,
             uses_external_assembler,
+            msvc_scan_depfile,
             msvc_directives_depfile,
             msvc_show_includes,
             profile_generate,
@@ -209,6 +218,7 @@ impl std::cmp::PartialEq for ParsedArguments {
             out_dir,
         } = self;
         input == &other.input
+            && input_absolute == &other.input_absolute
             && double_dash_input == &other.double_dash_input
             && language == &other.language
             && compilation_flag == &other.compilation_flag
@@ -224,6 +234,7 @@ impl std::cmp::PartialEq for ParsedArguments {
             && extra_dist_files == &other.extra_dist_files
             && extra_hash_files == &other.extra_hash_files
             && uses_external_assembler == &other.uses_external_assembler
+            && msvc_scan_depfile == &other.msvc_scan_depfile
             && msvc_directives_depfile == &other.msvc_directives_depfile
             && msvc_show_includes == &other.msvc_show_includes
             && profile_generate == &other.profile_generate
@@ -482,11 +493,17 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
             env_vars,
         }) {
             CompilerArguments::Ok(mut args) => {
+                // Canonicalize here so the absolute path to the input is in the
+                // preprocessor output instead of paths relative to `cwd`.
+                args.input_absolute = cwd.join(&args.input);
+                if args.input_absolute.exists() {
+                    args.input_absolute =
+                        dunce::canonicalize(&args.input_absolute).unwrap_or(args.input_absolute);
+                }
+
                 // Make input path and arguments relative to basedirs
                 args.input = {
-                    let input = cwd.join(&args.input);
-                    let input = dunce::canonicalize(&input).unwrap_or(input);
-                    let mut input = vec![input.into_os_string()];
+                    let mut input = vec![args.input_absolute.as_os_str().into()];
                     if let Err(err) = apply_basedirs_to_args(cwd, input.as_mut_slice(), basedirs) {
                         return CompilerArguments::CannotCache(
                             "base dirs",
@@ -558,6 +575,368 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
     }
 }
 
+struct GetDependenciesArgs<'a, T: CommandCreatorSync> {
+    compile_timestamp: DateTime<Utc>,
+    gen_hash_key_args: &'a GenerateHashKeyArgs<'a, T>,
+}
+
+struct ResolvedDependencies {
+    dependencies: Dependencies,
+    needs_update: bool,
+    source: SourceFileDeps,
+    obj_key: String,
+}
+
+impl<I> CCompilerHasher<I>
+where
+    I: CCompilerImpl,
+{
+    async fn get_dependencies<T>(
+        &self,
+        args: GetDependenciesArgs<'_, T>,
+    ) -> Result<(ResolvedDependencies, Duration)>
+    where
+        T: CommandCreatorSync,
+    {
+        let Self {
+            compiler,
+            parsed_args,
+            executable,
+            executable_digest,
+            ..
+        } = self;
+
+        let GetDependenciesArgs {
+            compile_timestamp,
+            gen_hash_key_args,
+            ..
+        } = args;
+
+        let GenerateHashKeyArgs {
+            cache_control,
+            creator,
+            cwd,
+            env_vars,
+            service,
+            ..
+        } = *gen_hash_key_args;
+
+        let mut elapsed = Duration::default();
+        let out_pretty = parsed_args.output_pretty();
+
+        let start = Instant::now();
+
+        let src_key = if CacheControl::ForceNoCache == cache_control {
+            // Skip hashing if we're not going to do any cache reads/writes
+            // In this mode, the cache key doesn't matter, so return empty string
+            None
+        } else {
+            let src_key = HashKeyParams::new(parsed_args)
+                // Hash arch, common, dependency, and preprocessor args
+                .with_args(&self.parsed_args.arch_args[..])
+                .with_args(&self.parsed_args.common_args[..])
+                .with_args(&self.parsed_args.dependency_args[..])
+                .with_args(&self.parsed_args.preprocessor_args[..])
+                .with_compile_timestamp(compile_timestamp)
+                .with_cwd(cwd)
+                .with_env_vars(env_vars)
+                .with_digests(
+                    &std::iter::once(executable_digest)
+                        .chain(self.extra_hashes.iter())
+                        .chain(hash_all(&parsed_args.extra_hash_files).await?.iter())
+                        .map(|s| s.as_str())
+                        .chain(
+                            compiler
+                                .assembler_digest()
+                                .filter(|_| parsed_args.uses_external_assembler),
+                        )
+                        .chain(["sources cache"])
+                        .collect::<Vec<_>>(),
+                )
+                .with_input_files(std::slice::from_ref(&self.parsed_args.input_absolute))
+                // Hash the input file path, otherwise:
+                // - a/r.h exists.
+                // - a/x.c has #include "r.h".
+                // - b/x.c is identical to a/x.c.
+                // - Compiling a/x.c records a/r.h in the dependencies cache entry.
+                // - Compiling b/x.c results in a false cache hit since a/x.c and b/x.c
+                // share dependencies cache entries and a/r.h exists.
+                //
+                // Do not strip basedirs from the input file path.
+                //
+                // If the compiler, args, and input file are identical to another
+                // compilation in a different base dir, then that would compute the
+                // same dependencies cache entry key as the compilation in the other
+                // basedir.
+                //
+                // That could lead to loading the wrong object from cache if their
+                // dependencies are different, which they almost certainly will be.
+                //
+                // Example:
+                // ```shell
+                // cat <<"EOF" >a/value.h
+                // #define VALUE 42
+                // EOF
+                //
+                // cat <<"EOF" >b/value.h
+                // #define VALUE 43
+                // EOF
+                //
+                // $ cat <<"EOF" | tee {a,b}/input.cpp >/dev/null
+                // #include "value.h"
+                // int result() { return VALUE; }
+                // EOF
+                //
+                // $ cat <<"EOF" | tee {a,b}/main.cpp >/dev/null
+                // #include <cstdio>
+                // int result();
+                // int main() {
+                //     printf("%d\n", result());
+                //     return 0;
+                // }
+                // EOF
+                //
+                // $ export SCCACHE_BASEDIRS="$(pwd)/a:$(pwd)/b"
+                // $ sccache gcc -c a/input.cpp -o a/input.o
+                // $ sccache gcc -c b/input.cpp -o b/input.o # < error: cache hit returns a/input.o
+                // $ gcc a/input.o a/main.cpp -o a/main
+                // $ gcc b/input.o b/main.cpp -o b/main
+                //
+                // # correct:
+                // $ a/main
+                // > 42
+                //
+                // # incorrect, should be 43:
+                // $ b/main
+                // > 42
+                // ```
+                .with_hashed_input_path(Some(self.parsed_args.input_absolute.as_path()))
+                .with_plusplus(compiler.plusplus())
+                .compute()
+                .await?
+                .unwrap_or_default();
+
+            Some(src_key)
+        };
+
+        let mut source = if let Some(src_key) = src_key.as_deref() {
+            tokio::time::timeout(
+                service.cache_read_timeout,
+                SourceFileDeps::get(service.storage.as_ref(), src_key),
+            )
+            .await
+            .map_err(|err| {
+                debug!(
+                    "[{out_pretty}, {src_key}]: Deps cache read timeout {:?}",
+                    start.elapsed()
+                );
+                err.into()
+            })
+            .and_then(|res| {
+                res.inspect_err(|err| {
+                    debug!("[{out_pretty}, {src_key}]: Deps cache lookup error: {err:#}");
+                })
+            })
+            .ok()
+            .and_then(|res| match res {
+                Cache::Miss => None,
+                Cache::Hit(source) => Some(source),
+            })
+        } else {
+            None
+        };
+
+        let obj_key_and_deps = if let Some(source) = source
+            .as_mut()
+            .filter(|_| CacheControl::ForceRecache != cache_control)
+        {
+            trace!(
+                "[{out_pretty}, {src_key}]: Searching deps cache entry",
+                src_key = source.key
+            );
+
+            let (needs_update, obj_key_and_deps) = source
+                .find_dependencies(&SOURCE_FILE_CACHE, compile_timestamp, &out_pretty)
+                .await;
+
+            obj_key_and_deps.map(|(obj_key, dependencies)| (obj_key, dependencies, needs_update))
+        } else {
+            None
+        };
+
+        let source = if let Some(source) = source {
+            source
+        } else {
+            SourceFileDeps::new(
+                src_key.unwrap_or_default(),
+                SOURCE_FILE_CACHE
+                    .get(&parsed_args.input_absolute, compile_timestamp)
+                    .await?
+                    .meta
+                    .clone(),
+            )
+        };
+
+        elapsed += start.elapsed();
+
+        if let Some((obj_key, dependencies, needs_update)) = obj_key_and_deps {
+            // Hydrate the depfiles from the dependencies cache entry
+
+            let mut depfile_outputs = parsed_args
+                .outputs
+                .iter()
+                .filter(|(name, _)| name.starts_with("dep"))
+                .map(|(name, desc)| (*name, desc))
+                .collect::<BTreeMap<_, _>>();
+
+            let mut depfile_futures = vec![];
+
+            for (name, data) in dependencies.outputs.iter() {
+                if let Some(desc) = depfile_outputs.remove(name.as_str()) {
+                    depfile_futures.push(async {
+                        tokio::fs::File::options()
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .open(cwd.join(&desc.path))
+                            .await?
+                            .write_all(data.as_bytes())
+                            .await
+                    });
+                }
+            }
+
+            let has_all_required_depfiles =
+                depfile_outputs.is_empty() || depfile_outputs.values().all(|desc| desc.optional);
+
+            if has_all_required_depfiles
+                && futures::future::try_join_all(depfile_futures).await.is_ok()
+            {
+                return Ok((
+                    ResolvedDependencies {
+                        obj_key,
+                        source,
+                        dependencies,
+                        needs_update,
+                    },
+                    elapsed,
+                ));
+            }
+        }
+
+        // Discover dependencies and generate depfiles
+        let (dependencies, duration) = compiler
+            .generate_dependencies(GenerateDependenciesArgs {
+                creator,
+                executable,
+                parsed_args,
+                cwd,
+                env_vars,
+            })
+            .await?;
+
+        elapsed += duration;
+
+        let sources = futures::future::try_join_all(dependencies.into_iter().map(|path| async {
+            SOURCE_FILE_CACHE
+                .get(cwd.join(path), compile_timestamp)
+                .await
+                .map(|file| file.meta.clone())
+        }))
+        .await?;
+
+        let outputs =
+            futures::future::try_join_all(parsed_args.outputs.iter().filter_map(|(name, desc)| {
+                if name.starts_with("dep") {
+                    Some(async {
+                        tokio::fs::read_to_string(cwd.join(&desc.path))
+                            .await
+                            .or_else(|err| {
+                                if desc.optional {
+                                    Ok(String::new())
+                                } else {
+                                    Err(err)
+                                }
+                            })
+                            .map(|file| (name.to_string(), file))
+                    })
+                } else {
+                    None
+                }
+            }))
+            .await?;
+
+        let dependencies = Dependencies {
+            sources,
+            outputs: outputs.into_iter().collect::<BTreeMap<_, _>>(),
+        };
+
+        Ok((
+            ResolvedDependencies {
+                needs_update: true,
+                obj_key: String::new(),
+                source,
+                dependencies,
+            },
+            elapsed,
+        ))
+    }
+
+    async fn put_dependencies(
+        new_key: String,
+        ResolvedDependencies {
+            mut source,
+            dependencies,
+            obj_key: old_key,
+            ..
+        }: ResolvedDependencies,
+        storage: Arc<dyn Storage>,
+        mut elapsed: Duration,
+        out_pretty: String,
+        cache_write_timeout: Option<Duration>,
+    ) -> Result<Duration> {
+        let start = Instant::now();
+
+        if new_key != old_key {
+            source.add_revision(&new_key, dependencies, &out_pretty);
+        }
+
+        let fut = source.put(storage.as_ref());
+
+        elapsed += if let Some(cache_write_timeout) = cache_write_timeout {
+            match tokio::time::timeout(cache_write_timeout, fut).await {
+                Ok(res) => match res {
+                    Ok(duration) => duration,
+                    Err(err) => {
+                        // Don't fail if updating the deps cache entry fails, just log it
+                        debug!("[{out_pretty}]: Failed to update deps cache entry: {err:#}");
+                        start.elapsed()
+                    }
+                },
+                Err(_) => {
+                    // Don't fail if updating the deps cache entry fails, just log it
+                    debug!(
+                        "[{out_pretty}]: Deps cache write timeout ({:?})",
+                        start.elapsed()
+                    );
+                    start.elapsed()
+                }
+            }
+        } else {
+            match fut.await {
+                Ok(duration) => duration,
+                Err(err) => {
+                    // Don't fail if updating the deps cache entry fails, just log it
+                    debug!("[{out_pretty}]: Failed to update deps cache entry: {err:#}");
+                    start.elapsed()
+                }
+            }
+        };
+
+        Ok(elapsed)
+    }
+}
+
 #[async_trait]
 impl<T, I> CompilerHasher<T> for CCompilerHasher<I>
 where
@@ -570,80 +949,98 @@ where
 
     async fn generate_hash_key(
         self: Box<Self>,
-        creator: &T,
-        cwd: PathBuf,
-        env_vars: Vec<(OsString, OsString)>,
-        _runtime: &tokio::runtime::Handle,
-        cache_control: CacheControl,
-    ) -> Result<(HashResult<T>, Duration)> {
-        let CCompilerHasher {
-            compiler,
-            executable,
-            executable_digest,
-            parsed_args,
+        args: GenerateHashKeyArgs<'_, T>,
+    ) -> Result<(
+        HashResult<T>,
+        Pin<Box<dyn Future<Output = Result<Duration>> + Send>>,
+    )> {
+        let GenerateHashKeyArgs {
+            cwd,
+            env_vars,
+            cache_control,
+            service,
             ..
-        } = *self;
+        } = args;
 
         let mut elapsed = Duration::default();
+        let out_pretty = self.parsed_args.output_pretty();
+        let mut dist_files = vec![cwd.join(&self.parsed_args.input)];
 
-        // A compiler binary may be a symlink to another and so has the same digest, but that means
-        // the toolchain will not contain the correct path to invoke the compiler! Add the compiler
-        // executable path to try and prevent this
-        let weak_toolchain_key = format!("{}-{}", executable.to_string_lossy(), executable_digest);
-
-        let mut dist_files = vec![cwd.join(&parsed_args.input)];
+        // If the compiler has support for it, the expansion of __DATE__ will change
+        // according to the value of SOURCE_DATE_EPOCH. If the compiler doesn't support
+        // it (i.e. MSVC), this envvar shouldn't be defined.
+        let compile_timestamp = env_vars
+            .iter()
+            .find(|(k, _)| k == "SOURCE_DATE_EPOCH")
+            .and_then(|(_, v)| v.as_os_str().to_str())
+            .and_then(|v| v.parse().ok())
+            .and_then(DateTime::from_timestamp_secs)
+            .unwrap_or_else(Utc::now);
 
         // Only get dependencies if the file requires preprocessing
-        if parsed_args.language.needs_c_preprocessing() {
-            let (dependencies, duration) = compiler
-                .generate_dependencies(GenerateDependenciesArgs {
-                    creator,
-                    executable: &executable,
-                    parsed_args: &parsed_args,
-                    cwd: &cwd,
-                    env_vars: &env_vars,
+        let deps = if self.parsed_args.language.needs_c_preprocessing() {
+            let (deps, duration) = self
+                .get_dependencies(GetDependenciesArgs {
+                    compile_timestamp,
+                    gen_hash_key_args: &args,
                 })
                 .await?;
 
             elapsed += duration;
-            dist_files.extend(dependencies);
-        }
+
+            dist_files.extend(
+                deps.dependencies
+                    .sources
+                    .iter()
+                    .map(|meta| meta.path.as_os_str())
+                    .map(PathBuf::from),
+            );
+
+            Some(deps)
+        } else {
+            None
+        };
 
         let key = if CacheControl::ForceNoCache == cache_control {
             // Skip hashing if we're not going to do any cache reads/writes
             // In this mode, the cache key doesn't matter, so return empty string
             String::new()
+        } else if let Some(deps) = deps.as_ref().filter(|deps| !deps.obj_key.is_empty()) {
+            deps.obj_key.clone()
         } else {
             let start = Instant::now();
-            // If the compiler has support for it, the expansion of __DATE__ will change
-            // according to the value of SOURCE_DATE_EPOCH. If the compiler doesn't support
-            // it (i.e. MSVC), this envvar shouldn't be defined.
-            let compile_timestamp = env_vars
-                .iter()
-                .find(|(k, _)| k == "SOURCE_DATE_EPOCH")
-                .and_then(|(_, v)| v.as_os_str().to_str())
-                .and_then(|v| v.parse().ok())
-                .and_then(DateTime::from_timestamp_secs)
-                .unwrap_or_else(Utc::now);
 
-            let key = HashKeyParams::new(&parsed_args)
+            let key = HashKeyParams::new(&self.parsed_args)
+                // Hash arch, common, and preprocessor args
+                .with_args(&self.parsed_args.arch_args[..])
+                .with_args(&self.parsed_args.common_args[..])
+                .with_args(&self.parsed_args.preprocessor_args[..])
                 .with_compile_timestamp(compile_timestamp)
-                .with_cwd(&cwd)
-                .with_env_vars(&env_vars)
+                .with_cwd(cwd)
+                .with_env_vars(env_vars)
                 .with_digests(
-                    &std::iter::once(&executable_digest)
+                    &std::iter::once(&self.executable_digest)
                         .chain(self.extra_hashes.iter())
-                        .chain(hash_all(&parsed_args.extra_hash_files).await?.iter())
+                        .chain(hash_all(&self.parsed_args.extra_hash_files).await?.iter())
                         .map(|s| s.as_str())
                         .chain(
-                            compiler
+                            self.compiler
                                 .assembler_digest()
-                                .filter(|_| parsed_args.uses_external_assembler),
+                                .filter(|_| self.parsed_args.uses_external_assembler),
                         )
+                        .chain(["objects cache"])
                         .collect::<Vec<_>>(),
                 )
                 .with_input_files(&dist_files)
-                .with_plusplus(compiler.plusplus())
+                // Hash the absolute input path for CUDA compilations because nvcc's
+                // .module_id is different for files in different directories, even
+                // if their contents and dependencies are identical
+                .with_hashed_input_path(if matches!(self.parsed_args.language, Language::Cuda) {
+                    Some(self.parsed_args.input.as_path())
+                } else {
+                    None
+                })
+                .with_plusplus(self.compiler.plusplus())
                 .compute()
                 .await?
                 .unwrap_or_default();
@@ -653,21 +1050,50 @@ where
             key
         };
 
+        let cache_write =
+            if let Some(deps) = deps.filter(|deps| !key.is_empty() && deps.needs_update) {
+                // If the dependencies cache entry is new or was updated, write it back to
+                // storage.
+                // This happens if the LRU order changes, or if time macros were found and
+                // the entry's includes were updated to match the current ctimes/mtimes.
+                // See [`SourceFileDeps::test_dependencies`].
+                Box::pin(Self::put_dependencies(
+                    key.clone(),
+                    deps,
+                    service.storage.clone(),
+                    elapsed,
+                    out_pretty.into_owned(),
+                    service.cache_write_timeout,
+                ))
+            } else {
+                Box::pin(async move { Ok::<_, anyhow::Error>(elapsed) })
+                    as Pin<Box<dyn Future<Output = Result<Duration>> + Send>>
+            };
+
+        // A compiler binary may be a symlink to another and so has the same digest, but that means
+        // the toolchain will not contain the correct path to invoke the compiler! Add the compiler
+        // executable path to try and prevent this
+        let weak_toolchain_key = format!(
+            "{}-{}",
+            self.executable.to_string_lossy(),
+            self.executable_digest
+        );
+
         return Ok((
             HashResult {
                 key,
                 compilation: Box::new(CCompilation {
-                    compiler,
-                    cwd,
+                    compiler: self.compiler,
+                    cwd: cwd.to_owned(),
                     dist_files,
-                    env_vars,
-                    executable,
+                    env_vars: env_vars.to_vec(),
+                    executable: self.executable,
                     is_locally_preprocessed: true,
-                    parsed_args,
+                    parsed_args: self.parsed_args,
                 }),
                 weak_toolchain_key,
             },
-            elapsed,
+            cache_write,
         ));
     }
 
@@ -1456,12 +1882,14 @@ static SOURCE_FILE_CACHE: LazyLock<SourceFileCache> = LazyLock::new(|| {
 /// ```
 // #[derive(Debug, Clone)]
 pub struct HashKeyParams<'a> {
+    args: Vec<&'a OsString>,
     compile_timestamp: DateTime<Utc>,
     cwd: &'a Path,
     env_vars: &'a [(OsString, OsString)],
     digests: &'a [&'a str],
     input_files: &'a [PathBuf],
     parsed_args: &'a ParsedArguments,
+    hashed_input_path: Option<&'a Path>,
     plusplus: bool,
 }
 
@@ -1475,14 +1903,22 @@ impl<'a> HashKeyParams<'a> {
     /// * `preprocessor_output` - Preprocessed source to hash
     pub fn new(parsed_args: &'a ParsedArguments) -> Self {
         Self {
+            args: vec![],
             compile_timestamp: Utc::now(),
             cwd: Path::new(""),
             env_vars: &[],
             digests: &[],
             input_files: &[],
             parsed_args,
+            hashed_input_path: None,
             plusplus: false,
         }
+    }
+
+    /// Sets the environment variables to consider for caching.
+    pub fn with_args(mut self, args: &'a [OsString]) -> Self {
+        self.args.extend(args);
+        self
     }
 
     /// Sets the compile timestamp to use when comparing __DATE__, __TIME__, and __TIMESTAMP__ macros
@@ -1515,6 +1951,11 @@ impl<'a> HashKeyParams<'a> {
         self
     }
 
+    pub fn with_hashed_input_path(mut self, hashed_input_path: Option<&'a Path>) -> Self {
+        self.hashed_input_path = hashed_input_path;
+        self
+    }
+
     /// Sets whether this is a C++ compiler (affects clang/clang++ distinction).
     pub fn with_plusplus(mut self, plusplus: bool) -> Self {
         self.plusplus = plusplus;
@@ -1543,15 +1984,9 @@ impl<'a> HashKeyParams<'a> {
         m.update(&[(self.parsed_args.color_mode != ColorMode::Off) as u8]);
         m.update(self.parsed_args.language.as_str().as_bytes());
 
-        // Hash arch, common, and preprocessor args
-        for arguments in [
-            &self.parsed_args.arch_args[..],
-            &self.parsed_args.common_args[..],
-            &self.parsed_args.preprocessor_args[..],
-        ] {
-            for arg in arguments {
-                arg.hash(&mut HashToDigest { digest: &mut m });
-            }
+        // Hash args
+        for arg in self.args {
+            arg.hash(&mut HashToDigest { digest: &mut m });
         }
 
         for (var, val) in self.env_vars.iter() {
@@ -1560,7 +1995,7 @@ impl<'a> HashKeyParams<'a> {
                 m.update(&b"="[..]);
 
                 // Canonicalize the paths in CPATH and friends, otherwise we
-                // can get false-positive preprocessor cache hits when these
+                // can get false-positive dependencies cache hits when these
                 // envvars traverse symlinks
                 if var == "CPATH"
                     || var == "C_INCLUDE_PATH"
@@ -1581,13 +2016,8 @@ impl<'a> HashKeyParams<'a> {
             }
         }
 
-        // Hash the absolute input path for CUDA compilations because nvcc's
-        // .module_id is different for files in different directories, even
-        // if their contents and dependencies are identical
-        if matches!(self.parsed_args.language, Language::Cuda) {
-            self.parsed_args
-                .input
-                .hash(&mut HashToDigest { digest: &mut m });
+        if let Some(path) = self.hashed_input_path {
+            path.hash(&mut HashToDigest { digest: &mut m });
         }
 
         // Canonicalize the dependency paths on a background thread
@@ -1627,7 +2057,7 @@ impl<'a> HashKeyParams<'a> {
             Ok(None)
         } else {
             for entry in entries.into_iter().flatten() {
-                entry.digest.hash(&mut HashToDigest { digest: &mut m });
+                entry.meta.digest.hash(&mut HashToDigest { digest: &mut m });
             }
             Ok(Some(m.finish()))
         }
@@ -1695,12 +2125,18 @@ mod test {
         let p = vec![p];
 
         let h1 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .compute()
             .wait()
             .unwrap();
         let h2 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .compute()
@@ -1724,12 +2160,18 @@ mod test {
         let p = vec![p];
 
         let h1 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .compute()
             .wait()
             .unwrap();
         let h2 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .with_plusplus(true)
@@ -1754,18 +2196,27 @@ mod test {
         let p = vec![p];
 
         let h1 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .compute()
             .wait()
             .unwrap();
         let h2 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["efgh"])
             .with_input_files(&p)
             .compute()
             .wait()
             .unwrap();
         let h3 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["ijkl"])
             .with_input_files(&p)
             .compute()
@@ -1776,6 +2227,9 @@ mod test {
         // Not knowing the assembler must keep the key the compiler alone would give,
         // so that caches predating assembler tracking stay usable.
         let h4 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .compute()
@@ -1799,6 +2253,9 @@ mod test {
         let p = vec![p];
 
         let h1 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .compute()
@@ -1811,6 +2268,9 @@ mod test {
         };
 
         let h2 = HashKeyParams::new(&args_cheader)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .compute()
@@ -1834,6 +2294,9 @@ mod test {
         let p = vec![p];
 
         let h1 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .with_plusplus(true)
@@ -1847,6 +2310,9 @@ mod test {
         };
 
         let h2 = HashKeyParams::new(&args_cxxheader)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .with_plusplus(true)
@@ -1871,12 +2337,18 @@ mod test {
         let p = vec![p];
 
         let h1 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .compute()
             .wait()
             .unwrap();
         let h2 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["wxyz"])
             .with_input_files(&p)
             .compute()
@@ -1917,24 +2389,36 @@ mod test {
         let p = vec![p];
 
         let h_abc = HashKeyParams::new(&abc)
+            .with_args(&abc.arch_args[..])
+            .with_args(&abc.common_args[..])
+            .with_args(&abc.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .compute()
             .wait()
             .unwrap();
         let h_xyz = HashKeyParams::new(&xyz)
+            .with_args(&xyz.arch_args[..])
+            .with_args(&xyz.common_args[..])
+            .with_args(&xyz.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .compute()
             .wait()
             .unwrap();
         let h_ab = HashKeyParams::new(&ab)
+            .with_args(&ab.arch_args[..])
+            .with_args(&ab.common_args[..])
+            .with_args(&ab.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .compute()
             .wait()
             .unwrap();
         let h_a = HashKeyParams::new(&a)
+            .with_args(&a.arch_args[..])
+            .with_args(&a.common_args[..])
+            .with_args(&a.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .compute()
@@ -1965,12 +2449,18 @@ mod test {
         let p2 = vec![p2];
 
         let h1 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p1)
             .compute()
             .wait()
             .unwrap();
         let h2 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p2)
             .compute()
@@ -1995,6 +2485,9 @@ mod test {
 
         for var in CACHED_ENV_VARS.iter() {
             let h1 = HashKeyParams::new(&args)
+                .with_args(&args.arch_args[..])
+                .with_args(&args.common_args[..])
+                .with_args(&args.preprocessor_args[..])
                 .with_digests(&["abcd"])
                 .with_input_files(&p)
                 .compute()
@@ -2003,6 +2496,9 @@ mod test {
 
             let vars1 = vec![(OsString::from(var), OsString::from("something"))];
             let h2 = HashKeyParams::new(&args)
+                .with_args(&args.arch_args[..])
+                .with_args(&args.common_args[..])
+                .with_args(&args.preprocessor_args[..])
                 .with_digests(&["abcd"])
                 .with_input_files(&p)
                 .with_env_vars(&vars1)
@@ -2012,6 +2508,9 @@ mod test {
 
             let vars2 = vec![(OsString::from(var), OsString::from("something else"))];
             let h3 = HashKeyParams::new(&args)
+                .with_args(&args.arch_args[..])
+                .with_args(&args.common_args[..])
+                .with_args(&args.preprocessor_args[..])
                 .with_digests(&["abcd"])
                 .with_input_files(&p)
                 .with_env_vars(&vars2)
@@ -2041,12 +2540,18 @@ mod test {
         let p = vec![p];
 
         let h1 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_input_files(&p)
             .with_digests(&[&["abcd"], &extra_data[..]].concat())
             .compute()
             .wait()
             .unwrap();
         let h2 = HashKeyParams::new(&args)
+            .with_args(&args.arch_args[..])
+            .with_args(&args.common_args[..])
+            .with_args(&args.preprocessor_args[..])
             .with_digests(&["abcd"])
             .with_input_files(&p)
             .compute()

@@ -14,30 +14,46 @@
 // limitations under the License.
 
 use crate::{
+    cache::{Cache, Storage},
     errors::*,
-    lru_disk_cache::LruCache,
+    lru_disk_cache::{LruCache, lru_cache},
     util::{Digest, MetadataCtimeExt, Timestamp},
 };
+use bytes::{Buf, BufMut, BytesMut};
 use futures::lock::Mutex;
+use serde::{Deserialize, Serialize, de, ser::SerializeMap};
 use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    fmt,
+    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 #[derive(Clone)]
 pub struct SourceFileEntry {
     pub compiled_at: chrono::DateTime<chrono::Utc>,
-    /// Its status change time, `None` if not recorded.
-    pub ctime: Option<Timestamp>,
-    /// The hash of its contents
-    pub digest: String,
-    /// Its file size, in bytes.
-    pub fsize: u64,
-    /// Its modification time, `None` if not recorded.
-    pub mtime: Option<Timestamp>,
+    pub meta: SourceFileMeta,
     pub found_time: bool,
     pub found_date: bool,
     pub found_timestamp: bool,
+}
+
+/// Corresponds to a cached include file used in the pre-processor stage
+#[derive(Clone, Deserialize, Serialize, Debug, Default, PartialEq, Eq)]
+pub struct SourceFileMeta {
+    /// The file's absolute path.
+    pub path: OsString,
+    /// The hash of the file's contents.
+    pub digest: String,
+    /// The file's size (in bytes).
+    pub fsize: u64,
+    /// The file's modification time, `None` if not recorded.
+    pub mtime: Option<Timestamp>,
+    /// The file's status change time, `None` if not recorded.
+    pub ctime: Option<Timestamp>,
 }
 
 #[derive(Clone, Debug)]
@@ -74,7 +90,8 @@ impl SourceFileCache {
 
         let entry = self.lru.lock().await.get(path).and_then(|entry| {
             // If the file hasn't changed, reuse the cached entry
-            let file_good = entry.fsize == fsize && entry.ctime == ctime && entry.mtime == mtime;
+            let file_good =
+                entry.meta.fsize == fsize && entry.meta.ctime == ctime && entry.meta.mtime == mtime;
 
             // If __TIMESTAMP__ or __DATE__ were found, compare compile time to now (or SOURCE_DATE_EPOCH)
             let time_good = if entry.found_timestamp {
@@ -118,10 +135,13 @@ impl SourceFileCache {
 
             let entry = Arc::new(SourceFileEntry {
                 compiled_at: compile_timestamp,
-                ctime,
-                digest,
-                fsize,
-                mtime,
+                meta: SourceFileMeta {
+                    ctime,
+                    digest,
+                    fsize,
+                    mtime,
+                    path: path.into(),
+                },
                 found_time: finder.found_time(),
                 found_date: finder.found_date(),
                 found_timestamp: finder.found_timestamp(),
@@ -133,6 +153,373 @@ impl SourceFileCache {
         };
 
         Ok(entry)
+    }
+}
+
+// The dependencies cache entry is a description of all information needed
+// to cache pre-processor output in C-family languages for a given input file.
+// The current implementation is very much inspired from the "manifest"
+// that `ccache` uses for its "direct mode", though the on-disk format is
+// different.
+
+const MAX_REVISIONS: u64 = 1_000;
+
+#[derive(Clone, Default, Deserialize, Serialize, Debug, PartialEq, Eq)]
+pub struct Dependencies {
+    /// The list of included dependencies
+    pub sources: Vec<SourceFileMeta>,
+    /// Dependency files produced the compiler (if any)
+    pub outputs: BTreeMap<String, String>,
+}
+
+#[derive(Clone)]
+pub struct SourceFileDeps {
+    pub key: String,
+    /// Information about the original source file
+    pub meta: SourceFileMeta,
+    /// An LRU reverse-map of object hash key -> dependencies + depfile(s).
+    ///
+    /// The dependencies are the included files reported by the compiler
+    /// and the depfiles (if any) that were produced by the preprocessor's
+    /// dependency generation routine.
+    pub revs: LruCache<String, Dependencies>,
+}
+
+impl SourceFileDeps {
+    pub fn new(key: String, meta: SourceFileMeta) -> Self {
+        Self {
+            key,
+            meta,
+            revs: LruCache::new(MAX_REVISIONS),
+        }
+    }
+
+    /// Return the dependencies cache entry for a given dependencies key if it exists in storage.
+    pub async fn get(storage: &dyn Storage, key: &str) -> Result<Cache<SourceFileDeps>> {
+        match storage.get(key).await {
+            Err(err) => Err(err),
+            Ok(Cache::Miss) => Ok(Cache::Miss),
+            Ok(Cache::Hit(deflated)) => tokio::task::spawn_blocking(move || {
+                let mut inflated = vec![];
+                flate2::read::ZlibDecoder::new(deflated.reader())
+                    .read_to_end(&mut inflated)
+                    .map_err(Into::into)
+                    .and_then(|_| Self::try_from(opendal::Buffer::from(inflated)))
+                    .map_or_else(|_| Cache::Miss, Cache::Hit)
+            })
+            .await
+            .or(Ok(Cache::Miss)),
+        }
+    }
+
+    /// Write a dependencies cache entry for the given dependencies key to storage,
+    /// overwriting if it exists.
+    pub async fn put(self, storage: &dyn Storage) -> Result<Duration> {
+        use bytes::{BufMut, BytesMut};
+
+        let key = self.key.clone();
+
+        let buf = tokio::task::spawn_blocking(move || {
+            let mut writer = flate2::write::ZlibEncoder::new(
+                BytesMut::new().writer(),
+                flate2::Compression::best(),
+            );
+
+            bincode::serialize_into(&mut writer, &self)?;
+
+            writer
+                .finish()
+                .map_err(anyhow::Error::new)
+                .map(|writer| writer.into_inner().freeze().into())
+        })
+        .await??;
+
+        storage.put(&key, buf).await
+    }
+
+    pub fn from_buffer(buffer: opendal::Buffer) -> Result<Self> {
+        Ok(bincode::deserialize_from(buffer.reader())?)
+    }
+
+    pub fn to_buffer(&self) -> Result<opendal::Buffer> {
+        let mut writer = BytesMut::new().writer();
+        bincode::serialize_into(&mut writer, self)?;
+        Ok(opendal::Buffer::from(writer.into_inner().freeze()))
+    }
+
+    pub fn iter(&self) -> lru_cache::Iter<'_, String, Dependencies> {
+        self.revs.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> lru_cache::IterMut<'_, String, Dependencies> {
+        self.revs.iter_mut()
+    }
+
+    /// Insert the full compilation key and included files for a given source file.
+    ///
+    /// There can be more than one result at once for a source file if one
+    /// or more of the include files has changed but not the source file.
+    pub fn add_revision(
+        &mut self,
+        obj_key: &str,
+        dependencies: Dependencies,
+        out_pretty: &str,
+    ) -> &mut Self {
+        let num_includes = dependencies.sources.len();
+
+        self.revs.insert(obj_key.to_string(), dependencies);
+
+        let num_results = self.revs.len();
+
+        debug!(
+            "[{out_pretty}, {src_key}, {obj_key}]: Added revision to dependencies cache entry: num_includes={num_includes}, num_results={num_results}",
+            src_key = self.key
+        );
+
+        self
+    }
+
+    /// Returns the digest of the first result whose expected included files
+    /// are already on disk and have not changed.
+    pub async fn find_dependencies(
+        &mut self,
+        source_file_cache: &SourceFileCache,
+        compile_timestamp: chrono::DateTime<chrono::Utc>,
+        out_pretty: &str,
+    ) -> (bool, Option<(String, Dependencies)>) {
+        let mut maybe_result = None;
+        let mut needs_update = false;
+        let mut log_messages = vec![];
+
+        // Find the first result key whose include files on disk match this
+        // dependencies cache entry. Check newest results first since they're
+        // more likely to match.
+        for (idx, (obj_key, deps)) in self.iter_mut().rev().enumerate() {
+            let (failure, updated) =
+                Self::test_dependencies(source_file_cache, compile_timestamp, &mut deps.sources)
+                    .await;
+
+            if let Some(reason) = updated {
+                needs_update = true;
+                if log_enabled!(log::Level::Trace) {
+                    log_messages.push(format!("{obj_key}]: {reason}"));
+                }
+            }
+
+            if let Some(reason) = failure {
+                if log_enabled!(log::Level::Trace) {
+                    log_messages.push(format!("{obj_key}]: Deps lookup failure: {reason}"));
+                }
+            } else {
+                if idx != 0 {
+                    // Need to write back to storage if the LRU order changes
+                    needs_update = true;
+                    if log_enabled!(log::Level::Trace) {
+                        log_messages.push(format!("{obj_key}]: Deps LRU order changed"));
+                    }
+                }
+                maybe_result = Some((obj_key.clone(), deps.clone()));
+                break;
+            }
+        }
+
+        for msg in log_messages {
+            trace!("[{out_pretty}, {src_key}, {msg}", src_key = self.key);
+        }
+
+        if let Some((obj_key, _)) = maybe_result.as_ref() {
+            // Move the entry to the back of the LRU
+            self.revs.get(obj_key);
+        }
+
+        (
+            // Signal this dependencies cache entry was modified and should
+            // be written back to storage.
+            // Note: This can happen regardless whether a result was found.
+            needs_update,
+            // Return the object key and dependencies
+            maybe_result,
+        )
+    }
+
+    /// A result matches if all of its include files exist on disk and have not changed.
+    async fn test_dependencies(
+        source_file_cache: &SourceFileCache,
+        compile_timestamp: chrono::DateTime<chrono::Utc>,
+        dependencies: &mut [SourceFileMeta],
+    ) -> (Option<String>, Option<String>) {
+        let mut failure = None;
+        let mut updated = None;
+
+        for prev in dependencies.iter_mut() {
+            let path = Path::new(prev.path.as_os_str());
+
+            let curr = match source_file_cache.get(path, compile_timestamp).await {
+                Ok(entry) => entry,
+                Err(err) => {
+                    failure = Some(format!("{err:#}"));
+                    break;
+                }
+            };
+
+            let SourceFileEntry {
+                meta: curr,
+                found_time,
+                found_date,
+                found_timestamp,
+                ..
+            } = curr.as_ref();
+
+            if *found_time {
+                // We don't know for sure that the program actually uses the __TIME__ macro,
+                // but we have to assume it anyway and hash the time stamp. However, that's
+                // not very useful since the chance that we get a cache hit later the same
+                // second should be quite slim... So, just signal back to the caller that
+                // __TIME__ has been found so that the dependencies cache can be disabled.
+                failure = Some(format!("Found __TIME__ in {path:?}"));
+                break;
+            }
+
+            // If the digests are different, disable dependencies cache
+            if prev.digest != curr.digest {
+                failure = Some(format!("Digest mismatch for {path:?}"));
+                break;
+            }
+
+            // If __DATE__ or __TIMESTAMP__ found, update the includes for this result.
+            if *found_date {
+                // trace!("[{out_pretty}, {src_key}]: updating entry, __DATE__ found in {path:?}");
+                updated = Some(format!("updating entry, __DATE__ found in {path:?}"));
+                *prev = curr.clone();
+            } else if *found_timestamp {
+                // trace!("[{out_pretty}, {src_key}]: updating entry, __TIMESTAMP__ found in {path:?}");
+                updated = Some(format!("updating entry, __TIMESTAMP__ found in {path:?}"));
+                *prev = curr.clone();
+            }
+        }
+
+        (failure, updated)
+    }
+}
+
+impl TryFrom<SourceFileDeps> for opendal::Buffer {
+    type Error = anyhow::Error;
+
+    fn try_from(src: SourceFileDeps) -> std::result::Result<Self, Self::Error> {
+        src.to_buffer()
+    }
+}
+
+impl TryFrom<opendal::Buffer> for SourceFileDeps {
+    type Error = anyhow::Error;
+
+    fn try_from(buf: opendal::Buffer) -> std::result::Result<Self, Self::Error> {
+        Self::from_buffer(buf)
+    }
+}
+
+impl fmt::Debug for SourceFileDeps {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string_pretty(self).expect("json serialize to succeed")
+        )
+    }
+}
+
+impl fmt::Display for SourceFileDeps {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string(self).expect("json serialize to succeed")
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for SourceFileDeps {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SourceFileDepsVisitor;
+        impl<'de> de::Visitor<'de> for SourceFileDepsVisitor {
+            type Value = SourceFileDeps;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("expected a depepdency cache entry")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: de::MapAccess<'de>,
+            {
+                let mut key = None;
+                let mut meta = None;
+                let mut revs = None;
+                let mut size = None;
+
+                while let Ok(Some(name)) = map.next_key::<String>() {
+                    match name.as_str() {
+                        "key" => {
+                            key = Some(map.next_value::<String>()?);
+                        }
+                        "revs" => {
+                            revs = Some(map.next_value::<Vec<(String, Dependencies)>>()?);
+                        }
+                        "meta" => {
+                            meta = Some(map.next_value::<SourceFileMeta>()?);
+                        }
+                        "size" => {
+                            size = Some(map.next_value::<u64>()?);
+                        }
+                        name => {
+                            return Err(de::Error::unknown_field(
+                                name,
+                                &["key", "meta", "revs", "size"],
+                            ));
+                        }
+                    }
+                }
+
+                let Some(key) = key else {
+                    return Err(de::Error::missing_field("key"));
+                };
+
+                let Some(meta) = meta else {
+                    return Err(de::Error::missing_field("meta"));
+                };
+
+                let mut deps = SourceFileDeps {
+                    key,
+                    meta,
+                    revs: LruCache::new(size.unwrap_or(MAX_REVISIONS).max(MAX_REVISIONS)),
+                };
+
+                for (key, val) in revs.into_iter().flatten().rev() {
+                    deps.revs.insert(key, val);
+                }
+
+                Ok(deps)
+            }
+        }
+
+        deserializer.deserialize_map(SourceFileDepsVisitor)
+    }
+}
+
+impl Serialize for SourceFileDeps {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(4))?;
+        map.serialize_entry("key", &self.key)?;
+        map.serialize_entry("meta", &self.meta)?;
+        map.serialize_entry("size", &self.revs.capacity())?;
+        map.serialize_entry("revs", &self.iter().rev().collect::<Vec<_>>())?;
+        map.end()
     }
 }
 
@@ -379,4 +766,184 @@ int __fxstat64(int ver, int fd, struct stat64 *st)
     std::fs::remove_file(temp)?;
 
     Ok(path)
+}
+
+#[cfg(test)]
+mod test {
+
+    use super::*;
+    use crate::test::utils::*;
+
+    #[test]
+    fn test_serialize_deserialize() -> Result<()> {
+        let f = TestFixture::new();
+        let p = f.touch("file.c")?;
+
+        let mut entry_a = SourceFileDeps::new(
+            "src_key".into(),
+            SourceFileMeta {
+                path: p.into(),
+                digest: String::new(),
+                fsize: 0,
+                mtime: None,
+                ctime: None,
+            },
+        );
+
+        entry_a.add_revision("obj_key", Dependencies::default(), "file.c");
+
+        assert_eq!(entry_a.iter().count(), 1);
+
+        let buf = opendal::Buffer::try_from(entry_a)?;
+        let entry_b = SourceFileDeps::try_from(buf.clone())?;
+
+        assert_eq!(entry_b.iter().count(), 1);
+        assert_eq!(buf.to_bytes(), entry_b.to_buffer()?.to_bytes());
+
+        Ok(())
+    }
+
+    // #[test]
+    // fn test_preprocessor_cache_entry_hash_key_basedirs() {
+    //     #[cfg(target_os = "windows")]
+    //     use crate::util::normalize_win_path;
+    //     use std::fs;
+    //     use tempfile::TempDir;
+
+    //     // Create two different base directories
+    //     let dir1 = TempDir::new().unwrap();
+    //     let dir2 = TempDir::new().unwrap();
+    //     let dirs = [&dir1, &dir2]
+    //         .iter()
+    //         .map(|dir| {
+    //             let bytes = dir.path().to_string_lossy().into_owned().into_bytes();
+    //             #[cfg(target_os = "windows")]
+    //             return normalize_win_path(&bytes);
+    //             #[cfg(not(target_os = "windows"))]
+    //             bytes
+    //         })
+    //         .collect::<Vec<_>>();
+
+    //     // Create identical files with the same relative path in each directory
+    //     let file_path = Path::new("test.c");
+    //     let content = b"int main() { return 0; }";
+    //     fs::write(dir1.path().join(file_path), content).unwrap();
+    //     fs::write(dir2.path().join(file_path), content).unwrap();
+
+    //     let args = ParsedArguments {
+    //         language: Language::C,
+    //         input: file_path.into(),
+    //         ..Default::default()
+    //     };
+
+    //     let compile_timestamp = chrono::Utc::now();
+
+    //     // Test 1: With basedirs, hashes should be the same
+    //     let hash1_with_basedirs = preprocessor_cache_entry_hash_key(
+    //         "test_digest",
+    //         None,
+    //         &args,
+    //         &[],
+    //         &[],
+    //         dir1.path(),
+    //         false,
+    //         &dirs,
+    //         compile_timestamp,
+    //     )
+    //     .wait()
+    //     .unwrap()
+    //     .unwrap();
+
+    //     let hash2_with_basedirs = preprocessor_cache_entry_hash_key(
+    //         "test_digest",
+    //         None,
+    //         &args,
+    //         &[],
+    //         &[],
+    //         dir2.path(),
+    //         false,
+    //         &dirs,
+    //         compile_timestamp,
+    //     )
+    //     .wait()
+    //     .unwrap()
+    //     .unwrap();
+
+    //     assert_ne!(
+    //         hash1_with_basedirs, hash2_with_basedirs,
+    //         "Hashes should be different when using basedirs with identical files in different directories"
+    //     );
+
+    //     // Test 2: With basedir1 for first, and basedir2 for second, hashes should be the same
+    //     let hash1_with_basedirs = preprocessor_cache_entry_hash_key(
+    //         "test_digest",
+    //         None,
+    //         &args,
+    //         &[],
+    //         &[],
+    //         dir1.path(),
+    //         false,
+    //         &dirs[..1],
+    //         compile_timestamp,
+    //     )
+    //     .wait()
+    //     .unwrap()
+    //     .unwrap();
+
+    //     let hash2_with_basedirs = preprocessor_cache_entry_hash_key(
+    //         "test_digest",
+    //         None,
+    //         &args,
+    //         &[],
+    //         &[],
+    //         dir2.path(),
+    //         false,
+    //         &dirs[1..],
+    //         compile_timestamp,
+    //     )
+    //     .wait()
+    //     .unwrap()
+    //     .unwrap();
+
+    //     assert_ne!(
+    //         hash1_with_basedirs, hash2_with_basedirs,
+    //         "Hashes should be different when using basedirs with identical files in different directories"
+    //     );
+
+    //     // Test 3: Without basedirs, hashes should be different
+    //     let hash1_no_basedirs = preprocessor_cache_entry_hash_key(
+    //         "test_digest",
+    //         None,
+    //         &args,
+    //         &[],
+    //         &[],
+    //         dir1.path(),
+    //         false,
+    //         &[],
+    //         compile_timestamp,
+    //     )
+    //     .wait()
+    //     .unwrap()
+    //     .unwrap();
+
+    //     let hash2_no_basedirs = preprocessor_cache_entry_hash_key(
+    //         "test_digest",
+    //         None,
+    //         &args,
+    //         &[],
+    //         &[],
+    //         dir2.path(),
+    //         false,
+    //         &[],
+    //         compile_timestamp,
+    //     )
+    //     .wait()
+    //     .unwrap()
+    //     .unwrap();
+
+    //     assert_ne!(
+    //         hash1_no_basedirs, hash2_no_basedirs,
+    //         "Hashes should be different without basedirs for files in different directories"
+    //     );
+    // }
 }

@@ -32,11 +32,10 @@ use {
 
 use crate::{
     cache::FileObjectSource,
-    compiler::args::*,
     compiler::{
         Cacheable, ColorMode, Compilation, CompileCommand, Compiler, CompilerArguments,
-        CompilerCommand, CompilerHasher, CompilerKind, CompilerProxy, HashResult, Language,
-        SingleCompileCommand, c::ArtifactDescriptor,
+        CompilerCommand, CompilerHasher, CompilerKind, CompilerProxy, GenerateHashKeyArgs,
+        HashResult, Language, SingleCompileCommand, args::*, c::ArtifactDescriptor,
     },
     counted_array, dist,
     errors::*,
@@ -1392,12 +1391,18 @@ where
 
     async fn generate_hash_key(
         self: Box<Self>,
-        creator: &T,
-        cwd: PathBuf,
-        env_vars: Vec<(OsString, OsString)>,
-        pool: &tokio::runtime::Handle,
-        cache_control: CacheControl,
-    ) -> Result<(HashResult<T>, Duration)> {
+        GenerateHashKeyArgs {
+            creator,
+            cwd,
+            env_vars,
+            cache_control,
+            runtime: pool,
+            ..
+        }: GenerateHashKeyArgs<'_, T>,
+    ) -> Result<(
+        HashResult<T>,
+        Pin<Box<dyn Future<Output = Result<Duration>> + Send>>,
+    )> {
         trace!("[{}]: generate_hash_key", self.parsed_args.crate_name);
 
         let start = Instant::now();
@@ -1436,8 +1441,8 @@ where
             &self.parsed_args.crate_name,
             &self.executable,
             &filtered_arguments,
-            &cwd,
-            &env_vars,
+            cwd,
+            env_vars,
             pool,
         )
         .await?;
@@ -1621,8 +1626,8 @@ where
             creator,
             &self.executable,
             flat_os_string_arguments,
-            &cwd,
-            &env_vars,
+            cwd,
+            env_vars,
         )
         .await?;
 
@@ -1749,14 +1754,17 @@ where
                     crate_name: self.parsed_args.crate_name.clone(),
                     crate_types: self.parsed_args.crate_types.clone(),
                     dep_info,
-                    cwd,
-                    env_vars,
+                    cwd: cwd.to_owned(),
+                    env_vars: env_vars.to_vec(),
                     #[cfg(feature = "dist-client")]
                     rlib_dep_reader: self.rlib_dep_reader.clone(),
                 }),
                 weak_toolchain_key,
             },
-            start.elapsed(),
+            Box::pin({
+                let elapsed = start.elapsed();
+                async move { Ok(elapsed) }
+            }) as Pin<Box<dyn Future<Output = Result<Duration>> + Send>>,
         ))
     }
 
@@ -2784,7 +2792,8 @@ mod test {
 
     use crate::compiler::*;
     use crate::mock_command::*;
-    use crate::test::utils::*;
+    use crate::server::SccacheService;
+    use crate::test::{mock_storage::MockStorage, utils::*};
     use fs::File;
     use itertools::Itertools;
     use std::ffi::OsStr;
@@ -3613,11 +3622,14 @@ proc_macro false
         mock_file_names(&creator, &["foo.rlib", "foo.a"]);
         let runtime = single_threaded_runtime();
         let pool = runtime.handle().clone();
+        let storage = Arc::new(MockStorage::new(None, true));
+        let service = SccacheService::mock_with_storage(storage, pool.clone());
         let res = hasher
-            .generate_hash_key(
-                &creator,
-                f.tempdir.path().to_owned(),
-                [
+            .generate_hash_key(GenerateHashKeyArgs {
+                cache_control: CacheControl::Default,
+                creator: &creator,
+                cwd: f.tempdir.path(),
+                env_vars: &[
                     (OsString::from("CARGO_PKG_NAME"), OsString::from("foo")),
                     (OsString::from("FOO"), OsString::from("bar")),
                     (OsString::from("CARGO_BLAH"), OsString::from("abc")),
@@ -3629,11 +3641,10 @@ proc_macro false
                         OsString::from("CARGO_BUILD_JOBS"),
                         OsString::from("ignored"),
                     ),
-                ]
-                .to_vec(),
-                &pool,
-                CacheControl::Default,
-            )
+                ],
+                runtime: &pool,
+                service: &service,
+            })
             .wait()
             .unwrap()
             .0;
@@ -3712,18 +3723,21 @@ proc_macro false
 
         let creator = new_creator();
         let runtime = single_threaded_runtime();
-        let pool = runtime.handle().clone();
+        let pool = runtime.handle();
+        let storage = Arc::new(MockStorage::new(None, true));
+        let service = SccacheService::mock_with_storage(storage, pool.clone());
 
         mock_dep_info(&creator, &["foo.rs"]);
         mock_file_names(&creator, &["foo.rlib"]);
         let res = hasher
-            .generate_hash_key(
-                &creator,
-                f.tempdir.path().to_owned(),
-                env_vars.to_owned(),
-                &pool,
-                CacheControl::Default,
-            )
+            .generate_hash_key(GenerateHashKeyArgs {
+                cache_control: CacheControl::Default,
+                creator: &creator,
+                cwd: f.tempdir.path(),
+                env_vars,
+                runtime: pool,
+                service: &service,
+            })
             .wait()
             .unwrap()
             .0;

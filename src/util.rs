@@ -346,7 +346,7 @@ pub struct TimeMacroFinder {
 
 impl TimeMacroFinder {
     /// Called for each chunk of a file during the hashing process
-    /// in preprocessor cache mode.
+    /// when creating a dependencies cache entry.
     ///
     /// When buffer reading a file, we get something like this:
     ///

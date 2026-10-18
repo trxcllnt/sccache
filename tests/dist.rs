@@ -577,7 +577,7 @@ async fn test_dist_cpp_errors_on_toolchain_load_failures(message_broker: &str) -
 #[test_case("redis" ; "with redis")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Result<()> {
-    // Bug 2173: preprocessor cache hit but main cache miss - because using the preprocessor cache
+    // Bug 2173: dependencies cache hit but main cache miss - because using the dependencies cache
     // means not doing regular preprocessing, there was no preprocessed translation unit to send
     // out for distributed compilation, so an empty u8 array was compiled - which "worked", but
     // the object file *was* the result of compiling an empty file.

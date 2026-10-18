@@ -37,3 +37,4 @@ mod counted_array;
 
 pub use crate::compiler::c::CCompilerKind;
 pub use crate::compiler::compiler::*;
+pub use crate::compiler::util::SourceFileDeps;

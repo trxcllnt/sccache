@@ -121,7 +121,7 @@ int main(int argc, char** argv) {{
             ..Default::default()
         })?;
 
-        // Compile again to ensure preprocessor cache hit
+        // Compile again to ensure dependencies cache hit
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
             compile_requests: Some(1),
@@ -158,7 +158,7 @@ int a() {{ return b(); }}
             ..Default::default()
         })?;
 
-        // Compile again to ensure preprocessor cache hit
+        // Compile again to ensure dependencies cache hit
         // Should still be two object hashes
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
@@ -184,7 +184,7 @@ int a() {{ return b(); }}
             ..Default::default()
         })?;
 
-        // Compile again to ensure preprocessor cache hit
+        // Compile again to ensure dependencies cache hit
         // Should still be three object hashes
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
@@ -195,7 +195,7 @@ int a() {{ return b(); }}
         })?;
     }
 
-    // Revert dep_b to ensure preprocessor cache hit
+    // Revert dep_b to ensure dependencies cache hit
     {
         // Write dependency B
         write_source(tempdir, dep_b, r#"int b() { return 1; }"#);
@@ -210,7 +210,7 @@ int a() {{ return b(); }}
         })?;
     }
 
-    // Revert dep_a to ensure preprocessor cache hit
+    // Revert dep_a to ensure dependencies cache hit
     {
         // Write dependency A
         write_source(tempdir, dep_a, r#"int a() { return 0; }"#);
@@ -299,7 +299,7 @@ int main(int argc, char** argv) {{
             ..Default::default()
         })?;
 
-        // Wait 2s and compile again to ensure preprocessor cache miss
+        // Wait 2s and compile again to ensure dependencies cache miss
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         compile_and_verify(AdditionalStats {
@@ -346,7 +346,7 @@ void a() { printf("time: %s", __TIME__); }
             ..Default::default()
         })?;
 
-        // Wait 2s and compile again to ensure preprocessor cache miss
+        // Wait 2s and compile again to ensure dependencies cache miss
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         compile_and_verify(AdditionalStats {
@@ -390,7 +390,7 @@ void b() { printf("time: %s", __TIME__); }
             ..Default::default()
         })?;
 
-        // Wait 2s and compile again to ensure preprocessor cache miss
+        // Wait 2s and compile again to ensure dependencies cache miss
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         compile_and_verify(AdditionalStats {
@@ -419,7 +419,7 @@ void b() { printf("time: %s", __TIME__); }
             ..Default::default()
         })?;
 
-        // Wait 2s and compile again to ensure preprocessor cache hit
+        // Wait 2s and compile again to ensure dependencies cache hit
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         compile_and_verify(AdditionalStats {
@@ -533,7 +533,7 @@ int main(int argc, char** argv) {{
             },
         )?;
 
-        // Compile again to ensure preprocessor cache hit
+        // Compile again to ensure dependencies cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -567,7 +567,7 @@ int main(int argc, char** argv) {{
             },
         )?;
 
-        // Compile "tomorrow" again to ensure preprocessor cache hit
+        // Compile "tomorrow" again to ensure dependencies cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -628,7 +628,7 @@ void a() { printf("date: %s", __DATE__); }
             },
         )?;
 
-        // Compile again to ensure preprocessor cache hit
+        // Compile again to ensure dependencies cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -662,7 +662,7 @@ void a() { printf("date: %s", __DATE__); }
             },
         )?;
 
-        // Compile "tomorrow" again to ensure preprocessor cache hit
+        // Compile "tomorrow" again to ensure dependencies cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -720,7 +720,7 @@ void b() { printf("date: %s", __DATE__); }
             },
         )?;
 
-        // Compile "today" again to ensure preprocessor cache hit
+        // Compile "today" again to ensure dependencies cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -754,7 +754,7 @@ void b() { printf("date: %s", __DATE__); }
             },
         )?;
 
-        // Compile "today" again to ensure preprocessor cache hit
+        // Compile "today" again to ensure dependencies cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -770,7 +770,7 @@ void b() { printf("date: %s", __DATE__); }
             },
         )?;
 
-        // Compile "tomorrow" again to ensure preprocessor cache hit
+        // Compile "tomorrow" again to ensure dependencies cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -810,7 +810,7 @@ void b() { printf("date: %s", __DATE__); }
             },
         )?;
 
-        // Compile "today" again to ensure preprocessor cache hit
+        // Compile "today" again to ensure dependencies cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -826,7 +826,7 @@ void b() { printf("date: %s", __DATE__); }
             },
         )?;
 
-        // Compile "tomorrow" again to ensure preprocessor cache hit
+        // Compile "tomorrow" again to ensure dependencies cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -920,7 +920,7 @@ int main(int argc, char** argv) {{
             ..Default::default()
         })?;
 
-        // Compile again to ensure preprocessor cache hit
+        // Compile again to ensure dependencies cache hit
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
             compile_requests: Some(1),
@@ -930,7 +930,7 @@ int main(int argc, char** argv) {{
         })?;
 
         // Wait 2s, update source file with __TIMESTAMP__ macro,
-        // then compile again to ensure preprocessor cache miss
+        // then compile again to ensure dependencies cache miss
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         write_source(
@@ -955,7 +955,7 @@ int main(int argc, char** argv) {{
             ..Default::default()
         })?;
 
-        // Compile again to ensure preprocessor cache hit
+        // Compile again to ensure dependencies cache hit
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
             compile_requests: Some(1),
@@ -1013,7 +1013,7 @@ void a() { printf("timestamp: %s", __TIMESTAMP__); }
         })?;
 
         // Wait 2s, update dependency A with __TIMESTAMP__ macro,
-        // then compile again to ensure preprocessor cache miss
+        // then compile again to ensure dependencies cache miss
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         write_source(
@@ -1035,7 +1035,7 @@ void a() { printf("timestamp: %s", __TIMESTAMP__); }
             ..Default::default()
         })?;
 
-        // Compile again to ensure preprocessor cache hit
+        // Compile again to ensure dependencies cache hit
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
             compile_requests: Some(1),
@@ -1090,7 +1090,7 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
         })?;
 
         // Wait 2s, update dependency B with __TIMESTAMP__ macro,
-        // then compile again to ensure preprocessor cache miss
+        // then compile again to ensure dependencies cache miss
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         let prev_mtime = std::fs::metadata(tempdir.join(dep_b))?.modified()?;
@@ -1114,7 +1114,7 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
             ..Default::default()
         })?;
 
-        // Compile again to ensure preprocessor cache hit
+        // Compile again to ensure dependencies cache hit
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
             compile_requests: Some(1),
@@ -1123,14 +1123,14 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
             ..Default::default()
         })?;
 
-        // Reset the mtime and compile again to validate preprocessor cache hits
+        // Reset the mtime and compile again to validate dependencies cache hits
         // Don't error if this fails due to permissions issues (i.e. in Windows CI)
         let mtime_reset = std::fs::File::open(tempdir.join(dep_b))
             .and_then(|f| f.set_modified(prev_mtime).map(|_| f))
             .and_then(|f| f.sync_all());
 
         if mtime_reset.is_ok() {
-            // Compile again to ensure preprocessor cache hit
+            // Compile again to ensure dependencies cache hit
             compile_and_verify(AdditionalStats {
                 hashed: Some(1),
                 compile_requests: Some(1),
@@ -1159,7 +1159,7 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
             ..Default::default()
         })?;
 
-        // Compile again to ensure preprocessor cache hit
+        // Compile again to ensure dependencies cache hit
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
             compile_requests: Some(1),
