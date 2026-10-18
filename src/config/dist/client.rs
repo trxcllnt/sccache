@@ -152,7 +152,7 @@ impl From<MaxRetries> for f64 {
 pub struct Networking {
     pub connect_timeout: u32,
     pub request_timeout: u32,
-    #[serde(default, deserialize_with = "deserialize_bool")]
+    #[serde(deserialize_with = "deserialize_bool")]
     pub connection_pool: bool,
     pub max_connections: u32,
     pub keepalive: Keepalive,
