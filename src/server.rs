@@ -1814,23 +1814,25 @@ where
             }
 
             if let Some(cache_write) = cache_write {
-                match cache_write.await {
-                    Err(e) => {
-                        debug!("[{out_pretty}]: Error executing cache write: {e}");
-                        me.stats.lock().await.cache_write_errors += 1;
+                me.rt.clone().spawn(async move {
+                    match cache_write.await {
+                        Err(e) => {
+                            debug!("[{out_pretty}]: Error executing cache write: {e}");
+                            me.stats.lock().await.cache_write_errors += 1;
+                        }
+                        //TODO: save cache stats!
+                        Ok(info) => {
+                            trace!(
+                                "[{}]: Cache write finished in {}",
+                                info.object_file_pretty,
+                                util::fmt_duration_as_secs(&info.duration)
+                            );
+                            let mut stats = me.stats.lock().await;
+                            stats.cache_writes += 1;
+                            stats.cache_write_duration += info.duration;
+                        }
                     }
-                    //TODO: save cache stats!
-                    Ok(info) => {
-                        trace!(
-                            "[{}]: Cache write finished in {}",
-                            info.object_file_pretty,
-                            util::fmt_duration_as_secs(&info.duration)
-                        );
-                        let mut stats = me.stats.lock().await;
-                        stats.cache_writes += 1;
-                        stats.cache_write_duration += info.duration;
-                    }
-                }
+                }).await?;
             }
 
             Ok(res)
