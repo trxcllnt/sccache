@@ -38,7 +38,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// A struct on which to implement `CCompilerImpl`.
@@ -487,9 +487,12 @@ where
     let mut input_arg = None;
     let mut double_dash_input = false;
     let mut depfile = None;
-    let mut depfile_format = None;
+    let mut structured_depfile = None;
+    let mut structured_depfile_format = None;
     let mut dep_target = None;
+    let mut structured_dep_target = None;
     let mut dep_flag = OsString::from("-MT");
+    let mut structured_dep_flag = OsString::from("-fdeps-target");
     let mut cxx20_modules = false;
     let mut common_args = vec![];
     let mut arch_args = vec![];
@@ -503,12 +506,15 @@ where
     let mut multiple_input_files = Vec::new();
     let mut split_dwarf = false;
     let mut need_explicit_dep_target = false;
+    let mut need_explicit_structured_dep_target = false;
+    let mut need_explicit_structured_dep_format = true;
     enum DepArgumentRequirePath {
         NotNeeded,
         Missing,
         Provided,
     }
     let mut need_explicit_dep_argument_path = DepArgumentRequirePath::NotNeeded;
+    let mut need_explicit_structured_dep_argument_path = DepArgumentRequirePath::NotNeeded;
     let mut language = None;
     // Clang assembles in-process unless told otherwise; the other compilers
     // parsed here always hand off to a separate assembler.
@@ -606,21 +612,36 @@ where
                     need_explicit_dep_argument_path = DepArgumentRequirePath::Missing;
                 }
             }
-            Some(DepTarget(s)) | Some(StructuredDepTarget(s)) => {
+            Some(DepTarget(s)) => {
                 dep_flag = OsString::from(arg.flag_str().expect("Dep target flag expected"));
                 dep_target = Some(s.clone());
+            }
+            Some(StructuredDepTarget(s)) => {
+                structured_dep_flag =
+                    OsString::from(arg.flag_str().expect("Structured dep target flag expected"));
+                structured_dep_target = Some(s.clone());
             }
             Some(DepArgumentPath(path)) => {
                 depfile = Some(path.clone());
                 need_explicit_dep_argument_path = DepArgumentRequirePath::Provided;
             }
             Some(StructuredDepArgumentPath(path)) => {
-                depfile = Some(path.clone());
+                structured_depfile = Some(path.clone());
                 // https://gcc.gnu.org/onlinedocs/gcc/C-Dialect-Options.html#index-fdeps-
-                depfile_format = depfile_format.or(Some(OsString::from("p1689r5")));
-                need_explicit_dep_argument_path = DepArgumentRequirePath::Provided;
+                structured_depfile_format =
+                    structured_depfile_format.or(Some(OsString::from("p1689r5")));
+                need_explicit_structured_dep_argument_path = DepArgumentRequirePath::Provided;
             }
-            Some(StructuredDepFormat(format)) => depfile_format = Some(format.clone()),
+            Some(StructuredDepFormat(format)) => {
+                need_explicit_structured_dep_target = true;
+                need_explicit_structured_dep_format = false;
+                if let DepArgumentRequirePath::NotNeeded =
+                    need_explicit_structured_dep_argument_path
+                {
+                    need_explicit_structured_dep_argument_path = DepArgumentRequirePath::Missing;
+                }
+                structured_depfile_format = Some(format.clone());
+            }
             Some(SerializeDiagnostics(path)) => {
                 serialize_diagnostics = Some(path.clone());
             }
@@ -813,7 +834,6 @@ where
             Some(DepArgumentPath(_))
             | Some(NeedDepTarget)
             | Some(StructuredDepFormat(_))
-            | Some(StructuredDepTarget(_))
             | Some(StructuredDepArgumentPath(_)) => &mut dependency_args,
             Some(DoCompilation)
             // Skip `-fdiagnostics-color[=auto]` flags and handle in `generate_compile_commands`
@@ -823,6 +843,7 @@ where
             | Some(Output(_))
             | Some(XClang(_))
             | Some(DepTarget(_))
+            | Some(StructuredDepTarget(_))
             | Some(SerializeDiagnostics(_)) => continue,
             Some(NotCompilationFlag) | Some(TooHardFlag) | Some(TooHard(_)) => unreachable!(),
             None => match arg {
@@ -1012,24 +1033,48 @@ where
     // If the language doesn't need preprocessing, it doesn't generate a dependency file. See issue #2664
     if language.needs_c_preprocessing() {
         if need_explicit_dep_target {
+            let dep_target = dep_target.unwrap_or_else(|| output.clone().into_os_string());
             dependency_args.push(dep_flag);
-            dependency_args.push(dep_target.unwrap_or_else(|| output.clone().into_os_string()));
+            dependency_args.push(dep_target);
         }
+
         if let DepArgumentRequirePath::Missing = need_explicit_dep_argument_path {
-            let dep_path = Path::new(&output).with_extension(
-                match depfile_format.as_deref().and_then(|s| s.to_str()) {
-                    Some("p1689r5") => "json",
-                    _ => "d",
-                },
-            );
-            depfile = Some(dep_path.clone());
+            let dep_path = Path::new(&output).with_extension("d");
             dependency_args.push(OsString::from("-MF"));
-            dependency_args.push(dep_path.into_os_string());
+            dependency_args.push(dep_path.as_os_str().into());
+            depfile = Some(dep_path);
         }
 
         if let Some(p) = depfile.as_ref() {
             outputs.insert(
                 "dep",
+                ArtifactDescriptor {
+                    path: p.clone(),
+                    optional: false,
+                },
+            );
+        }
+
+        if need_explicit_structured_dep_target {
+            let dep_target =
+                structured_dep_target.unwrap_or_else(|| output.clone().into_os_string());
+            let mut arg = structured_dep_flag;
+            arg.push("=");
+            arg.push(dep_target);
+            dependency_args.push(arg);
+        }
+
+        if let DepArgumentRequirePath::Missing = need_explicit_structured_dep_argument_path {
+            let dep_path = Path::new(&output).with_extension("ddi");
+            let mut arg = OsString::from("-fdeps-file=");
+            arg.push(dep_path.as_os_str());
+            dependency_args.push(arg);
+            structured_depfile = Some(dep_path);
+        }
+
+        if let Some(p) = structured_depfile.as_ref() {
+            outputs.insert(
+                "dep:modules",
                 ArtifactDescriptor {
                     path: p.clone(),
                     optional: false,
@@ -1067,18 +1112,23 @@ where
         },
     );
 
-    let depfile_format = if depfile_format.is_none() {
-        match depfile
-            .as_deref()
-            .and_then(|p| p.extension())
-            .and_then(|ext| ext.to_str())
-        {
-            Some("json") => Some(OsString::from("p1689r5")),
-            _ => None,
+    let structured_depfile_format = if structured_depfile_format.is_none() {
+        if structured_depfile.is_some() {
+            Some(OsString::from("p1689r5"))
+        } else {
+            None
         }
     } else {
-        depfile_format
+        structured_depfile_format
     };
+
+    if need_explicit_structured_dep_format
+        && let Some(format) = structured_depfile_format.as_deref()
+    {
+        let mut arg = OsString::from("-fdeps-format=");
+        arg.push(format);
+        dependency_args.push(arg);
+    }
 
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),
@@ -1088,7 +1138,8 @@ where
         cxx20_modules,
         outputs,
         depfile,
-        depfile_format,
+        structured_depfile_format,
+        structured_depfile,
         dependency_args,
         preprocessor_args,
         common_args,
@@ -1239,16 +1290,40 @@ where
         elapsed += duration;
     }
 
+    let generate_module_dependencies = parsed_args.cxx20_modules
+        && parsed_args.structured_depfile_format.is_some()
+        && parsed_args.structured_depfile.is_some();
+
     let depfile = parsed_args
         .depfile
-        .as_deref()
+        .clone()
         .filter(|_| !generate_user_dependencies);
+
+    let structured_depfile_format = parsed_args
+        .structured_depfile_format
+        .as_deref()
+        .and_then(|s| s.to_str());
+
+    let (deps_arg, depfile) = match structured_depfile_format {
+        Some("p1689r5") => (
+            OsStr::new("-MD"),
+            depfile.or_else(|| {
+                Some({
+                    match parsed_args.outputs.get("obj") {
+                        Some(obj) => obj.path.with_added_extension("d"),
+                        None => parsed_args.input.with_added_extension("d"),
+                    }
+                })
+            }),
+        ),
+        _ => (OsStr::new("-M"), depfile),
+    };
 
     let cmd = {
         let args = args_without_dependency_flags
             .into_iter()
             .chain(
-                std::iter::once(OsStr::new("-M"))
+                std::iter::once(deps_arg)
                     .chain(
                         parsed_args
                             .dependency_args
@@ -1268,13 +1343,30 @@ where
                                     || arg
                                         .contains("--generate-nonsystem-dependencies-with-compile")
                                 {
-                                    OsStr::new("-M")
+                                    deps_arg
                                 } else {
                                     arg.as_os_str()
                                 }
                             }),
                     )
                     .unique(),
+            )
+            .chain(
+                (deps_arg == "-MD")
+                    .then(|| {
+                        [
+                            OsStr::new("-E"),
+                            OsStr::new("-P"),
+                            OsStr::new("-o"),
+                            if cfg!(windows) {
+                                OsStr::new("nul")
+                            } else {
+                                OsStr::new("/dev/null")
+                            },
+                        ]
+                    })
+                    .into_iter()
+                    .flatten(),
             )
             .chain(parsed_args.double_dash_input.then_some(OsStr::new("--")))
             .chain(std::iter::once(parsed_args.input.as_os_str()));
@@ -1309,18 +1401,41 @@ where
                 }
             })?;
 
+    let dependencies = {
+        let start = Instant::now();
+
+        let dependencies = [
+            if generate_module_dependencies
+                && let Some(depfile) = parsed_args.structured_depfile.as_deref()
+            {
+                parse_dependencies(
+                    &parsed_args.input,
+                    parsed_args.structured_depfile_format.as_deref(),
+                    &read_depfile(cwd.as_ref().join(depfile)).await?,
+                )?
+            } else {
+                vec![]
+            },
+            parse_dependencies(
+                &parsed_args.input,
+                None,
+                &if let Some(depfile) = depfile {
+                    read_depfile(cwd.as_ref().join(depfile)).await?
+                } else {
+                    bytes_to_str(output.stdout)?
+                },
+            )?,
+        ]
+        .concat();
+
+        elapsed += start.elapsed();
+
+        dependencies
+    };
+
     elapsed += duration;
 
-    parse_dependencies(
-        &parsed_args.input,
-        parsed_args.depfile_format.as_deref(),
-        &if let Some(depfile) = depfile {
-            read_depfile(cwd.as_ref().join(depfile)).await?
-        } else {
-            bytes_to_str(output.stdout)?
-        },
-    )
-    .map(|dependencies| (dependencies, elapsed))
+    Ok((dependencies, elapsed))
 }
 
 pub async fn read_depfile<'a, P: AsRef<Path>>(depfile: P) -> Result<std::borrow::Cow<'a, str>> {

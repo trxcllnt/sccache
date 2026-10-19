@@ -154,8 +154,10 @@ pub struct ParsedArguments {
     pub cxx20_modules: bool,
     /// The file in which to generate dependencies.
     pub depfile: Option<PathBuf>,
-    /// The format of the dependencies file.
-    pub depfile_format: Option<OsString>,
+    /// The file in which to generate module dependencies.
+    pub structured_depfile: Option<PathBuf>,
+    /// The format of the structured dependencies file.
+    pub structured_depfile_format: Option<OsString>,
     /// Output files and whether it's optional, keyed by a simple name, like "obj".
     pub outputs: HashMap<&'static str, ArtifactDescriptor>,
     /// Commandline arguments for dependency generation.
@@ -200,7 +202,8 @@ impl std::cmp::PartialEq for ParsedArguments {
             compilation_flag,
             cxx20_modules,
             depfile,
-            depfile_format,
+            structured_depfile,
+            structured_depfile_format,
             outputs,
             dependency_args,
             preprocessor_args,
@@ -224,7 +227,8 @@ impl std::cmp::PartialEq for ParsedArguments {
             && compilation_flag == &other.compilation_flag
             && cxx20_modules == &other.cxx20_modules
             && depfile == &other.depfile
-            && depfile_format == &other.depfile_format
+            && structured_depfile == &other.structured_depfile
+            && structured_depfile_format == &other.structured_depfile_format
             && outputs == &other.outputs
             && dependency_args == &other.dependency_args
             && preprocessor_args == &other.preprocessor_args
