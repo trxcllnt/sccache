@@ -1238,10 +1238,13 @@ where
             };
 
             let maybe_verbose = next_arg.or(arg.strip_prefix("-Wp,")).unwrap_or(arg);
-            if maybe_verbose == "-v"
-                || maybe_verbose == "-v2"
-                || maybe_verbose == "--verbose"
-                || maybe_verbose == "--verbose2"
+            if ["-v", "-v2", "--verbose", "--verbose2"]
+                .into_iter()
+                .any(|v| {
+                    maybe_verbose == v
+                        || maybe_verbose.contains(format!(",{v}"))
+                        || maybe_verbose.contains(format!("{v},"))
+                })
             {
                 continue;
             } else {
