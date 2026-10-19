@@ -1207,32 +1207,50 @@ where
             || arg.contains("--generate-nonsystem-dependencies-with-compile")
     });
 
-    let args_without_dependency_flags = std::iter::empty()
-        .chain(
-            // Set the langauge flag
-            parsed_args
-                .language
-                .as_compiler_str(kind.into())
-                .into_iter()
-                .flat_map(|lang| ["-x", lang])
-                .map(OsStr::new),
-        )
-        .chain(
-            std::iter::empty()
-                .chain(parsed_args.preprocessor_args.iter())
-                .chain(parsed_args.arch_args.iter())
-                .chain(parsed_args.common_args.iter())
-                .map(|arg| arg.as_os_str()),
-        )
-        .filter(|&arg| {
-            arg != parsed_args.compilation_flag
-            // Filter out verbose flags (both gcc and nvcc) since they write to stdout
-                && arg != "-v"
-                && arg != "-v2"
-                && arg != "--verbose"
-                && arg != "--verbose2"
-        })
-        .collect::<Vec<_>>();
+    let args_without_dependency_flags = {
+        let mut iter = std::iter::empty()
+            .chain(
+                // Set the langauge flag
+                parsed_args
+                    .language
+                    .as_compiler_str(kind.into())
+                    .into_iter()
+                    .flat_map(|lang| ["-x", lang])
+                    .map(OsStr::new),
+            )
+            .chain(
+                std::iter::empty()
+                    .chain(parsed_args.preprocessor_args.iter())
+                    .chain(parsed_args.arch_args.iter())
+                    .chain(parsed_args.common_args.iter())
+                    .map(|arg| arg.as_os_str()),
+            )
+            .filter(|&arg| arg != parsed_args.compilation_flag);
+
+        let mut args_without_dependency_flags = vec![];
+
+        // Filter out verbose flags (both gcc and nvcc) since they write to stdout on Windows
+        while let Some(arg) = iter.next() {
+            let next_arg = if arg == "-Xcompiler" {
+                iter.next()
+            } else {
+                None
+            };
+
+            let maybe_verbose = next_arg.or(arg.strip_prefix("-Wp,")).unwrap_or(arg);
+            if maybe_verbose == "-v"
+                || maybe_verbose == "-v2"
+                || maybe_verbose == "--verbose"
+                || maybe_verbose == "--verbose2"
+            {
+                continue;
+            } else {
+                args_without_dependency_flags.extend(std::iter::once(arg).chain(next_arg));
+            }
+        }
+
+        args_without_dependency_flags
+    };
 
     // If `-MMD -MF <file>`, write that depfile out now. We need to return
     // dependencies with system includes to compute the hash key, but the
