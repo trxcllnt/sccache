@@ -1224,7 +1224,7 @@ where
                 .chain(parsed_args.common_args.iter())
                 .map(|arg| arg.as_os_str()),
         )
-        .filter(|&arg| arg != parsed_args.compilation_flag)
+        .filter(|&arg| arg != parsed_args.compilation_flag && arg != "-v" && arg != "--verbose")
         .collect::<Vec<_>>();
 
     // If `-MMD -MF <file>`, write that depfile out now. We need to return
