@@ -1224,7 +1224,14 @@ where
                 .chain(parsed_args.common_args.iter())
                 .map(|arg| arg.as_os_str()),
         )
-        .filter(|&arg| arg != parsed_args.compilation_flag && arg != "-v" && arg != "--verbose")
+        .filter(|&arg| {
+            arg != parsed_args.compilation_flag
+            // Filter out verbose flags (both gcc and nvcc) since they write to stdout
+                && arg != "-v"
+                && arg != "-v2"
+                && arg != "--verbose"
+                && arg != "--verbose2"
+        })
         .collect::<Vec<_>>();
 
     // If `-MMD -MF <file>`, write that depfile out now. We need to return
