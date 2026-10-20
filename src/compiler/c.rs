@@ -635,7 +635,7 @@ where
             // In this mode, the cache key doesn't matter, so return empty string
             None
         } else {
-            let src_key = HashKeyParams::new(parsed_args)
+            HashKeyParams::new(parsed_args)
                 // Hash arch, common, dependency, and preprocessor args
                 .with_args(&self.parsed_args.arch_args[..])
                 .with_args(&self.parsed_args.common_args[..])
@@ -719,9 +719,6 @@ where
                 .with_version(DEPS_VERSION)
                 .compute()
                 .await?
-                .unwrap_or_default();
-
-            Some(src_key)
         };
 
         let force_recache_dependencies = env_vars.iter().any(|(k, v)| {
