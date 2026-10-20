@@ -1225,10 +1225,13 @@ where
             ..
         } = self.local;
 
-        compile_cmd
-            .execute(service, command_creator)
-            .await
-            .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o))
+        Ok((
+            hash_key,
+            outputs,
+            cacheable,
+            DistType::NoDist,
+            compile_cmd.execute(service, command_creator).await?,
+        ))
     }
 
     #[cfg(feature = "dist-client")]
@@ -1256,43 +1259,54 @@ where
             ..
         } = self.local;
 
-        match self.dist {
-            None => compile_cmd
-                .execute(service, command_creator)
-                .await
-                .map(move |o| (hash_key, outputs, cacheable, DistType::NoDist, o)),
-            Some(dist) => {
-                let executable = compile_cmd.get_executable();
-                let fallback_to_local = dist.dist_client.fallback_to_local_compile();
-                // Do the distributed compilation
-                let dist_compile_res = dist.into_result(&executable, &outputs, service).await;
+        let mut dist_type = DistType::NoDist;
 
-                match dist_compile_res {
-                    Ok((dt, o)) => Ok((hash_key, outputs, cacheable, dt, o)),
-                    Err(e) => {
-                        if let Some(HttpClientError(_)) = e.downcast_ref::<HttpClientError>() {
-                            Err(e)
-                        } else if let Some(lru_disk_cache::Error::FileTooLarge) =
-                            e.downcast_ref::<lru_disk_cache::Error>()
-                        {
-                            Err(anyhow!(
-                                "Could not cache dist toolchain for {executable:?} locally.
-                             Increase `toolchain_cache_size` or decrease the toolchain archive size.",
-                            ))
-                        } else if !fallback_to_local {
-                            Err(anyhow!(DistClientError(e)))
-                        } else {
-                            // `{:#}` prints the error and the causes in a single line.
-                            warn!("[{out_pretty}]: Could not perform distributed compile: {e:#}");
-                            compile_cmd
-                                .execute(service, command_creator)
-                                .await
-                                .map(move |o| (hash_key, outputs, cacheable, DistType::Error, o))
-                        }
+        if let Some(dist) = self.dist {
+            let executable = compile_cmd.get_executable();
+            let fallback_to_local = dist.dist_client.fallback_to_local_compile();
+
+            // Do the distributed compilation
+            let dist_compile_res = dist.into_result(&executable, &outputs, service).await;
+
+            match dist_compile_res {
+                // Distributed compilation succeeded
+                Ok((dist_type, output)) => {
+                    return Ok((hash_key, outputs, cacheable, dist_type, output));
+                }
+                // Fallback to local compile
+                Err(e) if fallback_to_local => {
+                    dist_type = DistType::Error;
+                    // `{:#}` prints the error and the causes in a single line.
+                    warn!("[{out_pretty}]: Could not perform distributed compile: {e:#}");
+                }
+                // Distributed compilation failed
+                Err(e) => {
+                    if e.downcast_ref::<HttpClientError>().is_some() {
+                        return Err(e);
                     }
+
+                    if let Some(lru_disk_cache::Error::FileTooLarge) =
+                        e.downcast_ref::<lru_disk_cache::Error>()
+                    {
+                        return Err(anyhow!(
+                            "Could not cache dist toolchain for {executable:?} locally.
+                            Increase `toolchain_cache_size` or decrease the toolchain archive size.",
+                        ));
+                    }
+
+                    return Err(DistClientError(e).into());
                 }
             }
         }
+
+        // Local compile
+        Ok((
+            hash_key,
+            outputs,
+            cacheable,
+            dist_type,
+            compile_cmd.execute(service, command_creator).await?,
+        ))
     }
 }
 
@@ -1324,7 +1338,6 @@ where
         service: &server::SccacheService<T>,
     ) -> Result<(DistType, ProcessOutput)> {
         use dist::RunJobResponse;
-        use futures::AsyncWriteExt;
         use itertools::Itertools;
         use std::io;
         use tokio_retry2::strategy::FibonacciBackoff;
@@ -1355,33 +1368,67 @@ where
             // and we don't want to OOM the server during parallel builds.
             let job_inputs = crate::util::tempfile()?;
 
-            let mut inputs_writer = async_compression::futures::write::ZlibEncoder::with_quality(
-                futures::io::AllowStdIo::new(job_inputs.reopen()?),
-                async_compression::core::Level::Default,
-            );
+            if false {
+                let mut inputs_writer = flate2::write::ZlibEncoder::new(
+                    job_inputs.reopen()?,
+                    // // Optimize for size since bandwidth costs more than client CPU cycles
+                    // flate2::Compression::best(),
+                    flate2::Compression::default(),
+                );
 
-            inputs_packager
-                .write_inputs_async(&mut path_transformer, &mut inputs_writer)
-                .await?;
+                path_transformer = tokio::task::spawn_blocking(move || {
+                    inputs_packager
+                        .write_inputs(&mut path_transformer, &mut inputs_writer)
+                        .and_then(|_| {
+                            inputs_writer
+                                .flush()
+                                .context("failed to flush compressor")?;
+                            trace!(
+                                "Compressed inputs from {} MiB -> {} MiB",
+                                (inputs_writer.total_in() as f64 / (1024.0 * 1024.0)),
+                                (inputs_writer.total_out() as f64 / (1024.0 * 1024.0))
+                            );
+                            inputs_writer
+                                .finish()
+                                .context("failed to finish compressor")
+                        })
+                        .context("Could not write inputs for compilation")
+                        .map(|_| path_transformer)
+                })
+                .await??;
+            } else {
+                use futures::AsyncWriteExt;
+                let mut inputs_writer =
+                    async_compression::futures::write::ZlibEncoder::with_quality(
+                        futures::io::AllowStdIo::new(job_inputs.reopen()?),
+                        async_compression::core::Level::Default,
+                    );
 
-            inputs_writer
-                .flush()
-                .await
-                .context("failed to flush compressor")?;
+                inputs_packager
+                    .write_inputs_async(&mut path_transformer, &mut inputs_writer)
+                    .await?;
 
-            trace!(
-                "Compressed inputs from {} MiB -> {} MiB",
-                (inputs_writer.total_in() as f64 / (1024.0 * 1024.0)),
-                (inputs_writer.total_out() as f64 / (1024.0 * 1024.0))
-            );
+                inputs_writer
+                    .flush()
+                    .await
+                    .context("failed to flush compressor")?;
 
-            inputs_writer
-                .close()
-                .await
-                .context("failed to finish compressor")?;
+                trace!(
+                    "Compressed inputs from {} MiB -> {} MiB",
+                    (inputs_writer.total_in() as f64 / (1024.0 * 1024.0)),
+                    (inputs_writer.total_out() as f64 / (1024.0 * 1024.0))
+                );
+
+                inputs_writer
+                    .close()
+                    .await
+                    .context("failed to finish compressor")?;
+            }
 
             job_inputs
         };
+
+        drop(pending);
 
         trace!("[{out_pretty}]: Identifying dist toolchain for {executable:?}");
 
@@ -1448,8 +1495,6 @@ where
         let mut retry_delay = FibonacciBackoff::from_millis(1000)
             .max_delay(Duration::from_secs(10))
             .map(tokio_retry2::strategy::jitter);
-
-        drop(pending);
 
         let dist_compile_res = loop {
             use futures::TryStreamExt;
