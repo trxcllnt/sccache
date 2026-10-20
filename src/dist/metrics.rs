@@ -861,7 +861,7 @@ pub struct SysinfoMetrics {
     m_names: BTreeMap<&'static str, Cow<'static, str>>,
     metrics: Metrics,
     num_cpus: usize,
-    sysinfo: Arc<std::sync::Mutex<sysinfo::System>>,
+    sysinfo: Arc<std::sync::Mutex<(Instant, sysinfo::System)>>,
 }
 
 impl SysinfoMetrics {
@@ -920,7 +920,7 @@ impl SysinfoMetrics {
             metrics,
             m_names,
             num_cpus,
-            sysinfo: Arc::new(std::sync::Mutex::new(sysinfo)),
+            sysinfo: Arc::new(std::sync::Mutex::new((Instant::now(), sysinfo))),
         }
     }
 
@@ -929,12 +929,20 @@ impl SysinfoMetrics {
     }
 
     pub fn system_metrics(&self) -> (usize, f32, u64, u64) {
-        let mut sys = self.sysinfo.lock().unwrap();
-        sys.refresh_cpu_specifics(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
-        sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
-        let cpu_usage = sys.global_cpu_usage();
-        let mem_avail = sys.available_memory();
-        let mem_total = sys.total_memory();
+        let mut pair = self.sysinfo.lock().unwrap();
+
+        if Instant::now().duration_since(pair.0) > sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
+            pair.0 = Instant::now();
+            pair.1
+                .refresh_cpu_specifics(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
+        }
+
+        pair.1
+            .refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+
+        let cpu_usage = pair.1.global_cpu_usage();
+        let mem_avail = pair.1.available_memory();
+        let mem_total = pair.1.total_memory();
         self.metrics
             .histo(self.m_name(NUM_CPUS), self.num_cpus as f64);
         self.metrics.histo(self.m_name(CPU_USAGE_RATIO), cpu_usage);
@@ -946,6 +954,7 @@ impl SysinfoMetrics {
             self.m_name(MEM_USED_BYTES),
             mem_total.saturating_sub(mem_avail) as f64,
         );
+
         (self.num_cpus, cpu_usage, mem_avail, mem_total)
     }
 }
