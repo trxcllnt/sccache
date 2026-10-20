@@ -28,7 +28,7 @@ use std::{
     fmt,
     io::Read,
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock},
+    sync::Arc,
     time::Duration,
 };
 
@@ -524,8 +524,8 @@ impl Serialize for SourceFileDeps {
 }
 
 #[cfg(unix)]
-static GCC_PRAGMA_ONCE_FIX_LOCK: LazyLock<tokio::sync::Semaphore> =
-    LazyLock::new(|| tokio::sync::Semaphore::new(1));
+static GCC_PRAGMA_ONCE_FIX_LOCK: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(1));
 
 #[cfg(unix)]
 pub async fn build_gcc_pragma_once_fix<
