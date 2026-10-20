@@ -18,7 +18,7 @@ use crate::{
         CacheControl, Cacheable, ColorMode, Compilation, CompileCommand, CompileCommandImpl,
         Compiler, CompilerArguments, CompilerHasher, CompilerKind, GenerateHashKeyArgs, HashResult,
         Language,
-        util::{Dependencies, SourceFileCache, SourceFileDeps},
+        util::{DEPS_VERSION, Dependencies, SourceFileCache, SourceFileDeps},
     },
     dist,
     errors::*,
@@ -716,6 +716,7 @@ where
                 // ```
                 .with_hashed_input_path(Some(self.parsed_args.input_absolute.as_path()))
                 .with_plusplus(compiler.plusplus())
+                .with_version(DEPS_VERSION)
                 .compute()
                 .await?
                 .unwrap_or_default();
@@ -1044,6 +1045,7 @@ where
                     None
                 })
                 .with_plusplus(self.compiler.plusplus())
+                .with_version(CACHE_VERSION)
                 .compute()
                 .await?
                 .unwrap_or_default();
@@ -1894,6 +1896,7 @@ pub struct HashKeyParams<'a> {
     parsed_args: &'a ParsedArguments,
     hashed_input_path: Option<&'a Path>,
     plusplus: bool,
+    version: &'a [u8],
 }
 
 impl<'a> HashKeyParams<'a> {
@@ -1915,6 +1918,7 @@ impl<'a> HashKeyParams<'a> {
             parsed_args,
             hashed_input_path: None,
             plusplus: false,
+            version: &[],
         }
     }
 
@@ -1954,6 +1958,7 @@ impl<'a> HashKeyParams<'a> {
         self
     }
 
+    /// Sets the optional input path to hash.
     pub fn with_hashed_input_path(mut self, hashed_input_path: Option<&'a Path>) -> Self {
         self.hashed_input_path = hashed_input_path;
         self
@@ -1962,6 +1967,12 @@ impl<'a> HashKeyParams<'a> {
     /// Sets whether this is a C++ compiler (affects clang/clang++ distinction).
     pub fn with_plusplus(mut self, plusplus: bool) -> Self {
         self.plusplus = plusplus;
+        self
+    }
+
+    /// Sets the cache entry version.
+    pub fn with_version(mut self, version: &'a [u8]) -> Self {
+        self.version = version;
         self
     }
 
@@ -1975,7 +1986,7 @@ impl<'a> HashKeyParams<'a> {
     /// If you change any of the inputs to the hash, you should change `CACHE_VERSION`.
     pub async fn compute(self) -> Result<Option<String>> {
         let mut m = Digest::new();
-        m.update(CACHE_VERSION);
+        m.update(self.version);
         // Include all the digests (compiler, assembler, specfiles, etc.)
         for digest in self.digests {
             digest.hash(&mut HashToDigest { digest: &mut m });

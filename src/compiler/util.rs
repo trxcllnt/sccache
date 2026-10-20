@@ -235,9 +235,9 @@ impl SourceFileCache {
 // that `ccache` uses for its "direct mode", though the on-disk format is
 // different.
 
-/// The format is 7 bytes for the magic sccache string + 1 byte for the
+/// The header is 7 bytes for the magic sccache string + 1 byte for the
 /// format version of the [`SourceFileDeps`] struct encoding.
-const FORMAT_VERSION: u8 = 1;
+pub const DEPS_VERSION: &[u8] = b"sccache1";
 const MAX_REVISIONS: u64 = 1_000;
 
 #[derive(Clone, Default, Deserialize, Serialize, Debug, PartialEq, Eq)]
@@ -301,8 +301,7 @@ impl SourceFileDeps {
                 flate2::Compression::best(),
             );
 
-            writer.write_all(b"sccache")?;
-            writer.write_all(&[FORMAT_VERSION])?;
+            writer.write_all(DEPS_VERSION)?;
             bincode::serialize_into(&mut writer, &self)?;
 
             writer
@@ -316,12 +315,9 @@ impl SourceFileDeps {
     }
 
     pub fn from_buffer(buffer: opendal::Buffer) -> Result<Self> {
-        let mut format = [0u8; 8];
+        let mut header = [0u8; 8];
         let mut reader = buffer.reader().take(8);
-        if reader.read_exact(&mut format).is_err()
-            || &format[0..7] != b"sccache"
-            || format[7] != FORMAT_VERSION
-        {
+        if reader.read_exact(&mut header).is_err() || header != DEPS_VERSION {
             bail!("Format version mismatch");
         } else {
             Ok(bincode::deserialize_from(reader.into_inner())?)
@@ -330,8 +326,7 @@ impl SourceFileDeps {
 
     pub fn to_buffer(&self) -> Result<opendal::Buffer> {
         let mut writer = BytesMut::new().writer();
-        writer.write_all(b"sccache")?;
-        writer.write_all(&[FORMAT_VERSION])?;
+        writer.write_all(DEPS_VERSION)?;
         bincode::serialize_into(&mut writer, self)?;
         Ok(opendal::Buffer::from(writer.into_inner().freeze()))
     }
