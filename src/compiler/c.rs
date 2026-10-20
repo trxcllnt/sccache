@@ -724,7 +724,12 @@ where
             Some(src_key)
         };
 
-        let mut source = if let Some(src_key) = src_key.as_deref() {
+        let force_recache_dependencies = env_vars.iter().any(|(k, v)| {
+            k == "SCCACHE_RECACHE_DEPENDENCIES"
+                && matches!(v.to_str().unwrap_or_default(), "true" | "on" | "1")
+        });
+
+        let mut source = if !force_recache_dependencies && let Some(src_key) = src_key.as_deref() {
             tokio::time::timeout(
                 service.cache_read_timeout,
                 SourceFileDeps::get(service.storage.as_ref(), src_key),
@@ -769,12 +774,7 @@ where
             None
         };
 
-        let force_recache_dependencies = env_vars.iter().any(|(k, v)| {
-            k == "SCCACHE_RECACHE_DEPENDENCIES"
-                && matches!(v.to_str().unwrap_or_default(), "true" | "on" | "1")
-        });
-
-        let source = if let Some(source) = source.filter(|_| !force_recache_dependencies) {
+        let source = if let Some(source) = source {
             source
         } else {
             SourceFileDeps::new(
