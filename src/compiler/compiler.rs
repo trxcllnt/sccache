@@ -2488,15 +2488,25 @@ ArgData! {
 //  gcc is expected to exist on the PATH. So if gcc doesn't exist
 //  compiler detection fails if we don't pass along the ccbin arg
 counted_array!(static ARGS: [ArgInfo<ArgData>; _] = [
+    flag!("--allow-unsupported-compiler", ArgData::PassThroughFlag),
     take_arg!("--compiler-bindir", OsString, CanBeConcatenated(b'='), ArgData::PassThrough),
     take_arg!("--cuda-gpu-arch", OsString, CanBeConcatenated(b'='), ArgData::PassThrough),
     take_arg!("--cuda-path", OsString, CanBeConcatenated(b'='), ArgData::PassThrough),
     flag!("--cuda-path-ignore-env", ArgData::PassThroughFlag),
+    flag!("--dont-use-profile", ArgData::PassThroughFlag),
     flag!("--force-cl-env-setup", ArgData::PassThroughFlag),
+    flag!("--forward-unknown-opts", ArgData::PassThroughFlag),
+    flag!("--forward-unknown-to-host-compiler", ArgData::PassThroughFlag),
+    flag!("--forward-unknown-to-host-linker", ArgData::PassThroughFlag),
     flag!("--no-cuda-version-check", ArgData::PassThroughFlag),
     flag!("--use-local-env", ArgData::PassThroughFlag),
+    flag!("-allow-unsupported-compiler", ArgData::PassThroughFlag),
     take_arg!("-ccbin", OsString, CanBeConcatenated(b'='), ArgData::PassThrough),
     flag!("-force-cl-env-setup", ArgData::PassThroughFlag),
+    flag!("-forward-unknown-opts", ArgData::PassThroughFlag),
+    flag!("-forward-unknown-to-host-compiler", ArgData::PassThroughFlag),
+    flag!("-forward-unknown-to-host-linker", ArgData::PassThroughFlag),
+    flag!("-noprof", ArgData::PassThroughFlag),
     flag!("-use-local-env", ArgData::PassThroughFlag),
 ]);
 

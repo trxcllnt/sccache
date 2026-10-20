@@ -130,6 +130,7 @@ impl Nvcc {
             creator,
             executable.as_ref(),
             env_vars.clone(),
+            args.clone(),
             &host_compiler,
         )
         .await
@@ -139,6 +140,7 @@ impl Nvcc {
             creator,
             executable.as_ref(),
             env_vars.clone(),
+            args.clone(),
             &host_compiler,
         )
         .await
@@ -148,6 +150,7 @@ impl Nvcc {
             creator,
             executable.as_ref(),
             env_vars.clone(),
+            args.clone(),
             &host_compiler,
         )
         .await
@@ -179,6 +182,8 @@ impl Nvcc {
 
     pub async fn read_all_archs<
         C,
+        Arg: AsRef<OsStr>,
+        Args: Iterator<Item = Arg> + Clone,
         Exe: AsRef<Path>,
         Key: AsRef<OsStr>,
         Var: AsRef<OsStr>,
@@ -192,11 +197,21 @@ impl Nvcc {
     where
         C: CommandCreatorSync,
     {
-        Self::read_archs(creator, executable, env_vars, host_compiler, "all").await
+        Self::read_archs(
+            creator,
+            executable,
+            arguments,
+            env_vars,
+            host_compiler,
+            "all",
+        )
+        .await
     }
 
     pub async fn read_major_archs<
         C,
+        Arg: AsRef<OsStr>,
+        Args: Iterator<Item = Arg> + Clone,
         Exe: AsRef<Path>,
         Key: AsRef<OsStr>,
         Var: AsRef<OsStr>,
@@ -204,17 +219,28 @@ impl Nvcc {
     >(
         creator: &mut C,
         executable: Exe,
+        arguments: Args,
         env_vars: Envs,
         host_compiler: &NvccHostCompiler,
     ) -> Result<Vec<String>>
     where
         C: CommandCreatorSync,
     {
-        Self::read_archs(creator, executable, env_vars, host_compiler, "all-major").await
+        Self::read_archs(
+            creator,
+            executable,
+            arguments,
+            env_vars,
+            host_compiler,
+            "all-major",
+        )
+        .await
     }
 
     pub async fn read_native_archs<
         C,
+        Arg: AsRef<OsStr>,
+        Args: Iterator<Item = Arg> + Clone,
         Exe: AsRef<Path>,
         Key: AsRef<OsStr>,
         Var: AsRef<OsStr>,
@@ -228,11 +254,21 @@ impl Nvcc {
     where
         C: CommandCreatorSync,
     {
-        Self::read_archs(creator, executable, env_vars, host_compiler, "native").await
+        Self::read_archs(
+            creator,
+            executable,
+            arguments,
+            env_vars,
+            host_compiler,
+            "native",
+        )
+        .await
     }
 
     async fn read_archs<
         C,
+        Arg: AsRef<OsStr>,
+        Args: Iterator<Item = Arg> + Clone,
         Exe: AsRef<Path>,
         Key: AsRef<OsStr>,
         Var: AsRef<OsStr>,
@@ -247,6 +283,17 @@ impl Nvcc {
     where
         C: CommandCreatorSync,
     {
+        let mut args = arguments.map(|arg| arg.as_ref().into()).collect::<Vec<_>>();
+        args.extend([
+            "-x".into(),
+            "cu".into(),
+            "-c".into(),
+            "x.cu".into(),
+            "-o".into(),
+            "x.cu.o".into(),
+            format!("-arch={meta_arch}").into(),
+        ]);
+
         let mut env_vars = env_vars
             .map(|(k, v)| (k.as_ref().into(), v.as_ref().into()))
             .collect::<Vec<_>>();
@@ -256,15 +303,7 @@ impl Nvcc {
             executable.as_ref(),
             Path::new("."),
             &mut env_vars,
-            &[
-                "-x".into(),
-                "cu".into(),
-                "-c".into(),
-                "x.cu".into(),
-                "-o".into(),
-                "x.cu.o".into(),
-                format!("-arch={meta_arch}").into(),
-            ],
+            &args,
             &NvccCompileFlag::Device,
             host_compiler,
             &mut nvcc_internal_files,
@@ -320,7 +359,7 @@ impl Nvcc {
             .map(|(k, v)| (k.as_ref().into(), v.as_ref().into()))
             .collect::<Vec<_>>();
 
-        let mut res = None;
+        let mut maybe_res = None;
 
         for mut args in [args_with_enable_tile, arguments] {
             let mut nvcc_internal_files = HashMap::<String, String>::new();
@@ -333,32 +372,30 @@ impl Nvcc {
                 "x.cu.o".into(),
             ]);
 
-            res = Some(
-                select_nvcc_subcommands(
-                    creator,
-                    executable.as_ref(),
-                    Path::new("."),
-                    &mut env_vars,
-                    &args,
-                    &NvccCompileFlag::Device,
-                    host_compiler,
-                    &mut nvcc_internal_files,
-                    Path::new("x.cu.o"),
-                    is_nvcc_exe,
-                )
-                .await
-                .map(|cmds| {
-                    cmds.into_iter()
-                        .map(|(_, exe, _)| exe)
-                        .sorted()
-                        .dedup()
-                        // Resolve compiler avoiding ccache wrappers to prevent double-caching.
-                        .map(|exe| resolve_compiler_avoiding_wrapper(&exe, &env_vars))
-                        .collect()
-                }),
-            );
+            let res = select_nvcc_subcommands(
+                creator,
+                executable.as_ref(),
+                Path::new("."),
+                &mut env_vars,
+                &args,
+                &NvccCompileFlag::Device,
+                host_compiler,
+                &mut nvcc_internal_files,
+                Path::new("x.cu.o"),
+                is_nvcc_exe,
+            )
+            .await
+            .map(|cmds| {
+                cmds.into_iter()
+                    .map(|(_, exe, _)| exe)
+                    .sorted()
+                    .dedup()
+                    // Resolve compiler avoiding ccache wrappers to prevent double-caching.
+                    .map(|exe| resolve_compiler_avoiding_wrapper(&exe, &env_vars))
+                    .collect()
+            });
 
-            if let Some(Ok(nvcc_tools)) = res {
+            if let Ok(nvcc_tools) = res {
                 return Ok(nvcc_tools);
             }
         }
