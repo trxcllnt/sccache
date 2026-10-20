@@ -45,33 +45,31 @@ pub struct SourceFileEntry {
 }
 
 #[derive(Clone, Default, DeserializeFromStr, SerializeDisplay, PartialEq, Eq)]
-pub struct OsStringDisplay {
-    inner: OsString,
-}
+pub struct OsStringDisplay(OsString);
 
 impl std::ops::Deref for OsStringDisplay {
     type Target = OsStr;
 
     fn deref(&self) -> &Self::Target {
-        self.inner.as_os_str()
+        self.0.as_os_str()
     }
 }
 
 impl AsRef<OsStr> for OsStringDisplay {
     fn as_ref(&self) -> &OsStr {
-        self.inner.as_os_str()
+        self.0.as_os_str()
     }
 }
 
 impl fmt::Debug for OsStringDisplay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.inner.display())
+        write!(f, "{:?}", self.0)
     }
 }
 
 impl fmt::Display for OsStringDisplay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.inner.display())
+        write!(f, "{}", self.0.display())
     }
 }
 
@@ -79,45 +77,37 @@ impl std::str::FromStr for OsStringDisplay {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        Ok(Self {
-            inner: OsString::from(s),
-        })
+        Ok(Self(OsString::from(s)))
     }
 }
 
 impl<'a> From<&'a OsStr> for OsStringDisplay {
     fn from(value: &'a OsStr) -> Self {
-        OsStringDisplay {
-            inner: value.to_owned(),
-        }
+        OsStringDisplay(value.to_owned())
     }
 }
 
 impl<'a> From<&'a Path> for OsStringDisplay {
     fn from(value: &'a Path) -> Self {
-        OsStringDisplay {
-            inner: value.as_os_str().to_owned(),
-        }
+        OsStringDisplay(value.as_os_str().to_owned())
     }
 }
 
 impl From<OsString> for OsStringDisplay {
     fn from(value: OsString) -> Self {
-        OsStringDisplay { inner: value }
+        OsStringDisplay(value)
     }
 }
 
 impl From<PathBuf> for OsStringDisplay {
     fn from(value: PathBuf) -> Self {
-        OsStringDisplay {
-            inner: value.into_os_string(),
-        }
+        OsStringDisplay(value.into_os_string())
     }
 }
 
 impl From<OsStringDisplay> for OsString {
     fn from(value: OsStringDisplay) -> Self {
-        value.inner
+        value.0
     }
 }
 
