@@ -22,9 +22,12 @@ use crate::{
 use bytes::{Buf, BufMut, BytesMut};
 use futures::lock::Mutex;
 use serde::{Deserialize, Serialize, de, ser::SerializeMap};
+use serde_with::{
+    DeserializeFromStr, DisplayFromStr, IfIsHumanReadable, SerializeDisplay, serde_as,
+};
 use std::{
     collections::BTreeMap,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fmt,
     io::Read,
     path::{Path, PathBuf},
@@ -41,11 +44,90 @@ pub struct SourceFileEntry {
     pub found_timestamp: bool,
 }
 
+#[derive(Clone, Default, DeserializeFromStr, SerializeDisplay, PartialEq, Eq)]
+pub struct OsStringDisplay {
+    inner: OsString,
+}
+
+impl std::ops::Deref for OsStringDisplay {
+    type Target = OsStr;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.as_os_str()
+    }
+}
+
+impl AsRef<OsStr> for OsStringDisplay {
+    fn as_ref(&self) -> &OsStr {
+        self.inner.as_os_str()
+    }
+}
+
+impl fmt::Debug for OsStringDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.inner.display())
+    }
+}
+
+impl fmt::Display for OsStringDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.inner.display())
+    }
+}
+
+impl std::str::FromStr for OsStringDisplay {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(Self {
+            inner: OsString::from(s),
+        })
+    }
+}
+
+impl<'a> From<&'a OsStr> for OsStringDisplay {
+    fn from(value: &'a OsStr) -> Self {
+        OsStringDisplay {
+            inner: value.to_owned(),
+        }
+    }
+}
+
+impl<'a> From<&'a Path> for OsStringDisplay {
+    fn from(value: &'a Path) -> Self {
+        OsStringDisplay {
+            inner: value.as_os_str().to_owned(),
+        }
+    }
+}
+
+impl From<OsString> for OsStringDisplay {
+    fn from(value: OsString) -> Self {
+        OsStringDisplay { inner: value }
+    }
+}
+
+impl From<PathBuf> for OsStringDisplay {
+    fn from(value: PathBuf) -> Self {
+        OsStringDisplay {
+            inner: value.into_os_string(),
+        }
+    }
+}
+
+impl From<OsStringDisplay> for OsString {
+    fn from(value: OsStringDisplay) -> Self {
+        value.inner
+    }
+}
+
 /// Corresponds to a cached include file used in the pre-processor stage
+#[serde_as]
 #[derive(Clone, Deserialize, Serialize, Debug, Default, PartialEq, Eq)]
 pub struct SourceFileMeta {
     /// The file's absolute path.
-    pub path: OsString,
+    #[serde_as(as = "IfIsHumanReadable<DisplayFromStr>")]
+    pub path: OsStringDisplay,
     /// The hash of the file's contents.
     pub digest: String,
     /// The file's size (in bytes).
@@ -352,7 +434,7 @@ impl SourceFileDeps {
         let mut updated = None;
 
         for prev in dependencies.iter_mut() {
-            let path = Path::new(prev.path.as_os_str());
+            let path = Path::new(&prev.path);
 
             let curr = match source_file_cache.get(path, compile_timestamp).await {
                 Ok(entry) => entry,
@@ -437,6 +519,22 @@ impl fmt::Display for SourceFileDeps {
         )
     }
 }
+
+// impl fmt::Debug for SourceFileDeps {
+//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+//         f.debug_struct("SourceFileDeps")
+//             .field("key", &self.key)
+//             .field("meta", &self.meta)
+//             .field("revs", &self.iter().rev().collect::<Vec<_>>())
+//             .finish()
+//     }
+// }
+
+// impl fmt::Display for SourceFileDeps {
+//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+//         writeln!(f, "{self:?}")
+//     }
+// }
 
 impl<'de> Deserialize<'de> for SourceFileDeps {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>

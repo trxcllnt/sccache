@@ -996,8 +996,7 @@ where
                 deps.dependencies
                     .sources
                     .iter()
-                    .map(|meta| meta.path.as_os_str())
-                    .map(PathBuf::from),
+                    .map(|meta| PathBuf::from(&meta.path)),
             );
 
             Some(deps)
