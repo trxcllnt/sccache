@@ -1494,10 +1494,8 @@ fn paths_from_pragma_once_fix_lines(stderr: &[u8]) -> Result<Vec<PathBuf>> {
         if let Some(line) = line.strip_prefix("pragma-once-fix:")
         // " /foo/bar.h : 123 -> 123" -> (" /foo/bar.h ", " 123 -> 123")
         && let Some((line, _)) = line.rsplit_once(":")
-        // " /foo/bar.h " -> "/foo/bar.h"
-        && let line = line.trim()
         {
-            paths.push(PathBuf::from(line));
+            paths.push(PathBuf::from(line.trim()));
         }
     }
 
