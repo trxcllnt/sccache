@@ -25,14 +25,14 @@ use crate::{
     },
     counted_array, dist,
     errors::*,
-    mock_command::{CommandCreatorSync, RunCommand},
+    mock_command::{CommandCreatorSync, ProcessOutput, RunCommand},
     util::{OsStrExt, bytes_to_str, run_input_output, run_input_output_timed},
 };
 use async_trait::async_trait;
 use fs_err as fs;
 use itertools::Itertools;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     env,
     ffi::{OsStr, OsString},
     io::Read,
@@ -1306,13 +1306,15 @@ where
                 .await
                 .or_else(|(err, duration)| {
                     // nvc++ exits with an error even though it generated dependencies
-                    if matches!(kind, CCompilerKind::Nvhpc) {
-                        match err.downcast::<ProcessError>() {
-                            Ok(ProcessError(out)) => Ok((out, duration)),
-                            Err(err) => Err(err),
+                    match err.downcast::<ProcessError>() {
+                        Ok(ProcessError(out)) => {
+                            if matches!(kind, CCompilerKind::Nvhpc) {
+                                Ok((out, duration))
+                            } else {
+                                Err(ProcessError(out).into())
+                            }
                         }
-                    } else {
-                        Err(err)
+                        Err(err) => Err(err),
                     }
                 })?;
         elapsed += duration;
@@ -1403,7 +1405,8 @@ where
 
         cmd.current_dir(cwd.as_ref())
             .env_clear()
-            .envs(env_vars.clone());
+            .envs(env_vars.clone())
+            .env("PRAGMA_ONCE_FIX_DEBUG", "1");
 
         for arg in args {
             cmd.arg(arg);
@@ -1418,52 +1421,87 @@ where
         run_input_output_timed(cmd, None)
             .await
             .or_else(|(err, duration)| {
-                // nvc++ exits with an error even though it generated dependencies
-                if matches!(kind, CCompilerKind::Nvhpc) {
-                    match err.downcast::<ProcessError>() {
-                        Ok(ProcessError(out)) => Ok((out, duration)),
-                        Err(err) => Err(err),
+                match err.downcast::<ProcessError>() {
+                    Ok(ProcessError(out)) => {
+                        // nvc++ exits with an error even though it generated dependencies
+                        if matches!(kind, CCompilerKind::Nvhpc) {
+                            Ok((out, duration))
+                        } else {
+                            Err(ProcessError(strip_pragma_once_fix_lines(out)?).into())
+                        }
                     }
-                } else {
-                    Err(err)
+                    Err(err) => Err(err),
                 }
             })?;
 
     let dependencies = {
         let start = Instant::now();
 
-        let dependencies = [
-            if generate_module_dependencies
-                && let Some(depfile) = parsed_args.structured_depfile.as_deref()
-            {
-                parse_dependencies(
-                    &parsed_args.input,
-                    parsed_args.structured_depfile_format.as_deref(),
-                    &read_depfile(cwd.as_ref().join(depfile)).await?,
-                )?
-            } else {
-                vec![]
-            },
-            parse_dependencies(
+        let mut dependencies = BTreeSet::new();
+
+        if generate_module_dependencies
+            && let Some(depfile) = parsed_args.structured_depfile.as_deref()
+        {
+            dependencies.extend(parse_dependencies(
                 &parsed_args.input,
-                None,
-                &if let Some(depfile) = depfile {
-                    read_depfile(cwd.as_ref().join(depfile)).await?
-                } else {
-                    bytes_to_str(output.stdout)?
-                },
-            )?,
-        ]
-        .concat();
+                parsed_args.structured_depfile_format.as_deref(),
+                &read_depfile(cwd.as_ref().join(depfile)).await?,
+            )?);
+        }
+
+        dependencies.extend(parse_dependencies(
+            &parsed_args.input,
+            None,
+            &if let Some(depfile) = depfile {
+                read_depfile(cwd.as_ref().join(depfile)).await?
+            } else {
+                bytes_to_str(output.stdout)?
+            },
+        )?);
+
+        dependencies.extend(paths_from_pragma_once_fix_lines(&output.stderr)?);
 
         elapsed += start.elapsed();
 
-        dependencies
+        dependencies.into_iter().collect::<Vec<_>>()
     };
 
     elapsed += duration;
 
     Ok((dependencies, elapsed))
+}
+
+fn strip_pragma_once_fix_lines(mut output: ProcessOutput) -> Result<ProcessOutput> {
+    output.stderr = bytes_to_str(output.stderr)?
+        .split("\n")
+        .filter_map(|line| {
+            if line.starts_with("pragma-once-fix:") {
+                None
+            } else {
+                Some(line.as_bytes())
+            }
+        })
+        .collect::<Vec<_>>()
+        .concat();
+
+    Ok(output)
+}
+
+fn paths_from_pragma_once_fix_lines(stderr: &[u8]) -> Result<Vec<PathBuf>> {
+    let mut paths = vec![];
+    for line in bytes_to_str(stderr)?.split("\n") {
+        // "pragma-once-fix: /foo/bar.h : 123 -> 123" -> " /foo/bar.h : 123 -> 123"
+        if let Some(line) = line.strip_prefix("pragma-once-fix:")
+        // " /foo/bar.h : 123 -> 123" -> (" /foo/bar.h ", " 123 -> 123")
+        && let Some((line, _)) = line.rsplit_once(":")
+        // " /foo/bar.h " -> "/foo/bar.h"
+        && let line = line.trim()
+        {
+            paths.push(PathBuf::from(line));
+        }
+    }
+
+    Ok(paths)
 }
 
 pub async fn read_depfile<'a, P: AsRef<Path>>(depfile: P) -> Result<std::borrow::Cow<'a, str>> {
