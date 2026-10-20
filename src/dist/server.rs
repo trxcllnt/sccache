@@ -301,11 +301,15 @@ impl Server {
             let this = self.clone();
             async move {
                 loop {
-                    let _ = futures::future::join(
-                        this.poll_for_cancelled_jobs(),     //
-                        this.broadcast_server_status(None), //
+                    if futures::future::try_join(
+                        this.poll_for_cancelled_jobs(),
+                        this.broadcast_server_status(None),
                     )
-                    .await;
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
 
                     tokio::time::sleep(heartbeat_interval).await;
                 }
@@ -496,7 +500,7 @@ impl Server {
         Ok(())
     }
 
-    async fn broadcast_server_status(&self, schedulers: Option<Vec<String>>) {
+    async fn broadcast_server_status(&self, schedulers: Option<Vec<String>>) -> Result<()> {
         let schedulers = if let Some(schedulers) = schedulers {
             schedulers
         } else {
@@ -511,14 +515,16 @@ impl Server {
         let status = self.status_update().await;
 
         // Notify interested schedulers
-        let _ = futures::future::join_all(
+        futures::future::try_join_all(
             std::iter::once(self.tasks.update_status(status.clone(), None)).chain(
                 schedulers
                     .iter()
                     .map(|send_to| self.tasks.update_status(status.clone(), Some(send_to))),
             ),
         )
-        .await;
+        .await
+        .map(|_| ())
+        .map_err(Into::into)
     }
 
     async fn health_check_listener(&self, health_check_bind_addr: SocketAddr) -> () {
@@ -899,12 +905,12 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFunc {
                 match server.check_if_job_cancelled(job_id, reply_to).await? {
                     RunJobStatus::Cancelled => {
                         // Broadcast status after accepting the job
-                        server.broadcast_server_status(None).await;
+                        server.broadcast_server_status(None).await?;
                         Err(RunJobError::job_cancelled().into())
                     }
                     RunJobStatus::Active { schedulers } => {
                         // Broadcast status after accepting the job
-                        server.broadcast_server_status(Some(schedulers)).await;
+                        server.broadcast_server_status(Some(schedulers)).await?;
                         // Load and run the job
                         server
                             .load_job_and_run_build(

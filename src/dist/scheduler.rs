@@ -207,11 +207,15 @@ impl Scheduler {
             let this = self.clone();
             async move {
                 loop {
-                    let _ = futures::future::join(
-                        this.poll_for_finished_jobs(), //
-                        this.send_status_to_servers(), //
+                    if futures::future::try_join(
+                        this.poll_for_finished_jobs(),
+                        this.send_status_to_servers(),
                     )
-                    .await;
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
                     tokio::time::sleep(heartbeat_interval).await;
                 }
             }
@@ -272,7 +276,7 @@ impl Scheduler {
             .inspect_err(|err| tracing::warn!("Scheduler did not shutdown gracefully: {err:#}"))
     }
 
-    async fn poll_for_finished_jobs(&self) {
+    async fn poll_for_finished_jobs(&self) -> Result<()> {
         let finished_jobs =
             futures::future::join_all(self.jobs.lock().await.keys().map(|job_id| async {
                 (job_id.clone(), self.jobs_io.has_job_result(job_id).await)
@@ -281,10 +285,11 @@ impl Scheduler {
             .into_iter()
             .filter_map(|(job_id, has_result)| has_result.then_some(job_id));
 
-        let _ = futures::future::join_all(
+        futures::future::try_join_all(
             finished_jobs.map(|job_id| async move { self.job_finished(&job_id, None).await }),
         )
-        .await;
+        .await
+        .map(|_| ())
     }
 
     async fn send_status_to_servers(&self) -> Result<()> {
@@ -301,16 +306,16 @@ impl Scheduler {
             .map(|s| s.queue.clone())
             .collect::<Vec<_>>();
 
-        let _ = futures::future::join_all(
+        futures::future::try_join_all(
             std::iter::once(self.tasks.update_status(status.clone(), None)).chain(
                 servers
                     .iter()
                     .map(|send_to| self.tasks.update_status(status.clone(), Some(send_to))),
             ),
         )
-        .await;
-
-        Ok(())
+        .await
+        .map(|_| ())
+        .map_err(Into::into)
     }
 
     fn status_update(&self, status: SchedulerStatus) -> StatusUpdate {
