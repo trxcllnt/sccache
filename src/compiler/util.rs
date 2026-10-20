@@ -28,7 +28,7 @@ use std::{
     fmt,
     io::Read,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 
@@ -524,6 +524,10 @@ impl Serialize for SourceFileDeps {
 }
 
 #[cfg(unix)]
+static GCC_PRAGMA_ONCE_FIX_LOCK: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::new(1));
+
+#[cfg(unix)]
 pub async fn build_gcc_pragma_once_fix<
     Exe: AsRef<Path>,
     Key: AsRef<std::ffi::OsStr>,
@@ -536,32 +540,44 @@ pub async fn build_gcc_pragma_once_fix<
     use crate::{
         jobserver,
         mock_command::{AsyncCommand, RunCommand},
-        util::{SCCACHE_TMPDIR, run_input_output},
+        util::{Digest, SCCACHE_TMPDIR, run_input_output},
     };
-    use fs_err as fs;
+    use std::ffi::OsStr;
+
+    let _permit = GCC_PRAGMA_ONCE_FIX_LOCK.acquire().await?;
 
     let temp = SCCACHE_TMPDIR.as_ref()?;
-    let path = temp.join("pragma_once_fix.so");
-    let temp = path.clone().with_added_extension("1");
-    let mut file = fs::File::options().write(true).create(true).open(&path)?;
+    let name = format!(
+        "pragma_once_fix_{name}_{hash}.so",
+        name = exe
+            .as_ref()
+            .file_stem()
+            .unwrap_or(OsStr::new("gcc"))
+            .display(),
+        hash = Digest::from_file(exe.as_ref()).await?.finish()
+    );
+    let path = temp.join(&name);
 
-    file.lock()?;
+    let file = tempfile::Builder::new()
+        .rand_bytes(0)
+        .prefix(&name)
+        .suffix(".lock")
+        .tempfile_in(temp)?;
 
-    if file.metadata()?.len() > 0 {
-        return Ok(path);
-    }
+    file.as_file().lock()?;
 
-    let mut cmd = AsyncCommand::new(exe.as_ref(), jobserver::Client::new_num(1));
+    if !path.exists() || !path.is_file() || path.metadata()?.len() == 0 {
+        let mut cmd = AsyncCommand::new(exe.as_ref(), jobserver::Client::new_num(1));
 
-    cmd.env_clear()
-        .envs(env_vars)
-        .args(&["-x", "c", "-O2", "-shared", "-fPIC"])
-        .arg("-o")
-        .arg(&temp)
-        .arg("-")
-        .arg("-ldl");
+        cmd.env_clear()
+            .envs(env_vars)
+            .args(&["-x", "c", "-O2", "-shared", "-fPIC"])
+            .arg("-o")
+            .arg(&path)
+            .arg("-")
+            .arg("-ldl");
 
-    run_input_output(cmd, Some(r#"
+        run_input_output(cmd, Some(r#"
 /*
  * LD_PRELOAD shim that makes GCC's #pragma once identify a header by its
  * (st_dev, st_ino) instead of by its (st_mtime, st_size, contents).
@@ -761,9 +777,9 @@ int __fxstat64(int ver, int fd, struct stat64 *st)
 	return ret;
 }
 "#.as_bytes().to_vec())).await?;
+    }
 
-    std::io::copy(&mut std::fs::File::open(&temp)?, &mut file)?;
-    std::fs::remove_file(temp)?;
+    file.as_file().unlock()?;
 
     Ok(path)
 }
