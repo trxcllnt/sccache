@@ -56,7 +56,7 @@ use std::{
     pin::Pin,
     sync::{Arc, atomic::AtomicU64},
     task::{Context, Poll, Waker},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -72,7 +72,7 @@ use unit_prefix::NumberPrefix;
 #[cfg(feature = "dist-client")]
 use {
     crate::config,
-    std::{mem, time::Instant},
+    std::mem,
 };
 
 /// If the dist client couldn't be created, retry creation at this number

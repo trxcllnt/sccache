@@ -1021,8 +1021,6 @@ where
             ..
         } = self;
 
-        let mut path_transformer = dist::PathTransformer::new();
-
         let (compile_cmd, _dist_compile_cmd, cacheable) =
             compilation
                 .generate_compile_commands()
