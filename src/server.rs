@@ -747,15 +747,24 @@ impl<A: crate::net::Acceptor, C: CommandCreatorSync> SccacheServer<A, C> {
                 .unwrap_or(Ok(1000))
                 .unwrap_or(1000);
             loop {
-                if let Ok(mut sys) = sysinfo.lock() {
-                    sys.refresh_cpu_specifics(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
-                    sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+                if let Ok(mut pair) = sysinfo.lock() {
+                    if Instant::now().duration_since(pair.0) > sysinfo::MINIMUM_CPU_UPDATE_INTERVAL
+                    {
+                        pair.0 = Instant::now();
+                        pair.1.refresh_cpu_specifics(
+                            sysinfo::CpuRefreshKind::nothing().with_cpu_usage(),
+                        );
+                    }
+
+                    pair.1
+                        .refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+
                     info!(
                         "sysinfo: {{ cpu: {}%, mem: {{ total: {}b, available: {}b, used: {}b }} }}",
-                        sys.global_cpu_usage(),
-                        sys.total_memory(),
-                        sys.available_memory(),
-                        sys.used_memory(),
+                        pair.1.global_cpu_usage(),
+                        pair.1.total_memory(),
+                        pair.1.available_memory(),
+                        pair.1.used_memory(),
                     );
                 }
                 tokio::time::sleep(Duration::from_millis(interval)).await;
@@ -990,7 +999,7 @@ where
     info: ActiveInfo,
 
     // System info (CPU/mem usage)
-    sysinfo: Arc<std::sync::Mutex<sysinfo::System>>,
+    sysinfo: Arc<std::sync::Mutex<(Instant, sysinfo::System)>>,
 }
 
 impl<C> SccacheService<C>
@@ -1027,6 +1036,20 @@ where
 
     pub fn increment_pending_compilations(&self) -> SccacheGaugeIncrement {
         self.pending_compilations.increment()
+    }
+
+    fn cpu_usage(&self) -> f32 {
+        if let Ok(mut pair) = self.sysinfo.lock() {
+            if Instant::now().duration_since(pair.0) > sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
+                pair.0 = Instant::now();
+                pair.1
+                    .refresh_cpu_specifics(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
+            }
+
+            pair.1.global_cpu_usage()
+        } else {
+            100.0
+        }
     }
 }
 
@@ -1168,13 +1191,16 @@ where
     }
 }
 
-fn init_sysinfo() -> sysinfo::System {
+fn init_sysinfo() -> (Instant, sysinfo::System) {
     use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
-    System::new_with_specifics(
-        RefreshKind::nothing()
-            .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
-            .with_memory(MemoryRefreshKind::nothing().with_ram()),
+    (
+        Instant::now(),
+        System::new_with_specifics(
+            RefreshKind::nothing()
+                .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
+                .with_memory(MemoryRefreshKind::nothing().with_ram()),
+        ),
     )
 }
 
@@ -1465,22 +1491,24 @@ where
             // boundary and be scheduled after the next outer compile request. But
             // even if a few sometimes do, most won't, which is good enough.
             let _queued = self.increment_queued_compilations();
+            let mut cpu_usage: u64 = 100;
             loop {
                 match self
                     .pending_compilations
                     .increment_if(|pending_compilations| {
-                        pending_compilations < self.pending_compilations_limit
+                        pending_compilations
+                            < self.pending_compilations_limit * (100 / cpu_usage.max(1))
                     }) {
                     Ok(pending) => {
                         break pending;
                     }
                     Err(_) => {
                         // Jitter so not every task retries at the same time
-                        tokio::time::sleep(tokio_retry2::strategy::jitter_range(1.0, 2.0)(
-                            // Make this configurable?
-                            Duration::from_millis(250),
+                        tokio::time::sleep(tokio_retry2::strategy::jitter_range(0.0, 5.0)(
+                            Duration::from_secs(1),
                         ))
                         .await;
+                        cpu_usage = self.cpu_usage().ceil() as u64;
                     }
                 }
             }
