@@ -636,7 +636,11 @@ pub async fn build_gcc_pragma_once_fix<
             .file_stem()
             .unwrap_or(OsStr::new("gcc"))
             .display(),
-        hash = Digest::from_file(exe.as_ref()).await?.finish()
+        hash = {
+            let mut digest = Digest::from_file(exe.as_ref()).await?;
+            digest.update(GCC_PRAGMA_ONCE_FIX_SOURCE.as_bytes());
+            digest.finish()
+        }
     );
     let path = temp.join(&name);
 
@@ -659,7 +663,16 @@ pub async fn build_gcc_pragma_once_fix<
             .arg("-")
             .arg("-ldl");
 
-        run_input_output(cmd, Some(r#"
+        run_input_output(cmd, Some(GCC_PRAGMA_ONCE_FIX_SOURCE.as_bytes().to_vec())).await?;
+    }
+
+    file.as_file().unlock()?;
+
+    Ok(path)
+}
+
+#[cfg(unix)]
+static GCC_PRAGMA_ONCE_FIX_SOURCE: &str = r#"
 /*
  * LD_PRELOAD shim that makes GCC's #pragma once identify a header by its
  * (st_dev, st_ino) instead of by its (st_mtime, st_size, contents).
@@ -777,7 +790,7 @@ static void log_remap(int fd, uint64_t real, uint64_t fake)
 	snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
 	ssize_t n = readlink(link, path, sizeof(path) - 1);
 	path[n > 0 ? n : 0] = '\0';
-	fprintf(stderr, "pragma-once-fix: %s: st_mtime %lld -> %lld (another file has the same mtime and size)\n",
+	fprintf(stderr, "pragma-once-fix: %s : %lld -> %lld\n",
 		path, (long long)real, (long long)fake);
 }
 
@@ -807,7 +820,7 @@ static void remap(int fd, uint64_t dev, uint64_t ino, mode_t mode, uint64_t size
 			}
 			*f = (struct slot){ dev, ino, t, true };
 			files.len++;
-			if (debug && t != real)
+			if (debug)
 				log_remap(fd, real, t);
 		}
 		*mtime = (time_t)f->val;
@@ -858,13 +871,7 @@ int __fxstat64(int ver, int fd, struct stat64 *st)
 		remap(fd, st->st_dev, st->st_ino, st->st_mode, st->st_size, &st->st_mtime);
 	return ret;
 }
-"#.as_bytes().to_vec())).await?;
-    }
-
-    file.as_file().unlock()?;
-
-    Ok(path)
-}
+"#;
 
 #[cfg(test)]
 mod test {
