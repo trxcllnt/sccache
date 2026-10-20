@@ -769,7 +769,12 @@ where
             None
         };
 
-        let source = if let Some(source) = source {
+        let force_recache_dependencies = env_vars.iter().any(|(k, v)| {
+            k == "SCCACHE_RECACHE_DEPENDENCIES"
+                && matches!(v.to_str().unwrap_or_default(), "true" | "on" | "1")
+        });
+
+        let source = if let Some(source) = source.filter(|_| !force_recache_dependencies) {
             source
         } else {
             SourceFileDeps::new(
