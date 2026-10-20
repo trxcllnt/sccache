@@ -70,10 +70,7 @@ use tower::Service;
 use unit_prefix::NumberPrefix;
 
 #[cfg(feature = "dist-client")]
-use {
-    crate::config,
-    std::mem,
-};
+use {crate::config, std::mem};
 
 /// If the dist client couldn't be created, retry creation at this number
 /// of seconds from now (or later)
