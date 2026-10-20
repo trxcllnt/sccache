@@ -291,8 +291,6 @@ impl SourceFileDeps {
     /// Write a dependencies cache entry for the given dependencies key to storage,
     /// overwriting if it exists.
     pub async fn put(self, storage: &dyn Storage) -> Result<Duration> {
-        use bytes::{BufMut, BytesMut};
-
         let key = self.key.clone();
 
         let buf = tokio::task::spawn_blocking(move || {
