@@ -115,11 +115,21 @@ impl Nvcc {
     where
         C: CommandCreatorSync,
     {
+        let env_vars = env_vars
+            .map(|(k, v)| (k.as_ref().into(), v.as_ref().into()))
+            .filter(|(k, _): &(OsString, OsString)| {
+                k != "NVCC_PREPEND_FLAGS" && k != "NVCC_APPEND_FLAGS"
+            })
+            .collect::<Vec<_>>();
+
         #[cfg(unix)]
         let pragma_once_fix = Arc::new(if matches!(host_compiler, NvccHostCompiler::Gcc) {
-            crate::compiler::util::build_gcc_pragma_once_fix(executable.as_ref(), env_vars.clone())
-                .await
-                .unwrap_or_else(|_| PathBuf::new())
+            crate::compiler::util::build_gcc_pragma_once_fix(
+                executable.as_ref(),
+                env_vars.iter().cloned(),
+            )
+            .await
+            .unwrap_or_else(|_| PathBuf::new())
         } else {
             PathBuf::new()
         });
@@ -129,8 +139,8 @@ impl Nvcc {
         let archs_all = Self::read_all_archs(
             creator,
             executable.as_ref(),
-            env_vars.clone(),
             args.clone(),
+            env_vars.iter().cloned(),
             &host_compiler,
         )
         .await
@@ -139,8 +149,8 @@ impl Nvcc {
         let archs_major = Self::read_major_archs(
             creator,
             executable.as_ref(),
-            env_vars.clone(),
             args.clone(),
+            env_vars.iter().cloned(),
             &host_compiler,
         )
         .await
@@ -149,8 +159,8 @@ impl Nvcc {
         let archs_native = Self::read_native_archs(
             creator,
             executable.as_ref(),
-            env_vars.clone(),
             args.clone(),
+            env_vars.iter().cloned(),
             &host_compiler,
         )
         .await
@@ -163,7 +173,7 @@ impl Nvcc {
             creator,
             executable.as_ref(),
             args,
-            env_vars.clone(),
+            env_vars.iter().cloned(),
             &host_compiler,
         )
         .await?;
@@ -191,6 +201,7 @@ impl Nvcc {
     >(
         creator: &mut C,
         executable: Exe,
+        arguments: Args,
         env_vars: Envs,
         host_compiler: &NvccHostCompiler,
     ) -> Result<Vec<String>>
@@ -248,6 +259,7 @@ impl Nvcc {
     >(
         creator: &mut C,
         executable: Exe,
+        arguments: Args,
         env_vars: Envs,
         host_compiler: &NvccHostCompiler,
     ) -> Result<Vec<String>>
@@ -276,6 +288,7 @@ impl Nvcc {
     >(
         creator: &mut C,
         executable: Exe,
+        arguments: Args,
         env_vars: Envs,
         host_compiler: &NvccHostCompiler,
         meta_arch: &str,
@@ -398,9 +411,11 @@ impl Nvcc {
             if let Ok(nvcc_tools) = res {
                 return Ok(nvcc_tools);
             }
+
+            maybe_res = Some(res);
         }
 
-        res.unwrap_or_else(|| bail!("Failed to find nvcc tools"))
+        maybe_res.unwrap_or_else(|| bail!("Failed to find nvcc tools"))
     }
 }
 
