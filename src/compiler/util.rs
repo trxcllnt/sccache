@@ -29,7 +29,7 @@ use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
     fmt,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -229,11 +229,15 @@ impl SourceFileCache {
 }
 
 // The dependencies cache entry is a description of all information needed
-// to cache pre-processor output in C-family languages for a given input file.
+// to cache preprocessor dependencies in C-family languages for a given
+// input file.
 // The current implementation is very much inspired from the "manifest"
 // that `ccache` uses for its "direct mode", though the on-disk format is
 // different.
 
+/// The format is 7 bytes for the magic sccache string + 1 byte for the
+/// format version of the [`SourceFileDeps`] struct encoding.
+const FORMAT_VERSION: u8 = 1;
 const MAX_REVISIONS: u64 = 1_000;
 
 #[derive(Clone, Default, Deserialize, Serialize, Debug, PartialEq, Eq)]
@@ -297,6 +301,8 @@ impl SourceFileDeps {
                 flate2::Compression::best(),
             );
 
+            writer.write_all(b"sccache")?;
+            writer.write_all(&[FORMAT_VERSION])?;
             bincode::serialize_into(&mut writer, &self)?;
 
             writer
@@ -310,11 +316,22 @@ impl SourceFileDeps {
     }
 
     pub fn from_buffer(buffer: opendal::Buffer) -> Result<Self> {
-        Ok(bincode::deserialize_from(buffer.reader())?)
+        let mut format = [0u8; 8];
+        let mut reader = buffer.reader().take(8);
+        if reader.read_exact(&mut format).is_err()
+            || &format[0..7] != b"sccache"
+            || format[7] != FORMAT_VERSION
+        {
+            bail!("Format version mismatch");
+        } else {
+            Ok(bincode::deserialize_from(reader.into_inner())?)
+        }
     }
 
     pub fn to_buffer(&self) -> Result<opendal::Buffer> {
         let mut writer = BytesMut::new().writer();
+        writer.write_all(b"sccache")?;
+        writer.write_all(&[FORMAT_VERSION])?;
         bincode::serialize_into(&mut writer, self)?;
         Ok(opendal::Buffer::from(writer.into_inner().freeze()))
     }
@@ -509,22 +526,6 @@ impl fmt::Display for SourceFileDeps {
         )
     }
 }
-
-// impl fmt::Debug for SourceFileDeps {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         f.debug_struct("SourceFileDeps")
-//             .field("key", &self.key)
-//             .field("meta", &self.meta)
-//             .field("revs", &self.iter().rev().collect::<Vec<_>>())
-//             .finish()
-//     }
-// }
-
-// impl fmt::Display for SourceFileDeps {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         writeln!(f, "{self:?}")
-//     }
-// }
 
 impl<'de> Deserialize<'de> for SourceFileDeps {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
