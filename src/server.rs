@@ -1501,7 +1501,7 @@ where
                     }
                     Err(_) => {
                         // Jitter so not every task retries at the same time
-                        tokio::time::sleep(tokio_retry2::strategy::jitter_range(0.0, 5.0)(
+                        tokio::time::sleep(tokio_retry2::strategy::jitter_range(0.0, 10.0)(
                             Duration::from_secs(1),
                         ))
                         .await;
