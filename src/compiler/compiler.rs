@@ -1366,7 +1366,7 @@ where
             // and we don't want to OOM the server during parallel builds.
             let job_inputs = crate::util::tempfile()?;
 
-            if false {
+            if true {
                 let mut inputs_writer = flate2::write::ZlibEncoder::new(
                     job_inputs.reopen()?,
                     // // Optimize for size since bandwidth costs more than client CPU cycles

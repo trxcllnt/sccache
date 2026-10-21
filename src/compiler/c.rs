@@ -655,7 +655,6 @@ where
                                 .assembler_digest()
                                 .filter(|_| parsed_args.uses_external_assembler),
                         )
-                        .chain(["sources cache"])
                         .collect::<Vec<_>>(),
                 )
                 .with_input_files(std::slice::from_ref(&self.parsed_args.input_absolute))
@@ -716,7 +715,7 @@ where
                 // $ b/main
                 // > 42
                 // ```
-                .with_hashed_input_path(Some(self.parsed_args.input_absolute.as_path()))
+                .with_hashed_input_path(self.parsed_args.input_absolute.as_path())
                 .with_plusplus(compiler.plusplus())
                 .with_version(DEPS_VERSION)
                 .compute()
@@ -1097,7 +1096,6 @@ where
                                 .assembler_digest()
                                 .filter(|_| self.parsed_args.uses_external_assembler),
                         )
-                        .chain(["objects cache"])
                         .collect::<Vec<_>>(),
                 )
                 .with_input_files(&dist_files[..])
@@ -2032,8 +2030,11 @@ impl<'a> HashKeyParams<'a> {
     }
 
     /// Sets the optional input path to hash.
-    pub fn with_hashed_input_path(mut self, hashed_input_path: Option<&'a Path>) -> Self {
-        self.hashed_input_path = hashed_input_path;
+    pub fn with_hashed_input_path<P: Into<Option<&'a Path>>>(
+        mut self,
+        hashed_input_path: P,
+    ) -> Self {
+        self.hashed_input_path = hashed_input_path.into();
         self
     }
 
