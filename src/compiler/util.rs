@@ -140,7 +140,6 @@ impl SourceFileCache {
         }
     }
 
-    #[allow(unused)]
     pub async fn get<P: AsRef<Path>>(
         &self,
         path: P,
@@ -457,7 +456,7 @@ impl SourceFileDeps {
 
     /// Returns the digest of the first result whose expected included files
     /// are already on disk and have not changed.
-    pub fn find_dependencies(
+    pub async fn find_dependencies(
         &mut self,
         source_file_cache: &SourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
@@ -472,7 +471,73 @@ impl SourceFileDeps {
         // more likely to match.
         for (idx, (obj_key, deps)) in self.iter_mut().rev().enumerate() {
             let (failure, updated) =
-                Self::test_dependencies(source_file_cache, compile_timestamp, &mut deps.sources);
+                Self::test_dependencies(source_file_cache, compile_timestamp, &mut deps.sources)
+                    .await;
+
+            if let Some(reason) = updated {
+                needs_update = true;
+                if log_enabled!(log::Level::Trace) {
+                    log_messages.push(format!("{obj_key}]: {reason}"));
+                }
+            }
+
+            if let Some(reason) = failure {
+                if log_enabled!(log::Level::Trace) {
+                    log_messages.push(format!("{obj_key}]: Deps lookup failure: {reason}"));
+                }
+            } else {
+                if idx != 0 {
+                    // Need to write back to storage if the LRU order changes
+                    needs_update = true;
+                    if log_enabled!(log::Level::Trace) {
+                        log_messages.push(format!("{obj_key}]: Deps LRU order changed"));
+                    }
+                }
+                maybe_result = Some((obj_key.clone(), deps.clone()));
+                break;
+            }
+        }
+
+        for msg in log_messages {
+            trace!("[{out_pretty}, {src_key}, {msg}", src_key = self.key);
+        }
+
+        if let Some((obj_key, _)) = maybe_result.as_ref() {
+            // Move the entry to the back of the LRU
+            self.revs.get(obj_key);
+        }
+
+        (
+            // Signal this dependencies cache entry was modified and should
+            // be written back to storage.
+            // Note: This can happen regardless whether a result was found.
+            needs_update,
+            // Return the object key and dependencies
+            maybe_result,
+        )
+    }
+
+    /// Returns the digest of the first result whose expected included files
+    /// are already on disk and have not changed.
+    pub fn find_dependencies_sync(
+        &mut self,
+        source_file_cache: &SourceFileCache,
+        compile_timestamp: chrono::DateTime<chrono::Utc>,
+        out_pretty: &str,
+    ) -> (bool, Option<(String, Dependencies)>) {
+        let mut maybe_result = None;
+        let mut needs_update = false;
+        let mut log_messages = vec![];
+
+        // Find the first result key whose include files on disk match this
+        // dependencies cache entry. Check newest results first since they're
+        // more likely to match.
+        for (idx, (obj_key, deps)) in self.iter_mut().rev().enumerate() {
+            let (failure, updated) = Self::test_dependencies_sync(
+                source_file_cache,
+                compile_timestamp,
+                &mut deps.sources,
+            );
 
             if let Some(reason) = updated {
                 needs_update = true;
@@ -518,7 +583,66 @@ impl SourceFileDeps {
     }
 
     /// A result matches if all of its include files exist on disk and have not changed.
-    fn test_dependencies(
+    async fn test_dependencies(
+        source_file_cache: &SourceFileCache,
+        compile_timestamp: chrono::DateTime<chrono::Utc>,
+        dependencies: &mut [SourceFileMeta],
+    ) -> (Option<String>, Option<String>) {
+        let mut failure = None;
+        let mut updated = None;
+
+        for prev in dependencies.iter_mut() {
+            let path = Path::new(&prev.path);
+
+            let curr = match source_file_cache.get(path, compile_timestamp).await {
+                Ok(entry) => entry,
+                Err(err) => {
+                    failure = Some(format!("{err:#}"));
+                    break;
+                }
+            };
+
+            let SourceFileEntry {
+                meta: curr,
+                found_time,
+                found_date,
+                found_timestamp,
+                ..
+            } = curr.as_ref();
+
+            if *found_time {
+                // We don't know for sure that the program actually uses the __TIME__ macro,
+                // but we have to assume it anyway and hash the time stamp. However, that's
+                // not very useful since the chance that we get a cache hit later the same
+                // second should be quite slim... So, just signal back to the caller that
+                // __TIME__ has been found so that the dependencies cache can be disabled.
+                failure = Some(format!("Found __TIME__ in {path:?}"));
+                break;
+            }
+
+            // If the digests are different, disable dependencies cache
+            if prev.digest != curr.digest {
+                failure = Some(format!("Digest mismatch for {path:?}"));
+                break;
+            }
+
+            // If __DATE__ or __TIMESTAMP__ found, update the includes for this result.
+            if *found_date {
+                // trace!("[{out_pretty}, {src_key}]: updating entry, __DATE__ found in {path:?}");
+                updated = Some(format!("updating entry, __DATE__ found in {path:?}"));
+                *prev = curr.clone();
+            } else if *found_timestamp {
+                // trace!("[{out_pretty}, {src_key}]: updating entry, __TIMESTAMP__ found in {path:?}");
+                updated = Some(format!("updating entry, __TIMESTAMP__ found in {path:?}"));
+                *prev = curr.clone();
+            }
+        }
+
+        (failure, updated)
+    }
+
+    /// A result matches if all of its include files exist on disk and have not changed.
+    fn test_dependencies_sync(
         source_file_cache: &SourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
         dependencies: &mut [SourceFileMeta],

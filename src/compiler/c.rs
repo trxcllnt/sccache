@@ -623,6 +623,7 @@ where
             env_vars,
             service,
             runtime,
+            use_async_io,
             ..
         } = *gen_hash_key_args;
 
@@ -638,6 +639,7 @@ where
         } else {
             let src_key = HashKeyParams::new(parsed_args)
                 .with_runtime(runtime)
+                .with_async_io(use_async_io)
                 // Hash arch, common, dependency, and preprocessor args
                 .with_args(&self.parsed_args.arch_args[..])
                 .with_args(&self.parsed_args.common_args[..])
@@ -772,33 +774,36 @@ where
 
             let start = Instant::now();
 
-            let (source, obj_key_and_deps) = runtime
-                .spawn_blocking({
-                    let out_pretty = out_pretty.clone().into_owned();
-                    move || {
-                        let (needs_update, obj_key_and_deps) = source.find_dependencies(
-                            &SOURCE_FILE_CACHE,
-                            compile_timestamp,
-                            &out_pretty,
-                        );
-                        (
-                            source,
-                            obj_key_and_deps.map(|(obj_key, dependencies)| {
-                                (obj_key, dependencies, needs_update)
-                            }),
-                        )
-                    }
-                })
-                .await?;
-
-            maybe_source = Some(source);
+            let (needs_update, obj_key_and_deps) = if use_async_io {
+                let (needs_update, obj_key_and_deps) = source
+                    .find_dependencies(&SOURCE_FILE_CACHE, compile_timestamp, &out_pretty)
+                    .await;
+                maybe_source = Some(source);
+                (needs_update, obj_key_and_deps)
+            } else {
+                let (source, needs_update, obj_key_and_deps) = runtime
+                    .spawn_blocking({
+                        let out_pretty = out_pretty.clone().into_owned();
+                        move || {
+                            let (needs_update, obj_key_and_deps) = source.find_dependencies_sync(
+                                &SOURCE_FILE_CACHE,
+                                compile_timestamp,
+                                &out_pretty,
+                            );
+                            (source, needs_update, obj_key_and_deps)
+                        }
+                    })
+                    .await?;
+                maybe_source = Some(source);
+                (needs_update, obj_key_and_deps)
+            };
 
             trace!(
                 "[{out_pretty}]: find deps time: {}",
                 fmt_duration_as_secs(&start.elapsed())
             );
 
-            obj_key_and_deps
+            obj_key_and_deps.map(|(obj_key, dependencies)| (obj_key, dependencies, needs_update))
         } else {
             maybe_source = None;
             None
@@ -879,25 +884,40 @@ where
             fmt_duration_as_secs(&gen_deps_duration)
         );
 
-        let sources = runtime
-            .spawn_blocking(move || {
-                use itertools::Itertools;
+        let sources = if use_async_io {
+            futures::future::try_join_all(
                 dependencies
                     .into_iter()
-                    .filter_map(|path| {
-                        if path.exists() {
-                            Some(
-                                SOURCE_FILE_CACHE
-                                    .get_sync(path, compile_timestamp)
-                                    .map(|file| file.meta.clone()),
-                            )
-                        } else {
-                            None
-                        }
-                    })
-                    .try_collect()
-            })
-            .await??;
+                    .filter(|path| path.exists())
+                    .map(|path| async {
+                        SOURCE_FILE_CACHE
+                            .get(path, compile_timestamp)
+                            .await
+                            .map(|file| file.meta.clone())
+                    }),
+            )
+            .await?
+        } else {
+            runtime
+                .spawn_blocking(move || {
+                    use itertools::Itertools;
+                    dependencies
+                        .into_iter()
+                        .filter_map(|path| {
+                            if path.exists() {
+                                Some(
+                                    SOURCE_FILE_CACHE
+                                        .get_sync(path, compile_timestamp)
+                                        .map(|file| file.meta.clone()),
+                                )
+                            } else {
+                                None
+                            }
+                        })
+                        .try_collect()
+                })
+                .await??
+        };
 
         let outputs =
             futures::future::try_join_all(parsed_args.outputs.iter().filter_map(|(name, desc)| {
@@ -1023,6 +1043,7 @@ where
             cache_control,
             service,
             runtime,
+            use_async_io,
             ..
         } = args;
 
@@ -1079,6 +1100,7 @@ where
             let start = Instant::now();
 
             let key = HashKeyParams::new(&self.parsed_args)
+                .with_async_io(use_async_io)
                 .with_runtime(runtime)
                 // Hash arch, common, and preprocessor args
                 .with_args(&self.parsed_args.arch_args[..])
@@ -1957,6 +1979,7 @@ static SOURCE_FILE_CACHE: LazyLock<SourceFileCache> = LazyLock::new(|| {
 // #[derive(Debug, Clone)]
 pub struct HashKeyParams<'a> {
     args: Vec<&'a OsString>,
+    async_io: bool,
     compile_timestamp: DateTime<Utc>,
     cwd: &'a Path,
     env_vars: &'a [(OsString, OsString)],
@@ -1980,6 +2003,7 @@ impl<'a> HashKeyParams<'a> {
     pub fn new(parsed_args: &'a ParsedArguments) -> Self {
         Self {
             args: vec![],
+            async_io: true,
             compile_timestamp: Utc::now(),
             cwd: Path::new(""),
             env_vars: &[],
@@ -1996,6 +2020,11 @@ impl<'a> HashKeyParams<'a> {
     /// Sets the environment variables to consider for caching.
     pub fn with_args(mut self, args: &'a [OsString]) -> Self {
         self.args.extend(args);
+        self
+    }
+
+    pub fn with_async_io(mut self, async_io: bool) -> Self {
+        self.async_io = async_io;
         self
     }
 
@@ -2119,34 +2148,70 @@ impl<'a> HashKeyParams<'a> {
             &tokio::runtime::Handle::current()
         };
 
-        // Canonicalize and hash the dependencies on a background thread
-        let entries = runtime
-            .spawn_blocking({
-                let cwd = self.cwd.to_owned();
-                let input_files = self.input_files;
-                let compile_timestamp = self.compile_timestamp;
-                let out_pretty = self.parsed_args.output_pretty().into_owned();
-                move || {
-                    let mut entries = vec![];
-
-                    for path in input_files {
-                        let path = cwd.join(path.as_path());
-                        let path = dunce::canonicalize(&path).unwrap_or(path);
-                        let entry = SOURCE_FILE_CACHE.get_sync(&path, compile_timestamp)?;
-
-                        if entry.found_time {
-                            // __TIME__ found, disable caching
-                            debug!("[{out_pretty}]: Found __TIME__ in '{}'", path.display());
-                            entries.push(None);
-                        } else {
-                            entries.push(Some(entry.clone()));
+        let entries = if self.async_io {
+            // Canonicalize the dependency paths on a background thread
+            let paths = runtime
+                .spawn_blocking({
+                    let cwd = self.cwd.to_owned();
+                    let mut input_files = self.input_files;
+                    move || {
+                        for path in input_files.iter_mut() {
+                            if let Ok(path2) = dunce::canonicalize(cwd.join(path.as_path())) {
+                                *path = path2;
+                            }
                         }
+                        input_files
                     }
+                })
+                .await?;
 
-                    Ok::<_, anyhow::Error>(entries)
+            // Hash the input and dependencies
+            futures::future::try_join_all(paths.into_iter().map(|path| async move {
+                let entry = SOURCE_FILE_CACHE.get(&path, self.compile_timestamp).await?;
+
+                if entry.found_time {
+                    // __TIME__ found, disable caching
+                    debug!(
+                        "[{}]: Found __TIME__ in '{}'",
+                        self.parsed_args.output_pretty(),
+                        path.display()
+                    );
+                    Ok::<_, anyhow::Error>(None)
+                } else {
+                    Ok(Some(entry.clone()))
                 }
-            })
-            .await??;
+            }))
+            .await?
+        } else {
+            // Canonicalize and hash the dependencies on a background thread
+            runtime
+                .spawn_blocking({
+                    let cwd = self.cwd.to_owned();
+                    let input_files = self.input_files;
+                    let compile_timestamp = self.compile_timestamp;
+                    let out_pretty = self.parsed_args.output_pretty().into_owned();
+                    move || {
+                        let mut entries = vec![];
+
+                        for path in input_files {
+                            let path = cwd.join(path.as_path());
+                            let path = dunce::canonicalize(&path).unwrap_or(path);
+                            let entry = SOURCE_FILE_CACHE.get_sync(&path, compile_timestamp)?;
+
+                            if entry.found_time {
+                                // __TIME__ found, disable caching
+                                debug!("[{out_pretty}]: Found __TIME__ in '{}'", path.display());
+                                entries.push(None);
+                            } else {
+                                entries.push(Some(entry.clone()));
+                            }
+                        }
+
+                        Ok::<_, anyhow::Error>(entries)
+                    }
+                })
+                .await??
+        };
 
         if entries.iter().any(|entry| entry.is_none()) {
             Ok(None)

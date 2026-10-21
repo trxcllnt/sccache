@@ -3644,6 +3644,7 @@ proc_macro false
                 ],
                 runtime: &pool,
                 service: &service,
+                use_async_io: false,
             })
             .wait()
             .unwrap()
@@ -3737,6 +3738,7 @@ proc_macro false
                 env_vars,
                 runtime: pool,
                 service: &service,
+                use_async_io: true,
             })
             .wait()
             .unwrap()

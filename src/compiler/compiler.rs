@@ -630,6 +630,7 @@ pub struct GenerateHashKeyArgs<'a, T: CommandCreatorSync> {
     pub env_vars: &'a [(OsString, OsString)],
     pub runtime: &'a tokio::runtime::Handle,
     pub service: &'a server::SccacheService<T>,
+    pub use_async_io: bool,
 }
 
 /// An interface to a compiler for hash key generation, the result of
@@ -683,8 +684,6 @@ where
             }
         );
 
-        let hash_wait_time = Instant::now();
-
         let dist_client = dist_client.filter(|_| {
             // Clients might want to set this when configuring
             // so e.g. the CMake compiler checks execute locally
@@ -694,6 +693,13 @@ where
             })
         });
 
+        let use_async_io = env_vars.iter().any(|(k, v)| {
+            k == "SCCACHE_ASYNC_IO_PIPELINE"
+                && matches!(v.to_str().unwrap_or_default(), "true" | "on" | "1")
+        });
+
+        let hash_time = Instant::now();
+
         let hash_result = self
             .generate_hash_key(GenerateHashKeyArgs {
                 cache_control,
@@ -702,14 +708,15 @@ where
                 env_vars: &env_vars,
                 runtime: &runtime,
                 service,
+                use_async_io,
             })
             .await;
 
-        let hash_wait_time = hash_wait_time.elapsed();
+        let hash_time = hash_time.elapsed();
 
         debug!(
             "[{out_pretty}]: generate_hash_key took {}",
-            fmt_duration_as_secs(&hash_wait_time)
+            fmt_duration_as_secs(&hash_time)
         );
 
         // Decrement pending_compilations as soon as we're done preprocessing
@@ -739,7 +746,7 @@ where
                 return match err.downcast::<ProcessError>() {
                     Ok(ProcessError(output)) => {
                         debug!("[{out_pretty}]: process error: {output:?}");
-                        Ok((CompileResult::Error(hash_wait_time), output))
+                        Ok((CompileResult::Error(hash_time), output))
                     }
                     Err(e) => Err(e),
                 };
@@ -756,6 +763,7 @@ where
             out_pretty.clone(),
             runtime.clone(),
             service,
+            use_async_io,
         );
 
         let lookup = lookup_or_compile
@@ -901,6 +909,7 @@ struct CacheLookupOrCompile<'a, T: CommandCreatorSync> {
     runtime: tokio::runtime::Handle,
     sccache_service: &'a server::SccacheService<T>,
     weak_toolchain_key: String,
+    use_async_io: bool,
 }
 
 impl<'a, T> CacheLookupOrCompile<'a, T>
@@ -917,6 +926,7 @@ where
         out_pretty: String,
         runtime: tokio::runtime::Handle,
         sccache_service: &'a server::SccacheService<T>,
+        use_async_io: bool,
     ) -> Self {
         let HashResult {
             compilation,
@@ -966,6 +976,7 @@ where
             runtime,
             sccache_service,
             weak_toolchain_key,
+            use_async_io,
         }
     }
 
@@ -1051,6 +1062,7 @@ where
             outputs,
             sccache_service,
             weak_toolchain_key,
+            use_async_io,
             ..
         } = self;
 
@@ -1066,6 +1078,7 @@ where
                 out_pretty: out_pretty.clone(),
                 path_transformer: Default::default(),
                 weak_toolchain_key,
+                use_async_io,
             })
         });
 
@@ -1322,6 +1335,7 @@ struct DistCompile<T: CommandCreatorSync> {
     #[cfg(feature = "dist-client")]
     path_transformer: dist::PathTransformer,
     weak_toolchain_key: String,
+    use_async_io: bool,
 }
 
 #[cfg(feature = "dist-client")]
@@ -1347,6 +1361,7 @@ where
             ref out_pretty,
             mut path_transformer,
             weak_toolchain_key,
+            use_async_io,
             ..
         } = self;
 
@@ -1366,12 +1381,41 @@ where
             // and we don't want to OOM the server during parallel builds.
             let job_inputs = crate::util::tempfile()?;
 
-            if true {
+            if use_async_io {
+                use futures::AsyncWriteExt;
+                let mut inputs_writer =
+                    async_compression::futures::write::ZlibEncoder::with_quality(
+                        futures::io::AllowStdIo::new(job_inputs.reopen()?),
+                        // Optimize for size since bandwidth costs more than client CPU cycles
+                        async_compression::core::Level::Best,
+                        // async_compression::core::Level::Default,
+                    );
+
+                inputs_packager
+                    .write_inputs_async(&mut path_transformer, &mut inputs_writer)
+                    .await?;
+
+                inputs_writer
+                    .flush()
+                    .await
+                    .context("failed to flush compressor")?;
+
+                trace!(
+                    "Compressed inputs from {} MiB -> {} MiB",
+                    (inputs_writer.total_in() as f64 / (1024.0 * 1024.0)),
+                    (inputs_writer.total_out() as f64 / (1024.0 * 1024.0))
+                );
+
+                inputs_writer
+                    .close()
+                    .await
+                    .context("failed to finish compressor")?;
+            } else {
                 let mut inputs_writer = flate2::write::ZlibEncoder::new(
                     job_inputs.reopen()?,
-                    // // Optimize for size since bandwidth costs more than client CPU cycles
-                    // flate2::Compression::best(),
-                    flate2::Compression::default(),
+                    // Optimize for size since bandwidth costs more than client CPU cycles
+                    flate2::Compression::best(),
+                    // flate2::Compression::default(),
                 );
 
                 path_transformer = tokio::task::spawn_blocking(move || {
@@ -1394,33 +1438,6 @@ where
                         .map(|_| path_transformer)
                 })
                 .await??;
-            } else {
-                use futures::AsyncWriteExt;
-                let mut inputs_writer =
-                    async_compression::futures::write::ZlibEncoder::with_quality(
-                        futures::io::AllowStdIo::new(job_inputs.reopen()?),
-                        async_compression::core::Level::Default,
-                    );
-
-                inputs_packager
-                    .write_inputs_async(&mut path_transformer, &mut inputs_writer)
-                    .await?;
-
-                inputs_writer
-                    .flush()
-                    .await
-                    .context("failed to flush compressor")?;
-
-                trace!(
-                    "Compressed inputs from {} MiB -> {} MiB",
-                    (inputs_writer.total_in() as f64 / (1024.0 * 1024.0)),
-                    (inputs_writer.total_out() as f64 / (1024.0 * 1024.0))
-                );
-
-                inputs_writer
-                    .close()
-                    .await
-                    .context("failed to finish compressor")?;
             }
 
             job_inputs
@@ -3650,6 +3667,7 @@ LLVM version: 6.0",
                         env_vars: &[],
                         runtime: pool,
                         service: &service,
+                        use_async_io: false,
                     })
                     .wait()
                     .unwrap()
@@ -3710,6 +3728,7 @@ LLVM version: 6.0",
                     env_vars: &[],
                     runtime: pool,
                     service: &service,
+                    use_async_io: true,
                 })
                 .wait()
                 .unwrap()
@@ -3807,6 +3826,7 @@ LLVM version: 6.0",
                         env_vars: &[],
                         runtime: pool,
                         service: &service,
+                        use_async_io: false,
                     })
                     .wait()
                     .unwrap()
@@ -3872,6 +3892,7 @@ LLVM version: 6.0",
                         env_vars: &[],
                         runtime: pool,
                         service: &service,
+                        use_async_io: true,
                     })
                     .wait()
                     .unwrap()
