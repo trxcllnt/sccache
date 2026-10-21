@@ -20,7 +20,7 @@ use crate::{
     util::{Digest, MetadataCtimeExt, Timestamp},
 };
 use bytes::{Buf, BufMut, BytesMut};
-use futures::lock::Mutex;
+use fs_err as fs;
 use serde::{Deserialize, Serialize, de, ser::SerializeMap};
 use serde_with::{
     DeserializeFromStr, DisplayFromStr, IfIsHumanReadable, SerializeDisplay, serde_as,
@@ -31,11 +31,11 @@ use std::{
     fmt,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SourceFileEntry {
     pub compiled_at: chrono::DateTime<chrono::Utc>,
     pub meta: SourceFileMeta,
@@ -140,6 +140,7 @@ impl SourceFileCache {
         }
     }
 
+    #[allow(unused)]
     pub async fn get<P: AsRef<Path>>(
         &self,
         path: P,
@@ -160,7 +161,7 @@ impl SourceFileCache {
         let ctime = meta.ctime_or_creation().ok();
         let fsize = meta.len();
 
-        let entry = self.lru.lock().await.get(path).and_then(|entry| {
+        let entry = self.lru.lock().unwrap().get(path).and_then(|entry| {
             // If the file hasn't changed, reuse the cached entry
             let file_good =
                 entry.meta.fsize == fsize && entry.meta.ctime == ctime && entry.meta.mtime == mtime;
@@ -219,7 +220,100 @@ impl SourceFileCache {
                 found_timestamp: finder.found_timestamp(),
             });
 
-            self.lru.lock().await.insert(path.to_owned(), entry.clone());
+            self.lru
+                .lock()
+                .unwrap()
+                .insert(path.to_owned(), entry.clone());
+
+            entry
+        };
+
+        Ok(entry)
+    }
+
+    pub fn get_sync<P: AsRef<Path>>(
+        &self,
+        path: P,
+        compile_timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Arc<SourceFileEntry>> {
+        use chrono::Datelike;
+
+        // Assumes path has been canonicalized
+        let path = path.as_ref();
+        let meta = match fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(err) => {
+                bail!("Error reading metadata for '{}': {err:#}", path.display());
+            }
+        };
+
+        let mtime = meta.modified().map(Into::into).ok();
+        let ctime = meta.ctime_or_creation().ok();
+        let fsize = meta.len();
+
+        let entry = self.lru.lock().unwrap().get(path).and_then(|entry| {
+            // If the file hasn't changed, reuse the cached entry
+            let file_good =
+                entry.meta.fsize == fsize && entry.meta.ctime == ctime && entry.meta.mtime == mtime;
+
+            // If __TIMESTAMP__ or __DATE__ were found, compare compile time to now (or SOURCE_DATE_EPOCH)
+            let time_good = if entry.found_timestamp {
+                // If __TIMESTAMP__ was found, compare timestamp seconds exactly
+                entry.compiled_at == compile_timestamp
+            } else if entry.found_date {
+                // If __DATE__ was found, only compare the parts of the
+                // timestamp the compiler embeds (day, month, and year)
+                let date_0 = entry.compiled_at.date_naive();
+                let date_1 = compile_timestamp.date_naive();
+                date_0.day() == date_1.day()
+                    && date_0.month() == date_1.month()
+                    && date_0.year() == date_1.year()
+            } else {
+                // If neither were found, use this cached include entry
+                true
+            };
+
+            if file_good && time_good {
+                Some(entry.clone())
+            } else {
+                None
+            }
+        });
+
+        let entry = if let Some(entry) = entry {
+            entry
+        } else {
+            let digest_and_finder =
+                Digest::from_file_with_time_macros_sync(path, compile_timestamp)
+                    .with_context(|| format!("while reading '{}'", path.display()))
+                    .inspect_err(|err| trace!("[result_matches]: {err:#}"))
+                    .map(|(digest, finder)| (digest.finish(), finder));
+
+            let (digest, finder) = match digest_and_finder {
+                Ok((digest, finder)) => (digest, finder),
+                Err(err) => {
+                    bail!("Error computing digest: {err:#}");
+                }
+            };
+
+            let entry = Arc::new(SourceFileEntry {
+                compiled_at: compile_timestamp,
+                meta: SourceFileMeta {
+                    ctime,
+                    digest,
+                    fsize,
+                    mtime,
+                    path: path.into(),
+                },
+                found_time: finder.found_time(),
+                found_date: finder.found_date(),
+                found_timestamp: finder.found_timestamp(),
+            });
+
+            self.lru
+                .lock()
+                .unwrap()
+                .insert(path.to_owned(), entry.clone());
 
             entry
         };
@@ -363,7 +457,7 @@ impl SourceFileDeps {
 
     /// Returns the digest of the first result whose expected included files
     /// are already on disk and have not changed.
-    pub async fn find_dependencies(
+    pub fn find_dependencies(
         &mut self,
         source_file_cache: &SourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
@@ -378,8 +472,7 @@ impl SourceFileDeps {
         // more likely to match.
         for (idx, (obj_key, deps)) in self.iter_mut().rev().enumerate() {
             let (failure, updated) =
-                Self::test_dependencies(source_file_cache, compile_timestamp, &mut deps.sources)
-                    .await;
+                Self::test_dependencies(source_file_cache, compile_timestamp, &mut deps.sources);
 
             if let Some(reason) = updated {
                 needs_update = true;
@@ -425,7 +518,7 @@ impl SourceFileDeps {
     }
 
     /// A result matches if all of its include files exist on disk and have not changed.
-    async fn test_dependencies(
+    fn test_dependencies(
         source_file_cache: &SourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
         dependencies: &mut [SourceFileMeta],
@@ -436,7 +529,7 @@ impl SourceFileDeps {
         for prev in dependencies.iter_mut() {
             let path = Path::new(&prev.path);
 
-            let curr = match source_file_cache.get(path, compile_timestamp).await {
+            let curr = match source_file_cache.get_sync(path, compile_timestamp) {
                 Ok(entry) => entry,
                 Err(err) => {
                     failure = Some(format!("{err:#}"));

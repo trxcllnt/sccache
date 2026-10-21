@@ -24,7 +24,7 @@ use crate::{
     errors::*,
     mock_command::{CommandCreatorSync, ProcessOutput},
     server::SccacheService,
-    util::{Digest, HashToDigest, apply_basedirs_to_args, hash_all},
+    util::{Digest, HashToDigest, apply_basedirs_to_args, fmt_duration_as_secs},
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -622,6 +622,7 @@ where
             cwd,
             env_vars,
             service,
+            runtime,
             ..
         } = *gen_hash_key_args;
 
@@ -635,7 +636,8 @@ where
             // In this mode, the cache key doesn't matter, so return empty string
             None
         } else {
-            HashKeyParams::new(parsed_args)
+            let src_key = HashKeyParams::new(parsed_args)
+                .with_runtime(runtime)
                 // Hash arch, common, dependency, and preprocessor args
                 .with_args(&self.parsed_args.arch_args[..])
                 .with_args(&self.parsed_args.common_args[..])
@@ -647,7 +649,6 @@ where
                 .with_digests(
                     &std::iter::once(executable_digest)
                         .chain(self.extra_hashes.iter())
-                        .chain(hash_all(&parsed_args.extra_hash_files).await?.iter())
                         .map(|s| s.as_str())
                         .chain(
                             compiler
@@ -658,6 +659,7 @@ where
                         .collect::<Vec<_>>(),
                 )
                 .with_input_files(std::slice::from_ref(&self.parsed_args.input_absolute))
+                .with_input_files(&parsed_args.extra_hash_files[..])
                 // Hash the input file path, otherwise:
                 // - a/r.h exists.
                 // - a/x.c has #include "r.h".
@@ -718,7 +720,14 @@ where
                 .with_plusplus(compiler.plusplus())
                 .with_version(DEPS_VERSION)
                 .compute()
-                .await?
+                .await?;
+
+            trace!(
+                "[{out_pretty}]: deps hash key time: {}",
+                fmt_duration_as_secs(&start.elapsed())
+            );
+
+            src_key
         };
 
         let force_recache_dependencies = env_vars.iter().any(|(k, v)| {
@@ -726,65 +735,87 @@ where
                 && matches!(v.to_str().unwrap_or_default(), "true" | "on" | "1")
         });
 
-        let mut source = if !force_recache_dependencies && let Some(src_key) = src_key.as_deref() {
-            tokio::time::timeout(
-                service.cache_read_timeout,
-                SourceFileDeps::get(service.storage.as_ref(), src_key),
-            )
-            .await
-            .map_err(|err| {
-                debug!(
-                    "[{out_pretty}, {src_key}]: Deps cache read timeout {:?}",
-                    start.elapsed()
-                );
-                err.into()
-            })
-            .and_then(|res| {
-                res.inspect_err(|err| {
-                    debug!("[{out_pretty}, {src_key}]: Deps cache lookup error: {err:#}");
+        let mut maybe_source =
+            if !force_recache_dependencies && let Some(src_key) = src_key.as_deref() {
+                tokio::time::timeout(
+                    service.cache_read_timeout,
+                    SourceFileDeps::get(service.storage.as_ref(), src_key),
+                )
+                .await
+                .map_err(|err| {
+                    debug!(
+                        "[{out_pretty}, {src_key}]: Deps cache read timeout {:?}",
+                        start.elapsed()
+                    );
+                    err.into()
                 })
-            })
-            .ok()
-            .and_then(|res| match res {
-                Cache::Miss => None,
-                Cache::Hit(source) => Some(source),
-            })
-        } else {
-            None
-        };
+                .and_then(|res| {
+                    res.inspect_err(|err| {
+                        debug!("[{out_pretty}, {src_key}]: Deps cache lookup error: {err:#}");
+                    })
+                })
+                .ok()
+                .and_then(|res| match res {
+                    Cache::Miss => None,
+                    Cache::Hit(source) => Some(source),
+                })
+            } else {
+                None
+            };
 
-        let obj_key_and_deps = if let Some(source) = source
-            .as_mut()
-            .filter(|_| CacheControl::ForceRecache != cache_control)
+        let obj_key_and_deps = if let Some(mut source) =
+            maybe_source.filter(|_| CacheControl::ForceRecache != cache_control)
         {
             trace!(
                 "[{out_pretty}, {src_key}]: Searching deps cache entry",
                 src_key = source.key
             );
 
-            let (needs_update, obj_key_and_deps) = source
-                .find_dependencies(&SOURCE_FILE_CACHE, compile_timestamp, &out_pretty)
-                .await;
+            let start = Instant::now();
 
-            obj_key_and_deps.map(|(obj_key, dependencies)| (obj_key, dependencies, needs_update))
+            let (source, obj_key_and_deps) = runtime
+                .spawn_blocking({
+                    let out_pretty = out_pretty.clone().into_owned();
+                    move || {
+                        let (needs_update, obj_key_and_deps) = source.find_dependencies(
+                            &SOURCE_FILE_CACHE,
+                            compile_timestamp,
+                            &out_pretty,
+                        );
+                        (
+                            source,
+                            obj_key_and_deps.map(|(obj_key, dependencies)| {
+                                (obj_key, dependencies, needs_update)
+                            }),
+                        )
+                    }
+                })
+                .await?;
+
+            maybe_source = Some(source);
+
+            trace!(
+                "[{out_pretty}]: find deps time: {}",
+                fmt_duration_as_secs(&start.elapsed())
+            );
+
+            obj_key_and_deps
         } else {
+            maybe_source = None;
             None
         };
 
-        let source = if let Some(source) = source {
+        let source = if let Some(source) = maybe_source {
             source
         } else {
             SourceFileDeps::new(
                 src_key.unwrap_or_default(),
                 SOURCE_FILE_CACHE
-                    .get(&parsed_args.input_absolute, compile_timestamp)
-                    .await?
+                    .get_sync(&parsed_args.input_absolute, compile_timestamp)?
                     .meta
                     .clone(),
             )
         };
-
-        elapsed += start.elapsed();
 
         if let Some((obj_key, dependencies, needs_update)) = obj_key_and_deps {
             // Hydrate the depfiles from the dependencies cache entry
@@ -819,6 +850,8 @@ where
             if has_all_required_depfiles
                 && futures::future::try_join_all(depfile_futures).await.is_ok()
             {
+                elapsed += start.elapsed();
+
                 return Ok((
                     ResolvedDependencies {
                         obj_key,
@@ -832,7 +865,7 @@ where
         }
 
         // Discover dependencies and generate depfiles
-        let (dependencies, duration) = compiler
+        let (dependencies, gen_deps_duration) = compiler
             .generate_dependencies(GenerateDependenciesArgs {
                 creator,
                 executable,
@@ -842,15 +875,30 @@ where
             })
             .await?;
 
-        elapsed += duration;
+        trace!(
+            "[{out_pretty}]: compiler generate_dependencies: {}",
+            fmt_duration_as_secs(&gen_deps_duration)
+        );
 
-        let sources = futures::future::try_join_all(dependencies.into_iter().map(|path| async {
-            SOURCE_FILE_CACHE
-                .get(cwd.join(path), compile_timestamp)
-                .await
-                .map(|file| file.meta.clone())
-        }))
-        .await?;
+        let sources = runtime
+            .spawn_blocking(move || {
+                use itertools::Itertools;
+                dependencies
+                    .into_iter()
+                    .filter_map(|path| {
+                        if path.exists() {
+                            Some(
+                                SOURCE_FILE_CACHE
+                                    .get_sync(path, compile_timestamp)
+                                    .map(|file| file.meta.clone()),
+                            )
+                        } else {
+                            None
+                        }
+                    })
+                    .try_collect()
+            })
+            .await??;
 
         let outputs =
             futures::future::try_join_all(parsed_args.outputs.iter().filter_map(|(name, desc)| {
@@ -877,6 +925,8 @@ where
             sources,
             outputs: outputs.into_iter().collect::<BTreeMap<_, _>>(),
         };
+
+        elapsed += start.elapsed();
 
         Ok((
             ResolvedDependencies {
@@ -910,7 +960,7 @@ where
 
         let fut = source.put(storage.as_ref());
 
-        elapsed += if let Some(cache_write_timeout) = cache_write_timeout {
+        let duration = if let Some(cache_write_timeout) = cache_write_timeout {
             match tokio::time::timeout(cache_write_timeout, fut).await {
                 Ok(res) => match res {
                     Ok(duration) => duration,
@@ -940,6 +990,13 @@ where
             }
         };
 
+        trace!(
+            "[{out_pretty}]: put deps time: {}",
+            fmt_duration_as_secs(&duration)
+        );
+
+        elapsed += duration;
+
         Ok(elapsed)
     }
 }
@@ -966,6 +1023,7 @@ where
             env_vars,
             cache_control,
             service,
+            runtime,
             ..
         } = args;
 
@@ -993,6 +1051,11 @@ where
                 })
                 .await?;
 
+            trace!(
+                "[{out_pretty}]: get deps time: {}",
+                fmt_duration_as_secs(&duration)
+            );
+
             elapsed += duration;
 
             dist_files.extend(
@@ -1017,6 +1080,7 @@ where
             let start = Instant::now();
 
             let key = HashKeyParams::new(&self.parsed_args)
+                .with_runtime(runtime)
                 // Hash arch, common, and preprocessor args
                 .with_args(&self.parsed_args.arch_args[..])
                 .with_args(&self.parsed_args.common_args[..])
@@ -1027,7 +1091,6 @@ where
                 .with_digests(
                     &std::iter::once(&self.executable_digest)
                         .chain(self.extra_hashes.iter())
-                        .chain(hash_all(&self.parsed_args.extra_hash_files).await?.iter())
                         .map(|s| s.as_str())
                         .chain(
                             self.compiler
@@ -1037,7 +1100,8 @@ where
                         .chain(["objects cache"])
                         .collect::<Vec<_>>(),
                 )
-                .with_input_files(&dist_files)
+                .with_input_files(&dist_files[..])
+                .with_input_files(&self.parsed_args.extra_hash_files[..])
                 // Hash the absolute input path for CUDA compilations because nvcc's
                 // .module_id is different for files in different directories, even
                 // if their contents and dependencies are identical
@@ -1051,6 +1115,11 @@ where
                 .compute()
                 .await?
                 .unwrap_or_default();
+
+            trace!(
+                "[{out_pretty}]: comp hash key time: {}",
+                fmt_duration_as_secs(&start.elapsed())
+            );
 
             elapsed += start.elapsed();
 
@@ -1894,10 +1963,11 @@ pub struct HashKeyParams<'a> {
     cwd: &'a Path,
     env_vars: &'a [(OsString, OsString)],
     digests: &'a [&'a str],
-    input_files: &'a [PathBuf],
+    input_files: Vec<PathBuf>,
     parsed_args: &'a ParsedArguments,
     hashed_input_path: Option<&'a Path>,
     plusplus: bool,
+    runtime: Option<&'a tokio::runtime::Handle>,
     version: &'a [u8],
 }
 
@@ -1916,10 +1986,11 @@ impl<'a> HashKeyParams<'a> {
             cwd: Path::new(""),
             env_vars: &[],
             digests: &[],
-            input_files: &[],
+            input_files: vec![],
             parsed_args,
             hashed_input_path: None,
             plusplus: false,
+            runtime: None,
             version: &[],
         }
     }
@@ -1956,7 +2027,7 @@ impl<'a> HashKeyParams<'a> {
 
     /// Sets the input file and dependencies to hash.
     pub fn with_input_files(mut self, input_files: &'a [PathBuf]) -> Self {
-        self.input_files = input_files;
+        self.input_files.extend(input_files.iter().cloned());
         self
     }
 
@@ -1969,6 +2040,11 @@ impl<'a> HashKeyParams<'a> {
     /// Sets whether this is a C++ compiler (affects clang/clang++ distinction).
     pub fn with_plusplus(mut self, plusplus: bool) -> Self {
         self.plusplus = plusplus;
+        self
+    }
+
+    pub fn with_runtime(mut self, runtime: &'a tokio::runtime::Handle) -> Self {
+        self.runtime = Some(runtime);
         self
     }
 
@@ -2036,38 +2112,40 @@ impl<'a> HashKeyParams<'a> {
             path.hash(&mut HashToDigest { digest: &mut m });
         }
 
-        // Canonicalize the dependency paths on a background thread
-        let paths = tokio::task::spawn_blocking({
-            let cwd = self.cwd.to_owned();
-            let mut paths = self.input_files.to_vec();
-            move || {
-                for path in paths.iter_mut() {
-                    if let Ok(path2) = dunce::canonicalize(cwd.join(path.as_path())) {
-                        *path = path2;
+        let runtime = if let Some(runtime) = self.runtime {
+            runtime
+        } else {
+            &tokio::runtime::Handle::current()
+        };
+
+        // Canonicalize and hash the dependencies on a background thread
+        let entries = runtime
+            .spawn_blocking({
+                let cwd = self.cwd.to_owned();
+                let input_files = self.input_files;
+                let compile_timestamp = self.compile_timestamp;
+                let out_pretty = self.parsed_args.output_pretty().into_owned();
+                move || {
+                    let mut entries = vec![];
+
+                    for path in input_files {
+                        let path = cwd.join(path.as_path());
+                        let path = dunce::canonicalize(&path).unwrap_or(path);
+                        let entry = SOURCE_FILE_CACHE.get_sync(&path, compile_timestamp)?;
+
+                        if entry.found_time {
+                            // __TIME__ found, disable caching
+                            debug!("[{out_pretty}]: Found __TIME__ in '{}'", path.display());
+                            entries.push(None);
+                        } else {
+                            entries.push(Some(entry.clone()));
+                        }
                     }
+
+                    Ok::<_, anyhow::Error>(entries)
                 }
-                paths
-            }
-        })
-        .await?;
-
-        // Hash the input and dependencies
-        let entries = futures::future::try_join_all(paths.into_iter().map(|path| async move {
-            let entry = SOURCE_FILE_CACHE.get(&path, self.compile_timestamp).await?;
-
-            if entry.found_time {
-                // __TIME__ found, disable caching
-                debug!(
-                    "[{}]: Found __TIME__ in '{}'",
-                    self.parsed_args.output_pretty(),
-                    path.display()
-                );
-                Ok::<_, anyhow::Error>(None)
-            } else {
-                Ok(Some(entry.clone()))
-            }
-        }))
-        .await?;
+            })
+            .await??;
 
         if entries.iter().any(|entry| entry.is_none()) {
             Ok(None)

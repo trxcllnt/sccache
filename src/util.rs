@@ -103,6 +103,19 @@ impl Digest {
             .await
     }
 
+    /// Calculate the BLAKE3 digest of the contents of `path`, while
+    /// also checking for the presence of time macros.
+    /// See [`TimeMacroFinder`] for more details.
+    pub fn from_file_with_time_macros_sync<T>(
+        path: T,
+        compile_timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(Self, TimeMacroFinder)>
+    where
+        T: AsRef<Path>,
+    {
+        Self::new().with_file_and_time_macros_sync(path, compile_timestamp)
+    }
+
     /// Calculate the BLAKE3 digest of the contents read from `reader`, calling
     /// `each` before each time the digest is updated.
     pub async fn from_reader_with_each<R: AsyncRead + Send, F: FnMut(&[u8])>(
@@ -190,6 +203,54 @@ impl Digest {
             debug!("found __TIMESTAMP__ in {path:?}");
             let mtime: chrono::DateTime<chrono::Local> = tokio::fs::symlink_metadata(path)
                 .await
+                .with_context(|| format!("Failed to read file metadata for hashing: {path:?}"))?
+                .modified()
+                .with_context(|| format!("Failed to read file mtime for hashing: {path:?}"))?
+                .into();
+
+            digest.delimiter(b"timestamp");
+            digest.update(&mtime.naive_local().and_utc().timestamp().to_le_bytes());
+        }
+
+        Ok((digest, finder))
+    }
+
+    /// Update the BLAKE3 digest of the contents of `path` into this digest, while
+    /// also checking for the presence of time macros.
+    /// See [`TimeMacroFinder`] for more details.
+    pub fn with_file_and_time_macros_sync<T>(
+        self,
+        path: T,
+        compile_timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(Self, TimeMacroFinder)>
+    where
+        T: AsRef<Path>,
+    {
+        use chrono::Datelike;
+
+        let path = path.as_ref();
+
+        let (mut digest, finder) = self.with_reader_and_time_macros_sync(
+            std::io::BufReader::new(Self::open_file(path)?.into_inner().into_inner()),
+        )?;
+
+        // If __DATE__ or __TIMESTAMP__ found, make sure that the digest changes
+        // if the (potential) expansion of those macros changes by computing a new
+        // digest comprising the file digest and time information that represents the
+        // macro expansions.
+
+        if finder.found_date() {
+            debug!("found __DATE__ in {path:?}");
+            digest.delimiter(b"date");
+            let date = compile_timestamp.date_naive();
+            digest.update(&date.year().to_le_bytes());
+            digest.update(&date.month().to_le_bytes());
+            digest.update(&date.day().to_le_bytes());
+        }
+
+        if finder.found_timestamp() {
+            debug!("found __TIMESTAMP__ in {path:?}");
+            let mtime: chrono::DateTime<chrono::Local> = fs::symlink_metadata(path)
                 .with_context(|| format!("Failed to read file metadata for hashing: {path:?}"))?
                 .modified()
                 .with_context(|| format!("Failed to read file mtime for hashing: {path:?}"))?
