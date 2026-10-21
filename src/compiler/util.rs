@@ -611,12 +611,15 @@ static GCC_PRAGMA_ONCE_FIX_LOCK: std::sync::LazyLock<tokio::sync::Semaphore> =
 
 #[cfg(unix)]
 pub async fn build_gcc_pragma_once_fix<
+    Arg: AsRef<OsStr>,
+    Args: Iterator<Item = Arg> + Clone,
     Exe: AsRef<Path>,
     Key: AsRef<std::ffi::OsStr>,
     Var: AsRef<std::ffi::OsStr>,
     Envs: Iterator<Item = (Key, Var)> + Clone,
 >(
     exe: Exe,
+    args: Args,
     env_vars: Envs,
 ) -> Result<PathBuf> {
     use crate::{
@@ -655,9 +658,13 @@ pub async fn build_gcc_pragma_once_fix<
     if !path.exists() || !path.is_file() || path.metadata()?.len() == 0 {
         let mut cmd = AsyncCommand::new(exe.as_ref(), jobserver::Client::new_num(1));
 
-        cmd.env_clear()
-            .envs(env_vars)
-            .args(&["-x", "c", "-O2", "-shared", "-fPIC"])
+        cmd.env_clear().envs(env_vars);
+
+        for arg in args {
+            cmd.arg(arg);
+        }
+
+        cmd.args(&["-x", "c", "-O2", "-shared", "-fPIC"])
             .arg("-o")
             .arg(&path)
             .arg("-")

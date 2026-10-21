@@ -75,9 +75,13 @@ impl Gcc {
     {
         #[cfg(unix)]
         let pragma_once_fix = Arc::new(
-            crate::compiler::util::build_gcc_pragma_once_fix(executable.as_ref(), env_vars.clone())
-                .await
-                .unwrap_or_else(|_| PathBuf::new()),
+            crate::compiler::util::build_gcc_pragma_once_fix(
+                executable.as_ref(),
+                ([] as [&OsStr; 0]).into_iter(),
+                env_vars.clone(),
+            )
+            .await
+            .unwrap_or_else(|_| PathBuf::new()),
         );
         #[cfg(not(unix))]
         let pragma_once_fix = Arc::new(PathBuf::new());

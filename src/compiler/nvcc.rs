@@ -126,6 +126,11 @@ impl Nvcc {
         let pragma_once_fix = Arc::new(if matches!(host_compiler, NvccHostCompiler::Gcc) {
             crate::compiler::util::build_gcc_pragma_once_fix(
                 executable.as_ref(),
+                [
+                    OsStr::new("-allow-unsupported-compiler"),
+                    OsStr::new("-forward-unknown-to-host-compiler"),
+                ]
+                .into_iter(),
                 env_vars.iter().cloned(),
             )
             .await
