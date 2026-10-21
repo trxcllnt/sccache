@@ -1034,20 +1034,6 @@ where
     pub fn increment_pending_compilations(&self) -> SccacheGaugeIncrement {
         self.pending_compilations.increment()
     }
-
-    fn cpu_usage(&self) -> f32 {
-        if let Ok(mut pair) = self.sysinfo.lock() {
-            if Instant::now().duration_since(pair.0) > sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
-                pair.0 = Instant::now();
-                pair.1
-                    .refresh_cpu_specifics(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
-            }
-
-            pair.1.global_cpu_usage()
-        } else {
-            100.0
-        }
-    }
 }
 
 impl<C> std::fmt::Debug for SccacheService<C>
@@ -1488,24 +1474,21 @@ where
             // boundary and be scheduled after the next outer compile request. But
             // even if a few sometimes do, most won't, which is good enough.
             let _queued = self.increment_queued_compilations();
-            let mut cpu_usage: u64 = 100;
             loop {
                 match self
                     .pending_compilations
                     .increment_if(|pending_compilations| {
-                        pending_compilations
-                            < self.pending_compilations_limit * (100 / cpu_usage.max(1))
+                        pending_compilations < self.pending_compilations_limit
                     }) {
                     Ok(pending) => {
                         break pending;
                     }
                     Err(_) => {
                         // Jitter so not every task retries at the same time
-                        tokio::time::sleep(tokio_retry2::strategy::jitter_range(0.0, 10.0)(
+                        tokio::time::sleep(tokio_retry2::strategy::jitter_range(0.0, 5.0)(
                             Duration::from_secs(1),
                         ))
                         .await;
-                        cpu_usage = self.cpu_usage().ceil() as u64;
                     }
                 }
             }
