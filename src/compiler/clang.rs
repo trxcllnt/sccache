@@ -117,6 +117,7 @@ impl CCompilerImpl for Clang {
             parsed_args,
             cwd,
             env_vars,
+            tolerate_failure,
             ..
         }: GenerateDependenciesArgs<'_, T>,
     ) -> Result<(Vec<PathBuf>, Duration)>
@@ -130,6 +131,7 @@ impl CCompilerImpl for Clang {
             cwd,
             env_vars.iter().cloned(),
             self.kind(),
+            tolerate_failure,
         )
         .await
     }

@@ -21,6 +21,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut, BytesMut};
 use fs_err as fs;
+use memchr::{memchr_iter, memchr2, memchr3, memmem};
 use serde::{Deserialize, Serialize, de, ser::SerializeMap};
 use serde_with::{
     DeserializeFromStr, DisplayFromStr, IfIsHumanReadable, SerializeDisplay, serde_as,
@@ -42,6 +43,7 @@ pub struct SourceFileEntry {
     pub found_time: bool,
     pub found_date: bool,
     pub found_timestamp: bool,
+    pub hidden_includes: HiddenIncludes,
 }
 
 #[derive(Clone, Default, DeserializeFromStr, SerializeDisplay, PartialEq, Eq)]
@@ -192,14 +194,16 @@ impl SourceFileCache {
         let entry = if let Some(entry) = entry {
             entry
         } else {
-            let digest_and_finder = Digest::from_file_with_time_macros(path, compile_timestamp)
+            let digest_and_finder = Digest::from_file_with_macro_finders(path, compile_timestamp)
                 .await
                 .with_context(|| format!("while reading '{}'", path.display()))
                 .inspect_err(|err| trace!("[result_matches]: {err:#}"))
-                .map(|(digest, finder)| (digest.finish(), finder));
+                .map(|(digest, time_finder, hinc_finder)| {
+                    (digest.finish(), time_finder, hinc_finder)
+                });
 
-            let (digest, finder) = match digest_and_finder {
-                Ok((digest, finder)) => (digest, finder),
+            let (digest, time_finder, hinc_finder) = match digest_and_finder {
+                Ok(val) => val,
                 Err(err) => {
                     bail!("Error computing digest: {err:#}");
                 }
@@ -214,9 +218,10 @@ impl SourceFileCache {
                     mtime,
                     path: path.into(),
                 },
-                found_time: finder.found_time(),
-                found_date: finder.found_date(),
-                found_timestamp: finder.found_timestamp(),
+                hidden_includes: hinc_finder.into(),
+                found_time: time_finder.found_time(),
+                found_date: time_finder.found_date(),
+                found_timestamp: time_finder.found_timestamp(),
             });
 
             self.lru
@@ -283,13 +288,15 @@ impl SourceFileCache {
             entry
         } else {
             let digest_and_finder =
-                Digest::from_file_with_time_macros_sync(path, compile_timestamp)
+                Digest::from_file_with_macro_finders_sync(path, compile_timestamp)
                     .with_context(|| format!("while reading '{}'", path.display()))
                     .inspect_err(|err| trace!("[result_matches]: {err:#}"))
-                    .map(|(digest, finder)| (digest.finish(), finder));
+                    .map(|(digest, time_finder, hinc_finder)| {
+                        (digest.finish(), time_finder, hinc_finder)
+                    });
 
-            let (digest, finder) = match digest_and_finder {
-                Ok((digest, finder)) => (digest, finder),
+            let (digest, time_finder, hinc_finder) = match digest_and_finder {
+                Ok(val) => val,
                 Err(err) => {
                     bail!("Error computing digest: {err:#}");
                 }
@@ -304,9 +311,10 @@ impl SourceFileCache {
                     mtime,
                     path: path.into(),
                 },
-                found_time: finder.found_time(),
-                found_date: finder.found_date(),
-                found_timestamp: finder.found_timestamp(),
+                hidden_includes: hinc_finder.into(),
+                found_time: time_finder.found_time(),
+                found_date: time_finder.found_date(),
+                found_timestamp: time_finder.found_timestamp(),
             });
 
             self.lru
@@ -328,15 +336,18 @@ impl SourceFileCache {
 // that `ccache` uses for its "direct mode", though the on-disk format is
 // different.
 
-/// The header is 7 bytes for the magic sccache string + 1 byte for the
+/// The header is 7 bytes for the magic string + 1 byte for the
 /// format version of the [`SourceFileDeps`] struct encoding.
-pub const DEPS_VERSION: &[u8] = b"sccache1";
+pub const DEPS_VERSION: &[u8] = b"rapids_0";
 const MAX_REVISIONS: u64 = 1_000;
 
 #[derive(Clone, Default, Deserialize, Serialize, Debug, PartialEq, Eq)]
 pub struct Dependencies {
     /// The list of included dependencies
     pub sources: Vec<SourceFileMeta>,
+    /// The list of transitive dependencies from `#if __has_includes(...)` and similar.
+    /// These don't affect the object hash, but need to be included in dist job inputs.
+    pub no_hash: Vec<SourceFileMeta>,
     /// Dependency files produced the compiler (if any)
     pub outputs: BTreeMap<String, String>,
 }
@@ -470,9 +481,13 @@ impl SourceFileDeps {
         // dependencies cache entry. Check newest results first since they're
         // more likely to match.
         for (idx, (obj_key, deps)) in self.iter_mut().rev().enumerate() {
-            let (failure, updated) =
-                Self::test_dependencies(source_file_cache, compile_timestamp, &mut deps.sources)
-                    .await;
+            let (failure, updated) = Self::test_dependencies(
+                source_file_cache,
+                compile_timestamp,
+                &mut deps.sources,
+                &deps.no_hash,
+            )
+            .await;
 
             if let Some(reason) = updated {
                 needs_update = true;
@@ -537,6 +552,7 @@ impl SourceFileDeps {
                 source_file_cache,
                 compile_timestamp,
                 &mut deps.sources,
+                &deps.no_hash,
             );
 
             if let Some(reason) = updated {
@@ -587,6 +603,7 @@ impl SourceFileDeps {
         source_file_cache: &SourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
         dependencies: &mut [SourceFileMeta],
+        transitive_deps: &[SourceFileMeta],
     ) -> (Option<String>, Option<String>) {
         let mut failure = None;
         let mut updated = None;
@@ -638,6 +655,16 @@ impl SourceFileDeps {
             }
         }
 
+        if failure.is_none() {
+            for meta in transitive_deps {
+                let path = Path::new(&meta.path);
+                if let Err(err) = tokio::fs::symlink_metadata(path).await {
+                    failure = Some(format!("{err:#}"));
+                    break;
+                }
+            }
+        }
+
         (failure, updated)
     }
 
@@ -646,6 +673,7 @@ impl SourceFileDeps {
         source_file_cache: &SourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
         dependencies: &mut [SourceFileMeta],
+        transitive_deps: &[SourceFileMeta],
     ) -> (Option<String>, Option<String>) {
         let mut failure = None;
         let mut updated = None;
@@ -694,6 +722,16 @@ impl SourceFileDeps {
                 // trace!("[{out_pretty}, {src_key}]: updating entry, __TIMESTAMP__ found in {path:?}");
                 updated = Some(format!("updating entry, __TIMESTAMP__ found in {path:?}"));
                 *prev = curr.clone();
+            }
+        }
+
+        if failure.is_none() {
+            for meta in transitive_deps {
+                let path = Path::new(&meta.path);
+                if let Err(err) = fs::symlink_metadata(path) {
+                    failure = Some(format!("{err:#}"));
+                    break;
+                }
             }
         }
 
@@ -1097,11 +1135,607 @@ int __fxstat64(int ver, int fd, struct stat64 *st)
 }
 "#;
 
+#[derive(Clone, Debug, Default)]
+pub struct HiddenIncludes {
+    /// The operands of `__has_include`.
+    pub includes: Vec<String>,
+    /// The operands of `__has_include_next`.
+    pub next_includes: Vec<String>,
+    /// The operands of `__has_embed`, including any embed parameters.
+    pub embeds: Vec<String>,
+}
+
+impl HiddenIncludes {
+    pub fn is_empty(&self) -> bool {
+        self.includes.is_empty() && self.next_includes.is_empty() && self.embeds.is_empty()
+    }
+
+    pub fn dedupe(mut self) -> Self {
+        use itertools::Itertools;
+        self.includes = self.includes.into_iter().unique().collect();
+        self.next_includes = self.next_includes.into_iter().unique().collect();
+        self.embeds = self.embeds.into_iter().unique().collect();
+        self
+    }
+
+    pub fn to_source_file(&self) -> String {
+        let mut source = String::new();
+        for include in self.includes.iter() {
+            source.push_str(&format!(
+                "#if __has_include({include})\n#include {include}\n#endif\n"
+            ));
+        }
+        for include_next in self.next_includes.iter() {
+            source.push_str(&format!(
+                "#if __has_include_next({include_next})\n#include_next {include_next}\n#endif\n"
+            ));
+        }
+        for embed in self.embeds.iter() {
+            source.push_str(&format!(
+                "#if __has_embed({embed})\n#embed {embed}\n#endif\n"
+            ));
+        }
+        source
+    }
+}
+
+impl<'a> Extend<&'a HiddenIncludes> for HiddenIncludes {
+    fn extend<T: IntoIterator<Item = &'a HiddenIncludes>>(&mut self, iter: T) {
+        for incs in iter {
+            self.includes.extend_from_slice(&incs.includes[..]);
+            self.next_includes
+                .extend_from_slice(&incs.next_includes[..]);
+            self.embeds.extend_from_slice(&incs.embeds[..]);
+        }
+    }
+}
+
+/// The `__has_include` operands. Those of the other operators are in `next_includes` and
+/// `embeds`.
+impl From<HiddenIncludesFinder> for HiddenIncludes {
+    fn from(finder: HiddenIncludesFinder) -> Self {
+        Self {
+            includes: finder.includes,
+            next_includes: finder.next_includes,
+            embeds: finder.embeds,
+        }
+    }
+}
+
+/// Collects the operands of `__has_include(...)`, `__has_include_next(...)`, and
+/// `__has_embed(...)` in C, C++, and CUDA sources.
+///
+/// Only `#if`, `#elif`, and `#define` lines are searched, and comments, literals, and line
+/// splices are handled as the preprocessor handles them. Each operand is collected as written
+/// (minus line splices) from its first token to its last, e.g. `<cuda_fp16.h>`,
+/// `MAKE_HEADER(fp16)`, or `<data.bin> limit(4)`.
+#[derive(Debug, Default)]
+pub struct HiddenIncludesFinder {
+    /// The operands of `__has_include`.
+    pub includes: Vec<String>,
+    /// The operands of `__has_include_next`.
+    pub next_includes: Vec<String>,
+    /// The operands of `__has_embed`, including any embed parameters.
+    pub embeds: Vec<String>,
+    /// A backslash, and any whitespace after it, that splices lines if a newline follows.
+    backslash: bool,
+    backslash_ws: Vec<u8>,
+    lex: Lex,
+    line: Line,
+    expr: Expr,
+    /// The first bytes of the current identifier, and its full length.
+    ident: [u8; 32],
+    ident_len: usize,
+    /// The delimiter of the current raw string literal.
+    raw_delim: [u8; 16],
+    raw_len: usize,
+    /// The operand so far, its length through its last token, and how deeply it's nested in
+    /// parentheses.
+    operand: Vec<u8>,
+    operand_end: usize,
+    depth: u32,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Lex {
+    #[default]
+    Code,
+    Ident,
+    Number,
+    /// A `'` in a number: a digit separator, or the start of a character literal.
+    NumberQuote,
+    /// A `/` that may start a comment.
+    Slash,
+    /// A `%` at the start of a line that may be the `%:` spelling of `#`.
+    Percent,
+    LineComment,
+    BlockComment,
+    BlockCommentStar,
+    Literal {
+        quote: u8,
+        escaped: bool,
+    },
+    RawDelim,
+    /// Inside a raw string, having matched `matched` bytes of its `)delim"` terminator.
+    RawBody {
+        matched: usize,
+    },
+    /// A `<...>` or `"..."` operand, in which comments and escapes don't apply.
+    HeaderName {
+        close: u8,
+    },
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Line {
+    /// Nothing but whitespace and comments so far.
+    #[default]
+    Start,
+    /// After `#`, expecting the directive name.
+    Hash,
+    /// After `#define`, expecting the macro name.
+    DefineName,
+    /// In an `#if`, `#elif`, or `#define`, where the operators may appear.
+    Active,
+    /// In any other line.
+    Inactive,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Expr {
+    #[default]
+    Idle,
+    /// After an operator's name, expecting `(`.
+    Keyword(Operator),
+    /// Inside the operator's parentheses.
+    Operand(Operator),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Operator {
+    Include,
+    IncludeNext,
+    Embed,
+}
+
+impl HiddenIncludesFinder {
+    pub fn is_empty(&self) -> bool {
+        self.includes.is_empty() && self.next_includes.is_empty() && self.embeds.is_empty()
+    }
+
+    /// Scans the next part of the current file, which may be split at any byte. Given a whole
+    /// file, `find_in_file` is faster.
+    pub fn find_has_include(&mut self, haystack: &[u8]) {
+        let mut rest = haystack;
+        while let Some((&c, tail)) = rest.split_first() {
+            self.splice(c);
+            rest = &tail[self.skip(tail)..];
+        }
+    }
+
+    /// Ends the current file, so the next `find_has_include` call starts a new one.
+    pub fn finish_file(&mut self) {
+        *self = Self {
+            includes: std::mem::take(&mut self.includes),
+            next_includes: std::mem::take(&mut self.next_includes),
+            embeds: std::mem::take(&mut self.embeds),
+            ..Self::default()
+        };
+    }
+
+    /// Scans `file` as a whole file, independently of earlier calls. Unlike
+    /// `find_has_include`, this skips a file that can't contain an operator without lexing it.
+    pub fn find_in_file(&mut self, file: &[u8]) {
+        self.finish_file();
+        if might_name_operator(file) {
+            self.find_has_include(file);
+            self.finish_file();
+        }
+    }
+
+    /// Returns how many of the next bytes `lex` would pass over without effect, updating the
+    /// state as if it had. A backslash is never skipped, since it may splice lines.
+    fn skip(&mut self, rest: &[u8]) -> usize {
+        if self.backslash || matches!(self.expr, Expr::Operand(_)) {
+            return 0;
+        }
+        let end = match self.lex {
+            Lex::LineComment => memchr2(b'\n', b'\\', rest),
+            Lex::BlockComment => memchr2(b'*', b'\\', rest),
+            Lex::Literal {
+                quote,
+                escaped: false,
+            } => memchr3(quote, b'\n', b'\\', rest),
+            Lex::RawBody { matched: 0 } => memchr2(b')', b'\\', rest),
+            Lex::Code if self.line == Line::Start => {
+                rest.iter().position(|&b| b != b' ' && b != b'\t')
+            }
+            // An ordinary line matters only where a comment or literal could start, or where
+            // the line ends.
+            Lex::Code | Lex::Ident | Lex::Number if self.line == Line::Inactive => {
+                let n = before_last_word(&rest[..next_significant(rest)]);
+                if n > 0 {
+                    self.lex = Lex::Code;
+                }
+                Some(n)
+            }
+            // So does a line where operators may appear, apart from their names.
+            Lex::Code if self.line == Line::Active && self.expr == Expr::Idle => {
+                let run = &rest[..next_significant(rest)];
+                let end = memmem::find(run, b"__has_").unwrap_or(run.len());
+                Some(before_last_word(&run[..end]))
+            }
+            // The rest of an identifier or number.
+            Lex::Ident => {
+                let n = rest
+                    .iter()
+                    .position(|&b| !is_ident(b))
+                    .unwrap_or(rest.len());
+                let start = self.ident_len.min(self.ident.len());
+                let stored = n.min(self.ident.len() - start);
+                self.ident[start..start + stored].copy_from_slice(&rest[..stored]);
+                self.ident_len += n;
+                Some(n)
+            }
+            Lex::Number => rest.iter().position(|&b| !is_ident(b) && b != b'.'),
+            _ => Some(0),
+        };
+        end.unwrap_or(rest.len())
+    }
+
+    /// Removes line splices (backslash-newline) before lexing.
+    fn splice(&mut self, c: u8) {
+        if self.backslash {
+            match c {
+                b'\n' => {
+                    self.backslash = false;
+                    self.backslash_ws.clear();
+                    return;
+                }
+                // GCC and Clang also splice when whitespace separates the backslash and newline.
+                b' ' | b'\t' | b'\r' | b'\x0b' | b'\x0c' => {
+                    self.backslash_ws.push(c);
+                    return;
+                }
+                _ => {
+                    self.backslash = false;
+                    self.lex(b'\\');
+                    let ws = std::mem::take(&mut self.backslash_ws);
+                    ws.iter().for_each(|&w| self.lex(w));
+                    self.backslash_ws = ws;
+                    self.backslash_ws.clear();
+                }
+            }
+        }
+        if c == b'\\' {
+            self.backslash = true;
+        } else {
+            self.lex(c);
+        }
+    }
+
+    fn lex(&mut self, c: u8) {
+        match self.lex {
+            Lex::Code => self.code(c),
+            Lex::Ident if is_ident(c) => {
+                if let Some(slot) = self.ident.get_mut(self.ident_len) {
+                    *slot = c;
+                }
+                self.ident_len += 1;
+                self.token(c);
+            }
+            Lex::Ident
+                if c == b'"' && matches!(self.ident(), b"R" | b"u8R" | b"uR" | b"UR" | b"LR") =>
+            {
+                if matches!(self.line, Line::Hash | Line::DefineName) {
+                    self.line = Line::Inactive;
+                }
+                self.token(c);
+                self.raw_len = 0;
+                self.lex = Lex::RawDelim;
+            }
+            Lex::Ident => {
+                self.lex = Lex::Code;
+                self.end_ident();
+                self.code(c);
+            }
+            Lex::Number if is_ident(c) || c == b'.' => self.token(c),
+            Lex::Number if c == b'\'' => {
+                self.token(c);
+                self.lex = Lex::NumberQuote;
+            }
+            Lex::Number => {
+                self.lex = Lex::Code;
+                self.code(c);
+            }
+            Lex::NumberQuote if is_ident(c) => {
+                self.token(c);
+                self.lex = Lex::Number;
+            }
+            Lex::NumberQuote => {
+                self.lex = Lex::Literal {
+                    quote: b'\'',
+                    escaped: false,
+                };
+                self.lex(c);
+            }
+            Lex::Slash if c == b'*' || c == b'/' => {
+                self.trivia(b'/');
+                self.trivia(c);
+                self.lex = if c == b'*' {
+                    Lex::BlockComment
+                } else {
+                    Lex::LineComment
+                };
+            }
+            Lex::Slash => {
+                self.lex = Lex::Code;
+                self.start_token(b'/');
+                self.code(c);
+            }
+            Lex::Percent => {
+                self.lex = Lex::Code;
+                if c == b':' {
+                    self.line = Line::Hash;
+                } else {
+                    self.line = Line::Inactive;
+                    self.code(c);
+                }
+            }
+            Lex::LineComment if c == b'\n' => {
+                self.lex = Lex::Code;
+                self.newline();
+            }
+            Lex::LineComment => self.trivia(c),
+            Lex::BlockComment | Lex::BlockCommentStar => {
+                self.trivia(c);
+                self.lex = match (self.lex, c) {
+                    (Lex::BlockCommentStar, b'/') => Lex::Code,
+                    (_, b'*') => Lex::BlockCommentStar,
+                    _ => Lex::BlockComment,
+                };
+            }
+            // Like GCC and Clang, end an unterminated literal at the end of its line.
+            Lex::Literal { .. } | Lex::HeaderName { .. } if c == b'\n' => {
+                self.lex = Lex::Code;
+                self.newline();
+            }
+            Lex::Literal { quote, escaped } => {
+                self.token(c);
+                if escaped || c == b'\\' {
+                    self.lex = Lex::Literal {
+                        quote,
+                        escaped: !escaped,
+                    };
+                } else if c == quote {
+                    self.lex = Lex::Code;
+                }
+            }
+            Lex::HeaderName { close } => {
+                self.operand.push(c);
+                if c == close {
+                    self.operand_end = self.operand.len();
+                    self.lex = Lex::Code;
+                }
+            }
+            Lex::RawDelim if c == b'(' => {
+                self.token(c);
+                self.lex = Lex::RawBody { matched: 0 };
+            }
+            Lex::RawDelim
+                if c.is_ascii_graphic()
+                    && c != b')'
+                    && c != b'\\'
+                    && self.raw_len < self.raw_delim.len() =>
+            {
+                self.token(c);
+                self.raw_delim[self.raw_len] = c;
+                self.raw_len += 1;
+            }
+            // Not a valid raw string delimiter, so lex it as an ordinary string.
+            Lex::RawDelim => {
+                self.lex = Lex::Literal {
+                    quote: b'"',
+                    escaped: false,
+                };
+                self.lex(c);
+            }
+            Lex::RawBody { matched } => {
+                self.token(c);
+                let delim = &self.raw_delim[..self.raw_len];
+                self.lex = if matched == delim.len() + 1 && c == b'"' {
+                    Lex::Code
+                } else if matched > 0 && delim.get(matched - 1) == Some(&c) {
+                    Lex::RawBody {
+                        matched: matched + 1,
+                    }
+                } else {
+                    Lex::RawBody {
+                        matched: usize::from(c == b')'),
+                    }
+                };
+            }
+        }
+    }
+
+    fn code(&mut self, c: u8) {
+        match c {
+            b'\n' => self.newline(),
+            b' ' | b'\t' | b'\r' | b'\x0b' | b'\x0c' => self.trivia(c),
+            b'/' => self.lex = Lex::Slash,
+            _ => self.start_token(c),
+        }
+    }
+
+    fn start_token(&mut self, c: u8) {
+        match self.line {
+            Line::Start if c == b'#' => {
+                self.line = Line::Hash;
+                return;
+            }
+            Line::Start if c == b'%' => {
+                self.lex = Lex::Percent;
+                return;
+            }
+            Line::Start => self.line = Line::Inactive,
+            Line::Hash | Line::DefineName if !is_ident_start(c) => self.line = Line::Inactive,
+            _ => {}
+        }
+        match self.expr {
+            Expr::Idle => {}
+            Expr::Keyword(operator) if c == b'(' => {
+                self.expr = Expr::Operand(operator);
+                self.operand_end = 0;
+                self.depth = 0;
+                return;
+            }
+            Expr::Keyword(_) => self.expr = Expr::Idle,
+            Expr::Operand(operator) => match c {
+                b'<' | b'"' if self.operand.is_empty() => {
+                    self.operand.push(c);
+                    let close = if c == b'<' { b'>' } else { b'"' };
+                    self.lex = Lex::HeaderName { close };
+                    return;
+                }
+                b'(' => self.depth += 1,
+                b')' if self.depth == 0 => {
+                    self.finish_operand(operator);
+                    return;
+                }
+                b')' => self.depth -= 1,
+                _ => {}
+            },
+        }
+        self.token(c);
+        match c {
+            b'"' | b'\'' => {
+                self.lex = Lex::Literal {
+                    quote: c,
+                    escaped: false,
+                }
+            }
+            b'0'..=b'9' => self.lex = Lex::Number,
+            _ if is_ident_start(c) => {
+                self.ident[0] = c;
+                self.ident_len = 1;
+                self.lex = Lex::Ident;
+            }
+            _ => {}
+        }
+    }
+
+    fn end_ident(&mut self) {
+        match self.line {
+            Line::Hash => {
+                self.line = match self.ident() {
+                    b"if" | b"elif" => Line::Active,
+                    b"define" => Line::DefineName,
+                    _ => Line::Inactive,
+                }
+            }
+            // The name being defined isn't a use, even when it is `__has_include` itself.
+            Line::DefineName => self.line = Line::Active,
+            Line::Active if self.expr == Expr::Idle => {
+                self.expr = match self.ident() {
+                    b"__has_include" => Expr::Keyword(Operator::Include),
+                    b"__has_include_next" => Expr::Keyword(Operator::IncludeNext),
+                    b"__has_embed" => Expr::Keyword(Operator::Embed),
+                    _ => Expr::Idle,
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The current identifier, or nothing if it's too long to be a name we look for.
+    fn ident(&self) -> &[u8] {
+        self.ident.get(..self.ident_len).unwrap_or_default()
+    }
+
+    /// Records a byte of a token, which extends the operand being collected.
+    fn token(&mut self, c: u8) {
+        if matches!(self.expr, Expr::Operand(_)) {
+            self.operand.push(c);
+            self.operand_end = self.operand.len();
+        }
+    }
+
+    /// Records a byte of whitespace or comment, which the operand keeps only between tokens.
+    fn trivia(&mut self, c: u8) {
+        if matches!(self.expr, Expr::Operand(_)) && !self.operand.is_empty() {
+            self.operand.push(c);
+        }
+    }
+
+    /// Ends the line, and with it any directive and unfinished operand.
+    fn newline(&mut self) {
+        self.line = Line::Start;
+        self.expr = Expr::Idle;
+        self.operand.clear();
+    }
+
+    fn finish_operand(&mut self, operator: Operator) {
+        self.operand.truncate(self.operand_end);
+        if !self.operand.is_empty() {
+            let operand = String::from_utf8_lossy(&self.operand).into_owned();
+            match operator {
+                Operator::Include => self.includes.push(operand),
+                Operator::IncludeNext => self.next_includes.push(operand),
+                Operator::Embed => self.embeds.push(operand),
+            }
+        }
+        self.operand.clear();
+        self.expr = Expr::Idle;
+    }
+}
+
+/// Whether `src` might contain an operator. It can't if `__has_` doesn't appear and no line
+/// splice follows an identifier character, since such a splice could split an operator's name.
+fn might_name_operator(src: &[u8]) -> bool {
+    memmem::find(src, b"__has_").is_some()
+        || memchr_iter(b'\\', src).any(|i| {
+            i > 0 && is_ident(src[i - 1]) && {
+                let after = &src[i + 1..];
+                let space = after
+                    .iter()
+                    .take_while(|&&b| matches!(b, b' ' | b'\t' | b'\r' | b'\x0b' | b'\x0c'))
+                    .count();
+                after.get(space) == Some(&b'\n')
+            }
+        })
+}
+
+/// The position of the first byte in `rest` that might start a comment or literal, splice
+/// lines, or end the line.
+fn next_significant(rest: &[u8]) -> usize {
+    let end = memchr3(b'\n', b'/', b'"', rest).unwrap_or(rest.len());
+    memchr2(b'\'', b'\\', &rest[..end]).unwrap_or(end)
+}
+
+/// The length of `run` before the identifier or number at its end, if any. That is left to
+/// `lex`, since it may be a raw string prefix or a number with digit separators.
+fn before_last_word(run: &[u8]) -> usize {
+    run.iter()
+        .rposition(|&b| !is_ident(b) && b != b'.')
+        .map_or(0, |last| last + 1)
+}
+
+fn is_ident_start(c: u8) -> bool {
+    c.is_ascii_alphabetic() || c == b'_' || c == b'$' || c >= 0x80
+}
+
+fn is_ident(c: u8) -> bool {
+    is_ident_start(c) || c.is_ascii_digit()
+}
+
 #[cfg(test)]
 mod test {
 
     use super::*;
     use crate::test::utils::*;
+    use std::sync::{Arc, mpsc};
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn test_serialize_deserialize() -> Result<()> {
@@ -1131,6 +1765,686 @@ mod test {
 
         Ok(())
     }
+
+    /// A finder's `includes`, `next_includes`, and `embeds`.
+    type Found = (Vec<String>, Vec<String>, Vec<String>);
+
+    /// Runs `scan` on a new finder in another thread, failing rather than hanging if it never
+    /// returns.
+    fn found(scan: impl FnOnce(&mut HiddenIncludesFinder) + Send + 'static) -> Found {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut finder = HiddenIncludesFinder::default();
+            scan(&mut finder);
+            tx.send((finder.includes, finder.next_includes, finder.embeds))
+                .unwrap();
+        });
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the finder hung or panicked")
+    }
+
+    /// Scans `src` fed in chunks that end at each of `cuts`.
+    fn find(src: &Arc<[u8]>, cuts: &[usize]) -> Found {
+        let (src, cuts) = (Arc::clone(src), cuts.to_vec());
+        found(move |finder| {
+            let mut start = 0;
+            for end in cuts.into_iter().chain([src.len()]) {
+                finder.find_has_include(&src[start..end]);
+                start = end;
+            }
+        })
+    }
+
+    /// Asserts that `src` yields exactly `includes`, and nothing for the other operators.
+    fn assert_finds(src: &[u8], includes: &[&str]) {
+        assert_finds_each(src, includes, &[], &[]);
+    }
+
+    /// Asserts that `src` yields exactly the given operands of each operator when scanned
+    /// whole (by `find_has_include` and by `find_in_file`), one byte at a time, and split in
+    /// two at every offset (about a thousand evenly spaced ones, if it's long).
+    fn assert_finds_each(src: &[u8], includes: &[&str], next_includes: &[&str], embeds: &[&str]) {
+        let set = |operands: &[&str]| operands.iter().map(|&s| s.into()).collect();
+        let expected: Found = (set(includes), set(next_includes), set(embeds));
+        let src: Arc<[u8]> = src.into();
+        let text = String::from_utf8_lossy(&src);
+        assert_eq!(find(&src, &[]), expected, "whole input: {text:?}");
+        let file = Arc::clone(&src);
+        assert_eq!(
+            found(move |finder| finder.find_in_file(&file)),
+            expected,
+            "find_in_file: {text:?}"
+        );
+        let every_byte: Vec<usize> = (1..src.len()).collect();
+        assert_eq!(
+            find(&src, &every_byte),
+            expected,
+            "one byte at a time: {text:?}"
+        );
+        for cut in (1..src.len()).step_by(src.len().div_ceil(1000).max(1)) {
+            assert_eq!(
+                find(&src, &[cut]),
+                expected,
+                "split at byte {cut}: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_has_includes() {
+        assert_finds(
+            TEST_SOURCE.as_bytes(),
+            &[
+                r#"<hello_kitty_1.h>"#,
+                r#"<hello_kitty_2.h>"#,
+                r#"<hello_kitty_3.h>"#,
+                r#""hello_kitty_4.h""#,
+                r#"_HELLO_KITTY(5, _HELLO_KITTY(10))"#,
+                r#"<cuda_fp16.h>"#,
+                r#"<cuda_bf16.h>"#,
+                r#"<cuda_fp8.h>"#,
+                r#"<cuda_fp6.h>"#,
+                r#"<cuda_fp4.h>"#,
+            ],
+        );
+    }
+
+    #[test]
+    fn test_macro_operands() {
+        // The code after some operands has parentheses that must not be matched with theirs.
+        assert_finds(
+            b"#if __has_include(HDR)\n#endif\nint f(int x) { return (x); }\n",
+            &["HDR"],
+        );
+        assert_finds(b"#if __has_include(HDR)\n#endif\n", &["HDR"]);
+        assert_finds(b"#define HAS_A __has_include(HDR)", &["HDR"]);
+        assert_finds(
+            b"#if __has_include(MK(a))\n#endif\nint f(int x) { return (x); }\n",
+            &["MK(a)"],
+        );
+        assert_finds(b"#if __has_include(MK2(a, b))\n#endif\n", &["MK2(a, b)"]);
+        assert_finds(
+            b"#if __has_include(M(N(a), O(b)))\n#endif\n",
+            &["M(N(a), O(b))"],
+        );
+        assert_finds(
+            b"#if __has_include(I(I(MK(a))))\n#endif\n",
+            &["I(I(MK(a)))"],
+        );
+        assert_finds(
+            b"#if __has_include(HDR) && __has_include(<b.h>)\n#endif\n",
+            &["HDR", "<b.h>"],
+        );
+        // Parentheses inside literals and comments don't count.
+        assert_finds(
+            b"#if __has_include(ANY(\")\", ')', /* ) */ a))\n#endif\n",
+            &["ANY(\")\", ')', /* ) */ a)"],
+        );
+        // A wrapper macro's own operand is its parameter.
+        assert_finds(
+            b"#ifdef __has_include\n#  define HAS_INC(x) __has_include(x)\n#else\n#  define HAS_INC(x) 0\n#endif\n#if HAS_INC(<a.h>)\n#endif\n",
+            &["x"],
+        );
+    }
+
+    #[test]
+    fn test_whitespace() {
+        assert_finds(b"#if __has_include\t(<a.h>)\n#endif\n", &["<a.h>"]);
+        assert_finds(
+            b"#if __has_include(\t<a.h>\t)\n#endif\nint f(int x) { return (x); }\n",
+            &["<a.h>"],
+        );
+        assert_finds(b"#if __has_include\x0b(\x0c<a.h>)\n#endif\n", &["<a.h>"]);
+        assert_finds(b"#if __has_include \\\r\n(<a.h>)\r\n#endif\r\n", &["<a.h>"]);
+        // GCC and Clang allow whitespace between a line continuation and its newline.
+        assert_finds(b"#if __has_include \\ \t\n(<a.h>)\n#endif\n", &["<a.h>"]);
+    }
+
+    #[test]
+    fn test_comments() {
+        assert_finds(
+            b"#if __has_include(/*/ c */ <a.h>)\n#endif\nint f(int x) { return (x); }\n",
+            &["<a.h>"],
+        );
+        assert_finds(
+            b"#if __has_include(/** c **/<a.h> /* c */)\n#endif\n",
+            &["<a.h>"],
+        );
+        assert_finds(
+            b"#if __has_include /* c\n c */ (<a.h>)\n#endif\n",
+            &["<a.h>"],
+        );
+        assert_finds(
+            b"/* c\n c */ # /* c */ if __has_include(<a.h>)\n#endif\n",
+            &["<a.h>"],
+        );
+    }
+
+    #[test]
+    fn test_line_splices() {
+        assert_finds(b"#if __has_\\\ninclude(<a.h>)\n#endif\n", &["<a.h>"]);
+        assert_finds(b"#\\\nif __has_include(<a.h>)\n#endif\n", &["<a.h>"]);
+        // Collected as the name the compiler searches for.
+        assert_finds(b"#if __has_include(<a\\\n.h>)\n#endif\n", &["<a.h>"]);
+        assert_finds(
+            b"#if __has_include(MK2(a,\\\n b))\n#endif\n",
+            &["MK2(a, b)"],
+        );
+        // A splice continues a line comment.
+        assert_finds(b"// c \\\n#define HAS_A __has_include(<a.h>)\n", &[]);
+    }
+
+    #[test]
+    fn test_header_names() {
+        assert_finds(
+            b"#if __has_include(<a.h>) && __has_include(\"b.h\")\n#elif __has_include(<c.h>)\n#endif\n",
+            &["<a.h>", "\"b.h\"", "<c.h>"],
+        );
+        assert_finds(
+            b"#if !(__has_include(<a.h>) || defined(X))\n#endif\n#if(__has_include(<b.h>))\n#endif\n",
+            &["<a.h>", "<b.h>"],
+        );
+        assert_finds(b"#define HAS_A __has_include(<a.h>)", &["<a.h>"]);
+        assert_finds(b"#if __has_include(<SUB/a.h>)\n#endif\n", &["<SUB/a.h>"]);
+        assert_finds(b"%:if __has_include(<a.h>)\n%:endif\n", &["<a.h>"]);
+        // Delimiter, comment, and escape characters are literal in header names.
+        assert_finds(
+            b"#if __has_include(\"a)b>c.h\") || __has_include(<a)b.h>)\n#endif\n",
+            &["\"a)b>c.h\"", "<a)b.h>"],
+        );
+        assert_finds(
+            b"#if __has_include(<a//b.h>) || __has_include(\"a/*b.h\") || __has_include(\"dir\\file.h\")\n#endif\n",
+            &["<a//b.h>", "\"a/*b.h\"", "\"dir\\file.h\""],
+        );
+        // Bytes that aren't UTF-8 are replaced rather than causing a panic.
+        assert_finds(
+            b"#if __has_include(<caf\xe9.h>)\n#endif\n",
+            &["<caf\u{FFFD}.h>"],
+        );
+    }
+
+    #[test]
+    fn test_literals() {
+        // An unmatched quote ends with its line.
+        assert_finds(
+            b"#if 0\ndon't\n#endif\n#if __has_include(<a.h>)\n#endif\n",
+            &["<a.h>"],
+        );
+        // Digit separators aren't character literals.
+        assert_finds(b"#if 1'000 && __has_include(<a.h>)\n#endif\n", &["<a.h>"]);
+        // A raw string may span lines and contain comment markers.
+        assert_finds(
+            b"auto s = R\"(\n/*\n)\";\n#if __has_include(<a.h>)\n#endif\n// */\n",
+            &["<a.h>"],
+        );
+    }
+
+    #[test]
+    fn test_ignores_other_mentions() {
+        assert_finds(
+            b"#ifdef __has_include\n#endif\n#if defined(__has_include) || defined __has_include\n#endif\n",
+            &[],
+        );
+        assert_finds(
+            b"// __has_include(<a.h>)\n/* __has_include(<b.h>) */\n",
+            &[],
+        );
+        assert_finds(
+            b"auto s = \"__has_include(<a.h>)\";\nauto k = R\"(\n#if __has_include(<b.h>)\n#endif\n)\";\n",
+            &[],
+        );
+        assert_finds(
+            b"#if 0\nUse __has_include(<a.h>) here.\n#error __has_include(<b.h>) is required\n#endif\n",
+            &[],
+        );
+        assert_finds(
+            b"#define my__has_include(x) 0\n#if my__has_include(<a.h>)\n#endif\n",
+            &[],
+        );
+        // The pre-C++17 fallback defines the name rather than using it.
+        assert_finds(
+            b"#ifndef __has_include\n#  define __has_include(x) 0\n#endif\nint f(int x) { return (x); }\n",
+            &[],
+        );
+        // Directives end at a newline.
+        assert_finds(
+            b"void f() {\n#ifdef __has_include\n  (void)0;\n#endif\n}\n",
+            &[],
+        );
+        assert_finds(
+            b"void f() {\n#if __has_include(<a.h>)\n  (void)\"x\";\n#endif\n}\n",
+            &["<a.h>"],
+        );
+    }
+
+    #[test]
+    fn test_has_include_next() {
+        assert_finds_each(
+            b"#if __has_include_next(<a.h>) || __has_include_next(\"b.h\")\n#endif\n",
+            &[],
+            &["<a.h>", "\"b.h\""],
+            &[],
+        );
+        assert_finds_each(
+            b"#if __has_include_next(MK(a))\n#endif\nint f(int x) { return (x); }\n",
+            &[],
+            &["MK(a)"],
+            &[],
+        );
+        // Each operator collects into its own set.
+        assert_finds_each(
+            b"#if __has_include(<a.h>) && __has_include_next(<a.h>)\n#endif\n",
+            &["<a.h>"],
+            &["<a.h>"],
+            &[],
+        );
+        assert_finds_each(
+            b"#if __has_include_\\\nnext(<a.h>)\n#endif\n",
+            &[],
+            &["<a.h>"],
+            &[],
+        );
+        assert_finds(
+            b"#ifdef __has_include_next\n#endif\n#if defined(__has_include_next)\n#endif\n",
+            &[],
+        );
+        assert_finds(
+            b"#ifndef __has_include_next\n#  define __has_include_next(x) 0\n#endif\nint f(int x) { return (x); }\n",
+            &[],
+        );
+        assert_finds(
+            b"#define my__has_include_next(x) 0\n#if my__has_include_next(<a.h>)\n#endif\n",
+            &[],
+        );
+    }
+
+    #[test]
+    fn test_has_embed() {
+        assert_finds_each(
+            b"#if __has_embed(<data.bin>) || __has_embed(\"data.txt\")\n#endif\n",
+            &[],
+            &[],
+            &["<data.bin>", "\"data.txt\""],
+        );
+        // Embed parameters are part of the operand.
+        assert_finds_each(
+            b"#if __has_embed(<data.bin> limit(1) prefix(0xFF, ) if_empty(0)) == __STDC_EMBED_FOUND__\n#endif\n",
+            &[],
+            &[],
+            &["<data.bin> limit(1) prefix(0xFF, ) if_empty(0)"],
+        );
+        assert_finds_each(
+            b"#if __has_embed(\"data.txt\" clang::offset(2)) || __has_embed(<data.bin>limit(1))\n#endif\n",
+            &[],
+            &[],
+            &["\"data.txt\" clang::offset(2)", "<data.bin>limit(1)"],
+        );
+        assert_finds_each(
+            b"#if __has_embed( /* c */ <data.bin>\\\n limit(1) /* c */ )\n#endif\n",
+            &[],
+            &[],
+            &["<data.bin> limit(1)"],
+        );
+        assert_finds_each(
+            b"#if __has_embed(RES limit(1)) || __has_embed(MK(data) limit(1)) || __has_embed(MK (data))\n#endif\nint f(int x) { return (x); }\n",
+            &[],
+            &[],
+            &["RES limit(1)", "MK(data) limit(1)", "MK (data)"],
+        );
+        assert_finds_each(
+            b"#if __has_include(<a.h>) && __has_embed(<a.h>)\n#endif\n",
+            &["<a.h>"],
+            &[],
+            &["<a.h>"],
+        );
+        assert_finds(
+            b"#ifdef __has_embed\n#endif\n#if defined(__has_embed)\n#endif\n",
+            &[],
+        );
+    }
+
+    #[test]
+    fn test_is_empty() {
+        let mut finder = HiddenIncludesFinder::default();
+        assert!(finder.is_empty());
+        finder.find_has_include(b"#if __has_embed(<data.bin>)\n#endif\n");
+        assert!(!finder.is_empty());
+    }
+
+    #[test]
+    fn test_finish_file() {
+        let mut finder = HiddenIncludesFinder::default();
+        finder.find_has_include(
+            b"#if __has_include_next(<a.h>) || __has_embed(<b.bin>)\n#endif\n#define A 1 // no newline at end of file",
+        );
+        finder.finish_file();
+        finder.find_has_include(b"#if __has_include(<c.h>)\n#endif\n");
+        assert!(
+            finder.next_includes.contains(&("<a.h>".into()))
+                && finder.embeds.contains(&("<b.bin>".into()))
+        );
+        assert_eq!(finder.includes, ["<c.h>"]);
+    }
+
+    #[test]
+    fn test_find_in_file() {
+        // `__has_` never appears whole in these, so `find_in_file` only lexes them because
+        // a splice follows an identifier character.
+        assert_finds(b"#if __ha\\\ns_include(<a.h>)\n#endif\n", &["<a.h>"]);
+        assert_finds(b"#if _\\\n_has_include(<a.h>)\n#endif\n", &["<a.h>"]);
+        assert_finds(b"#if __has\\ \t\n_include(<a.h>)\n#endif\n", &["<a.h>"]);
+        assert_finds(b"#if __\\\n\\\nhas_include(<a.h>)\n#endif\n", &["<a.h>"]);
+        assert_finds_each(
+            b"#if __h\\\nas_include_next(<a.h>)\n#endif\n",
+            &[],
+            &["<a.h>"],
+            &[],
+        );
+        assert_finds_each(
+            b"#if __has\\\r\n_embed(<a.h> limit(1))\n#endif\n",
+            &[],
+            &[],
+            &["<a.h> limit(1)"],
+        );
+        // Files with neither aren't lexed.
+        assert!(!might_name_operator(
+            b"#define F(x) (x) \\\n  + 1\nconst char* s = \"a\\n\";\n"
+        ));
+        // Each file starts fresh, whatever came before it.
+        let mut finder = HiddenIncludesFinder::default();
+        finder.find_has_include(b"/* unterminated");
+        finder.find_in_file(b"#if __has_include(<a.h>)\n#endif\n");
+        assert_eq!(finder.includes, ["<a.h>"]);
+    }
+
+    const TEST_SOURCE: &str = r#"
+// Weird edge cases with comments, spaces, and newlines
+#if __has_include(\
+/*
+  hello kitty
+*/ \
+<hello_kitty_1.h>)
+hello kitty 1
+#endif
+
+#if __has_include (\
+/*
+  hello kitty
+*/ \
+<hello_kitty_2.h>)
+hello kitty 2
+#endif
+
+#if __has_include \
+(/* hello kitty */ \
+\
+<hello_kitty_3.h>)
+hello kitty 3
+#endif
+
+#if _FOO && __has_include /* hello kitty */ \
+( \
+\
+"hello_kitty_4.h")
+hello kitty 4
+#endif
+
+#if _FOO && __has_include(_HELLO_KITTY(5, _HELLO_KITTY(10)))
+hello kitty 5
+#endif
+
+
+// https://github.com/NVIDIA/cccl/blob/63707502c15f13a0196a9ad2a467e6c7b6d3c746/thrust/thrust/detail/config/host_system.h
+// Internal config header that is only included through thrust/detail/config/config.h
+
+#if defined(_CCCL_IMPLICIT_SYSTEM_HEADER_GCC)
+#  pragma GCC system_header
+#elif defined(_CCCL_IMPLICIT_SYSTEM_HEADER_CLANG)
+#  pragma clang system_header
+#elif defined(_CCCL_IMPLICIT_SYSTEM_HEADER_MSVC)
+#  pragma system_header
+#endif // no system header
+
+// reserve 0 for undefined
+#define THRUST_HOST_SYSTEM_CPP 1
+#define THRUST_HOST_SYSTEM_OMP 2
+#define THRUST_HOST_SYSTEM_TBB 3
+
+#ifndef THRUST_HOST_SYSTEM
+#  define THRUST_HOST_SYSTEM THRUST_HOST_SYSTEM_CPP
+#endif // THRUST_HOST_SYSTEM
+
+#if THRUST_HOST_SYSTEM == THRUST_HOST_SYSTEM_CPP
+#  define __THRUST_HOST_SYSTEM_NAMESPACE cpp
+#elif THRUST_HOST_SYSTEM == THRUST_HOST_SYSTEM_OMP
+#  define __THRUST_HOST_SYSTEM_NAMESPACE omp
+#elif THRUST_HOST_SYSTEM == THRUST_HOST_SYSTEM_TBB
+#  define __THRUST_HOST_SYSTEM_NAMESPACE tbb
+#endif
+
+// clang-format off
+#define __THRUST_HOST_SYSTEM_ROOT thrust/system/__THRUST_HOST_SYSTEM_NAMESPACE
+#define __THRUST_HOST_SYSTEM_ALGORITH_HEADER_INCLUDE(filename) <__THRUST_HOST_SYSTEM_ROOT/filename>
+#define __THRUST_HOST_SYSTEM_ALGORITH_DETAIL_HEADER_INCLUDE(filename) <__THRUST_HOST_SYSTEM_ROOT/detail/filename>
+// clang-format on
+
+// https://github.com/NVIDIA/cccl/blob/63707502c15f13a0196a9ad2a467e6c7b6d3c746/thrust/thrust/detail/config/device_system.h
+// Internal config header that is only included through thrust/detail/config/config.h
+
+#if defined(_CCCL_IMPLICIT_SYSTEM_HEADER_GCC)
+#  pragma GCC system_header
+#elif defined(_CCCL_IMPLICIT_SYSTEM_HEADER_CLANG)
+#  pragma clang system_header
+#elif defined(_CCCL_IMPLICIT_SYSTEM_HEADER_MSVC)
+#  pragma system_header
+#endif // no system header
+
+// reserve 0 for undefined
+#define THRUST_DEVICE_SYSTEM_CUDA 1
+#define THRUST_DEVICE_SYSTEM_OMP  2
+#define THRUST_DEVICE_SYSTEM_TBB  3
+#define THRUST_DEVICE_SYSTEM_CPP  4
+
+#ifndef THRUST_DEVICE_SYSTEM
+#  define THRUST_DEVICE_SYSTEM THRUST_DEVICE_SYSTEM_CUDA
+#endif // THRUST_DEVICE_SYSTEM
+
+#ifdef THRUST_DEVICE_BACKEND
+#  error THRUST_DEVICE_BACKEND is no longer supported; use THRUST_DEVICE_SYSTEM instead.
+#endif // THRUST_DEVICE_BACKEND
+
+#if THRUST_DEVICE_SYSTEM == THRUST_DEVICE_SYSTEM_CUDA
+#  define __THRUST_DEVICE_SYSTEM_NAMESPACE cuda
+#elif THRUST_DEVICE_SYSTEM == THRUST_DEVICE_SYSTEM_OMP
+#  define __THRUST_DEVICE_SYSTEM_NAMESPACE omp
+#elif THRUST_DEVICE_SYSTEM == THRUST_DEVICE_SYSTEM_TBB
+#  define __THRUST_DEVICE_SYSTEM_NAMESPACE tbb
+#elif THRUST_DEVICE_SYSTEM == THRUST_DEVICE_SYSTEM_CPP
+#  define __THRUST_DEVICE_SYSTEM_NAMESPACE cpp
+#endif
+
+// clang-format off
+#define __THRUST_DEVICE_SYSTEM_ROOT thrust/system/__THRUST_DEVICE_SYSTEM_NAMESPACE
+#define __THRUST_DEVICE_SYSTEM_ALGORITH_HEADER_INCLUDE(filename) <__THRUST_DEVICE_SYSTEM_ROOT/filename>
+#define __THRUST_DEVICE_SYSTEM_ALGORITH_DETAIL_HEADER_INCLUDE(filename) <__THRUST_DEVICE_SYSTEM_ROOT/detail/filename>
+// clang-format on
+
+
+// Include all active backend system implementations (generic, sequential, host and device)
+#include <thrust/system/detail/generic/per_device_resource.h>
+#include <thrust/system/detail/sequential/per_device_resource.h>
+#include __THRUST_HOST_SYSTEM_ALGORITH_DETAIL_HEADER_INCLUDE(per_device_resource.h)
+#include __THRUST_DEVICE_SYSTEM_ALGORITH_DETAIL_HEADER_INCLUDE(per_device_resource.h)
+
+// https://github.com/NVIDIA/cccl/blob/6ad0be74a142127e0cf8a90f54210325b26538ee/libcudacxx/include/cuda/std/__cccl/extended_data_types.h
+//===----------------------------------------------------------------------===//
+//
+// Part of libcu++, the C++ Standard Library for your entire system,
+// under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef __CCCL_EXTENDED_DATA_TYPES_H
+#define __CCCL_EXTENDED_DATA_TYPES_H
+
+#include <cuda/std/__cccl/compiler.h>
+#include <cuda/std/__cccl/system_header.h>
+
+#if defined(_CCCL_IMPLICIT_SYSTEM_HEADER_GCC)
+#  pragma GCC system_header
+#elif defined(_CCCL_IMPLICIT_SYSTEM_HEADER_CLANG)
+#  pragma clang system_header
+#elif defined(_CCCL_IMPLICIT_SYSTEM_HEADER_MSVC)
+#  pragma system_header
+#endif // no system header
+
+#include <cuda/std/__cccl/cuda_capabilities.h>
+#include <cuda/std/__cccl/cuda_toolkit.h>
+#include <cuda/std/__cccl/diagnostic.h>
+#include <cuda/std/__cccl/host_arch.h>
+#include <cuda/std/__cccl/os.h>
+#include <cuda/std/__cccl/preprocessor.h>
+
+#define _CCCL_HAS_INT128()   0
+#define _CCCL_HAS_NVFP4()    0
+#define _CCCL_HAS_NVFP6()    0
+#define _CCCL_HAS_NVFP8()    0
+#define _CCCL_HAS_NVFP16()   0
+#define _CCCL_HAS_NVBF16()   0
+#define _CCCL_HAS_FLOAT64()  0
+#define _CCCL_HAS_FLOAT128() 0
+
+#if _CCCL_TILE_COMPILATION() // TODO(miscco): Fix access to extended floating point types
+#  define CCCL_DISABLE_NVFP4_SUPPORT
+#  define CCCL_DISABLE_NVFP6_SUPPORT
+#  define CCCL_DISABLE_NVFP8_SUPPORT
+#  define CCCL_DISABLE_INT128_SUPPORT
+#  define CCCL_DISABLE_FLOAT128_SUPPORT
+#endif // _CCCL_TILE_COMPILATION()
+
+#if !defined(CCCL_DISABLE_INT128_SUPPORT) && _CCCL_OS(LINUX) \
+  && ((_CCCL_COMPILER(NVRTC) && defined(__CUDACC_RTC_INT128__)) || defined(__SIZEOF_INT128__))
+#  undef _CCCL_HAS_INT128
+#  define _CCCL_HAS_INT128() 1
+#endif
+
+#if __has_include(<cuda_fp16.h>) && (_CCCL_HAS_CTK() || defined(LIBCUDACXX_ENABLE_HOST_NVFP16)) \
+                      && !defined(CCCL_DISABLE_FP16_SUPPORT)
+#  undef _CCCL_HAS_NVFP16
+#  define _CCCL_HAS_NVFP16() 1
+struct __half;
+struct __half2;
+#endif
+
+#if __has_include(<cuda_bf16.h>) && _CCCL_HAS_NVFP16() && !defined(CCCL_DISABLE_BF16_SUPPORT)
+#  undef _CCCL_HAS_NVBF16
+#  define _CCCL_HAS_NVBF16() 1
+struct __nv_bfloat16;
+struct __nv_bfloat162;
+#endif
+
+#if __has_include(<cuda_fp8.h>) && _CCCL_HAS_NVFP16() && _CCCL_HAS_NVBF16() && !defined(CCCL_DISABLE_NVFP8_SUPPORT)
+#  undef _CCCL_HAS_NVFP8
+#  define _CCCL_HAS_NVFP8() 1
+struct __nv_fp8_e5m2;
+struct __nv_fp8x2_e5m2;
+struct __nv_fp8x4_e5m2;
+
+struct __nv_fp8_e4m3;
+struct __nv_fp8x2_e4m3;
+struct __nv_fp8x4_e4m3;
+
+#  if _CCCL_CTK_AT_LEAST(12, 8)
+struct __nv_fp8_e8m0;
+struct __nv_fp8x2_e8m0;
+struct __nv_fp8x4_e8m0;
+#  endif // _CCCL_CTK_AT_LEAST(12, 8)
+#endif
+
+#if __has_include(<cuda_fp6.h>) && _CCCL_HAS_NVFP8() && !_CCCL_CUDA_COMPILER(NVHPC) \
+                      && !defined(CCCL_DISABLE_NVFP6_SUPPORT)
+#  undef _CCCL_HAS_NVFP6
+#  define _CCCL_HAS_NVFP6() 1
+struct __nv_fp6_e3m2;
+struct __nv_fp6x2_e3m2;
+struct __nv_fp6x4_e3m2;
+
+struct __nv_fp6_e2m3;
+struct __nv_fp6x2_e2m3;
+struct __nv_fp6x4_e2m3;
+#endif
+
+#if __has_include(<cuda_fp4.h>) && _CCCL_HAS_NVFP6() && !defined(CCCL_DISABLE_NVFP4_SUPPORT)
+#  undef _CCCL_HAS_NVFP4
+#  define _CCCL_HAS_NVFP4() 1
+struct __nv_fp4_e2m1;
+struct __nv_fp4x2_e2m1;
+struct __nv_fp4x4_e2m1;
+#endif
+
+#define _CCCL_HAS_NVFP4_E2M1() _CCCL_HAS_NVFP4()
+#define _CCCL_HAS_NVFP6_E2M3() _CCCL_HAS_NVFP6()
+#define _CCCL_HAS_NVFP6_E3M2() _CCCL_HAS_NVFP6()
+#define _CCCL_HAS_NVFP8_E4M3() _CCCL_HAS_NVFP8()
+#define _CCCL_HAS_NVFP8_E5M2() _CCCL_HAS_NVFP8()
+#define _CCCL_HAS_NVFP8_E8M0() (_CCCL_HAS_NVFP8() && _CCCL_CTK_AT_LEAST(12, 8))
+
+/***********************************************************************************************************************
+ * _Float64
+ **********************************************************************************************************************/
+
+// _Float64, the type behind C++23's std::float64_t, is a distinct type from double even where the
+// two are bit-identical, so code that accepts either has to name both. __STDCPP_FLOAT64_T__ guards
+// the _Float64 token and guarantees the type is present, which is why no compiler version table is
+// needed here; where _Float64 is merely an alias for double, the double spelling covers it anyway.
+//
+// nvcc does not support _Float64 in device code. A type that exists in one pass of a CUDA
+// compilation and not the other would give the two passes different overload sets, so this reports
+// false for nvcc in both passes rather than only in the device one.
+#if defined(__STDCPP_FLOAT64_T__) && __STDCPP_FLOAT64_T__ == 1 && !_CCCL_CUDA_COMPILER(NVCC) && !_CCCL_COMPILER(NVRTC)
+#  undef _CCCL_HAS_FLOAT64
+#  define _CCCL_HAS_FLOAT64() 1
+#endif // __STDCPP_FLOAT64_T__ == 1 && !_CCCL_CUDA_COMPILER(NVCC) && !_CCCL_COMPILER(NVRTC)
+
+/***********************************************************************************************************************
+ * __float128
+ **********************************************************************************************************************/
+
+#if !defined(CCCL_DISABLE_FLOAT128_SUPPORT) && _CCCL_HAS_INT128() && _CCCL_OS(LINUX) && !_CCCL_HOST_ARCH(ARM64)
+// Detect host compiler support
+#  if (defined(__CUDACC_RTC_FLOAT128__) || defined(__SIZEOF_FLOAT128__) || defined(__FLOAT128__))
+#    if _CCCL_DEVICE_COMPILATION()
+// Only NVCC and NVRTC 12.8+ on architectures at least SM100 supports __float128 on device
+#      if (_CCCL_CUDA_COMPILER(NVCC, >=, 12, 8) || _CCCL_CUDA_COMPILER(NVRTC, >=, 12, 8)) && _CCCL_PTX_ARCH() >= 1000
+#        undef _CCCL_HAS_FLOAT128
+#        define _CCCL_HAS_FLOAT128() 1
+#      endif // _CCCL_CUDA_COMPILER(NVCC) && _CCCL_PTX_ARCH() >= 1000
+#    else // ^^^ _CCCL_DEVICE_COMPILATION() ^^^ / vvv !_CCCL_DEVICE_COMPILATION() vvv
+#      undef _CCCL_HAS_FLOAT128
+#      define _CCCL_HAS_FLOAT128() 1
+#    endif // ^^^ !_CCCL_DEVICE_COMPILATION() ^^^
+#  endif // Host compiler support
+#endif // !defined(CCCL_DISABLE_FLOAT128_SUPPORT) && _CCCL_HAS_INT128() && _CCCL_OS(LINUX) && !_CCCL_HOST_ARCH(ARM64)
+
+// gcc does not allow to use q/Q floating point literals when __STRICT_ANSI__ is defined. They may be allowed by
+// -fext-numeric-literals, but there is no way to detect it in the preprocessor. The user is required to define
+// CCCL_GCC_HAS_EXTENDED_NUMERIC_LITERALS in this case. Otherwise, we disable the __float128 support.
+//
+// Note: since GCC 13, we could use f128/F128 literals, but for values > DBL_MAX, the compilation with nvcc fails due to
+//       "floating constant is out of range".
+#if _CCCL_HAS_FLOAT128() && _CCCL_COMPILER(GCC) && defined(__STRICT_ANSI__) \
+  && !defined(CCCL_GCC_HAS_EXTENDED_NUMERIC_LITERALS)
+#  undef _CCCL_HAS_FLOAT128
+#  define _CCCL_HAS_FLOAT128() 0
+#endif // _CCCL_HAS_FLOAT128()
+
+#endif // __CCCL_EXTENDED_DATA_TYPES_H
+
+
+"#;
 
     // #[test]
     // fn test_preprocessor_cache_entry_hash_key_basedirs() {

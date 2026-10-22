@@ -616,6 +616,7 @@ impl CCompilerImpl for Nvcc {
             parsed_args,
             cwd,
             env_vars,
+            tolerate_failure,
             ..
         }: GenerateDependenciesArgs<'_, T>,
     ) -> Result<(Vec<PathBuf>, Duration)>
@@ -644,6 +645,7 @@ impl CCompilerImpl for Nvcc {
                     (key, val)
                 }),
             self.kind(),
+            tolerate_failure,
         )
         .await
     }

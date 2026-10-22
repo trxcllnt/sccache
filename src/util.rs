@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::{
+    compiler::HiddenIncludesFinder,
     errors::*,
     mock_command::{CommandChild, ProcessOutput, RunCommand},
 };
@@ -91,29 +92,29 @@ impl Digest {
     /// Calculate the BLAKE3 digest of the contents of `path`, while
     /// also checking for the presence of time macros.
     /// See [`TimeMacroFinder`] for more details.
-    pub async fn from_file_with_time_macros<T>(
+    pub async fn from_file_with_macro_finders<T>(
         path: T,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(Self, TimeMacroFinder)>
+    ) -> Result<(Self, TimeMacroFinder, HiddenIncludesFinder)>
     where
         T: AsRef<Path>,
     {
         Self::new()
-            .with_file_and_time_macros(path, compile_timestamp)
+            .with_file_and_macro_finders(path, compile_timestamp)
             .await
     }
 
     /// Calculate the BLAKE3 digest of the contents of `path`, while
     /// also checking for the presence of time macros.
     /// See [`TimeMacroFinder`] for more details.
-    pub fn from_file_with_time_macros_sync<T>(
+    pub fn from_file_with_macro_finders_sync<T>(
         path: T,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(Self, TimeMacroFinder)>
+    ) -> Result<(Self, TimeMacroFinder, HiddenIncludesFinder)>
     where
         T: AsRef<Path>,
     {
-        Self::new().with_file_and_time_macros_sync(path, compile_timestamp)
+        Self::new().with_file_and_macro_finders_sync(path, compile_timestamp)
     }
 
     /// Calculate the BLAKE3 digest of the contents read from `reader`, calling
@@ -130,14 +131,18 @@ impl Digest {
     /// Calculate the BLAKE3 digest of the contents read from `reader`, while
     /// also checking for the presence of time macros.
     /// See [`TimeMacroFinder`] for more details.
-    pub async fn from_reader_with_time_macros<R: AsyncRead + Send>(
+    pub async fn from_reader_with_macro_finders<R: AsyncRead + Send>(
         reader: R,
-    ) -> Result<(Self, TimeMacroFinder)> {
-        let mut finder = TimeMacroFinder::new();
-        let digest =
-            Self::from_reader_with_each(reader, |visit| finder.find_time_macros(visit)).await?;
+    ) -> Result<(Self, TimeMacroFinder, HiddenIncludesFinder)> {
+        let mut time_finder = TimeMacroFinder::new();
+        let mut hinc_finder = HiddenIncludesFinder::default();
+        let digest = Self::from_reader_with_each(reader, |visit| {
+            time_finder.find_time_macros(visit);
+            hinc_finder.find_has_include(visit);
+        })
+        .await?;
 
-        Ok((digest, finder))
+        Ok((digest, time_finder, hinc_finder))
     }
 
     /// Update the BLAKE3 digest of the contents of `path` into this digest.
@@ -169,11 +174,11 @@ impl Digest {
     /// Update the BLAKE3 digest of the contents of `path` into this digest, while
     /// also checking for the presence of time macros.
     /// See [`TimeMacroFinder`] for more details.
-    pub async fn with_file_and_time_macros<T>(
+    pub async fn with_file_and_macro_finders<T>(
         self,
         path: T,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(Self, TimeMacroFinder)>
+    ) -> Result<(Self, TimeMacroFinder, HiddenIncludesFinder)>
     where
         T: AsRef<Path>,
     {
@@ -181,8 +186,8 @@ impl Digest {
 
         let path = path.as_ref();
 
-        let (mut digest, finder) = self
-            .with_reader_and_time_macros(Self::open_file(path)?)
+        let (mut digest, time_finder, hinc_finder) = self
+            .with_reader_and_macro_finders(Self::open_file(path)?)
             .await?;
 
         // If __DATE__ or __TIMESTAMP__ found, make sure that the digest changes
@@ -190,7 +195,7 @@ impl Digest {
         // digest comprising the file digest and time information that represents the
         // macro expansions.
 
-        if finder.found_date() {
+        if time_finder.found_date() {
             debug!("found __DATE__ in {path:?}");
             digest.delimiter(b"date");
             let date = compile_timestamp.date_naive();
@@ -199,7 +204,7 @@ impl Digest {
             digest.update(&date.day().to_le_bytes());
         }
 
-        if finder.found_timestamp() {
+        if time_finder.found_timestamp() {
             debug!("found __TIMESTAMP__ in {path:?}");
             let mtime: chrono::DateTime<chrono::Local> = tokio::fs::symlink_metadata(path)
                 .await
@@ -212,17 +217,17 @@ impl Digest {
             digest.update(&mtime.naive_local().and_utc().timestamp().to_le_bytes());
         }
 
-        Ok((digest, finder))
+        Ok((digest, time_finder, hinc_finder))
     }
 
     /// Update the BLAKE3 digest of the contents of `path` into this digest, while
     /// also checking for the presence of time macros.
     /// See [`TimeMacroFinder`] for more details.
-    pub fn with_file_and_time_macros_sync<T>(
+    pub fn with_file_and_macro_finders_sync<T>(
         self,
         path: T,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(Self, TimeMacroFinder)>
+    ) -> Result<(Self, TimeMacroFinder, HiddenIncludesFinder)>
     where
         T: AsRef<Path>,
     {
@@ -230,7 +235,7 @@ impl Digest {
 
         let path = path.as_ref();
 
-        let (mut digest, finder) = self.with_reader_and_time_macros_sync(
+        let (mut digest, time_finder, hinc_finder) = self.with_reader_and_macro_finders_sync(
             std::io::BufReader::new(Self::open_file(path)?.into_inner().into_inner()),
         )?;
 
@@ -239,7 +244,7 @@ impl Digest {
         // digest comprising the file digest and time information that represents the
         // macro expansions.
 
-        if finder.found_date() {
+        if time_finder.found_date() {
             debug!("found __DATE__ in {path:?}");
             digest.delimiter(b"date");
             let date = compile_timestamp.date_naive();
@@ -248,7 +253,7 @@ impl Digest {
             digest.update(&date.day().to_le_bytes());
         }
 
-        if finder.found_timestamp() {
+        if time_finder.found_timestamp() {
             debug!("found __TIMESTAMP__ in {path:?}");
             let mtime: chrono::DateTime<chrono::Local> = fs::symlink_metadata(path)
                 .with_context(|| format!("Failed to read file metadata for hashing: {path:?}"))?
@@ -260,7 +265,7 @@ impl Digest {
             digest.update(&mtime.naive_local().and_utc().timestamp().to_le_bytes());
         }
 
-        Ok((digest, finder))
+        Ok((digest, time_finder, hinc_finder))
     }
 
     /// Update the BLAKE3 digest of the contents read from `reader` into this digest.
@@ -271,15 +276,19 @@ impl Digest {
     /// Update the BLAKE3 digest of the contents of `reader` into this digest, while
     /// also checking for the presence of time macros.
     /// See [`TimeMacroFinder`] for more details.
-    pub async fn with_reader_and_time_macros<R: AsyncRead + Send + Unpin>(
+    pub async fn with_reader_and_macro_finders<R: AsyncRead + Send + Unpin>(
         self,
         reader: R,
-    ) -> Result<(Self, TimeMacroFinder)> {
-        let mut finder = TimeMacroFinder::new();
+    ) -> Result<(Self, TimeMacroFinder, HiddenIncludesFinder)> {
+        let mut time_finder = TimeMacroFinder::new();
+        let mut hinc_finder = HiddenIncludesFinder::default();
         let digest = self
-            .with_reader_each(reader, |visit| finder.find_time_macros(visit))
+            .with_reader_each(reader, |lines| {
+                time_finder.find_time_macros(lines);
+                hinc_finder.find_has_include(lines);
+            })
             .await?;
-        Ok((digest, finder))
+        Ok((digest, time_finder, hinc_finder))
     }
 
     /// Update the BLAKE3 digest of the contents read from `reader` into this digest.
@@ -290,13 +299,17 @@ impl Digest {
     /// Update the BLAKE3 digest of the contents of `reader` into this digest, while
     /// also checking for the presence of time macros.
     /// See [`TimeMacroFinder`] for more details.
-    pub fn with_reader_and_time_macros_sync<R: Read + Send>(
+    pub fn with_reader_and_macro_finders_sync<R: Read + Send>(
         self,
         reader: R,
-    ) -> Result<(Self, TimeMacroFinder)> {
-        let mut finder = TimeMacroFinder::new();
-        let digest = self.with_reader_each_sync(reader, |visit| finder.find_time_macros(visit))?;
-        Ok((digest, finder))
+    ) -> Result<(Self, TimeMacroFinder, HiddenIncludesFinder)> {
+        let mut time_finder = TimeMacroFinder::new();
+        let mut hinc_finder = HiddenIncludesFinder::default();
+        let digest = self.with_reader_each_sync(reader, |lines| {
+            time_finder.find_time_macros(lines);
+            hinc_finder.find_has_include(lines);
+        })?;
+        Ok((digest, time_finder, hinc_finder))
     }
 
     /// Update the BLAKE3 digest of the contents read from `reader` into this digest, calling
@@ -2181,164 +2194,6 @@ pub fn strip_basedirs<'a>(preprocessor_output: &'a [u8], basedirs: &[Vec<u8>]) -
     result.extend_from_slice(&preprocessor_output[current_pos..]);
 
     Cow::Owned(result)
-}
-
-// const PRAGMA_GCC_PCH_PREPROCESS: &[u8] = b"pragma GCC pch_preprocess";
-
-// /// Strip #line directives from a batch of preprocessor output
-// pub fn remove_preprocessor_linemarkers(mut lines: BytesMut) -> BytesMut {
-//     let mut start = 0;
-//     let mut ranges = vec![];
-
-//     // Find newlines
-//     for end in memchr::memmem::find_iter(&lines[..], "\n") {
-//         let line = str::from_utf8(&lines[start..end])
-//             .unwrap()
-//             .trim()
-//             .as_bytes();
-
-//         // There are at least 7 characters (# 1 "x") in a #line directive
-//         if line.len() >= 7
-//             // Check if we look at a line containing the file name of an included file.
-//             // At least the following formats exist (where N is a positive integer):
-//             //
-//             // GCC/Clang/NVHPC:
-//             //
-//             //   # N "file"
-//             //   # N "file" N
-//             //   #pragma GCC pch_preprocess "file"
-//             //
-//             // MSVC and HP's compiler:
-//             //
-//             //   #line N "file"
-//             //
-//             // AIX's compiler:
-//             //
-//             //   #line N "file"
-//             //   #line N
-//             //
-//             // Note that there may be other lines starting with '#' left after
-//             // preprocessing as well, for instance "#    pragma".
-//             && line[0] == b'#'
-//             && (
-//                 // GCC/Clang/NVHPC:
-//                 (line[1] == b' ' && line[2] >= b'0' && line[2] <= b'9')
-//                 // GCC precompiled header:
-//                 || line[1..].starts_with(PRAGMA_GCC_PCH_PREPROCESS)
-//                 // MSVC/HP/AIX:
-//                 || &line[1..6] == b"line "
-//             )
-//         {
-//             ranges.push(start..end + 1);
-//         }
-//         start = end + 1;
-//     }
-
-//     // Collapse consecutive ranges
-//     let ranges = {
-//         let mut collapsed = vec![];
-//         let mut itr = ranges.drain(..);
-//         let mut curr = itr.next();
-//         while let Some(mut lhs) = curr.take() {
-//             for rhs in itr.by_ref() {
-//                 if lhs.end == rhs.start {
-//                     lhs.end = rhs.end;
-//                 } else {
-//                     curr.replace(rhs);
-//                     break;
-//                 }
-//             }
-//             collapsed.push(lhs);
-//         }
-//         collapsed
-//     };
-
-//     // Remove #line directives
-//     for range in ranges.into_iter().rev() {
-//         lines.copy_within(range.end.., range.start);
-//         lines.truncate(lines.len() - (range.end - range.start));
-//     }
-
-//     lines
-// }
-
-/// Strip empty newlines from a batch of source file lines, except newlines inside C++11 raw string literals.
-pub fn strip_empty_newlines(mut lines: BytesMut) -> BytesMut {
-    use memchr::memmem::{find, find_iter};
-
-    let mut start = 0;
-    let mut ranges = vec![];
-    let mut str_lit_delimiter = None;
-
-    // Find empty newlines
-    for end in find_iter(&lines[..], "\n") {
-        let line = str::from_utf8(&lines[start..end])
-            .unwrap()
-            .trim()
-            .as_bytes();
-
-        if str_lit_delimiter.is_none() {
-            // Remove empty newlines as long as we're not inside a raw string literal
-            if line.is_empty() {
-                ranges.push(start..end + 1);
-                start = end + 1;
-                continue;
-            }
-
-            // Pause removing newlines if the current line begins a raw string literal
-            if let Some(pos) = find(line, b"R\"") {
-                let rest = &line[pos + 2..];
-                if let Some(escape_sequence) = find(rest, b"(").map(|paren| &rest[..paren]) {
-                    let mut delim = vec![];
-                    delim.push(b')');
-                    delim.extend_from_slice(escape_sequence);
-                    delim.push(b'"');
-                    str_lit_delimiter = Some(delim);
-                }
-            }
-        }
-
-        // Continue removing newlines if this line terminates a raw string literal.
-        // This may find the end delimiter on the same line as the start delimiter,
-        // so the above doesn't `continue` the loop when we find a start delimiter.
-        // e.g. `R"esc(This is a raw string literal)esc"`
-        if str_lit_delimiter
-            .as_deref()
-            .and_then(|delim| find(line, delim))
-            .is_some()
-        {
-            str_lit_delimiter = None;
-        }
-
-        start = end + 1;
-    }
-
-    // Collapse consecutive ranges
-    let ranges = {
-        let mut collapsed = vec![];
-        let mut itr = ranges.drain(..);
-        let mut curr = itr.next();
-        while let Some(mut lhs) = curr.take() {
-            for rhs in itr.by_ref() {
-                if lhs.end == rhs.start {
-                    lhs.end = rhs.end;
-                } else {
-                    curr.replace(rhs);
-                    break;
-                }
-            }
-            collapsed.push(lhs);
-        }
-        collapsed
-    };
-
-    // Remove empty newline ranges
-    for range in ranges.into_iter().rev() {
-        lines.copy_within(range.end.., range.start);
-        lines.truncate(lines.len() - (range.end - range.start));
-    }
-
-    lines
 }
 
 pub fn apply_basedirs_to_args<P: AsRef<Path>>(

@@ -180,6 +180,8 @@ impl CCompilerImpl for Nvhpc {
             cwd,
             env_vars.iter().cloned(),
             self.kind(),
+            // nvc++ exits with an error even though it generated dependencies
+            true,
         )
         .await
     }

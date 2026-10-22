@@ -130,7 +130,7 @@ fn time_macro_finder_no_macros(bencher: Bencher) {
             let cursor = futures::io::AllowStdIo::new(cursor);
             black_box(
                 Digest::new()
-                    .with_reader_and_time_macros(cursor)
+                    .with_reader_and_macro_finders(cursor)
                     .await
                     .unwrap(),
             )
@@ -145,7 +145,7 @@ fn time_macro_finder_sync_no_macros(bencher: Bencher) {
     bencher.bench_local(|| {
         black_box(
             Digest::new()
-                .with_reader_and_time_macros_sync(&data[..])
+                .with_reader_and_macro_finders_sync(&data[..])
                 .unwrap(),
         );
     });
@@ -163,7 +163,7 @@ fn time_macro_finder_with_macros(bencher: Bencher) {
             let cursor = futures::io::AllowStdIo::new(cursor);
             black_box(
                 Digest::new()
-                    .with_reader_and_time_macros(cursor)
+                    .with_reader_and_macro_finders(cursor)
                     .await
                     .unwrap(),
             );
@@ -178,7 +178,7 @@ fn time_macro_finder_sync_with_macros(bencher: Bencher) {
     bencher.bench_local(|| {
         black_box(
             Digest::new()
-                .with_reader_and_time_macros_sync(&data[..])
+                .with_reader_and_macro_finders_sync(&data[..])
                 .unwrap(),
         );
     });
