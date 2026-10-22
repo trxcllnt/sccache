@@ -1409,9 +1409,7 @@ where
 
         cmd.current_dir(cwd.as_ref())
             .env_clear()
-            .envs(env_vars.clone())
-            // .env("PRAGMA_ONCE_FIX_DEBUG", "1")
-            ;
+            .envs(env_vars.clone());
 
         for arg in args {
             cmd.arg(arg);

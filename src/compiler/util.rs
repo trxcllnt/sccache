@@ -27,7 +27,7 @@ use serde_with::{
     DeserializeFromStr, DisplayFromStr, IfIsHumanReadable, SerializeDisplay, serde_as,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     ffi::{OsStr, OsString},
     fmt,
     io::{Read, Write},
@@ -1209,13 +1209,18 @@ impl From<HiddenIncludesFinder> for HiddenIncludes {
 /// splices are handled as the preprocessor handles them. Each operand is collected as written
 /// (minus line splices) from its first token to its last, e.g. `<cuda_fp16.h>`,
 /// `MAKE_HEADER(fp16)`, or `<data.bin> limit(4)`.
+///
+/// A function-like macro that passes its parameters to an operator, such as
+/// `#define HAS_INCLUDE(x) __has_include(x)`, is followed through: each call like
+/// `HAS_INCLUDE(<a.h>)` is collected as `<a.h>`, and the definition's own operand isn't.
+/// Calls count only after the definition has been scanned, which may be in an earlier file.
 #[derive(Debug, Default)]
 pub struct HiddenIncludesFinder {
-    /// The operands of `__has_include`.
+    /// The operands of `__has_include`, in the order they appear.
     pub includes: Vec<String>,
-    /// The operands of `__has_include_next`.
+    /// The operands of `__has_include_next`, in the order they appear.
     pub next_includes: Vec<String>,
-    /// The operands of `__has_embed`, including any embed parameters.
+    /// The operands of `__has_embed`, including any embed parameters, in the order they appear.
     pub embeds: Vec<String>,
     /// A backslash, and any whitespace after it, that splices lines if a newline follows.
     backslash: bool,
@@ -1223,17 +1228,26 @@ pub struct HiddenIncludesFinder {
     lex: Lex,
     line: Line,
     expr: Expr,
-    /// The first bytes of the current identifier, and its full length.
-    ident: [u8; 32],
-    ident_len: usize,
+    ident: Vec<u8>,
     /// The delimiter of the current raw string literal.
     raw_delim: [u8; 16],
     raw_len: usize,
-    /// The operand so far, its length through its last token, and how deeply it's nested in
-    /// parentheses.
+    /// The operand or call arguments so far, the length through the last token, and how
+    /// deeply that is nested in parentheses.
     operand: Vec<u8>,
     operand_end: usize,
     depth: u32,
+    /// The wrapper being called, the bounds in `operand` of each argument so far, and the
+    /// start of the current argument once it has a token.
+    callee: Vec<u8>,
+    args: Vec<(usize, usize)>,
+    arg_start: Option<usize>,
+    /// Whether a function-like macro is being defined on this line, and the definition, whose
+    /// buffers are reused from line to line.
+    defining: bool,
+    definition: Definition,
+    /// The function-like macros that pass their parameters to an operator, by name.
+    wrappers: HashMap<Vec<u8>, Wrapper>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1275,6 +1289,9 @@ enum Line {
     Hash,
     /// After `#define`, expecting the macro name.
     DefineName,
+    /// In a function-like macro's parameter list, having seen `dots` dots of a `...`, and
+    /// with `after_name` set right after a parameter's name.
+    Params { dots: u8, after_name: bool },
     /// In an `#if`, `#elif`, or `#define`, where the operators may appear.
     Active,
     /// In any other line.
@@ -1289,6 +1306,10 @@ enum Expr {
     Keyword(Operator),
     /// Inside the operator's parentheses.
     Operand(Operator),
+    /// After a wrapper's name, expecting `(`.
+    Callee,
+    /// Inside the wrapper call's parentheses.
+    Args,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1296,6 +1317,34 @@ enum Operator {
     Include,
     IncludeNext,
     Embed,
+}
+
+#[derive(Debug, Default)]
+struct Definition {
+    name: Vec<u8>,
+    /// The parameters' names, each followed by a comma.
+    params: Vec<u8>,
+    /// Whether the last parameter is variadic: `__VA_ARGS__`, or GNU C's `name...`.
+    variadic: bool,
+    /// The operands in the replacement list that use the parameters.
+    templates: Vec<Template>,
+}
+
+/// An operand that a wrapper builds from its parameters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Template {
+    operator: Operator,
+    /// As in `Definition`.
+    params: Vec<u8>,
+    variadic: bool,
+    operand: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct Wrapper {
+    /// Finds the wrapper's name, to tell whether text might call it.
+    name: memmem::Finder<'static>,
+    templates: Vec<Template>,
 }
 
 impl HiddenIncludesFinder {
@@ -1313,12 +1362,16 @@ impl HiddenIncludesFinder {
         }
     }
 
-    /// Ends the current file, so the next `find_has_include` call starts a new one.
+    /// Ends the current file, so the next `find_has_include` call starts a new one. Wrappers
+    /// defined so far still apply.
     pub fn finish_file(&mut self) {
+        // The last line may lack a newline.
+        self.end_definition();
         *self = Self {
             includes: std::mem::take(&mut self.includes),
             next_includes: std::mem::take(&mut self.next_includes),
             embeds: std::mem::take(&mut self.embeds),
+            wrappers: std::mem::take(&mut self.wrappers),
             ..Self::default()
         };
     }
@@ -1327,16 +1380,48 @@ impl HiddenIncludesFinder {
     /// `find_has_include`, this skips a file that can't contain an operator without lexing it.
     pub fn find_in_file(&mut self, file: &[u8]) {
         self.finish_file();
-        if might_name_operator(file) {
+        if self.might_name_operator(file) {
             self.find_has_include(file);
             self.finish_file();
         }
     }
 
+    /// Whether `src` might contain an operator or a call to a wrapper. It can't if their names
+    /// don't appear and no line splice follows an identifier character, since such a splice
+    /// could split a name.
+    fn might_name_operator(&self, src: &[u8]) -> bool {
+        self.first_name(src).is_some()
+            || memchr_iter(b'\\', src).any(|i| {
+                i > 0 && is_ident(src[i - 1]) && {
+                    let after = &src[i + 1..];
+                    let space = after
+                        .iter()
+                        .take_while(|&&b| matches!(b, b' ' | b'\t' | b'\r' | b'\x0b' | b'\x0c'))
+                        .count();
+                    after.get(space) == Some(&b'\n')
+                }
+            })
+    }
+
+    /// The position of the first operator's or wrapper's name in `text`, even if it's part of a
+    /// longer identifier.
+    fn first_name(&self, text: &[u8]) -> Option<usize> {
+        let operator = memmem::find(text, b"__has_");
+        if self.wrappers.is_empty() {
+            return operator;
+        }
+        let wrapper = self
+            .wrappers
+            .values()
+            .filter_map(|w| w.name.find(text))
+            .min();
+        operator.into_iter().chain(wrapper).min()
+    }
+
     /// Returns how many of the next bytes `lex` would pass over without effect, updating the
     /// state as if it had. A backslash is never skipped, since it may splice lines.
     fn skip(&mut self, rest: &[u8]) -> usize {
-        if self.backslash || matches!(self.expr, Expr::Operand(_)) {
+        if self.backslash || matches!(self.expr, Expr::Operand(_) | Expr::Args) {
             return 0;
         }
         let end = match self.lex {
@@ -1359,10 +1444,10 @@ impl HiddenIncludesFinder {
                 }
                 Some(n)
             }
-            // So does a line where operators may appear, apart from their names.
+            // So does a line where operators may appear, apart from their and wrappers' names.
             Lex::Code if self.line == Line::Active && self.expr == Expr::Idle => {
                 let run = &rest[..next_significant(rest)];
-                let end = memmem::find(run, b"__has_").unwrap_or(run.len());
+                let end = self.first_name(run).unwrap_or(run.len());
                 Some(before_last_word(&run[..end]))
             }
             // The rest of an identifier or number.
@@ -1371,10 +1456,7 @@ impl HiddenIncludesFinder {
                     .iter()
                     .position(|&b| !is_ident(b))
                     .unwrap_or(rest.len());
-                let start = self.ident_len.min(self.ident.len());
-                let stored = n.min(self.ident.len() - start);
-                self.ident[start..start + stored].copy_from_slice(&rest[..stored]);
-                self.ident_len += n;
+                self.ident.extend_from_slice(&rest[..n]);
                 Some(n)
             }
             Lex::Number => rest.iter().position(|&b| !is_ident(b) && b != b'.'),
@@ -1418,14 +1500,12 @@ impl HiddenIncludesFinder {
         match self.lex {
             Lex::Code => self.code(c),
             Lex::Ident if is_ident(c) => {
-                if let Some(slot) = self.ident.get_mut(self.ident_len) {
-                    *slot = c;
-                }
-                self.ident_len += 1;
+                self.ident.push(c);
                 self.token(c);
             }
             Lex::Ident
-                if c == b'"' && matches!(self.ident(), b"R" | b"u8R" | b"uR" | b"UR" | b"LR") =>
+                if c == b'"'
+                    && matches!(self.ident.as_slice(), b"R" | b"u8R" | b"uR" | b"UR" | b"LR") =>
             {
                 if matches!(self.line, Line::Hash | Line::DefineName) {
                     self.line = Line::Inactive;
@@ -1436,7 +1516,7 @@ impl HiddenIncludesFinder {
             }
             Lex::Ident => {
                 self.lex = Lex::Code;
-                self.end_ident();
+                self.end_ident(c);
                 self.code(c);
             }
             Lex::Number if is_ident(c) || c == b'.' => self.token(c),
@@ -1579,6 +1659,36 @@ impl HiddenIncludesFinder {
             }
             Line::Start => self.line = Line::Inactive,
             Line::Hash | Line::DefineName if !is_ident_start(c) => self.line = Line::Inactive,
+            Line::Params { .. } if c == b')' => {
+                self.line = Line::Active;
+                return;
+            }
+            // `...`, or GNU C's `name...`, which names the variadic parameter.
+            Line::Params {
+                dots: 2,
+                after_name,
+            } if c == b'.' => {
+                if !after_name {
+                    self.definition.params.extend_from_slice(b"__VA_ARGS__,");
+                }
+                self.definition.variadic = true;
+                self.line = Line::Params {
+                    dots: 0,
+                    after_name: false,
+                };
+            }
+            Line::Params { dots, after_name } if c == b'.' => {
+                self.line = Line::Params {
+                    dots: dots + 1,
+                    after_name,
+                }
+            }
+            Line::Params { .. } => {
+                self.line = Line::Params {
+                    dots: 0,
+                    after_name: false,
+                }
+            }
             _ => {}
         }
         match self.expr {
@@ -1590,6 +1700,33 @@ impl HiddenIncludesFinder {
                 return;
             }
             Expr::Keyword(_) => self.expr = Expr::Idle,
+            Expr::Callee if c == b'(' => {
+                self.expr = Expr::Args;
+                self.operand_end = 0;
+                self.depth = 0;
+                self.args.clear();
+                self.arg_start = None;
+                return;
+            }
+            Expr::Callee => self.expr = Expr::Idle,
+            Expr::Args => match c {
+                b',' | b')' if self.depth == 0 => {
+                    self.args.push(match self.arg_start.take() {
+                        Some(start) => (start, self.operand_end),
+                        None => (self.operand.len(), self.operand.len()),
+                    });
+                    if c == b')' {
+                        self.finish_call();
+                    } else {
+                        // Kept, though not as part of an argument, for `__VA_ARGS__`.
+                        self.operand.push(c);
+                    }
+                    return;
+                }
+                b'(' => self.depth += 1,
+                b')' => self.depth -= 1,
+                _ => {}
+            },
             Expr::Operand(operator) => match c {
                 b'<' | b'"' if self.operand.is_empty() => {
                     self.operand.push(c);
@@ -1616,30 +1753,58 @@ impl HiddenIncludesFinder {
             }
             b'0'..=b'9' => self.lex = Lex::Number,
             _ if is_ident_start(c) => {
-                self.ident[0] = c;
-                self.ident_len = 1;
+                self.ident.clear();
+                self.ident.push(c);
                 self.lex = Lex::Ident;
             }
             _ => {}
         }
     }
 
-    fn end_ident(&mut self) {
+    /// Handles the identifier just lexed, which `next` follows.
+    fn end_ident(&mut self, next: u8) {
         match self.line {
             Line::Hash => {
-                self.line = match self.ident() {
+                self.line = match self.ident.as_slice() {
                     b"if" | b"elif" => Line::Active,
                     b"define" => Line::DefineName,
                     _ => Line::Inactive,
                 }
             }
-            // The name being defined isn't a use, even when it is `__has_include` itself.
+            // The name being defined isn't a use, even when it is `__has_include` itself. A `(`
+            // right after it starts the parameters of a function-like macro.
+            Line::DefineName if next == b'(' => {
+                self.defining = true;
+                self.definition.name.clone_from(&self.ident);
+                self.definition.params.clear();
+                self.definition.variadic = false;
+                self.line = Line::Params {
+                    dots: 0,
+                    after_name: false,
+                };
+            }
             Line::DefineName => self.line = Line::Active,
+            Line::Params { .. } => {
+                self.definition.params.extend_from_slice(&self.ident);
+                self.definition.params.push(b',');
+                self.line = Line::Params {
+                    dots: 0,
+                    after_name: true,
+                };
+            }
             Line::Active if self.expr == Expr::Idle => {
-                self.expr = match self.ident() {
+                self.expr = match self.ident.as_slice() {
                     b"__has_include" => Expr::Keyword(Operator::Include),
                     b"__has_include_next" => Expr::Keyword(Operator::IncludeNext),
                     b"__has_embed" => Expr::Keyword(Operator::Embed),
+                    // A macro isn't expanded within its own definition.
+                    name if !self.wrappers.is_empty()
+                        && self.wrappers.contains_key(name)
+                        && !(self.defining && self.definition.name == name) =>
+                    {
+                        self.callee.clone_from(&self.ident);
+                        Expr::Callee
+                    }
                     _ => Expr::Idle,
                 }
             }
@@ -1647,28 +1812,29 @@ impl HiddenIncludesFinder {
         }
     }
 
-    /// The current identifier, or nothing if it's too long to be a name we look for.
-    fn ident(&self) -> &[u8] {
-        self.ident.get(..self.ident_len).unwrap_or_default()
-    }
-
-    /// Records a byte of a token, which extends the operand being collected.
+    /// Records a byte of a token, which extends the operand or argument being collected.
     fn token(&mut self, c: u8) {
-        if matches!(self.expr, Expr::Operand(_)) {
-            self.operand.push(c);
-            self.operand_end = self.operand.len();
+        match self.expr {
+            Expr::Operand(_) => {}
+            Expr::Args => {
+                self.arg_start.get_or_insert(self.operand.len());
+            }
+            _ => return,
         }
+        self.operand.push(c);
+        self.operand_end = self.operand.len();
     }
 
-    /// Records a byte of whitespace or comment, which the operand keeps only between tokens.
+    /// Records a byte of whitespace or comment, which is kept only between tokens.
     fn trivia(&mut self, c: u8) {
-        if matches!(self.expr, Expr::Operand(_)) && !self.operand.is_empty() {
+        if matches!(self.expr, Expr::Operand(_) | Expr::Args) && !self.operand.is_empty() {
             self.operand.push(c);
         }
     }
 
-    /// Ends the line, and with it any directive and unfinished operand.
+    /// Ends the line, and with it any directive and unfinished operand or call.
     fn newline(&mut self) {
+        self.end_definition();
         self.line = Line::Start;
         self.expr = Expr::Idle;
         self.operand.clear();
@@ -1676,33 +1842,220 @@ impl HiddenIncludesFinder {
 
     fn finish_operand(&mut self, operator: Operator) {
         self.operand.truncate(self.operand_end);
-        if !self.operand.is_empty() {
-            let operand = String::from_utf8_lossy(&self.operand).into_owned();
-            match operator {
-                Operator::Include => self.includes.push(operand),
-                Operator::IncludeNext => self.next_includes.push(operand),
-                Operator::Embed => self.embeds.push(operand),
-            }
-        }
+        let operand = std::mem::take(&mut self.operand);
+        self.found(operator, operand);
+        self.expr = Expr::Idle;
+    }
+
+    /// Collects the operands that the call to `callee`, with arguments `args`, passes to
+    /// operators.
+    fn finish_call(&mut self) {
+        let wrapper = &self.wrappers[&self.callee];
+        let operands: Vec<_> = wrapper
+            .templates
+            .iter()
+            .filter_map(|t| Some((t.operator, t.instantiate(&self.operand, &self.args)?)))
+            .collect();
         self.operand.clear();
         self.expr = Expr::Idle;
+        for (operator, operand) in operands {
+            self.found(operator, operand);
+        }
+    }
+
+    /// Collects an operand, unless it uses the parameters of the function-like macro being
+    /// defined, which makes it a template for that macro's calls.
+    fn found(&mut self, operator: Operator, operand: Vec<u8>) {
+        if operand.is_empty() {
+            return;
+        }
+        if self.defining && mentions(&operand, &self.definition.params) {
+            let template = Template {
+                operator,
+                params: self.definition.params.clone(),
+                variadic: self.definition.variadic,
+                operand,
+            };
+            if !self.definition.templates.contains(&template) {
+                self.definition.templates.push(template);
+            }
+            return;
+        }
+        let operand = String::from_utf8_lossy(&operand).into_owned();
+        match operator {
+            Operator::Include => self.includes.push(operand),
+            Operator::IncludeNext => self.next_includes.push(operand),
+            Operator::Embed => self.embeds.push(operand),
+        };
+    }
+
+    /// Ends the definition on this line, recording the macro as a wrapper if it has templates.
+    fn end_definition(&mut self) {
+        if !std::mem::take(&mut self.defining) || self.definition.templates.is_empty() {
+            return;
+        }
+        let templates = std::mem::take(&mut self.definition.templates);
+        let wrapper = self
+            .wrappers
+            .entry(self.definition.name.clone())
+            .or_insert_with_key(|name| Wrapper {
+                name: memmem::Finder::new(name).into_owned(),
+                templates: Vec::new(),
+            });
+        for template in templates {
+            if !wrapper.templates.contains(&template) {
+                wrapper.templates.push(template);
+            }
+        }
     }
 }
 
-/// Whether `src` might contain an operator. It can't if `__has_` doesn't appear and no line
-/// splice follows an identifier character, since such a splice could split an operator's name.
-fn might_name_operator(src: &[u8]) -> bool {
-    memmem::find(src, b"__has_").is_some()
-        || memchr_iter(b'\\', src).any(|i| {
-            i > 0 && is_ident(src[i - 1]) && {
-                let after = &src[i + 1..];
-                let space = after
-                    .iter()
-                    .take_while(|&&b| matches!(b, b' ' | b'\t' | b'\r' | b'\x0b' | b'\x0c'))
-                    .count();
-                after.get(space) == Some(&b'\n')
+impl Template {
+    /// The operand for a call whose arguments are at `args` in `text`, or `None` if the call
+    /// passes the wrong number of arguments.
+    fn instantiate(&self, text: &[u8], mut args: &[(usize, usize)]) -> Option<Vec<u8>> {
+        let params = self.params.iter().filter(|&&b| b == b',').count();
+        let named = params - usize::from(self.variadic);
+        // `F()` passes one empty argument, or none to a macro without parameters.
+        if params == 0 && matches!(args, [(start, end)] if start == end) {
+            args = &[];
+        }
+        if args.len() < named || (!self.variadic && args.len() > named) {
+            return None;
+        }
+        let mut values: Vec<&[u8]> = args[..named].iter().map(|&(s, e)| &text[s..e]).collect();
+        if self.variadic {
+            // The variadic arguments, with the commas between them.
+            values.push(match &args[named..] {
+                [] => &[],
+                [(start, _), .., (_, end)] | [(start, end)] => &text[*start..*end],
+            });
+        }
+        Some(substitute(&self.operand, &self.params, &values))
+    }
+}
+
+/// The position of `word` among `params`, which are each followed by a comma.
+fn param_index(params: &[u8], word: &[u8]) -> Option<usize> {
+    params.split(|&b| b == b',').position(|p| p == word)
+}
+
+/// Whether `text` uses any of `params`.
+fn mentions(text: &[u8], params: &[u8]) -> bool {
+    let mut i = 0;
+    while i < text.len() {
+        let (piece, end) = Piece::at(text, i);
+        if piece == Piece::Word && param_index(params, &text[i..end]).is_some() {
+            return true;
+        }
+        i = end;
+    }
+    false
+}
+
+/// Replaces `params` in `text` with `args`, applying `#` and `##` as macro expansion does,
+/// though without expanding other macros.
+fn substitute(text: &[u8], params: &[u8], args: &[&[u8]]) -> Vec<u8> {
+    let arg = |word: &[u8]| param_index(params, word).map(|k| args[k]);
+    let skip_space = |mut i: usize| {
+        while text.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        i
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < text.len() {
+        let (piece, mut end) = Piece::at(text, i);
+        match piece {
+            Piece::Word => out.extend_from_slice(arg(&text[i..end]).unwrap_or(&text[i..end])),
+            // `#` before a parameter makes a string literal of its argument.
+            Piece::Hash => {
+                let next = skip_space(end);
+                let param = (next < text.len())
+                    .then(|| Piece::at(text, next))
+                    .filter(|&(piece, _)| piece == Piece::Word)
+                    .and_then(|(_, word_end)| Some((arg(&text[next..word_end])?, word_end)));
+                match param {
+                    Some((value, word_end)) => {
+                        stringize(value, &mut out);
+                        end = word_end;
+                    }
+                    None => out.push(b'#'),
+                }
             }
-        })
+            // `##` joins what's on either side of it.
+            Piece::Paste => {
+                while out.last().is_some_and(u8::is_ascii_whitespace) {
+                    out.pop();
+                }
+                end = skip_space(end);
+            }
+            Piece::Other => out.extend_from_slice(&text[i..end]),
+        }
+        i = end;
+    }
+    out
+}
+
+/// Appends `value` as a string literal, as `#` makes it.
+fn stringize(value: &[u8], out: &mut Vec<u8>) {
+    out.push(b'"');
+    let mut space = false;
+    for &b in value {
+        if b.is_ascii_whitespace() {
+            space = true;
+            continue;
+        }
+        if std::mem::take(&mut space) {
+            out.push(b' ');
+        }
+        if b == b'"' || b == b'\\' {
+            out.push(b'\\');
+        }
+        out.push(b);
+    }
+    out.push(b'"');
+}
+
+/// A piece of a macro's replacement list, as far as substitution is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Piece {
+    /// An identifier, which may be a parameter.
+    Word,
+    /// `#`
+    Hash,
+    /// `##`
+    Paste,
+    /// Anything else, including literals, numbers, comments, and whitespace.
+    Other,
+}
+
+impl Piece {
+    /// The piece of `text` starting at `i`, and where it ends.
+    fn at(text: &[u8], i: usize) -> (Piece, usize) {
+        // The end of the run of bytes after the first that satisfy `keep`.
+        let run =
+            |keep: fn(u8) -> bool| i + 1 + text[i + 1..].iter().take_while(|&&b| keep(b)).count();
+        match &text[i..] {
+            [quote @ (b'"' | b'\''), ..] => {
+                let mut j = i + 1;
+                while j < text.len() && text[j] != *quote {
+                    j += if text[j] == b'\\' { 2 } else { 1 };
+                }
+                (Piece::Other, (j + 1).min(text.len()))
+            }
+            [b'/', b'*', tail @ ..] => (
+                Piece::Other,
+                memmem::find(tail, b"*/").map_or(text.len(), |e| i + 4 + e),
+            ),
+            [b'#', b'#', ..] => (Piece::Paste, i + 2),
+            [b'#', ..] => (Piece::Hash, i + 1),
+            [c, ..] if c.is_ascii_digit() => (Piece::Other, run(|b| is_ident(b) || b == b'.')),
+            [c, ..] if is_ident_start(*c) => (Piece::Word, run(is_ident)),
+            _ => (Piece::Other, i + 1),
+        }
+    }
 }
 
 /// The position of the first byte in `rest` that might start a comment or literal, splice
@@ -1846,7 +2199,7 @@ mod test {
                 r#"<cuda_fp6.h>"#,
                 r#"<cuda_fp4.h>"#,
             ],
-        );
+        )
     }
 
     #[test]
@@ -1880,9 +2233,39 @@ mod test {
             b"#if __has_include(ANY(\")\", ')', /* ) */ a))\n#endif\n",
             &["ANY(\")\", ')', /* ) */ a)"],
         );
-        // A wrapper macro's own operand is its parameter.
+    }
+
+    #[test]
+    fn test_wrapper_macros() {
+        // Calls are collected, but not the wrapper's own operand.
         assert_finds(
-            b"#ifdef __has_include\n#  define HAS_INC(x) __has_include(x)\n#else\n#  define HAS_INC(x) 0\n#endif\n#if HAS_INC(<a.h>)\n#endif\n",
+            b"#ifdef __has_include\n#  define HAS_INC(x) __has_include(x)\n#else\n#  define HAS_INC(x) 0\n#endif\n#if HAS_INC(<a.h>) || HAS_INC /* c */ (\"b.h\")\n#endif\n",
+            &["<a.h>", "\"b.h\""],
+        );
+        assert_finds_each(
+            b"#define HAS_NEXT(x) __has_include_next(x)\n#define HAS_EMBED(x) __has_embed(x)\n#if HAS_NEXT(<a.h>) && HAS_EMBED(<data.bin> limit(1))\n#endif\n",
+            &[],
+            &["<a.h>"],
+            &["<data.bin> limit(1)"],
+        );
+        // Parameters are replaced anywhere in the operand, with `#` and `##` applied.
+        assert_finds(
+            b"#define HAS_CUDA(name) __has_include(<cuda/name>)\n#define HAS_QUOTED(h) __has_include(#h)\n#define HAS_FP(bits) __has_include(<cuda_fp##bits.h>)\n#if HAS_CUDA(barrier) || HAS_QUOTED(a.h) || HAS_FP(16)\n#endif\n",
+            &["<cuda/barrier>", "\"a.h\"", "<cuda_fp16.h>"],
+        );
+        // Several parameters, variadic parameters, and arguments containing commas.
+        assert_finds(
+            b"#define HAS_EITHER(a, b) (__has_include(a) || __has_include(b))\n#define HAS_ANY(...) __has_include(__VA_ARGS__)\n#define HAS_GNU(args...) __has_include(args)\n#if HAS_EITHER(<a.h>, MK2(b, c)) || HAS_ANY(<d.h>) || HAS_GNU(<e.h>)\n#endif\nint f(int x) { return (x); }\n",
+            &["<a.h>", "MK2(b, c)", "<d.h>", "<e.h>"],
+        );
+        // Wrappers of wrappers, and operands that don't use the parameters.
+        assert_finds(
+            b"#define HAS_INC(x) __has_include(x)\n#define HAS_SUB(y) HAS_INC(<sub/y>)\n#define HAS_A(x) (__has_include(<a.h>) && x)\n#if HAS_SUB(b.h)\n#endif\n",
+            &["<a.h>", "<sub/b.h>"],
+        );
+        // Neither the name alone nor an object-like macro is a call.
+        assert_finds(
+            b"#define HAS_INC(x) __has_include(x)\n#if defined(HAS_INC) && defined HAS_INC\n#endif\n#define NOT_A_CALL (x) __has_include(x)\n",
             &["x"],
         );
     }
@@ -1945,6 +2328,11 @@ mod test {
             &["<a.h>", "<b.h>"],
         );
         assert_finds(b"#define HAS_A __has_include(<a.h>)", &["<a.h>"]);
+        // Operands are kept in order, repeats included.
+        assert_finds(
+            b"#if __has_include(<b.h>)\n#elif __has_include(<a.h>) || __has_include(<b.h>)\n#endif\n",
+            &["<b.h>", "<a.h>", "<b.h>"],
+        );
         assert_finds(b"#if __has_include(<SUB/a.h>)\n#endif\n", &["<SUB/a.h>"]);
         assert_finds(b"%:if __has_include(<a.h>)\n%:endif\n", &["<a.h>"]);
         // Delimiter, comment, and escape characters are literal in header names.
@@ -2119,9 +2507,9 @@ mod test {
         );
         finder.finish_file();
         finder.find_has_include(b"#if __has_include(<c.h>)\n#endif\n");
-        assert!(
-            finder.next_includes.contains(&("<a.h>".into()))
-                && finder.embeds.contains(&("<b.bin>".into()))
+        assert_eq!(
+            (&finder.next_includes, &finder.embeds),
+            (&vec!["<a.h>".to_string()], &vec!["<b.bin>".to_string()])
         );
         assert_eq!(finder.includes, ["<c.h>"]);
     }
@@ -2147,14 +2535,21 @@ mod test {
             &["<a.h> limit(1)"],
         );
         // Files with neither aren't lexed.
-        assert!(!might_name_operator(
-            b"#define F(x) (x) \\\n  + 1\nconst char* s = \"a\\n\";\n"
-        ));
+        assert!(
+            !HiddenIncludesFinder::default()
+                .might_name_operator(b"#define F(x) (x) \\\n  + 1\nconst char* s = \"a\\n\";\n")
+        );
         // Each file starts fresh, whatever came before it.
         let mut finder = HiddenIncludesFinder::default();
         finder.find_has_include(b"/* unterminated");
         finder.find_in_file(b"#if __has_include(<a.h>)\n#endif\n");
         assert_eq!(finder.includes, ["<a.h>"]);
+        // Except that wrappers carry over, so calls are found in files without `__has_`.
+        let mut finder = HiddenIncludesFinder::default();
+        finder.find_in_file(b"#define HAS_INC(x) __has_include(x)");
+        finder.find_in_file(b"#if HAS_INC(<a.h>)\n#endif\n");
+        finder.find_in_file(b"#if HAS_\\\nINC(<b.h>)\n#endif\n");
+        assert_eq!(finder.includes, ["<a.h>", "<b.h>"]);
     }
 
     const TEST_SOURCE: &str = r#"
@@ -2442,8 +2837,6 @@ struct __nv_fp4x4_e2m1;
 #endif // _CCCL_HAS_FLOAT128()
 
 #endif // __CCCL_EXTENDED_DATA_TYPES_H
-
-
 "#;
 
     // #[test]

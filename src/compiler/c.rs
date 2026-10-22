@@ -934,11 +934,21 @@ where
                     fmt_duration_as_secs(&gen_deps_duration)
                 );
 
-                deps.retain(|p| p != input);
+                {
+                    let input = dunce::canonicalize(cwd.join(input))?;
+                    deps.retain(|path| {
+                        if let Ok(path) = dunce::canonicalize(path) {
+                            path != input
+                        } else {
+                            true
+                        }
+                    });
+                }
 
                 let deps_len = dependencies.len();
-                dependencies.extend(deps.iter().cloned());
+                dependencies.extend(deps);
                 let found_all = dependencies.len() == deps_len;
+                let deps = dependencies.iter().cloned().collect::<Vec<_>>();
 
                 *sources = if use_async_io {
                     futures::future::try_join_all(deps.into_iter().map(|path| async {
@@ -1412,12 +1422,14 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
     fn into_dist_packagers(self: Box<Self>) -> Result<DistPackagers> {
         // use itertools::Itertools;
         // trace!(
-        //     "Dist inputs: {:?}",
+        //     "Dist inputs:\n{}",
         //     std::iter::empty()
         //         .chain(self.dist_files.iter())
         //         .chain(self.parsed_args.extra_dist_files.iter())
         //         .unique()
+        //         .map(|path| format!("  {}", path.display()))
         //         .collect::<Vec<_>>()
+        //         .join("\n")
         // );
 
         let toolchain_packager = Box::new(CToolchainPackager {
