@@ -1886,7 +1886,7 @@ impl HiddenIncludesFinder {
             Operator::Include => self.includes.push(operand),
             Operator::IncludeNext => self.next_includes.push(operand),
             Operator::Embed => self.embeds.push(operand),
-        };
+        }
     }
 
     /// Ends the definition on this line, recording the macro as a wrapper if it has templates.
@@ -2199,7 +2199,7 @@ mod test {
                 r#"<cuda_fp6.h>"#,
                 r#"<cuda_fp4.h>"#,
             ],
-        )
+        );
     }
 
     #[test]
