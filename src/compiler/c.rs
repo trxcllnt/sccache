@@ -39,7 +39,7 @@ use std::{
     ffi::{OsStr, OsString},
     fmt,
     hash::Hash,
-    io::{Seek, Write},
+    io::Write,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, LazyLock},
@@ -1004,18 +1004,21 @@ where
                 debug!("[{out_pretty}] found hidden includes: {hidden_includes:?}");
 
                 if no_hash_input.is_none() {
-                    no_hash_input.replace(crate::util::tempfile()?);
+                    no_hash_input.replace(crate::util::temppath()?);
                 }
-
-                let f = no_hash_input.as_mut().unwrap().as_file_mut();
-                f.rewind()?;
-                f.set_len(0)?;
-                f.write_all(hidden_includes.to_source_file().as_bytes())?;
 
                 sources = &mut no_hash;
                 gen_deps_args = &no_hash_gen_deps_args;
+                input = no_hash_input.as_ref().unwrap();
                 dependencies = &mut no_hash_dependencies;
-                input = no_hash_input.as_ref().unwrap().path();
+
+                let mut f = fs_err::OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .write(true)
+                    .open(input)?;
+
+                f.write_all(hidden_includes.to_source_file().as_bytes())?;
             }
         }
 
