@@ -4164,11 +4164,8 @@ LLVM version: 6.0",
             f.write_all(b"foo.o :")?;
             Ok(MockChild::new(exit_status(0), "", ""))
         });
-        // // The inputs_packager preprocessor invocation.
-        // next_command(
-        //     &creator,
-        //     Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-        // );
+        // The inputs_packager preprocessor invocation.
+        next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
         // The compiler invocation.
         const COMPILER_STDOUT: &[u8] = b"compiler stdout";
         const COMPILER_STDERR: &[u8] = b"compiler stderr";
@@ -4827,15 +4824,10 @@ LLVM version: 6.0",
                 // Pretend to preprocess something.
                 let mut f = File::create(&d)?;
                 f.write_all(b"foo.o :")?;
-                Ok(MockChild::new(exit_status(0), "", ""))
+                Ok(MockChild::new(exit_status(0), "preprocessor", ""))
             });
-            // if *attempts_compile {
-            //     // The inputs_packager preprocessor invocation.
-            //     next_command(
-            //         &creator,
-            //         Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-            //     );
-            // }
+            // The inputs_packager preprocessor invocation.
+            next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
             // The compiler invocation.
             let o = obj.clone();
             next_command_calls(&creator, move |_| {

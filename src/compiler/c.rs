@@ -265,7 +265,7 @@ impl ParsedArguments {
 
 /// A generic implementation of the `Compilation` trait for C/C++ compilers.
 #[derive(Clone, Debug)]
-struct CCompilation<I: CCompilerImpl> {
+struct CCompilation<I: CCompilerImpl, T: CommandCreatorSync> {
     parsed_args: ParsedArguments,
     is_locally_preprocessed: bool,
     executable: PathBuf,
@@ -273,6 +273,7 @@ struct CCompilation<I: CCompilerImpl> {
     cwd: PathBuf,
     env_vars: Vec<(OsString, OsString)>,
     dist_files: Vec<PathBuf>,
+    deps_args: Option<GetDependenciesArgs<I, T>>,
 }
 
 /// Supported C compilers.
@@ -585,9 +586,26 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
     }
 }
 
-struct GetDependenciesArgs<'a, T: CommandCreatorSync> {
+#[derive(Clone, Debug)]
+struct GetDependenciesArgs<I, T>
+where
+    I: CCompilerImpl,
+    T: CommandCreatorSync,
+{
+    cache_control: CacheControl,
     compile_timestamp: DateTime<Utc>,
-    gen_hash_key_args: &'a GenerateHashKeyArgs<'a, T>,
+    compiler: I,
+    creator: T,
+    cwd: PathBuf,
+    dist_compile: bool,
+    env_vars: Vec<(OsString, OsString)>,
+    executable_digest: String,
+    executable: PathBuf,
+    extra_hashes: Vec<String>,
+    parsed_args: ParsedArguments,
+    runtime: tokio::runtime::Handle,
+    service: crate::server::SccacheService<T>,
+    use_async_io: bool,
 }
 
 struct ResolvedDependencies {
@@ -595,533 +613,6 @@ struct ResolvedDependencies {
     needs_update: bool,
     depsfile: SourceFileDeps,
     obj_key: String,
-}
-
-impl<I> CCompilerHasher<I>
-where
-    I: CCompilerImpl,
-{
-    async fn get_dependencies<T>(
-        &self,
-        args: GetDependenciesArgs<'_, T>,
-    ) -> Result<(ResolvedDependencies, Duration)>
-    where
-        T: CommandCreatorSync,
-    {
-        use itertools::Itertools;
-
-        let Self {
-            compiler,
-            parsed_args,
-            executable,
-            executable_digest,
-            ..
-        } = self;
-
-        let GetDependenciesArgs {
-            compile_timestamp,
-            gen_hash_key_args,
-            ..
-        } = args;
-
-        let GenerateHashKeyArgs {
-            cache_control,
-            creator,
-            cwd,
-            env_vars,
-            service,
-            runtime,
-            use_async_io,
-            dist_compile,
-            ..
-        } = *gen_hash_key_args;
-
-        let mut elapsed = Duration::default();
-        let out_pretty = parsed_args.output_pretty();
-
-        let start = Instant::now();
-
-        let deps_key = if CacheControl::ForceNoCache == cache_control {
-            // Skip hashing if we're not going to do any cache reads/writes
-            // In this mode, the cache key doesn't matter, so return empty string
-            None
-        } else {
-            let deps_key = HashKeyParams::new(parsed_args)
-                .with_runtime(runtime)
-                .with_async_io(use_async_io)
-                // Hash arch, common, dependency, and preprocessor args
-                .with_args(&self.parsed_args.arch_args[..])
-                .with_args(&self.parsed_args.common_args[..])
-                .with_args(&self.parsed_args.dependency_args[..])
-                .with_args(&self.parsed_args.preprocessor_args[..])
-                .with_compile_timestamp(compile_timestamp)
-                .with_cwd(cwd)
-                .with_env_vars(env_vars)
-                .with_digests(
-                    &std::iter::once(executable_digest)
-                        .chain(self.extra_hashes.iter())
-                        .map(|s| s.as_str())
-                        .chain(
-                            compiler
-                                .assembler_digest()
-                                .filter(|_| parsed_args.uses_external_assembler),
-                        )
-                        .chain([if dist_compile { "1" } else { "0" }])
-                        .collect::<Vec<_>>(),
-                )
-                .with_input_files(std::slice::from_ref(&self.parsed_args.input_absolute))
-                .with_input_files(&parsed_args.extra_hash_files[..])
-                // Hash the input file path, otherwise:
-                // - a/r.h exists.
-                // - a/x.c has #include "r.h".
-                // - b/x.c is identical to a/x.c.
-                // - Compiling a/x.c records a/r.h in the dependencies cache entry.
-                // - Compiling b/x.c results in a false cache hit since a/x.c and b/x.c
-                // share dependencies cache entries and a/r.h exists.
-                //
-                // Do not strip basedirs from the input file path.
-                //
-                // If the compiler, args, and input file are identical to another
-                // compilation in a different base dir, then that would compute the
-                // same dependencies cache entry key as the compilation in the other
-                // basedir.
-                //
-                // That could lead to loading the wrong object from cache if their
-                // dependencies are different, which they almost certainly will be.
-                //
-                // Example:
-                // ```shell
-                // cat <<"EOF" >a/value.h
-                // #define VALUE 42
-                // EOF
-                //
-                // cat <<"EOF" >b/value.h
-                // #define VALUE 43
-                // EOF
-                //
-                // $ cat <<"EOF" | tee {a,b}/input.cpp >/dev/null
-                // #include "value.h"
-                // int result() { return VALUE; }
-                // EOF
-                //
-                // $ cat <<"EOF" | tee {a,b}/main.cpp >/dev/null
-                // #include <cstdio>
-                // int result();
-                // int main() {
-                //     printf("%d\n", result());
-                //     return 0;
-                // }
-                // EOF
-                //
-                // $ export SCCACHE_BASEDIRS="$(pwd)/a:$(pwd)/b"
-                // $ sccache gcc -c a/input.cpp -o a/input.o
-                // $ sccache gcc -c b/input.cpp -o b/input.o # < error: cache hit returns a/input.o
-                // $ gcc a/input.o a/main.cpp -o a/main
-                // $ gcc b/input.o b/main.cpp -o b/main
-                //
-                // # correct:
-                // $ a/main
-                // > 42
-                //
-                // # incorrect, should be 43:
-                // $ b/main
-                // > 42
-                // ```
-                .with_hashed_input_path(self.parsed_args.input_absolute.as_path())
-                .with_plusplus(compiler.plusplus())
-                .with_version(DEPS_VERSION)
-                .compute()
-                .await?;
-
-            trace!(
-                "[{out_pretty}]: deps hash key time: {}",
-                fmt_duration_as_secs(&start.elapsed())
-            );
-
-            deps_key
-        };
-
-        let force_recache_dependencies = env_vars.iter().any(|(k, v)| {
-            k == "SCCACHE_RECACHE_DEPENDENCIES"
-                && matches!(v.to_str().unwrap_or_default(), "true" | "on" | "1")
-        });
-
-        let mut maybe_depsfile = if let Some(deps_key) = deps_key.as_deref().filter(|deps_key| {
-            debug!("[{out_pretty}]: Deps key: {deps_key}");
-            !force_recache_dependencies
-        }) {
-            tokio::time::timeout(
-                service.cache_read_timeout,
-                SourceFileDeps::get(service.storage.as_ref(), deps_key),
-            )
-            .await
-            .map_err(|err| {
-                debug!(
-                    "[{out_pretty}, {deps_key}]: Deps cache read timeout {:?}",
-                    start.elapsed()
-                );
-                err.into()
-            })
-            .and_then(|res| {
-                res.inspect_err(|err| {
-                    debug!("[{out_pretty}, {deps_key}]: Deps cache lookup error: {err:#}");
-                })
-            })
-            .ok()
-            .and_then(|res| match res {
-                Cache::Miss => None,
-                Cache::Hit(depsfile) => Some(depsfile),
-            })
-        } else {
-            None
-        };
-
-        let obj_key_and_deps = if let Some(mut depsfile) =
-            maybe_depsfile.filter(|_| CacheControl::ForceRecache != cache_control)
-        {
-            trace!(
-                "[{out_pretty}, {deps_key}]: Searching deps cache entry",
-                deps_key = depsfile.key
-            );
-
-            let start = Instant::now();
-
-            let (needs_update, obj_key_and_deps) = if use_async_io {
-                let (needs_update, obj_key_and_deps) = depsfile
-                    .find_dependencies(&SOURCE_FILE_CACHE, compile_timestamp, &out_pretty)
-                    .await;
-                maybe_depsfile = Some(depsfile);
-                (needs_update, obj_key_and_deps)
-            } else {
-                let (deps_file, needs_update, obj_key_and_deps) = runtime
-                    .spawn_blocking({
-                        let out_pretty = out_pretty.clone().into_owned();
-                        move || {
-                            let (needs_update, obj_key_and_deps) = depsfile.find_dependencies_sync(
-                                &SOURCE_FILE_CACHE,
-                                compile_timestamp,
-                                &out_pretty,
-                            );
-                            (depsfile, needs_update, obj_key_and_deps)
-                        }
-                    })
-                    .await?;
-                maybe_depsfile = Some(deps_file);
-                (needs_update, obj_key_and_deps)
-            };
-
-            trace!(
-                "[{out_pretty}]: find deps time: {}",
-                fmt_duration_as_secs(&start.elapsed())
-            );
-
-            obj_key_and_deps.map(|(obj_key, dependencies)| (obj_key, dependencies, needs_update))
-        } else {
-            maybe_depsfile = None;
-            None
-        };
-
-        let depsfile = if let Some(depsfile) = maybe_depsfile {
-            depsfile
-        } else {
-            SourceFileDeps::new(
-                deps_key.unwrap_or_default(),
-                SOURCE_FILE_CACHE
-                    .get_sync(&parsed_args.input_absolute, compile_timestamp)?
-                    .meta
-                    .clone(),
-            )
-        };
-
-        if let Some((obj_key, dependencies, needs_update)) = obj_key_and_deps {
-            // Hydrate the depfiles from the dependencies cache entry
-
-            let mut depfile_outputs = parsed_args
-                .outputs
-                .iter()
-                .filter(|(name, _)| name.starts_with("dep"))
-                .map(|(name, desc)| (*name, desc))
-                .collect::<BTreeMap<_, _>>();
-
-            let mut depfile_futures = vec![];
-
-            for (name, data) in dependencies.outputs.iter() {
-                if let Some(desc) = depfile_outputs.remove(name.as_str()) {
-                    depfile_futures.push(async {
-                        tokio::fs::File::options()
-                            .write(true)
-                            .create(true)
-                            .truncate(true)
-                            .open(cwd.join(&desc.path))
-                            .await?
-                            .write_all(data.as_bytes())
-                            .await
-                    });
-                }
-            }
-
-            let has_all_required_depfiles =
-                depfile_outputs.is_empty() || depfile_outputs.values().all(|desc| desc.optional);
-
-            if has_all_required_depfiles
-                && futures::future::try_join_all(depfile_futures).await.is_ok()
-            {
-                elapsed += start.elapsed();
-
-                return Ok((
-                    ResolvedDependencies {
-                        obj_key,
-                        depsfile,
-                        needs_update,
-                        dependencies,
-                    },
-                    elapsed,
-                ));
-            }
-        }
-
-        // Discover dependencies and generate depfiles
-        let mut sources = vec![];
-        let mut no_hash = vec![];
-
-        {
-            let mut sources_dependencies = BTreeSet::new();
-            let sources_gen_deps_args = GenerateDependenciesArgs {
-                creator,
-                executable,
-                parsed_args,
-                cwd,
-                env_vars,
-                tolerate_failure: false,
-            };
-
-            let mut no_hash_input = None;
-            let mut no_hash_dependencies = BTreeSet::new();
-            let no_hash_gen_deps_args = GenerateDependenciesArgs {
-                parsed_args: &ParsedArguments {
-                    dependency_args: vec![],
-                    depfile: None,
-                    msvc_scan_depfile: None,
-                    msvc_directives_depfile: None,
-                    structured_depfile: None,
-                    structured_depfile_format: None,
-                    msvc_show_includes: false,
-                    profile_generate: false,
-                    ..parsed_args.clone()
-                },
-                tolerate_failure: true,
-                ..sources_gen_deps_args
-            };
-
-            let mut sources = &mut sources;
-            let mut gen_deps_args = &sources_gen_deps_args;
-            let mut dependencies = &mut sources_dependencies;
-            let mut input = gen_deps_args.parsed_args.input.as_path();
-
-            loop {
-                let (mut deps, gen_deps_duration) = compiler
-                    .generate_dependencies(GenerateDependenciesArgs {
-                        parsed_args: &ParsedArguments {
-                            input: input.to_owned(),
-                            ..gen_deps_args.parsed_args.clone()
-                        },
-                        ..gen_deps_args.clone()
-                    })
-                    .await?;
-
-                trace!(
-                    "[{out_pretty}]: compiler generate_dependencies: {}",
-                    fmt_duration_as_secs(&gen_deps_duration)
-                );
-
-                {
-                    let input = dunce::canonicalize(cwd.join(input))?;
-                    deps.retain(|path| {
-                        if let Ok(path) = dunce::canonicalize(path) {
-                            path != input
-                        } else {
-                            true
-                        }
-                    });
-                }
-
-                let deps_len = dependencies.len();
-                dependencies.extend(deps);
-                let found_all = dependencies.len() == deps_len;
-                let deps = dependencies.iter().cloned().collect::<Vec<_>>();
-
-                *sources = if use_async_io {
-                    futures::future::try_join_all(deps.into_iter().map(|path| async {
-                        if path.exists() {
-                            SOURCE_FILE_CACHE
-                                .get(path, compile_timestamp)
-                                .await
-                                .map(Some)
-                        } else {
-                            Ok(None)
-                        }
-                    }))
-                    .await?
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<Arc<SourceFileEntry>>>()
-                } else {
-                    runtime
-                        .spawn_blocking(move || {
-                            deps.into_iter()
-                                .filter_map(|path| {
-                                    if path.exists() {
-                                        Some(SOURCE_FILE_CACHE.get_sync(path, compile_timestamp))
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .try_collect()
-                        })
-                        .await??
-                };
-
-                // Break early if we don't need to find the additional hidden dependencies
-                // for distributed compilation, or if we tried and didn't find any new ones.
-                if found_all || !dist_compile {
-                    break;
-                }
-
-                let mut hidden_includes =
-                    sources
-                        .iter()
-                        .fold(HiddenIncludes::default(), |mut hidden_includes, file| {
-                            hidden_includes.extend([&file.hidden_includes].into_iter());
-                            hidden_includes
-                        });
-
-                if hidden_includes.is_empty() {
-                    break;
-                }
-
-                hidden_includes = hidden_includes.dedupe();
-
-                debug!("[{out_pretty}] found hidden includes: {hidden_includes:?}");
-
-                if no_hash_input.is_none() {
-                    no_hash_input.replace(crate::util::temppath()?);
-                }
-
-                sources = &mut no_hash;
-                gen_deps_args = &no_hash_gen_deps_args;
-                input = no_hash_input.as_ref().unwrap();
-                dependencies = &mut no_hash_dependencies;
-
-                let mut f = fs_err::OpenOptions::new()
-                    .create(true)
-                    .truncate(true)
-                    .write(true)
-                    .open(input)?;
-
-                f.write_all(hidden_includes.to_source_file().as_bytes())?;
-            }
-        }
-
-        let outputs =
-            futures::future::try_join_all(parsed_args.outputs.iter().filter_map(|(name, desc)| {
-                if name.starts_with("dep") {
-                    Some(async {
-                        tokio::fs::read_to_string(cwd.join(&desc.path))
-                            .await
-                            .or_else(|err| {
-                                if desc.optional {
-                                    Ok(String::new())
-                                } else {
-                                    Err(err)
-                                }
-                            })
-                            .map(|file| (name.to_string(), file))
-                    })
-                } else {
-                    None
-                }
-            }))
-            .await?;
-
-        let dependencies = Dependencies {
-            sources: sources.into_iter().map(|file| file.meta.clone()).collect(),
-            no_hash: no_hash.into_iter().map(|file| file.meta.clone()).collect(),
-            outputs: outputs.into_iter().collect::<BTreeMap<_, _>>(),
-        };
-
-        elapsed += start.elapsed();
-
-        Ok((
-            ResolvedDependencies {
-                needs_update: true,
-                obj_key: String::new(),
-                depsfile,
-                dependencies,
-            },
-            elapsed,
-        ))
-    }
-
-    async fn put_dependencies(
-        new_key: String,
-        ResolvedDependencies {
-            mut depsfile,
-            dependencies,
-            obj_key: old_key,
-            ..
-        }: ResolvedDependencies,
-        storage: Arc<dyn Storage>,
-        mut elapsed: Duration,
-        out_pretty: String,
-        cache_write_timeout: Option<Duration>,
-    ) -> Result<Duration> {
-        let start = Instant::now();
-
-        if new_key != old_key {
-            depsfile.add_revision(&new_key, dependencies, &out_pretty);
-        }
-
-        let fut = depsfile.put(storage.as_ref());
-
-        let duration = if let Some(cache_write_timeout) = cache_write_timeout {
-            match tokio::time::timeout(cache_write_timeout, fut).await {
-                Ok(res) => match res {
-                    Ok(duration) => duration,
-                    Err(err) => {
-                        // Don't fail if updating the deps cache entry fails, just log it
-                        debug!("[{out_pretty}]: Failed to update deps cache entry: {err:#}");
-                        start.elapsed()
-                    }
-                },
-                Err(_) => {
-                    // Don't fail if updating the deps cache entry fails, just log it
-                    debug!(
-                        "[{out_pretty}]: Deps cache write timeout ({:?})",
-                        start.elapsed()
-                    );
-                    start.elapsed()
-                }
-            }
-        } else {
-            match fut.await {
-                Ok(duration) => duration,
-                Err(err) => {
-                    // Don't fail if updating the deps cache entry fails, just log it
-                    debug!("[{out_pretty}]: Failed to update deps cache entry: {err:#}");
-                    start.elapsed()
-                }
-            }
-        };
-
-        trace!(
-            "[{out_pretty}]: put deps time: {}",
-            fmt_duration_as_secs(&duration)
-        );
-
-        elapsed += duration;
-
-        Ok(elapsed)
-    }
 }
 
 #[async_trait]
@@ -1142,6 +633,7 @@ where
         Pin<Box<dyn Future<Output = Result<Duration>> + Send>>,
     )> {
         let GenerateHashKeyArgs {
+            creator,
             cwd,
             env_vars,
             cache_control,
@@ -1171,15 +663,27 @@ where
             .unwrap_or_else(Utc::now);
 
         // Only get dependencies if the file requires preprocessing
-        let deps = if self.parsed_args.language.needs_c_preprocessing() {
+        let (deps, deps_args) = if self.parsed_args.language.needs_c_preprocessing() {
             let mut duration = Duration::default();
 
-            let (deps, deps_duration) = self
-                .get_dependencies(GetDependenciesArgs {
-                    compile_timestamp,
-                    gen_hash_key_args: &args,
-                })
-                .await?;
+            let deps_args = GetDependenciesArgs {
+                compiler: self.compiler.clone(),
+                parsed_args: self.parsed_args.clone(),
+                executable: self.executable.clone(),
+                executable_digest: self.executable_digest.clone(),
+                extra_hashes: self.extra_hashes.clone(),
+                compile_timestamp,
+                cache_control: cache_control.clone(),
+                creator: creator.clone(),
+                cwd: cwd.to_owned(),
+                env_vars: env_vars.to_owned(),
+                runtime: runtime.clone(),
+                service: service.clone(),
+                use_async_io,
+                dist_compile: false,
+            };
+
+            let (deps, deps_duration) = get_dependencies(&deps_args).await?;
 
             duration += deps_duration;
 
@@ -1205,9 +709,9 @@ where
 
             elapsed += duration;
 
-            Some(deps)
+            (Some(deps), Some(deps_args))
         } else {
-            None
+            (None, None)
         };
 
         let key = if CacheControl::ForceNoCache == cache_control {
@@ -1273,7 +777,7 @@ where
                 // This happens if the LRU order changes, or if time macros were found and
                 // the entry's includes were updated to match the current ctimes/mtimes.
                 // See [`SourceFileDeps::test_dependencies`].
-                Box::pin(Self::put_dependencies(
+                Box::pin(put_dependencies(
                     key.clone(),
                     deps,
                     service.storage.clone(),
@@ -1306,6 +810,7 @@ where
                     executable: self.executable,
                     is_locally_preprocessed: true,
                     parsed_args: self.parsed_args,
+                    deps_args,
                 }),
                 weak_toolchain_key,
             },
@@ -1330,6 +835,525 @@ where
     }
 }
 
+async fn get_dependencies<I, T>(
+    args: &GetDependenciesArgs<I, T>,
+) -> Result<(ResolvedDependencies, Duration)>
+where
+    I: CCompilerImpl,
+    T: CommandCreatorSync,
+{
+    use itertools::Itertools;
+
+    let GetDependenciesArgs {
+        compiler,
+        creator,
+        cwd,
+        env_vars,
+        executable_digest,
+        executable,
+        extra_hashes,
+        parsed_args,
+        runtime,
+        service,
+        ..
+    } = args;
+
+    let GetDependenciesArgs {
+        compile_timestamp,
+        cache_control,
+        use_async_io,
+        dist_compile,
+        ..
+    } = *args;
+
+    let mut elapsed = Duration::default();
+    let out_pretty = parsed_args.output_pretty();
+
+    let start = Instant::now();
+
+    let deps_key = if CacheControl::ForceNoCache == cache_control {
+        // Skip hashing if we're not going to do any cache reads/writes
+        // In this mode, the cache key doesn't matter, so return empty string
+        None
+    } else {
+        let deps_key = HashKeyParams::new(parsed_args)
+            .with_runtime(runtime)
+            .with_async_io(use_async_io)
+            // Hash arch, common, dependency, and preprocessor args
+            .with_args(&parsed_args.arch_args[..])
+            .with_args(&parsed_args.common_args[..])
+            .with_args(&parsed_args.dependency_args[..])
+            .with_args(&parsed_args.preprocessor_args[..])
+            .with_compile_timestamp(compile_timestamp)
+            .with_cwd(cwd)
+            .with_env_vars(env_vars)
+            .with_digests(
+                &std::iter::once(executable_digest)
+                    .chain(extra_hashes.iter())
+                    .map(|s| s.as_str())
+                    .chain(
+                        compiler
+                            .assembler_digest()
+                            .filter(|_| parsed_args.uses_external_assembler),
+                    )
+                    .chain([if dist_compile { "1" } else { "0" }])
+                    .collect::<Vec<_>>(),
+            )
+            .with_input_files(std::slice::from_ref(&parsed_args.input_absolute))
+            .with_input_files(&parsed_args.extra_hash_files[..])
+            // Hash the input file path, otherwise:
+            // - a/r.h exists.
+            // - a/x.c has #include "r.h".
+            // - b/x.c is identical to a/x.c.
+            // - Compiling a/x.c records a/r.h in the dependencies cache entry.
+            // - Compiling b/x.c results in a false cache hit since a/x.c and b/x.c
+            // share dependencies cache entries and a/r.h exists.
+            //
+            // Do not strip basedirs from the input file path.
+            //
+            // If the compiler, args, and input file are identical to another
+            // compilation in a different base dir, then that would compute the
+            // same dependencies cache entry key as the compilation in the other
+            // basedir.
+            //
+            // That could lead to loading the wrong object from cache if their
+            // dependencies are different, which they almost certainly will be.
+            //
+            // Example:
+            // ```shell
+            // cat <<"EOF" >a/value.h
+            // #define VALUE 42
+            // EOF
+            //
+            // cat <<"EOF" >b/value.h
+            // #define VALUE 43
+            // EOF
+            //
+            // $ cat <<"EOF" | tee {a,b}/input.cpp >/dev/null
+            // #include "value.h"
+            // int result() { return VALUE; }
+            // EOF
+            //
+            // $ cat <<"EOF" | tee {a,b}/main.cpp >/dev/null
+            // #include <cstdio>
+            // int result();
+            // int main() {
+            //     printf("%d\n", result());
+            //     return 0;
+            // }
+            // EOF
+            //
+            // $ export SCCACHE_BASEDIRS="$(pwd)/a:$(pwd)/b"
+            // $ sccache gcc -c a/input.cpp -o a/input.o
+            // $ sccache gcc -c b/input.cpp -o b/input.o # < error: cache hit returns a/input.o
+            // $ gcc a/input.o a/main.cpp -o a/main
+            // $ gcc b/input.o b/main.cpp -o b/main
+            //
+            // # correct:
+            // $ a/main
+            // > 42
+            //
+            // # incorrect, should be 43:
+            // $ b/main
+            // > 42
+            // ```
+            .with_hashed_input_path(parsed_args.input_absolute.as_path())
+            .with_plusplus(compiler.plusplus())
+            .with_version(DEPS_VERSION)
+            .compute()
+            .await?;
+
+        trace!(
+            "[{out_pretty}]: deps hash key time: {}",
+            fmt_duration_as_secs(&start.elapsed())
+        );
+
+        deps_key
+    };
+
+    let force_recache_dependencies = env_vars.iter().any(|(k, v)| {
+        k == "SCCACHE_RECACHE_DEPENDENCIES"
+            && matches!(v.to_str().unwrap_or_default(), "true" | "on" | "1")
+    });
+
+    let mut maybe_depsfile = if let Some(deps_key) = deps_key.as_deref().filter(|deps_key| {
+        debug!("[{out_pretty}]: Deps key: {deps_key}");
+        !force_recache_dependencies
+    }) {
+        tokio::time::timeout(
+            service.cache_read_timeout,
+            SourceFileDeps::get(service.storage.as_ref(), deps_key),
+        )
+        .await
+        .map_err(|err| {
+            debug!(
+                "[{out_pretty}, {deps_key}]: Deps cache read timeout {:?}",
+                start.elapsed()
+            );
+            err.into()
+        })
+        .and_then(|res| {
+            res.inspect_err(|err| {
+                debug!("[{out_pretty}, {deps_key}]: Deps cache lookup error: {err:#}");
+            })
+        })
+        .ok()
+        .and_then(|res| match res {
+            Cache::Miss => None,
+            Cache::Hit(depsfile) => Some(depsfile),
+        })
+    } else {
+        None
+    };
+
+    let obj_key_and_deps = if let Some(mut depsfile) =
+        maybe_depsfile.filter(|_| CacheControl::ForceRecache != cache_control)
+    {
+        trace!(
+            "[{out_pretty}, {deps_key}]: Searching deps cache entry",
+            deps_key = depsfile.key
+        );
+
+        let start = Instant::now();
+
+        let (needs_update, obj_key_and_deps) = if use_async_io {
+            let (needs_update, obj_key_and_deps) = depsfile
+                .find_dependencies(&SOURCE_FILE_CACHE, compile_timestamp, &out_pretty)
+                .await;
+            maybe_depsfile = Some(depsfile);
+            (needs_update, obj_key_and_deps)
+        } else {
+            let (deps_file, needs_update, obj_key_and_deps) = runtime
+                .spawn_blocking({
+                    let out_pretty = out_pretty.clone().into_owned();
+                    move || {
+                        let (needs_update, obj_key_and_deps) = depsfile.find_dependencies_sync(
+                            &SOURCE_FILE_CACHE,
+                            compile_timestamp,
+                            &out_pretty,
+                        );
+                        (depsfile, needs_update, obj_key_and_deps)
+                    }
+                })
+                .await?;
+            maybe_depsfile = Some(deps_file);
+            (needs_update, obj_key_and_deps)
+        };
+
+        trace!(
+            "[{out_pretty}]: find deps time: {}",
+            fmt_duration_as_secs(&start.elapsed())
+        );
+
+        obj_key_and_deps.map(|(obj_key, dependencies)| (obj_key, dependencies, needs_update))
+    } else {
+        maybe_depsfile = None;
+        None
+    };
+
+    let depsfile = if let Some(depsfile) = maybe_depsfile {
+        depsfile
+    } else {
+        SourceFileDeps::new(
+            deps_key.unwrap_or_default(),
+            SOURCE_FILE_CACHE
+                .get_sync(&parsed_args.input_absolute, compile_timestamp)?
+                .meta
+                .clone(),
+        )
+    };
+
+    if let Some((obj_key, dependencies, needs_update)) = obj_key_and_deps {
+        // Hydrate the depfiles from the dependencies cache entry
+
+        let mut depfile_outputs = parsed_args
+            .outputs
+            .iter()
+            .filter(|(name, _)| name.starts_with("dep"))
+            .map(|(name, desc)| (*name, desc))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut depfile_futures = vec![];
+
+        for (name, data) in dependencies.outputs.iter() {
+            if let Some(desc) = depfile_outputs.remove(name.as_str()) {
+                depfile_futures.push(async {
+                    tokio::fs::File::options()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .open(cwd.join(&desc.path))
+                        .await?
+                        .write_all(data.as_bytes())
+                        .await
+                });
+            }
+        }
+
+        let has_all_required_depfiles =
+            depfile_outputs.is_empty() || depfile_outputs.values().all(|desc| desc.optional);
+
+        if has_all_required_depfiles && futures::future::try_join_all(depfile_futures).await.is_ok()
+        {
+            elapsed += start.elapsed();
+
+            return Ok((
+                ResolvedDependencies {
+                    obj_key,
+                    depsfile,
+                    needs_update,
+                    dependencies,
+                },
+                elapsed,
+            ));
+        }
+    }
+
+    // Discover dependencies and generate depfiles
+    let mut sources = vec![];
+    let mut no_hash = vec![];
+    let mut outputs = vec![];
+
+    if !depsfile.key.is_empty() || dist_compile {
+        let mut sources_dependencies = BTreeSet::new();
+        let sources_gen_deps_args = GenerateDependenciesArgs {
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            tolerate_failure: false,
+        };
+
+        let mut no_hash_input = None;
+        let mut no_hash_dependencies = BTreeSet::new();
+        let no_hash_gen_deps_args = GenerateDependenciesArgs {
+            parsed_args: &ParsedArguments {
+                dependency_args: vec![],
+                depfile: None,
+                msvc_scan_depfile: None,
+                msvc_directives_depfile: None,
+                structured_depfile: None,
+                structured_depfile_format: None,
+                msvc_show_includes: false,
+                profile_generate: false,
+                ..parsed_args.clone()
+            },
+            tolerate_failure: true,
+            ..sources_gen_deps_args
+        };
+
+        let mut sources = &mut sources;
+        let mut gen_deps_args = &sources_gen_deps_args;
+        let mut dependencies = &mut sources_dependencies;
+        let mut input = gen_deps_args.parsed_args.input.as_path();
+
+        loop {
+            let (deps, gen_deps_duration) = compiler
+                .generate_dependencies(GenerateDependenciesArgs {
+                    parsed_args: &ParsedArguments {
+                        input: input.to_owned(),
+                        ..gen_deps_args.parsed_args.clone()
+                    },
+                    ..gen_deps_args.clone()
+                })
+                .await?;
+
+            trace!(
+                "[{out_pretty}]: compiler generate_dependencies: {}",
+                fmt_duration_as_secs(&gen_deps_duration)
+            );
+
+            let mut deps = deps
+                .into_iter()
+                .map(|path| cwd.join(path))
+                .collect::<Vec<_>>();
+
+            deps.retain(|path| path != input);
+
+            let deps_len = dependencies.len();
+            dependencies.extend(deps);
+            let found_all = dependencies.len() == deps_len;
+            let deps = dependencies.iter().cloned().collect::<Vec<_>>();
+
+            *sources = if use_async_io {
+                futures::future::try_join_all(deps.into_iter().map(|path| async {
+                    if path.exists() {
+                        SOURCE_FILE_CACHE
+                            .get(path, compile_timestamp)
+                            .await
+                            .map(Some)
+                    } else {
+                        Ok(None)
+                    }
+                }))
+                .await?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<Arc<SourceFileEntry>>>()
+            } else {
+                runtime
+                    .spawn_blocking(move || {
+                        deps.into_iter()
+                            .filter_map(|path| {
+                                if path.exists() {
+                                    Some(SOURCE_FILE_CACHE.get_sync(path, compile_timestamp))
+                                } else {
+                                    None
+                                }
+                            })
+                            .try_collect()
+                    })
+                    .await??
+            };
+
+            // Break early if we don't need to find the additional hidden dependencies
+            // for distributed compilation, or if we tried and didn't find any new ones.
+            if found_all || !dist_compile {
+                break;
+            }
+
+            let mut hidden_includes =
+                sources
+                    .iter()
+                    .fold(HiddenIncludes::default(), |mut hidden_includes, file| {
+                        hidden_includes.extend([&file.hidden_includes].into_iter());
+                        hidden_includes
+                    });
+
+            if hidden_includes.is_empty() {
+                break;
+            }
+
+            hidden_includes = hidden_includes.dedupe();
+
+            trace!("[{out_pretty}] found hidden includes: {hidden_includes:?}");
+
+            if no_hash_input.is_none() {
+                no_hash_input.replace(crate::util::temppath()?);
+            }
+
+            sources = &mut no_hash;
+            gen_deps_args = &no_hash_gen_deps_args;
+            input = no_hash_input.as_ref().unwrap();
+            dependencies = &mut no_hash_dependencies;
+
+            let mut f = fs_err::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(input)?;
+
+            f.write_all(hidden_includes.to_source_file().as_bytes())?;
+        }
+
+        if !depsfile.key.is_empty() {
+            outputs.extend(
+                futures::future::try_join_all(parsed_args.outputs.iter().filter_map(
+                    |(name, desc)| {
+                        if name.starts_with("dep") {
+                            Some(async {
+                                tokio::fs::read_to_string(cwd.join(&desc.path))
+                                    .await
+                                    .or_else(|err| {
+                                        if desc.optional {
+                                            Ok(String::new())
+                                        } else {
+                                            Err(err)
+                                        }
+                                    })
+                                    .map(|file| (name.to_string(), file))
+                            })
+                        } else {
+                            None
+                        }
+                    },
+                ))
+                .await?,
+            );
+        }
+    }
+
+    let dependencies = Dependencies {
+        sources: sources.into_iter().map(|file| file.meta.clone()).collect(),
+        no_hash: no_hash.into_iter().map(|file| file.meta.clone()).collect(),
+        outputs: outputs.into_iter().collect::<BTreeMap<_, _>>(),
+    };
+
+    elapsed += start.elapsed();
+
+    Ok((
+        ResolvedDependencies {
+            needs_update: !depsfile.key.is_empty(),
+            obj_key: String::new(),
+            depsfile,
+            dependencies,
+        },
+        elapsed,
+    ))
+}
+
+async fn put_dependencies(
+    new_key: String,
+    ResolvedDependencies {
+        mut depsfile,
+        dependencies,
+        obj_key: old_key,
+        ..
+    }: ResolvedDependencies,
+    storage: Arc<dyn Storage>,
+    mut elapsed: Duration,
+    out_pretty: String,
+    cache_write_timeout: Option<Duration>,
+) -> Result<Duration> {
+    let start = Instant::now();
+
+    if new_key != old_key {
+        depsfile.add_revision(&new_key, dependencies, &out_pretty);
+    }
+
+    let fut = depsfile.put(storage.as_ref());
+
+    let duration = if let Some(cache_write_timeout) = cache_write_timeout {
+        match tokio::time::timeout(cache_write_timeout, fut).await {
+            Ok(res) => match res {
+                Ok(duration) => duration,
+                Err(err) => {
+                    // Don't fail if updating the deps cache entry fails, just log it
+                    debug!("[{out_pretty}]: Failed to update deps cache entry: {err:#}");
+                    start.elapsed()
+                }
+            },
+            Err(_) => {
+                // Don't fail if updating the deps cache entry fails, just log it
+                debug!(
+                    "[{out_pretty}]: Deps cache write timeout ({:?})",
+                    start.elapsed()
+                );
+                start.elapsed()
+            }
+        }
+    } else {
+        match fut.await {
+            Ok(duration) => duration,
+            Err(err) => {
+                // Don't fail if updating the deps cache entry fails, just log it
+                debug!("[{out_pretty}]: Failed to update deps cache entry: {err:#}");
+                start.elapsed()
+            }
+        }
+    };
+
+    trace!(
+        "[{out_pretty}]: put deps time: {}",
+        fmt_duration_as_secs(&duration)
+    );
+
+    elapsed += duration;
+
+    Ok(elapsed)
+}
+
 #[derive(Debug, Clone)]
 struct CCompilerCommand<C, I, T>
 where
@@ -1338,7 +1362,7 @@ where
     T: CommandCreatorSync,
 {
     cmd: I,
-    compilation: CCompilation<C>,
+    compilation: CCompilation<C, T>,
     __: std::marker::PhantomData<T>,
 }
 
@@ -1349,7 +1373,7 @@ where
     T: CommandCreatorSync,
 {
     #[allow(clippy::new_ret_no_self)]
-    pub fn new(cmd: I, compilation: CCompilation<C>) -> Box<dyn CompileCommand<T>> {
+    pub fn new(cmd: I, compilation: CCompilation<C, T>) -> Box<dyn CompileCommand<T>> {
         Box::new(CCompilerCommand {
             cmd,
             compilation,
@@ -1388,7 +1412,7 @@ where
 }
 
 #[async_trait]
-impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I> {
+impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I, T> {
     fn generate_compile_commands(
         &self,
     ) -> Result<(
@@ -1469,9 +1493,63 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I>
     }
 }
 
+async fn get_dependencies_dist<I, T>(args: GetDependenciesArgs<I, T>) -> Result<Vec<PathBuf>>
+where
+    I: CCompilerImpl,
+    T: CommandCreatorSync,
+{
+    let stats = args.service.stats.clone();
+    let storage = args.service.storage.clone();
+    let cache_write_timeout = args.service.cache_write_timeout;
+    let out_pretty = args.parsed_args.output_pretty().into_owned();
+
+    let (deps, deps_duration) = get_dependencies(&GetDependenciesArgs {
+        dist_compile: true,
+        ..args
+    })
+    .await?;
+
+    let mut dist_files = vec![];
+
+    dist_files.extend(
+        deps.dependencies
+            .sources
+            .iter()
+            .map(|meta| PathBuf::from(&meta.path)),
+    );
+
+    dist_files.extend(
+        deps.dependencies
+            .no_hash
+            .iter()
+            .map(|meta| PathBuf::from(&meta.path)),
+    );
+
+    let hash_time = if deps.needs_update {
+        put_dependencies(
+            deps.obj_key.clone(),
+            deps,
+            storage,
+            deps_duration,
+            out_pretty,
+            cache_write_timeout,
+        )
+        .await?
+    } else {
+        deps_duration
+    };
+
+    // Track how long get_dependencies took
+    let mut stats = stats.lock().await;
+    stats.hashed += 1;
+    stats.hasher_duration += hash_time;
+
+    Ok(dist_files)
+}
+
 #[cfg(feature = "dist-client")]
 #[async_trait]
-impl<I: CCompilerImpl> pkg::InputsPackager for CCompilation<I> {
+impl<I: CCompilerImpl, T: CommandCreatorSync> pkg::InputsPackager for CCompilation<I, T> {
     fn write_inputs(
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
@@ -1479,10 +1557,20 @@ impl<I: CCompilerImpl> pkg::InputsPackager for CCompilation<I> {
     ) -> Result<()> {
         let CCompilation {
             parsed_args,
-            dist_files,
+            mut dist_files,
             env_vars,
+            deps_args,
             ..
         } = *self;
+
+        if let Some(deps_args) = deps_args {
+            dist_files.extend(
+                deps_args
+                    .runtime
+                    .clone()
+                    .block_on(async { get_dependencies_dist(deps_args).await })?,
+            );
+        }
 
         let mut package = pkg::ArchiveBuilder::new(path_transformer);
 
@@ -1504,10 +1592,15 @@ impl<I: CCompilerImpl> pkg::InputsPackager for CCompilation<I> {
     ) -> Result<()> {
         let CCompilation {
             parsed_args,
-            dist_files,
+            mut dist_files,
             env_vars,
+            deps_args,
             ..
         } = *self;
+
+        if let Some(deps_args) = deps_args {
+            dist_files.extend(get_dependencies_dist(deps_args).await?);
+        }
 
         let mut package = pkg::ArchiveBuilder::new(path_transformer);
 
