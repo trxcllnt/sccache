@@ -207,14 +207,13 @@ impl Scheduler {
             let this = self.clone();
             async move {
                 loop {
-                    if futures::future::try_join(
+                    if let Err(err) = futures::future::try_join(
                         this.poll_for_finished_jobs(),
                         this.send_status_to_servers(),
                     )
                     .await
-                    .is_err()
                     {
-                        break;
+                        break Err::<(), _>(err);
                     }
                     tokio::time::sleep(heartbeat_interval).await;
                 }
@@ -234,11 +233,7 @@ impl Scheduler {
                 biased;
                 res = celery => res,
                 res = sigint => res,
-                // This should never resolve before either celery or sigint unless
-                // a catastrophic error occurs (tokio dies somehow?). Just polling
-                // it here so the task is cancelled once either of the above two
-                // futures complete first.
-                _ = heartbeat => Ok(()),
+                res = heartbeat => res.map_err(Into::into).and_then(|res| res),
             };
 
             // Broadcast the scheduler is shutting down.

@@ -294,21 +294,20 @@ impl Server {
         let health = if let Some(health_check_bind_addr) = health_check_bind_addr {
             self.health_check_listener(health_check_bind_addr).boxed()
         } else {
-            futures::future::pending::<()>().boxed()
+            futures::future::pending::<Result<()>>().boxed()
         };
 
         let status = util::spawn({
             let this = self.clone();
             async move {
                 loop {
-                    if futures::future::try_join(
+                    if let Err(err) = futures::future::try_join(
                         this.poll_for_cancelled_jobs(),
                         this.broadcast_server_status(None),
                     )
                     .await
-                    .is_err()
                     {
-                        break;
+                        break Err::<(), _>(err);
                     }
 
                     tokio::time::sleep(heartbeat_interval).await;
@@ -327,12 +326,8 @@ impl Server {
             biased;
             res = celery => res,
             res = sigint => res,
-            // These should never resolve before either celery or sigint unless
-            // a catastrophic error occurs (tokio dies somehow?). Just polling
-            // it here so the tasks are cancelled once either of the above two
-            // futures complete first.
-            _ = health => Ok(()),
-            _ = status => Ok(()),
+            res = health => res,
+            res = status => res.map_err(Into::into).and_then(|res| res),
         };
 
         // Broadcast the server is shutting down.
@@ -527,17 +522,18 @@ impl Server {
         .map_err(Into::into)
     }
 
-    async fn health_check_listener(&self, health_check_bind_addr: SocketAddr) -> () {
+    async fn health_check_listener(&self, health_check_bind_addr: SocketAddr) -> Result<()> {
         use futures::stream::StreamExt;
         use hyper::{
             Response, StatusCode, server::conn::http1::Builder as HyperHttpBuilder,
             service::service_fn,
         };
         use hyper_util::rt::TokioIo;
-        use tokio::sync::mpsc::{error::SendError, unbounded_channel};
+        use tokio::sync::mpsc::{channel, error::SendError, unbounded_channel};
 
+        let (errors_tx, mut errors) = channel(1);
         // Track all outstanding TCP response futures
-        let (futures_tx, futures_rx) = unbounded_channel();
+        let (futures_tx, futures) = unbounded_channel();
 
         let outer = util::spawn({
             let ok_service = service_fn(move |_| async move {
@@ -550,7 +546,7 @@ impl Server {
                 let listener = match tokio::net::TcpListener::bind(health_check_bind_addr).await {
                     Ok(listener) => listener,
                     Err(err) => {
-                        tracing::warn!("Failed to create TCP listener: {err}");
+                        tracing::error!("Failed to create TCP listener: {err}");
                         return;
                     }
                 };
@@ -559,17 +555,22 @@ impl Server {
                     let stream = match listener.accept().await {
                         Ok((stream, _)) => TokioIo::new(stream),
                         Err(err) => {
-                            tracing::warn!("Error accepting connection, ignoring request: {err}");
-                            continue;
+                            tracing::error!("Error accepting connection: {err}");
+                            let _ = errors_tx.send(Err::<(), _>(err.into()));
+                            break;
                         }
                     };
 
-                    let inner = util::spawn(async move {
-                        if let Err(err) = HyperHttpBuilder::new()
-                            .serve_connection(stream, ok_service)
-                            .await
-                        {
-                            tracing::warn!("Error serving healthcheck connection: {err}");
+                    let inner = util::spawn({
+                        let errors_tx = errors_tx.clone();
+                        async move {
+                            if let Err(err) = HyperHttpBuilder::new()
+                                .serve_connection(stream, ok_service)
+                                .await
+                            {
+                                tracing::error!("Error serving healthcheck connection: {err}");
+                                let _ = errors_tx.send(Err::<(), _>(err.into()));
+                            }
                         }
                     });
 
@@ -582,14 +583,19 @@ impl Server {
             }
         });
 
-        let inners = tokio_stream::wrappers::UnboundedReceiverStream::new(futures_rx)
+        let inners = tokio_stream::wrappers::UnboundedReceiverStream::new(futures)
             .for_each_concurrent(None, |fut| async move {
                 if let Err(err) = fut.await {
-                    tracing::warn!("Healthcheck response future error: {err}");
+                    tracing::error!("Healthcheck response future error: {err}");
                 }
             });
 
-        let _ = tokio::join!(outer, inners);
+        tokio::select! {
+            biased;
+            res = errors.recv() => res.unwrap_or(Ok(())),
+            res = outer => res.map_err(Into::into),
+            _ = inners => Ok(()),
+        }
     }
 
     async fn load_job_and_run_build(
