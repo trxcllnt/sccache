@@ -673,7 +673,7 @@ where
                 executable_digest: self.executable_digest.clone(),
                 extra_hashes: self.extra_hashes.clone(),
                 compile_timestamp,
-                cache_control: cache_control.clone(),
+                cache_control,
                 creator: creator.clone(),
                 cwd: cwd.to_owned(),
                 env_vars: env_vars.to_owned(),
