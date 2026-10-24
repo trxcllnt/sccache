@@ -2368,6 +2368,14 @@ impl ServerStats {
                 "Average hash time"
             );
         }
+        if self.preprocessed > 0 {
+            set_duration_stat!(
+                stats_vec,
+                self.preprocessor_duration,
+                self.preprocessed,
+                "Average preprocessor"
+            );
+        }
         set_duration_stat!(
             stats_vec,
             self.compiler_write_duration,
