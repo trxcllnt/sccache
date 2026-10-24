@@ -1812,6 +1812,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
             CCompilerKind::Nvhpc => {
                 // Various programs called by the nvc/nvc++ front end.
                 let _ = add_default_files();
+                package_builder.add_dir(Path::new("/tmp"))?;
 
                 // Handle NVHPC's mpicc/mpic++ compiler wrappers
                 let executable = if let Some(executable) = named_file("-showme:command") {
