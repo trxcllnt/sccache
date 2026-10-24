@@ -320,9 +320,5 @@ fn deps_cache_entry<P: AsRef<Path>>(p: P) -> Option<SourceFileDeps> {
         return None;
     }
 
-    if let Ok(deps) = SourceFileDeps::from_buffer(b.into()) {
-        Some(deps)
-    } else {
-        None
-    }
+    SourceFileDeps::from_buffer(b.into()).ok()
 }

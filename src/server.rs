@@ -1223,7 +1223,7 @@ where
             storage,
             pending_compilations_limit: util::num_cpus() as u64,
             compiler_info_queue,
-            cache_read_timeout: cache_read_timeout.clone(),
+            cache_read_timeout,
             cache_write_timeout: cache_write_timeout.unwrap_or(cache_read_timeout),
             rt,
             creator,

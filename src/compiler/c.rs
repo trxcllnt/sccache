@@ -765,25 +765,19 @@ where
             obj_key
         };
 
-        let cache_write = if let Some(deps) = deps.filter(|deps| {
-            !obj_key.is_empty() && (obj_key != deps.obj_key || deps.write_to_storage)
-        }) {
-            // If the dependencies cache entry is new or was updated, write it back to
-            // storage.
-            // This happens if the LRU order changes, or if time macros were found and
-            // the entry's includes were updated to match the current ctimes/mtimes.
-            // See [`SourceFileDeps::test_dependencies`].
-            Some(Box::pin(put_dependencies(
-                obj_key.clone(),
-                deps,
-                service.storage.clone(),
-                out_pretty.into_owned(),
-                service.cache_write_timeout,
-            ))
-                as Pin<Box<dyn Future<Output = Result<()>> + Send>>)
-        } else {
-            None
-        };
+        let cache_write = deps
+            .filter(|deps| {
+                !obj_key.is_empty() && (obj_key != deps.obj_key || deps.write_to_storage)
+            })
+            .map(|deps| {
+                Box::pin(put_dependencies(
+                    obj_key.clone(),
+                    deps,
+                    service.storage.clone(),
+                    out_pretty.into_owned(),
+                    service.cache_write_timeout,
+                )) as Pin<Box<dyn Future<Output = Result<()>> + Send>>
+            });
 
         // A compiler binary may be a symlink to another and so has the same digest, but that means
         // the toolchain will not contain the correct path to invoke the compiler! Add the compiler
@@ -1109,13 +1103,12 @@ where
                 }
             }
 
-            let has_all_required_depfiles =
-                futures::future::try_join_all(depfile_futures).await.is_ok();
-            let has_all_required_depfiles = has_all_required_depfiles
-                && (depfile_outputs.is_empty()
-                    || depfile_outputs.values().all(|desc| desc.optional));
+            let has_all_required_depfiles = depfile_futures.is_empty()
+                || futures::future::try_join_all(depfile_futures).await.is_ok();
 
             has_all_required_depfiles
+                && (depfile_outputs.is_empty()
+                    || depfile_outputs.values().all(|desc| desc.optional))
         };
 
         if has_all_required_files {
@@ -1169,7 +1162,7 @@ where
 
                 let temp = hidden_includes_input
                     .map(Ok)
-                    .unwrap_or_else(|| crate::util::temppath())?;
+                    .unwrap_or_else(crate::util::temppath)?;
 
                 let mut f = fs_err::OpenOptions::new()
                     .create(true)
@@ -1270,7 +1263,7 @@ where
                 sources
                     .iter()
                     .fold(HiddenIncludes::default(), |mut hidden_includes, file| {
-                        hidden_includes.extend([&file.hidden_includes].into_iter());
+                        hidden_includes.extend([&file.hidden_includes]);
                         hidden_includes
                     });
 
@@ -1322,7 +1315,7 @@ where
     let hidden_includes = sources
         .iter()
         .fold(HiddenIncludes::default(), |mut hidden_includes, file| {
-            hidden_includes.extend([&file.hidden_includes].into_iter());
+            hidden_includes.extend([&file.hidden_includes]);
             hidden_includes
         })
         .dedupe();

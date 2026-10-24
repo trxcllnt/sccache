@@ -635,7 +635,7 @@ impl SourceFileDeps {
                 ..
             } = curr.as_ref();
 
-            hidden_incs.extend([hidden_includes].into_iter());
+            hidden_incs.extend([hidden_includes]);
 
             if *found_time {
                 // We don't know for sure that the program actually uses the __TIME__ macro,
@@ -712,7 +712,7 @@ impl SourceFileDeps {
                 ..
             } = curr.as_ref();
 
-            hidden_incs.extend([hidden_includes].into_iter());
+            hidden_incs.extend([hidden_includes]);
 
             if *found_time {
                 // We don't know for sure that the program actually uses the __TIME__ macro,

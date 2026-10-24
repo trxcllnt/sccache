@@ -556,7 +556,7 @@ impl Server {
                         Ok((stream, _)) => TokioIo::new(stream),
                         Err(err) => {
                             tracing::error!("Error accepting connection: {err}");
-                            let _ = errors_tx.send(Err::<(), _>(err.into()));
+                            let _ = errors_tx.send(Err::<(), _>(err.into())).await;
                             break;
                         }
                     };
@@ -569,7 +569,7 @@ impl Server {
                                 .await
                             {
                                 tracing::error!("Error serving healthcheck connection: {err}");
-                                let _ = errors_tx.send(Err::<(), _>(err.into()));
+                                let _ = errors_tx.send(Err::<(), _>(err.into())).await;
                             }
                         }
                     });
