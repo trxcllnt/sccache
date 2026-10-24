@@ -1385,23 +1385,22 @@ where
                     )
                     .unique(),
             )
-            .chain(
-                (deps_arg == "-MD")
-                    .then(|| {
-                        [
-                            OsStr::new("-E"),
-                            OsStr::new("-P"),
-                            OsStr::new("-o"),
-                            if cfg!(windows) {
-                                OsStr::new("nul")
-                            } else {
-                                OsStr::new("/dev/null")
-                            },
-                        ]
-                    })
-                    .into_iter()
-                    .flatten(),
-            )
+            .chain(if matches!(kind, CCompilerKind::Nvhpc) {
+                vec![OsStr::new("-E")]
+            } else if deps_arg == "-MD" {
+                vec![
+                    OsStr::new("-E"),
+                    OsStr::new("-P"),
+                    OsStr::new("-o"),
+                    if cfg!(windows) {
+                        OsStr::new("nul")
+                    } else {
+                        OsStr::new("/dev/null")
+                    },
+                ]
+            } else {
+                vec![]
+            })
             .chain(parsed_args.double_dash_input.then_some(OsStr::new("--")))
             .chain(std::iter::once(parsed_args.input.as_os_str()));
 
