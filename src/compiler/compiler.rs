@@ -649,7 +649,7 @@ where
         args: GenerateHashKeyArgs<'_, T>,
     ) -> Result<(
         HashResult<T>,
-        Pin<Box<dyn Future<Output = Result<Duration>> + Send>>,
+        Option<Pin<Box<dyn Future<Output = Result<()>> + Send>>>,
     )>;
 
     /// Return the state of any `--color` option passed to the compiler.
@@ -727,21 +727,10 @@ where
         let (hash_result, deps_cache_write) = match hash_result {
             Ok((hash_result, deps_cache_write)) => (
                 hash_result,
-                runtime.spawn({
-                    let stats = service.stats.clone();
-                    async move {
-                        // Immediately drive the dependency cache write so it
-                        // runs concurrently to cache lookups and compilations
-                        if let Ok(hash_time) = deps_cache_write.await
-                            && cache_control != CacheControl::ForceNoCache
-                        {
-                            // Track how long generate_hash_key took
-                            let mut stats = stats.lock().await;
-                            stats.hashed += 1;
-                            stats.hasher_duration += hash_time;
-                        }
-                        Ok::<_, anyhow::Error>(())
-                    }
+                deps_cache_write.map(|deps_cache_write| {
+                    // Immediately drive the dependency cache write so it
+                    // runs concurrently to cache lookups and compilations
+                    runtime.spawn(deps_cache_write)
                 }),
             ),
             Err(err) => {
@@ -781,7 +770,9 @@ where
         match lookup? {
             // Cache hit
             CacheLookupResult::Success(compile_result, output) => {
-                let _ = deps_cache_write.await;
+                if let Some(deps_cache_write) = deps_cache_write {
+                    let _ = deps_cache_write.await;
+                }
                 Ok::<_, Error>((compile_result, output))
             }
             // Cache miss, compile
@@ -853,9 +844,10 @@ where
                         }
                     });
 
-                let cache_write = if let Some(timeout) = service.cache_write_timeout {
+                let cache_write = Box::pin({
                     let out_pretty2 = out_pretty.clone();
-                    Box::pin(async move {
+                    let timeout = service.cache_write_timeout;
+                    async move {
                         let start = Instant::now();
                         match tokio::time::timeout(timeout, cache_write).await {
                             Ok(res) => res,
@@ -867,16 +859,19 @@ where
                                 Err(anyhow::Error::new(err))
                             }
                         }
+                    }
+                });
+
+                let cache_write = if let Some(deps_cache_write) = deps_cache_write {
+                    Box::pin(async move {
+                        // the deps cache write is allowed to error,
+                        // we only care about the object cache write
+                        futures::future::join(deps_cache_write, cache_write).await.1
                     })
+                        as Pin<Box<dyn Future<Output = Result<CacheWriteInfo>> + Send>>
                 } else {
                     cache_write
                 };
-
-                let cache_write = Box::pin(async move {
-                    // the deps cache write is allowed to error,
-                    // we only care about the object cache write
-                    futures::future::join(deps_cache_write, cache_write).await.1
-                });
 
                 Ok((
                     CompileResult::CacheMiss(miss_type, dist_type, duration, cache_write),

@@ -949,8 +949,8 @@ where
     /// Timeout for cache reads (default: 60s)
     pub cache_read_timeout: Duration,
 
-    /// Timeout for cache writes (default: None)
-    pub cache_write_timeout: Option<Duration>,
+    /// Timeout for cache writes (default: cache_read_timeout)
+    pub cache_write_timeout: Duration,
 
     /// Distributed sccache client
     dist_client: Arc<DistClientContainer>,
@@ -1223,8 +1223,8 @@ where
             storage,
             pending_compilations_limit: util::num_cpus() as u64,
             compiler_info_queue,
-            cache_read_timeout,
-            cache_write_timeout,
+            cache_read_timeout: cache_read_timeout.clone(),
+            cache_write_timeout: cache_write_timeout.unwrap_or(cache_read_timeout),
             rt,
             creator,
             tx,
@@ -1260,7 +1260,7 @@ where
             pending_compilations_limit: util::num_cpus() as u64,
             compiler_info_queue,
             cache_read_timeout: Duration::from_secs(60),
-            cache_write_timeout: None,
+            cache_write_timeout: Duration::from_secs(60),
             rt,
             creator,
             tx,
@@ -1312,7 +1312,7 @@ where
             pending_compilations_limit: util::num_cpus() as u64,
             compiler_info_queue,
             cache_read_timeout: Duration::from_secs(60),
-            cache_write_timeout: None,
+            cache_write_timeout: Duration::from_secs(60),
             rt: rt.clone(),
             creator,
             tx,
@@ -2089,12 +2089,16 @@ pub struct ServerStats {
     pub cache_read_hit_duration: Duration,
     /// The number of successful hashes computed.
     pub hashed: u64,
+    /// The number of successful preprocesses performed.
+    pub preprocessed: u64,
     /// The number of successful compilations performed.
     pub compilations: u64,
     /// The total time spent hashing.
     pub hasher_duration: Duration,
     /// The total time spent compiling.
     pub compiler_write_duration: Duration,
+    /// The total time spent preprocessing.
+    pub preprocessor_duration: Duration,
     /// The count of compilation failures.
     pub compile_fails: u64,
     /// Counts of reasons why compiles were not cached.
@@ -2133,9 +2137,11 @@ impl std::ops::AddAssign for ServerStats {
         self.cache_write_duration += rhs.cache_write_duration;
         self.cache_read_hit_duration += rhs.cache_read_hit_duration;
         self.hashed += rhs.hashed;
+        self.preprocessed += rhs.preprocessed;
         self.compilations += rhs.compilations;
         self.hasher_duration += rhs.hasher_duration;
         self.compiler_write_duration += rhs.compiler_write_duration;
+        self.preprocessor_duration += rhs.preprocessor_duration;
         self.compile_fails += rhs.compile_fails;
         for (k, v) in rhs.not_cached {
             *self.not_cached.entry(k).or_default() += v;
@@ -2198,12 +2204,14 @@ impl Default for ServerStats {
             forced_recaches: u64::default(),
             cache_write_errors: u64::default(),
             cache_writes: u64::default(),
-            cache_write_duration: Duration::new(0, 0),
-            cache_read_hit_duration: Duration::new(0, 0),
+            cache_write_duration: Duration::default(),
+            preprocessor_duration: Duration::default(),
+            cache_read_hit_duration: Duration::default(),
             hashed: u64::default(),
+            preprocessed: u64::default(),
             compilations: u64::default(),
-            hasher_duration: Duration::new(0, 0),
-            compiler_write_duration: Duration::new(0, 0),
+            hasher_duration: Duration::default(),
+            compiler_write_duration: Duration::default(),
             compile_fails: u64::default(),
             not_cached: HashMap::new(),
             dist_compiles: HashMap::new(),
@@ -2311,7 +2319,8 @@ impl ServerStats {
         set_stat!(stats_vec, self.forced_recaches, "Forced recaches");
         set_stat!(stats_vec, self.cache_write_errors, "Cache write errors");
 
-        set_stat!(stats_vec, self.hashed, "Hashes");
+        set_stat!(stats_vec, self.hashed, "Hashed");
+        set_stat!(stats_vec, self.preprocessed, "Preprocessed");
         set_stat!(
             stats_vec,
             self.compilations + self.compile_fails + self.non_cacheable_compilations,

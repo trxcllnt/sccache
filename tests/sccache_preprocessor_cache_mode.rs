@@ -25,14 +25,15 @@ use harness::{
     client::{SccacheClient, make_sccache_client},
     compile_cmdline, find_compilers, write_source,
 };
+use itertools::Itertools;
 use pastey::paste;
-use sccache::compiler::Language;
+use sccache::{
+    compiler::{Language, SourceFileDeps},
+    server::ServerStats,
+};
 use std::{ffi::OsString, path::Path};
 
-fn assert_stats_eq(
-    expected_stats: &sccache::server::ServerStats,
-    actual_stats: &sccache::server::ServerStats,
-) {
+fn assert_stats_eq(expected_stats: &ServerStats, actual_stats: &ServerStats) {
     if actual_stats != expected_stats {
         panic!(
             "assertion `left == right` failed.\n  expected: {}\n    actual: {}",
@@ -41,6 +42,90 @@ fn assert_stats_eq(
             serde_json::to_string(&serde_patch::diff(expected_stats, actual_stats).unwrap())
                 .unwrap()
         )
+    }
+}
+
+fn assert_num_deps_cache_entries_and_results<
+    I: IntoIterator<Item = (OsString, SourceFileDeps)> + Clone,
+>(
+    entries: I,
+    exp_num_entries: usize,
+    exp_num_results: &[usize],
+) {
+    // Assert the number of deps cache entries matches the expected number of entries
+    assert_eq!(exp_num_entries, entries.clone().into_iter().count());
+    // Assert the deps cache entry now has the expected number of results
+    assert_eq!(
+        exp_num_results,
+        entries
+            .into_iter()
+            .map(|(_, e)| e.iter().count())
+            .sorted()
+            .as_slice()
+    );
+}
+
+fn assert_deps_cache_entries_result_orders_changed<
+    I: IntoIterator<Item = (OsString, SourceFileDeps)> + Clone,
+>(
+    old: I,
+    new: I,
+) {
+    // Ensure same number of deps cache entries
+    assert_eq!(
+        new.clone().into_iter().count(),
+        old.clone().into_iter().count()
+    );
+
+    let old = old
+        .into_iter()
+        .sorted_by(|a, b| a.0.cmp(&b.0))
+        .collect::<Vec<_>>();
+    let new = new
+        .into_iter()
+        .sorted_by(|a, b| a.0.cmp(&b.0))
+        .collect::<Vec<_>>();
+
+    for ((old_key, old), (new_key, new)) in old.iter().zip(new.iter()) {
+        // Assert deps cache entry keys match
+        assert_eq!(old_key, new_key);
+
+        let old_back = old.iter().next_back();
+        let new_back = new.iter().next_back();
+
+        // Assert the new deps cache entry result is at the back of the LRU
+        assert_ne!((old_key, old_back), (new_key, new_back));
+
+        let new_back = new_back.unwrap();
+        // Assert all but the last deps cache entry results are the same
+        assert_eq!(
+            old.iter().filter(|x| x.0 != new_back.0).collect::<Vec<_>>(),
+            new.iter().filter(|x| x.0 != new_back.0).collect::<Vec<_>>()
+        );
+    }
+}
+
+fn assert_deps_cache_entries_are_identical<
+    I: IntoIterator<Item = (OsString, SourceFileDeps)> + Clone,
+>(
+    old: I,
+    new: I,
+) {
+    // Ensure same number of deps cache entries
+    assert_eq!(
+        new.clone().into_iter().count(),
+        old.clone().into_iter().count()
+    );
+    let old = old.into_iter().sorted_by(|a, b| a.0.cmp(&b.0));
+    let new = new.into_iter().sorted_by(|a, b| a.0.cmp(&b.0));
+    for ((old_key, old), (new_key, new)) in old.zip(new) {
+        // Assert deps cache entry keys match
+        assert_eq!(old_key, new_key);
+        // Assert the deps cache entry results are the same
+        assert_eq!(
+            old.iter().collect::<Vec<_>>(),
+            new.iter().collect::<Vec<_>>()
+        );
     }
 }
 
@@ -110,9 +195,10 @@ int main(int argc, char** argv) {{
         // Write dependency A
         write_source(tempdir, dep_a, r#"int a() { return 0; }"#);
 
-        // Compile and populate preprocessor and object disk caches
+        // Compile and populate deps and objs cache entries
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
+            preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -121,9 +207,10 @@ int main(int argc, char** argv) {{
             ..Default::default()
         })?;
 
-        // Compile again to ensure dependencies cache hit
+        // Compile again to ensure deps cache hit
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
+            preprocessed: Some(0),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -149,7 +236,8 @@ int a() {{ return b(); }}
 
         // Should be two object hashes now
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
+            preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -158,10 +246,11 @@ int a() {{ return b(); }}
             ..Default::default()
         })?;
 
-        // Compile again to ensure dependencies cache hit
+        // Compile again to ensure deps cache hit
         // Should still be two object hashes
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
+            preprocessed: Some(0),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -175,7 +264,8 @@ int a() {{ return b(); }}
 
         // Should be three object hashes now
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
+            preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -184,10 +274,11 @@ int a() {{ return b(); }}
             ..Default::default()
         })?;
 
-        // Compile again to ensure dependencies cache hit
+        // Compile again to ensure deps cache hit
         // Should still be three object hashes
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
+            preprocessed: Some(0),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -195,7 +286,7 @@ int a() {{ return b(); }}
         })?;
     }
 
-    // Revert dep_b to ensure dependencies cache hit
+    // Revert dep_b to ensure deps cache hit
     {
         // Write dependency B
         write_source(tempdir, dep_b, r#"int b() { return 1; }"#);
@@ -203,6 +294,7 @@ int a() {{ return b(); }}
         // Should still be three object hashes
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
+            preprocessed: Some(0),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -210,7 +302,7 @@ int a() {{ return b(); }}
         })?;
     }
 
-    // Revert dep_a to ensure dependencies cache hit
+    // Revert dep_a to ensure deps cache hit
     {
         // Write dependency A
         write_source(tempdir, dep_a, r#"int a() { return 0; }"#);
@@ -218,6 +310,7 @@ int a() {{ return b(); }}
         // Should still be three object hashes
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
+            preprocessed: Some(0),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
@@ -290,26 +383,35 @@ int main(int argc, char** argv) {{
     "#,
         );
 
-        // Compile and populate preprocessor and object disk caches
+        // Compile and populate deps and objs cache entries
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
             compile_requests: Some(1),
             requests_executed: Some(1),
             non_cacheable_compilations: Some(1),
             ..Default::default()
         })?;
 
-        // Wait 2s and compile again to ensure dependencies cache miss
+        // Wait 2s and compile again to ensure deps cache miss
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
             compile_requests: Some(1),
             requests_executed: Some(1),
             non_cacheable_compilations: Some(1),
             ..Default::default()
         })?;
+
+        // Assert the number of deps cache entries is still 0
+        assert_eq!(
+            0,
+            client.dependencies_cache_entries().into_iter().count() as u64
+        );
     }
+
+    let mut entries_a;
+    let mut entries_b;
 
     // Test time macro used in dependency
     {
@@ -337,25 +439,35 @@ void a() { printf("time: %s", __TIME__); }
 "#,
         );
 
-        // Compile and populate preprocessor and object disk caches
+        // Compile and populate deps and objs cache entries
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
+            preprocessed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             non_cacheable_compilations: Some(1),
             ..Default::default()
         })?;
 
-        // Wait 2s and compile again to ensure dependencies cache miss
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 0
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 0, &[]);
+
+        // Wait 2s and compile again to ensure deps cache miss
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
+            preprocessed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             non_cacheable_compilations: Some(1),
             ..Default::default()
         })?;
+
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 0
+        assert_num_deps_cache_entries_and_results(entries_b.clone(), 0, &[]);
     }
 
     // Test time macro used in dependency of a dependency
@@ -381,25 +493,35 @@ void b() { printf("time: %s", __TIME__); }
 "#,
         );
 
-        // Compile and populate preprocessor and object disk caches
+        // Compile and populate deps and objs cache entries
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
+            preprocessed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             non_cacheable_compilations: Some(1),
             ..Default::default()
         })?;
 
-        // Wait 2s and compile again to ensure dependencies cache miss
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 0
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 0, &[]);
+
+        // Wait 2s and compile again to ensure deps cache miss
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
+            preprocessed: Some(1),
             compile_requests: Some(1),
             requests_executed: Some(1),
             non_cacheable_compilations: Some(1),
             ..Default::default()
         })?;
+
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 0
+        assert_num_deps_cache_entries_and_results(entries_b.clone(), 0, &[]);
     }
 
     // Test removing __TIME__ macro from dependency B
@@ -407,9 +529,10 @@ void b() { printf("time: %s", __TIME__); }
         // Remove __TIME__ macro from dependency B
         write_source(tempdir, dep_b, r#"void b() {}"#);
 
-        // Compile and populate preprocessor and object disk caches
+        // Compile and populate deps and objs cache entries
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
+            preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -419,16 +542,29 @@ void b() { printf("time: %s", __TIME__); }
             ..Default::default()
         })?;
 
-        // Wait 2s and compile again to ensure dependencies cache hit
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is 1 (with 1 result)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 1, &[1]);
+        // // Verify the new deps cache entry result is at the back of the LRU
+        // assert_deps_cache_entries_result_orders_changed(entries_b.clone(), entries_a.clone());
+
+        // Wait 2s and compile again to ensure deps cache hit
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
+            preprocessed: Some(0),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
+
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 1 (with 1 result)
+        assert_num_deps_cache_entries_and_results(entries_b.clone(), 1, &[1]);
+        // Verify the deps cache entry results are in the same order
+        assert_deps_cache_entries_are_identical(entries_b.clone(), entries_a.clone());
     }
 
     Ok(())
@@ -500,6 +636,9 @@ fn test_date_macros(
     let s_epoch_today = s_epoch_today.timestamp().to_string();
     let s_epoch_tomorrow = s_epoch_tomorrow.timestamp().to_string();
 
+    let mut entries_a;
+    let mut entries_b;
+
     // Test __DATE__ macro used in main source file
     {
         // Write source file with __DATE__ macro
@@ -515,7 +654,7 @@ int main(int argc, char** argv) {{
     "#,
         );
 
-        // Compile "today" and populate preprocessor and object disk caches
+        // Compile "today" and populate deps and objs disk caches
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -523,7 +662,8 @@ int main(int argc, char** argv) {{
             ]
             .concat(),
             AdditionalStats {
-                hashed: Some(1),
+                hashed: Some(2),
+                preprocessed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
@@ -533,7 +673,11 @@ int main(int argc, char** argv) {{
             },
         )?;
 
-        // Compile again to ensure dependencies cache hit
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is now 1 (with 1 result)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 1, &[1]);
+
+        // Compile again to ensure deps cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -542,12 +686,17 @@ int main(int argc, char** argv) {{
             .concat(),
             AdditionalStats {
                 hashed: Some(1),
+                preprocessed: Some(0),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
+
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 1 (with 1 result)
+        assert_deps_cache_entries_are_identical(entries_a.clone(), entries_b.clone());
 
         // Compile "tomorrow" to ensure cache miss
         compile_and_verify(
@@ -557,7 +706,8 @@ int main(int argc, char** argv) {{
             ]
             .concat(),
             AdditionalStats {
-                hashed: Some(1),
+                hashed: Some(2),
+                preprocessed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
@@ -567,7 +717,11 @@ int main(int argc, char** argv) {{
             },
         )?;
 
-        // Compile "tomorrow" again to ensure dependencies cache hit
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is now 2 (with 1 result each)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 2, &[1, 1]);
+
+        // Compile "tomorrow" again to ensure deps cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -576,12 +730,17 @@ int main(int argc, char** argv) {{
             .concat(),
             AdditionalStats {
                 hashed: Some(1),
+                preprocessed: Some(0),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
+
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 2 (with 1 result each)
+        assert_deps_cache_entries_are_identical(entries_a.clone(), entries_b.clone());
     }
 
     // Test date macro used in dependency
@@ -610,7 +769,7 @@ void a() { printf("date: %s", __DATE__); }
 "#,
         );
 
-        // Compile "today" and populate preprocessor and object disk caches
+        // Compile "today" and populate deps and objs disk caches
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -618,7 +777,8 @@ void a() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
-                hashed: Some(1),
+                hashed: Some(2),
+                preprocessed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
@@ -628,7 +788,11 @@ void a() { printf("date: %s", __DATE__); }
             },
         )?;
 
-        // Compile again to ensure dependencies cache hit
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is now 3 (with 1 result each)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 3, &[1, 1, 1]);
+
+        // Compile again to ensure deps cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -637,12 +801,17 @@ void a() { printf("date: %s", __DATE__); }
             .concat(),
             AdditionalStats {
                 hashed: Some(1),
+                preprocessed: Some(0),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
+
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with 1 result each)
+        assert_deps_cache_entries_are_identical(entries_a.clone(), entries_b.clone());
 
         // Compile "tomorrow" to ensure cache miss
         compile_and_verify(
@@ -652,7 +821,8 @@ void a() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
-                hashed: Some(1),
+                hashed: Some(2),
+                preprocessed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
@@ -662,7 +832,11 @@ void a() { printf("date: %s", __DATE__); }
             },
         )?;
 
-        // Compile "tomorrow" again to ensure dependencies cache hit
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 2] results)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 3, &[1, 1, 2]);
+
+        // Compile "tomorrow" again to ensure deps cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -671,12 +845,17 @@ void a() { printf("date: %s", __DATE__); }
             .concat(),
             AdditionalStats {
                 hashed: Some(1),
+                preprocessed: Some(0),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
+
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 2] results)
+        assert_deps_cache_entries_are_identical(entries_a.clone(), entries_b.clone());
     }
 
     // Test date macro used in dependency of a dependency
@@ -702,7 +881,7 @@ void b() { printf("date: %s", __DATE__); }
 "#,
         );
 
-        // Compile "today" and populate preprocessor and object disk caches
+        // Compile "today" and populate deps and objs disk caches
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -710,7 +889,8 @@ void b() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
-                hashed: Some(1),
+                hashed: Some(2),
+                preprocessed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
@@ -720,7 +900,11 @@ void b() { printf("date: %s", __DATE__); }
             },
         )?;
 
-        // Compile "today" again to ensure dependencies cache hit
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 3] results)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 3, &[1, 1, 3]);
+
+        // Compile "today" again to ensure deps cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -729,12 +913,17 @@ void b() { printf("date: %s", __DATE__); }
             .concat(),
             AdditionalStats {
                 hashed: Some(1),
+                preprocessed: Some(0),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
+
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 3] results)
+        assert_deps_cache_entries_are_identical(entries_a.clone(), entries_b.clone());
 
         // Compile "tomorrow" to ensure cache miss
         compile_and_verify(
@@ -744,7 +933,8 @@ void b() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
-                hashed: Some(1),
+                hashed: Some(2),
+                preprocessed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
@@ -754,7 +944,11 @@ void b() { printf("date: %s", __DATE__); }
             },
         )?;
 
-        // Compile "today" again to ensure dependencies cache hit
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 4] results)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 3, &[1, 1, 4]);
+
+        // Compile "today" again to ensure deps cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -763,6 +957,7 @@ void b() { printf("date: %s", __DATE__); }
             .concat(),
             AdditionalStats {
                 hashed: Some(1),
+                preprocessed: Some(0),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
@@ -770,7 +965,24 @@ void b() { printf("date: %s", __DATE__); }
             },
         )?;
 
-        // Compile "tomorrow" again to ensure dependencies cache hit
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 4] results)
+        assert_num_deps_cache_entries_and_results(entries_b.clone(), 3, &[1, 1, 4]);
+        // Verify the new deps cache entry result is at the back of the LRU
+        assert_deps_cache_entries_result_orders_changed(
+            entries_a
+                .clone()
+                .into_iter()
+                .filter(|(_, e)| e.iter().count() > 1)
+                .collect::<Vec<_>>(),
+            entries_b
+                .clone()
+                .into_iter()
+                .filter(|(_, e)| e.iter().count() > 1)
+                .collect::<Vec<_>>(),
+        );
+
+        // Compile "tomorrow" again to ensure deps cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -779,12 +991,30 @@ void b() { printf("date: %s", __DATE__); }
             .concat(),
             AdditionalStats {
                 hashed: Some(1),
+                preprocessed: Some(0),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
+
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 4] results)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 3, &[1, 1, 4]);
+        // Verify the new deps cache entry result is at the back of the LRU
+        assert_deps_cache_entries_result_orders_changed(
+            entries_b
+                .clone()
+                .into_iter()
+                .filter(|(_, e)| e.iter().count() > 1)
+                .collect::<Vec<_>>(),
+            entries_a
+                .clone()
+                .into_iter()
+                .filter(|(_, e)| e.iter().count() > 1)
+                .collect::<Vec<_>>(),
+        );
     }
 
     // Test removing __DATE__ from dependency B
@@ -792,7 +1022,7 @@ void b() { printf("date: %s", __DATE__); }
         // Write dependency B without __DATE__ macro
         write_source(tempdir, dep_b, r#"void b() {}"#);
 
-        // Compile "today" and populate preprocessor and object disk caches
+        // Compile "today" and populate deps and objs disk caches
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -800,7 +1030,8 @@ void b() { printf("date: %s", __DATE__); }
             ]
             .concat(),
             AdditionalStats {
-                hashed: Some(1),
+                hashed: Some(2),
+                preprocessed: Some(1),
                 compilations: Some(1),
                 cache_writes: Some(1),
                 compile_requests: Some(1),
@@ -810,7 +1041,11 @@ void b() { printf("date: %s", __DATE__); }
             },
         )?;
 
-        // Compile "today" again to ensure dependencies cache hit
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 5] results)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 3, &[1, 1, 5]);
+
+        // Compile "today" again to ensure deps cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -819,6 +1054,7 @@ void b() { printf("date: %s", __DATE__); }
             .concat(),
             AdditionalStats {
                 hashed: Some(1),
+                preprocessed: Some(0),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
@@ -826,7 +1062,11 @@ void b() { printf("date: %s", __DATE__); }
             },
         )?;
 
-        // Compile "tomorrow" again to ensure dependencies cache hit
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 5] results)
+        assert_deps_cache_entries_are_identical(entries_a.clone(), entries_b.clone());
+
+        // Compile "tomorrow" again to ensure deps cache hit
         compile_and_verify(
             &[
                 &env_vars[..],
@@ -835,12 +1075,17 @@ void b() { printf("date: %s", __DATE__); }
             .concat(),
             AdditionalStats {
                 hashed: Some(1),
+                preprocessed: Some(0),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             },
         )?;
+
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 5] results)
+        assert_deps_cache_entries_are_identical(entries_b.clone(), entries_a.clone());
     }
 
     Ok(())
@@ -894,6 +1139,9 @@ fn test_timestamp_macros(
         Ok(())
     };
 
+    let mut entries_a;
+    let mut entries_b;
+
     // Test __TIMESTAMP__ macro used in main source file
     {
         // Write source file with __TIMESTAMP__ macro
@@ -909,9 +1157,10 @@ int main(int argc, char** argv) {{
     "#,
         );
 
-        // Compile and populate preprocessor and object disk caches
+        // Compile and populate deps and objs cache entries
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
+            preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -920,17 +1169,26 @@ int main(int argc, char** argv) {{
             ..Default::default()
         })?;
 
-        // Compile again to ensure dependencies cache hit
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is now 1 (with 1 result)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 1, &[1]);
+
+        // Compile again to ensure deps cache hit
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
+            preprocessed: Some(0),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 1 (with 1 result)
+        assert_deps_cache_entries_are_identical(entries_a.clone(), entries_b.clone());
+
         // Wait 2s, update source file with __TIMESTAMP__ macro,
-        // then compile again to ensure dependencies cache miss
+        // then compile again to ensure deps cache miss
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         write_source(
@@ -946,7 +1204,8 @@ int main(int argc, char** argv) {{
         );
 
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
+            preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -955,14 +1214,23 @@ int main(int argc, char** argv) {{
             ..Default::default()
         })?;
 
-        // Compile again to ensure dependencies cache hit
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is now 2 (with 1 result each)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 2, &[1, 1]);
+
+        // Compile again to ensure deps cache hit
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
+            preprocessed: Some(0),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
+
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 2 (with 1 result each)
+        assert_deps_cache_entries_are_identical(entries_a.clone(), entries_b.clone());
     }
 
     // Test timestamp macro used in dependency
@@ -993,9 +1261,10 @@ void a() { printf("timestamp: %s", __TIMESTAMP__); }
 "#,
         );
 
-        // Compile and populate preprocessor and object disk caches
+        // Compile and populate deps and objs cache entries
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
+            preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -1004,16 +1273,27 @@ void a() { printf("timestamp: %s", __TIMESTAMP__); }
             ..Default::default()
         })?;
 
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is now 3 (with 1 result each)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 3, &[1, 1, 1]);
+
+        // Compile again to ensure deps cache hit
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
+            preprocessed: Some(0),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
+        // Assert the number of deps cache entries is still 3
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with 1 result each)
+        assert_deps_cache_entries_are_identical(entries_a.clone(), entries_b.clone());
+
         // Wait 2s, update dependency A with __TIMESTAMP__ macro,
-        // then compile again to ensure dependencies cache miss
+        // then compile again to ensure deps cache miss
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         write_source(
@@ -1026,7 +1306,8 @@ void a() { printf("timestamp: %s", __TIMESTAMP__); }
         );
 
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
+            preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -1035,14 +1316,25 @@ void a() { printf("timestamp: %s", __TIMESTAMP__); }
             ..Default::default()
         })?;
 
-        // Compile again to ensure dependencies cache hit
+        // Assert the number of deps cache entries is still 3
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 2] results)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 3, &[1, 1, 2]);
+
+        // Compile again to ensure deps cache hit
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
+            preprocessed: Some(0),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
+
+        // Assert the number of deps cache entries is still 3
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 2] results)
+        assert_deps_cache_entries_are_identical(entries_a.clone(), entries_b.clone());
     }
 
     // Test timestamp macro used in dependency of a dependency
@@ -1070,9 +1362,10 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
 "#,
         );
 
-        // Compile and populate preprocessor and object disk caches
+        // Compile and populate deps and objs cache entries
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
+            preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -1081,16 +1374,28 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
             ..Default::default()
         })?;
 
+        // Assert the number of deps cache entries is still 3
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 3] results)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 3, &[1, 1, 3]);
+
+        // Compile again to ensure deps cache hit
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
+            preprocessed: Some(0),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
+        // Assert the number of deps cache entries is still 3
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 3] results)
+        assert_deps_cache_entries_are_identical(entries_a.clone(), entries_b.clone());
+
         // Wait 2s, update dependency B with __TIMESTAMP__ macro,
-        // then compile again to ensure dependencies cache miss
+        // then compile again to ensure deps cache miss
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         let prev_mtime = std::fs::metadata(tempdir.join(dep_b))?.modified()?;
@@ -1105,7 +1410,8 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
         );
 
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
+            preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -1114,30 +1420,59 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
             ..Default::default()
         })?;
 
-        // Compile again to ensure dependencies cache hit
+        // Assert the number of deps cache entries is still 3
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 4] results)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 3, &[1, 1, 4]);
+
+        // Compile again to ensure deps cache hit
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
+            preprocessed: Some(0),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
 
-        // Reset the mtime and compile again to validate dependencies cache hits
+        // Assert the number of deps cache entries is still 3
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 4] results)
+        assert_deps_cache_entries_are_identical(entries_a.clone(), entries_b.clone());
+
+        // Reset the mtime and compile again to validate deps cache hits
         // Don't error if this fails due to permissions issues (i.e. in Windows CI)
         let mtime_reset = std::fs::File::open(tempdir.join(dep_b))
             .and_then(|f| f.set_modified(prev_mtime).map(|_| f))
             .and_then(|f| f.sync_all());
 
         if mtime_reset.is_ok() {
-            // Compile again to ensure dependencies cache hit
+            // Compile again to ensure deps cache hit
             compile_and_verify(AdditionalStats {
                 hashed: Some(1),
+                preprocessed: Some(0),
                 compile_requests: Some(1),
                 requests_executed: Some(1),
                 cache_hits: Some(vec![(kind, lang, 1)]),
                 ..Default::default()
             })?;
+
+            entries_a = client.dependencies_cache_entries();
+            // Verify the number of deps cache entries is still 3 (with [1, 1, 4] results)
+            assert_num_deps_cache_entries_and_results(entries_a.clone(), 3, &[1, 1, 4]);
+            // Verify the new deps cache entry result is at the back of the LRU
+            assert_deps_cache_entries_result_orders_changed(
+                entries_b
+                    .clone()
+                    .into_iter()
+                    .filter(|(_, e)| e.iter().count() > 1)
+                    .collect::<Vec<_>>(),
+                entries_a
+                    .clone()
+                    .into_iter()
+                    .filter(|(_, e)| e.iter().count() > 1)
+                    .collect::<Vec<_>>(),
+            );
         }
     }
 
@@ -1148,9 +1483,10 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
         // Write dependency B without __TIMESTAMP__ macro
         write_source(tempdir, dep_b, r#"void b() {}"#);
 
-        // Compile and populate preprocessor and object disk caches
+        // Compile and populate deps and objs cache entries
         compile_and_verify(AdditionalStats {
-            hashed: Some(1),
+            hashed: Some(2),
+            preprocessed: Some(1),
             compilations: Some(1),
             cache_writes: Some(1),
             compile_requests: Some(1),
@@ -1159,14 +1495,25 @@ void b() { printf("timestamp: %s", __TIMESTAMP__); }
             ..Default::default()
         })?;
 
-        // Compile again to ensure dependencies cache hit
+        // Assert the number of deps cache entries is still 3
+        entries_a = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 5] results)
+        assert_num_deps_cache_entries_and_results(entries_a.clone(), 3, &[1, 1, 5]);
+
+        // Compile again to ensure deps cache hit
         compile_and_verify(AdditionalStats {
             hashed: Some(1),
+            preprocessed: Some(0),
             compile_requests: Some(1),
             requests_executed: Some(1),
             cache_hits: Some(vec![(kind, lang, 1)]),
             ..Default::default()
         })?;
+
+        // Assert the number of deps cache entries is still 3
+        entries_b = client.dependencies_cache_entries();
+        // Verify the number of deps cache entries is still 3 (with [1, 1, 5] results)
+        assert_deps_cache_entries_are_identical(entries_a.clone(), entries_b.clone());
     }
 
     Ok(())

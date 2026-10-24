@@ -30,6 +30,7 @@ use test_case::test_case;
 
 async fn cc_compile(client: &SccacheClient, tmpdir: &Path) -> Result<()> {
     let source_file = "x.c";
+    let dep_file = "x.o.d";
     let obj_file = "x.o";
     write_source(
         tmpdir,
@@ -47,6 +48,11 @@ async fn cc_compile(client: &SccacheClient, tmpdir: &Path) -> Result<()> {
         .arg(tmpdir.join(source_file))
         .arg("-o")
         .arg(tmpdir.join(obj_file))
+        .arg("-MD")
+        .arg("-MT")
+        .arg(tmpdir.join(obj_file))
+        .arg("-MF")
+        .arg(tmpdir.join(dep_file))
         .env("RUST_BACKTRACE", "1")
         .env("SCCACHE_THREADS", "2")
         .kill_on_drop(true)
@@ -94,6 +100,7 @@ async fn nvcc_compile(
 
 async fn stdpar_compile(client: &SccacheClient, compiler: &Compiler, tmpdir: &Path) -> Result<()> {
     let source_file = "x.cpp";
+    let dep_file = "x.cpp.o.d";
     let obj_file = "x.cpp.o";
     write_source(
         tmpdir,
@@ -131,6 +138,11 @@ async fn stdpar_compile(client: &SccacheClient, compiler: &Compiler, tmpdir: &Pa
         .arg(tmpdir.join(source_file))
         .arg("-o")
         .arg(tmpdir.join(obj_file))
+        .arg("-MD")
+        .arg("-MT")
+        .arg(tmpdir.join(obj_file))
+        .arg("-MF")
+        .arg(tmpdir.join(dep_file))
         .env("RUST_BACKTRACE", "1")
         .env("SCCACHE_THREADS", "2")
         .kill_on_drop(true)
@@ -711,6 +723,7 @@ async fn test_dist_cuda_compiles(
     } else {
         assert!(obj_a == obj_b, "object files don't match");
     }
+
     assert_eq!(
         String::from_utf8_lossy(&dep_a),
         String::from_utf8_lossy(&dep_b),

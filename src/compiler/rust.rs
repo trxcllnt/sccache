@@ -64,7 +64,7 @@ use std::{
     pin::Pin,
     process,
     sync::LazyLock,
-    time::{self, Duration, Instant},
+    time,
 };
 
 #[cfg(feature = "dist-client")]
@@ -1397,15 +1397,16 @@ where
             env_vars,
             cache_control,
             runtime: pool,
+            service,
             ..
         }: GenerateHashKeyArgs<'_, T>,
     ) -> Result<(
         HashResult<T>,
-        Pin<Box<dyn Future<Output = Result<Duration>> + Send>>,
+        Option<Pin<Box<dyn Future<Output = Result<()>> + Send>>>,
     )> {
         trace!("[{}]: generate_hash_key", self.parsed_args.crate_name);
-
-        let start = Instant::now();
+        let hash_start = time::Instant::now();
+        let mut preprocess_duration = time::Duration::default();
 
         // TODO: this doesn't produce correct arguments if they should be concatenated - should use iter_os_strings
         let os_string_arguments: Vec<(OsString, Option<OsString>)> = self
@@ -1471,6 +1472,8 @@ where
             m.update(d.as_bytes());
         }
         let weak_toolchain_key = m.clone().finish();
+
+        preprocess_duration += hash_start.elapsed();
 
         let key = if CacheControl::ForceNoCache == cache_control {
             // Skip hashing if we're not going to do any cache reads/writes
@@ -1613,8 +1616,20 @@ where
             // 10. The version of the compiler.
             self.version.hash(&mut HashToDigest { digest: &mut m });
 
-            m.finish()
+            let key = m.finish();
+
+            // Track average hash time
+            {
+                let hash_duration = hash_start.elapsed();
+                let mut stats = service.stats.lock().await;
+                stats.hashed += 1;
+                stats.hasher_duration += hash_duration;
+            }
+
+            key
         };
+
+        let start = time::Instant::now();
 
         // Turn arguments into a simple Vec<OsString> to calculate outputs.
         let flat_os_string_arguments: Vec<OsString> = os_string_arguments
@@ -1740,6 +1755,15 @@ where
             .chain(abs_staticlibs)
             .collect();
 
+        preprocess_duration += start.elapsed();
+
+        // Track average preprocessor time
+        {
+            let mut stats = service.stats.lock().await;
+            stats.preprocessed += 1;
+            stats.preprocessor_duration += preprocess_duration;
+        }
+
         Ok((
             HashResult {
                 key,
@@ -1761,10 +1785,7 @@ where
                 }),
                 weak_toolchain_key,
             },
-            Box::pin({
-                let elapsed = start.elapsed();
-                async move { Ok(elapsed) }
-            }) as Pin<Box<dyn Future<Output = Result<Duration>> + Send>>,
+            None,
         ))
     }
 

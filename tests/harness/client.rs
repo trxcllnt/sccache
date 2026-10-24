@@ -1,21 +1,20 @@
+use super::{TC_CACHE_SIZE, prune_command};
+use crate::harness::write_json_cfg;
 use fs_err as fs;
+use sccache::{
+    compiler::SourceFileDeps,
+    config::{self, CacheType, ClientConfig},
+    server::{ServerInfo, ServerStats},
+};
 use std::{
     env,
     ffi::{OsStr, OsString},
+    io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     str,
     sync::atomic::{AtomicU16, Ordering},
 };
-
-use sccache::{
-    config::{self, CacheType, ClientConfig},
-    server::{ServerInfo, ServerStats},
-};
-
-use crate::harness::write_json_cfg;
-
-use super::{TC_CACHE_SIZE, prune_command};
 
 pub fn make_sccache_client() -> (Option<tempfile::TempDir>, PathBuf, SccacheClient) {
     let tempdir = tempfile::Builder::new()
@@ -221,23 +220,47 @@ impl SccacheClient {
     }
 
     pub fn clear_disk_cache(&self) -> sccache::errors::Result<PathBuf> {
-        self.clear_compilations_cache()
-    }
-
-    pub fn clear_compilations_cache(&self) -> sccache::errors::Result<PathBuf> {
         let disk_cache = self.compilations_cache();
-        let compilations_cache_dir = disk_cache.dir;
-        println!("clear_object_cache: {compilations_cache_dir:?}");
+        let disk_cache_dir = disk_cache.dir;
+        println!("clear_disk_cache '{}'", disk_cache_dir.display());
         for path in "0123456789abcdef"
             .chars()
-            .map(|c| compilations_cache_dir.join(String::from(c)))
+            .map(|c| disk_cache_dir.join(String::from(c)))
         {
             if path.is_dir() {
                 println!("rmdir: {path:?}");
                 fs::remove_dir_all(path)?;
             }
         }
-        Ok(compilations_cache_dir)
+
+        Ok(disk_cache_dir)
+    }
+
+    pub fn clear_compilations_cache(&self) -> sccache::errors::Result<PathBuf> {
+        let disk_cache = self.compilations_cache();
+        let disk_cache_dir = disk_cache.dir;
+        println!("clear_compilations_cache: '{}'", disk_cache_dir.display());
+
+        let paths = walkdir::WalkDir::new(&disk_cache_dir)
+            .contents_first(true)
+            .into_iter()
+            .filter_map(|e| {
+                e.ok()
+                    .filter(|e| e.file_type().is_file())
+                    .map(|e| e.into_path())
+            })
+            .collect::<Vec<_>>();
+
+        println!("paths: {paths:?}");
+
+        for p in paths {
+            if deps_cache_entry(&p).is_none() {
+                println!("removing objs cache entry '{}'", p.display());
+                fs::remove_file(p)?;
+            }
+        }
+
+        Ok(disk_cache_dir)
     }
 
     pub fn clear_toolchains_cache(&self) -> sccache::errors::Result<PathBuf> {
@@ -256,10 +279,50 @@ impl SccacheClient {
         }
         Ok(tc_dir.clone())
     }
+
+    pub fn dependencies_cache_entries(
+        &self,
+    ) -> impl Clone + IntoIterator<Item = (OsString, SourceFileDeps)> {
+        let disk_cache = self.compilations_cache();
+
+        walkdir::WalkDir::new(disk_cache.dir.as_path())
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_type().is_file().then_some(e.into_path()))
+            .filter_map(|p| deps_cache_entry(&p).map(|e| (p, e)))
+            .map(|(path, deps)| {
+                let dep_key = path
+                    .components()
+                    .next_back()
+                    .unwrap()
+                    .as_os_str()
+                    .to_owned();
+                (dep_key, deps)
+            })
+            .collect::<Vec<_>>()
+    }
 }
 
 impl Drop for SccacheClient {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+fn deps_cache_entry<P: AsRef<Path>>(p: P) -> Option<SourceFileDeps> {
+    let mut b = vec![];
+
+    let Ok(mut f) = fs::File::open(p.as_ref()) else {
+        return None;
+    };
+
+    if f.read_to_end(&mut b).is_err() {
+        return None;
+    }
+
+    if let Ok(deps) = SourceFileDeps::from_buffer(b.into()) {
+        Some(deps)
+    } else {
+        None
     }
 }

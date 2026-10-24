@@ -336,18 +336,14 @@ impl SourceFileCache {
 // that `ccache` uses for its "direct mode", though the on-disk format is
 // different.
 
-/// The header is 7 bytes for the magic string + 1 byte for the
-/// format version of the [`SourceFileDeps`] struct encoding.
-pub const DEPS_VERSION: &[u8] = b"rapids_0";
+/// An 8 byte magic string denoting the version of the [`SourceFileDeps`] struct encoding.
+pub const DEPS_VERSION: &[u8] = b"rapids_1";
 const MAX_REVISIONS: u64 = 1_000;
 
 #[derive(Clone, Default, Deserialize, Serialize, Debug, PartialEq, Eq)]
 pub struct Dependencies {
     /// The list of included dependencies
     pub sources: Vec<SourceFileMeta>,
-    /// The list of transitive dependencies from `#if __has_includes(...)` and similar.
-    /// These don't affect the object hash, but need to be included in dist job inputs.
-    pub no_hash: Vec<SourceFileMeta>,
     /// Dependency files produced the compiler (if any)
     pub outputs: BTreeMap<String, String>,
 }
@@ -380,12 +376,7 @@ impl SourceFileDeps {
             Err(err) => Err(err),
             Ok(Cache::Miss) => Ok(Cache::Miss),
             Ok(Cache::Hit(deflated)) => tokio::task::spawn_blocking(move || {
-                let mut inflated = vec![];
-                flate2::read::ZlibDecoder::new(deflated.reader())
-                    .read_to_end(&mut inflated)
-                    .map_err(Into::into)
-                    .and_then(|_| Self::try_from(opendal::Buffer::from(inflated)))
-                    .map_or_else(|_| Cache::Miss, Cache::Hit)
+                Self::try_from(deflated).map_or_else(|_| Cache::Miss, Cache::Hit)
             })
             .await
             .or(Ok(Cache::Miss)),
@@ -397,28 +388,18 @@ impl SourceFileDeps {
     pub async fn put(self, storage: &dyn Storage) -> Result<Duration> {
         let key = self.key.clone();
 
-        let buf = tokio::task::spawn_blocking(move || {
-            let mut writer = flate2::write::ZlibEncoder::new(
-                BytesMut::new().writer(),
-                flate2::Compression::best(),
-            );
-
-            writer.write_all(DEPS_VERSION)?;
-            bincode::serialize_into(&mut writer, &self)?;
-
-            writer
-                .finish()
-                .map_err(anyhow::Error::new)
-                .map(|writer| writer.into_inner().freeze().into())
-        })
-        .await??;
+        let buf = tokio::task::spawn_blocking(move || self.into_buffer()).await??;
 
         storage.put(&key, buf).await
     }
 
-    pub fn from_buffer(buffer: opendal::Buffer) -> Result<Self> {
-        let mut header = [0u8; 8];
-        let mut reader = buffer.reader().take(8);
+    pub fn from_buffer(deflated: opendal::Buffer) -> Result<Self> {
+        let mut inflated = vec![];
+        flate2::read::ZlibDecoder::new(deflated.reader()).read_to_end(&mut inflated)?;
+
+        let buffer: bytes::Bytes = inflated.into();
+        let mut header = [0u8; DEPS_VERSION.len()];
+        let mut reader = buffer.reader().take(DEPS_VERSION.len() as u64);
         if reader.read_exact(&mut header).is_err() || header != DEPS_VERSION {
             bail!("Format version mismatch");
         } else {
@@ -426,11 +407,17 @@ impl SourceFileDeps {
         }
     }
 
-    pub fn to_buffer(&self) -> Result<opendal::Buffer> {
-        let mut writer = BytesMut::new().writer();
+    pub fn into_buffer(self) -> Result<opendal::Buffer> {
+        let mut writer =
+            flate2::write::ZlibEncoder::new(BytesMut::new().writer(), flate2::Compression::best());
+
         writer.write_all(DEPS_VERSION)?;
-        bincode::serialize_into(&mut writer, self)?;
-        Ok(opendal::Buffer::from(writer.into_inner().freeze()))
+        bincode::serialize_into(&mut writer, &self)?;
+
+        writer
+            .finish()
+            .map_err(anyhow::Error::new)
+            .map(|writer| writer.into_inner().freeze().into())
     }
 
     pub fn iter(&self) -> lru_cache::Iter<'_, String, Dependencies> {
@@ -471,8 +458,9 @@ impl SourceFileDeps {
         &mut self,
         source_file_cache: &SourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
+        transitive: bool,
         out_pretty: &str,
-    ) -> (bool, Option<(String, Dependencies)>) {
+    ) -> (bool, Option<(String, Dependencies, HiddenIncludes)>) {
         let mut maybe_result = None;
         let mut needs_update = false;
         let mut log_messages = vec![];
@@ -481,11 +469,13 @@ impl SourceFileDeps {
         // dependencies cache entry. Check newest results first since they're
         // more likely to match.
         for (idx, (obj_key, deps)) in self.iter_mut().rev().enumerate() {
+            let mut hidden_incs = HiddenIncludes::default();
             let (failure, updated) = Self::test_dependencies(
                 source_file_cache,
                 compile_timestamp,
                 &mut deps.sources,
-                &deps.no_hash,
+                &mut hidden_incs,
+                transitive,
             )
             .await;
 
@@ -508,7 +498,7 @@ impl SourceFileDeps {
                         log_messages.push(format!("{obj_key}]: Deps LRU order changed"));
                     }
                 }
-                maybe_result = Some((obj_key.clone(), deps.clone()));
+                maybe_result = Some((obj_key.clone(), deps.clone(), hidden_incs.dedupe()));
                 break;
             }
         }
@@ -517,7 +507,7 @@ impl SourceFileDeps {
             trace!("[{out_pretty}, {src_key}, {msg}", src_key = self.key);
         }
 
-        if let Some((obj_key, _)) = maybe_result.as_ref() {
+        if let Some((obj_key, _, _)) = maybe_result.as_ref() {
             // Move the entry to the back of the LRU
             self.revs.get(obj_key);
         }
@@ -538,8 +528,9 @@ impl SourceFileDeps {
         &mut self,
         source_file_cache: &SourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
+        transitive: bool,
         out_pretty: &str,
-    ) -> (bool, Option<(String, Dependencies)>) {
+    ) -> (bool, Option<(String, Dependencies, HiddenIncludes)>) {
         let mut maybe_result = None;
         let mut needs_update = false;
         let mut log_messages = vec![];
@@ -548,11 +539,13 @@ impl SourceFileDeps {
         // dependencies cache entry. Check newest results first since they're
         // more likely to match.
         for (idx, (obj_key, deps)) in self.iter_mut().rev().enumerate() {
+            let mut hidden_incs = HiddenIncludes::default();
             let (failure, updated) = Self::test_dependencies_sync(
                 source_file_cache,
                 compile_timestamp,
                 &mut deps.sources,
-                &deps.no_hash,
+                &mut hidden_incs,
+                transitive,
             );
 
             if let Some(reason) = updated {
@@ -574,7 +567,7 @@ impl SourceFileDeps {
                         log_messages.push(format!("{obj_key}]: Deps LRU order changed"));
                     }
                 }
-                maybe_result = Some((obj_key.clone(), deps.clone()));
+                maybe_result = Some((obj_key.clone(), deps.clone(), hidden_incs.dedupe()));
                 break;
             }
         }
@@ -583,7 +576,7 @@ impl SourceFileDeps {
             trace!("[{out_pretty}, {src_key}, {msg}", src_key = self.key);
         }
 
-        if let Some((obj_key, _)) = maybe_result.as_ref() {
+        if let Some((obj_key, _, _)) = maybe_result.as_ref() {
             // Move the entry to the back of the LRU
             self.revs.get(obj_key);
         }
@@ -603,13 +596,27 @@ impl SourceFileDeps {
         source_file_cache: &SourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
         dependencies: &mut [SourceFileMeta],
-        transitive_deps: &[SourceFileMeta],
+        hidden_incs: &mut HiddenIncludes,
+        transitive: bool,
     ) -> (Option<String>, Option<String>) {
         let mut failure = None;
         let mut updated = None;
 
         for prev in dependencies.iter_mut() {
             let path = Path::new(&prev.path);
+
+            if transitive {
+                let err = match tokio::fs::try_exists(path).await {
+                    Ok(true) => continue,
+                    Ok(false) => std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        anyhow!("{} does not exist", path.display()),
+                    ),
+                    Err(err) => err,
+                };
+                failure = Some(format!("{err:#}"));
+                break;
+            }
 
             let curr = match source_file_cache.get(path, compile_timestamp).await {
                 Ok(entry) => entry,
@@ -624,8 +631,11 @@ impl SourceFileDeps {
                 found_time,
                 found_date,
                 found_timestamp,
+                hidden_includes,
                 ..
             } = curr.as_ref();
+
+            hidden_incs.extend([hidden_includes].into_iter());
 
             if *found_time {
                 // We don't know for sure that the program actually uses the __TIME__ macro,
@@ -655,16 +665,6 @@ impl SourceFileDeps {
             }
         }
 
-        if failure.is_none() {
-            for meta in transitive_deps {
-                let path = Path::new(&meta.path);
-                if let Err(err) = tokio::fs::symlink_metadata(path).await {
-                    failure = Some(format!("{err:#}"));
-                    break;
-                }
-            }
-        }
-
         (failure, updated)
     }
 
@@ -673,13 +673,27 @@ impl SourceFileDeps {
         source_file_cache: &SourceFileCache,
         compile_timestamp: chrono::DateTime<chrono::Utc>,
         dependencies: &mut [SourceFileMeta],
-        transitive_deps: &[SourceFileMeta],
+        hidden_incs: &mut HiddenIncludes,
+        transitive: bool,
     ) -> (Option<String>, Option<String>) {
         let mut failure = None;
         let mut updated = None;
 
         for prev in dependencies.iter_mut() {
             let path = Path::new(&prev.path);
+
+            if transitive {
+                let err = match fs::exists(path) {
+                    Ok(true) => continue,
+                    Ok(false) => std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        anyhow!("{} does not exist", path.display()),
+                    ),
+                    Err(err) => err,
+                };
+                failure = Some(format!("{err:#}"));
+                break;
+            }
 
             let curr = match source_file_cache.get_sync(path, compile_timestamp) {
                 Ok(entry) => entry,
@@ -694,8 +708,11 @@ impl SourceFileDeps {
                 found_time,
                 found_date,
                 found_timestamp,
+                hidden_includes,
                 ..
             } = curr.as_ref();
+
+            hidden_incs.extend([hidden_includes].into_iter());
 
             if *found_time {
                 // We don't know for sure that the program actually uses the __TIME__ macro,
@@ -725,16 +742,6 @@ impl SourceFileDeps {
             }
         }
 
-        if failure.is_none() {
-            for meta in transitive_deps {
-                let path = Path::new(&meta.path);
-                if let Err(err) = fs::symlink_metadata(path) {
-                    failure = Some(format!("{err:#}"));
-                    break;
-                }
-            }
-        }
-
         (failure, updated)
     }
 }
@@ -743,7 +750,7 @@ impl TryFrom<SourceFileDeps> for opendal::Buffer {
     type Error = anyhow::Error;
 
     fn try_from(src: SourceFileDeps) -> std::result::Result<Self, Self::Error> {
-        src.to_buffer()
+        src.into_buffer()
     }
 }
 
@@ -2114,7 +2121,7 @@ mod test {
         let entry_b = SourceFileDeps::try_from(buf.clone())?;
 
         assert_eq!(entry_b.iter().count(), 1);
-        assert_eq!(buf.to_bytes(), entry_b.to_buffer()?.to_bytes());
+        assert_eq!(buf.to_bytes(), entry_b.into_buffer()?.to_bytes());
 
         Ok(())
     }
