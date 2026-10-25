@@ -314,6 +314,10 @@ impl Storage for RemoteStorage {
         let can_write = match self.operator.write(path, "Hello, World!").await {
             Ok(_) => true,
             Err(err) if err.kind() == ErrorKind::AlreadyExists => true,
+            Err(err) if err.kind() == ErrorKind::RateLimited => {
+                eprintln!("cache storage write check: {err:?}, but we decide to keep running");
+                true
+            }
             // Tolerate all other write errors because we can do read at least.
             Err(err) => {
                 eprintln!("storage write check failed: {err:?}");
