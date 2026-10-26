@@ -1792,6 +1792,8 @@ impl pkg::ToolchainPackager for CToolchainPackager {
         match self.kind {
             CCompilerKind::Clang => {
                 add_default_files()?;
+                #[cfg(not(target_os = "windows"))]
+                package_builder.add_dir(Path::new("/tmp"))?;
                 package_builder.add_executable_and_deps(&self.env_vars, &self.executable)?;
                 // Clang uses internal header files, so add them.
                 if let Some(limits_h) = named_file("-print-file-name=include/limits.h") {
@@ -1803,15 +1805,86 @@ impl pkg::ToolchainPackager for CToolchainPackager {
             CCompilerKind::Gcc => {
                 // Various external programs / files which may be needed by gcc
                 add_default_files()?;
+                #[cfg(not(target_os = "windows"))]
+                package_builder.add_dir(Path::new("/tmp"))?;
                 package_builder.add_executable_and_deps(&self.env_vars, &self.executable)?;
                 add_named_prog(&mut package_builder, "cc1")?;
                 add_named_prog(&mut package_builder, "cc1plus")?;
                 add_named_file(&mut package_builder, "liblto_plugin.so")?;
             }
 
+            CCompilerKind::Msvc => {
+                use crate::util::OsStrExt;
+                // cl.exe
+                package_builder.add_executable_and_deps(&self.env_vars, &self.executable)?;
+
+                if let Some(dir) = self.executable.parent() {
+                    // mspdbcmf.exe
+                    // mspdbsrv.exe
+                    for exe in [
+                        format!("mspdbcmf{}", std::env::consts::EXE_SUFFIX),
+                        format!("mspdbsrv{}", std::env::consts::EXE_SUFFIX),
+                    ] {
+                        package_builder.add_executable_and_deps(&self.env_vars, dir.join(exe))?;
+                    }
+
+                    let dll_prefixes = [
+                        "c1",
+                        "c2",
+                        "mspdbcore",
+                        "mspdbst",
+                        "tbbmalloc",
+                        // msobj140.dll
+                        "msobj",
+                        // mspdb140.dll
+                        "mspdb",
+                        // msvcp140.dll
+                        "msvcp",
+                        // vcruntime140.dll
+                        // vcruntime140_1.dll
+                        "vcruntime",
+                        // 1033/clui.dll
+                        "clui",
+                        // 1033/mspdbcmfui.dll
+                        "mspdbcmfui",
+                    ];
+
+                    let paths = walkdir::WalkDir::new(dir)
+                        .min_depth(1)
+                        .max_depth(2)
+                        .into_iter()
+                        .filter_map(|e| e.ok())
+                        .filter_map(|e| {
+                            if e.file_type().is_file()
+                                && let file_name = e.file_name().to_ascii_lowercase()
+                                && file_name.ends_with(std::env::consts::DLL_SUFFIX)
+                            {
+                                Some((file_name, e.path().to_owned()))
+                            } else {
+                                None
+                            }
+                        })
+                        .filter_map(|(file_name, file_path)| {
+                            if dll_prefixes
+                                .iter()
+                                .any(|prefix| file_name.starts_with(prefix))
+                            {
+                                Some(file_path)
+                            } else {
+                                None
+                            }
+                        });
+
+                    for path in paths {
+                        package_builder.add_executable_and_deps(&self.env_vars, &path)?;
+                    }
+                }
+            }
+
             CCompilerKind::Nvhpc => {
                 // Various programs called by the nvc/nvc++ front end.
                 let _ = add_default_files();
+                #[cfg(not(target_os = "windows"))]
                 package_builder.add_dir(Path::new("/tmp"))?;
 
                 // Handle NVHPC's mpicc/mpic++ compiler wrappers
@@ -2101,75 +2174,72 @@ impl pkg::ToolchainPackager for CToolchainPackager {
                 }
             }
 
-            CCompilerKind::Msvc => {
-                use crate::util::OsStrExt;
-                // cl.exe
+            CCompilerKind::Tileiras => {
+                use is_executable::IsExecutable;
+                use std::env::consts::{DLL_PREFIX, DLL_SUFFIX, EXE_SUFFIX};
+                #[cfg(not(target_os = "windows"))]
+                package_builder.add_dir(Path::new("/tmp"))?;
                 package_builder.add_executable_and_deps(&self.env_vars, &self.executable)?;
 
-                if let Some(dir) = self.executable.parent() {
-                    // mspdbcmf.exe
-                    // mspdbsrv.exe
-                    for exe in [
-                        format!("mspdbcmf{}", std::env::consts::EXE_SUFFIX),
-                        format!("mspdbsrv{}", std::env::consts::EXE_SUFFIX),
-                    ] {
-                        package_builder.add_executable_and_deps(&self.env_vars, dir.join(exe))?;
-                    }
+                let mut base = self.executable.as_path().parent();
+                let mut ptxas = OsString::new();
+                ptxas.push("ptxas");
+                ptxas.push(EXE_SUFFIX);
 
-                    let dll_prefixes = [
-                        "c1",
-                        "c2",
-                        "mspdbcore",
-                        "mspdbst",
-                        "tbbmalloc",
-                        // msobj140.dll
-                        "msobj",
-                        // mspdb140.dll
-                        "mspdb",
-                        // msvcp140.dll
-                        "msvcp",
-                        // vcruntime140.dll
-                        // vcruntime140_1.dll
-                        "vcruntime",
-                        // 1033/clui.dll
-                        "clui",
-                        // 1033/mspdbcmfui.dll
-                        "mspdbcmfui",
-                    ];
+                // Find ptxas next to tileiras
+                let ptxas = base
+                    .map(|bin| bin.join(&ptxas))
+                    .filter(|ptxas| ptxas.is_executable())
+                    .or_else(|| {
+                        // Fallback to finding ptxas from the path
+                        let env_path = self
+                            .env_vars
+                            .iter()
+                            .find(|(k, _)| k == "PATH")
+                            .map(|(_, v)| v.as_os_str());
 
-                    let paths = walkdir::WalkDir::new(dir)
-                        .min_depth(1)
-                        .max_depth(2)
+                        which::which_in(ptxas, env_path, Path::new("")).ok()
+                    });
+
+                if let Some(ptxas) = ptxas {
+                    package_builder.add_executable_and_deps(&self.env_vars, &ptxas)?;
+                }
+
+                // Find nvvm/lib64/libnvvm.so
+                let libnvvm = OsString::from(format!("{DLL_PREFIX}nvvm{DLL_SUFFIX}"));
+
+                while let Some(root) = base {
+                    let libnvvm = walkdir::WalkDir::new(root)
+                        .contents_first(true)
                         .into_iter()
-                        .filter_map(|e| e.ok())
-                        .filter_map(|e| {
-                            if e.file_type().is_file()
-                                && let file_name = e.file_name().to_ascii_lowercase()
-                                && file_name.ends_with(std::env::consts::DLL_SUFFIX)
-                            {
-                                Some((file_name, e.path().to_owned()))
-                            } else {
+                        .find_map(|entry| {
+                            let entry = entry.ok()?;
+                            if entry.file_type().is_dir() {
                                 None
-                            }
-                        })
-                        .filter_map(|(file_name, file_path)| {
-                            if dll_prefixes
-                                .iter()
-                                .any(|prefix| file_name.starts_with(prefix))
-                            {
-                                Some(file_path)
+                            } else if let Some(name) = entry.path().components().next_back() {
+                                let name = name.as_os_str();
+                                let found = name == libnvvm.as_os_str();
+                                if found {
+                                    Some(entry.path().to_owned())
+                                } else {
+                                    None
+                                }
                             } else {
                                 None
                             }
                         });
 
-                    for path in paths {
-                        package_builder.add_executable_and_deps(&self.env_vars, &path)?;
+                    if let Some(path) = libnvvm {
+                        package_builder.add_file(&self.env_vars, path)?;
+                        break;
                     }
+
+                    base = root.parent();
                 }
             }
-
             _ => {
+                #[cfg(not(target_os = "windows"))]
+                package_builder.add_dir(Path::new("/tmp"))?;
                 package_builder.add_executable_and_deps(&self.env_vars, &self.executable)?;
             }
         }
