@@ -54,7 +54,6 @@ async fn cc_compile(client: &SccacheClient, tmpdir: &Path) -> Result<()> {
         .arg("-MF")
         .arg(tmpdir.join(dep_file))
         .env("RUST_BACKTRACE", "1")
-        .env("SCCACHE_THREADS", "2")
         .kill_on_drop(true)
         .output()
         .await
@@ -90,7 +89,6 @@ async fn nvcc_compile(
         .arg("-MF")
         .arg(tmpdir.join(dep_file))
         .env("RUST_BACKTRACE", "1")
-        .env("SCCACHE_THREADS", "2")
         .kill_on_drop(true)
         .output()
         .await
@@ -144,7 +142,6 @@ async fn stdpar_compile(client: &SccacheClient, compiler: &Compiler, tmpdir: &Pa
         .arg("-MF")
         .arg(tmpdir.join(dep_file))
         .env("RUST_BACKTRACE", "1")
-        .env("SCCACHE_THREADS", "2")
         .kill_on_drop(true)
         .output()
         .await
@@ -191,7 +188,6 @@ async fn rust_compile(client: &SccacheClient, tmpdir: &Path) -> Result<Output> {
         .env("RUSTC_WRAPPER", &client.path)
         .env("CARGO_TARGET_DIR", "target")
         .env("RUST_BACKTRACE", "1")
-        .env("SCCACHE_THREADS", "2")
         .kill_on_drop(true)
         .output()
         .await
