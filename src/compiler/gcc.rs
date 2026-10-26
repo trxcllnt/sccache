@@ -758,8 +758,12 @@ where
                     let preprocessor_arg_val = preprocessor_arg.next();
                     match (preprocessor_arg_arg, preprocessor_arg_val) {
                         (Some("-MD"), Some(s)) |
-                        (Some("-MF"), Some(s)) |
                         (Some("--write-dependencies"), Some(s)) => {
+                            depfile = Some(s.into());
+                            need_explicit_dep_argument_path = DepArgumentRequirePath::Missing;
+                            &mut dependency_args
+                        }
+                        (Some("-MF"), Some(s)) => {
                             depfile = Some(s.into());
                             need_explicit_dep_argument_path = DepArgumentRequirePath::Provided;
                             &mut dependency_args
@@ -1040,14 +1044,38 @@ where
     if language.needs_c_preprocessing() {
         if need_explicit_dep_target {
             let dep_target = dep_target.unwrap_or_else(|| output.clone().into_os_string());
-            dependency_args.push(dep_flag);
-            dependency_args.push(dep_target);
+            let mut arg = OsString::new();
+            if matches!(kind, CCompilerKind::Gcc) {
+                arg.push("-Wp,");
+            }
+            arg.push(dep_flag);
+            if matches!(kind, CCompilerKind::Gcc) {
+                arg.push(",");
+                arg.push(dep_target);
+                dependency_args.push(arg);
+            } else {
+                dependency_args.push(arg);
+                dependency_args.push(dep_target);
+            }
         }
 
         if let DepArgumentRequirePath::Missing = need_explicit_dep_argument_path {
-            let dep_path = Path::new(&output).with_extension("d");
-            dependency_args.push(OsString::from("-MF"));
-            dependency_args.push(dep_path.as_os_str().into());
+            let dep_path = depfile
+                .clone()
+                .unwrap_or_else(|| Path::new(&output).with_extension("d"));
+            let mut arg = OsString::new();
+            if matches!(kind, CCompilerKind::Gcc) {
+                arg.push("-Wp,");
+            }
+            arg.push("-MF");
+            if matches!(kind, CCompilerKind::Gcc) {
+                arg.push(",");
+                arg.push(dep_path.as_os_str());
+                dependency_args.push(arg);
+            } else {
+                dependency_args.push(arg);
+                dependency_args.push(dep_path.as_os_str().into());
+            }
             depfile = Some(dep_path);
         }
 
@@ -1071,7 +1099,9 @@ where
         }
 
         if let DepArgumentRequirePath::Missing = need_explicit_structured_dep_argument_path {
-            let dep_path = Path::new(&output).with_extension("ddi");
+            let dep_path = structured_depfile
+                .clone()
+                .unwrap_or_else(|| Path::new(&output).with_extension("ddi"));
             let mut arg = OsString::from("-fdeps-file=");
             arg.push(dep_path.as_os_str());
             dependency_args.push(arg);
@@ -1356,6 +1386,7 @@ where
     let cmd = {
         let args = args_without_dependency_flags
             .into_iter()
+            .map(|arg| arg.to_owned())
             .chain(
                 std::iter::once(deps_arg)
                     .chain(
@@ -1383,26 +1414,46 @@ where
                                 }
                             }),
                     )
-                    .unique(),
+                    .unique()
+                    .map(|arg| arg.to_owned())
+                    .map(|mut arg| {
+                        if matches!(kind, CCompilerKind::Gcc) && !arg.starts_with("-Wp") {
+                            let mut wp = OsString::new();
+                            wp.push("-Wp,");
+                            wp.push(&arg);
+                            if arg == "-MD"
+                                && let Some(depfile) = depfile.as_deref()
+                            {
+                                wp.push(",");
+                                wp.push(depfile.as_os_str());
+                            }
+                            arg = wp;
+                        }
+                        arg
+                    }),
             )
-            .chain(if matches!(kind, CCompilerKind::Nvhpc) {
-                vec![OsStr::new("-E")]
-            } else if deps_arg == "-MD" {
+            .chain(if parsed_args.cxx20_modules {
                 vec![
-                    OsStr::new("-E"),
-                    OsStr::new("-P"),
-                    OsStr::new("-o"),
+                    "-E".into(),
+                    "-P".into(),
+                    "-o".into(),
                     if cfg!(windows) {
-                        OsStr::new("nul")
+                        "nul".into()
                     } else {
-                        OsStr::new("/dev/null")
+                        "/dev/null".into()
                     },
                 ]
+            } else if matches!(kind, CCompilerKind::Gcc | CCompilerKind::Nvhpc) {
+                vec!["-E".into()]
             } else {
                 vec![]
             })
-            .chain(parsed_args.double_dash_input.then_some(OsStr::new("--")))
-            .chain(std::iter::once(parsed_args.input.as_os_str()));
+            .chain(
+                parsed_args
+                    .double_dash_input
+                    .then_some(OsString::from("--")),
+            )
+            .chain(std::iter::once(parsed_args.input.clone().into_os_string()));
 
         let mut cmd = creator.clone().new_command_sync(executable.as_ref());
 
@@ -2524,7 +2575,7 @@ mod test {
     #[test]
     fn test_parse_arguments_explicit_dep_target_needed() {
         let args = stringvec![
-            "-c", "foo.c", "-MT", "depfile", "-fabc", "-MF", "foo.o.d", "-o", "foo.o", "-MD"
+            "-c", "foo.c", "-MT", "foo.o", "-fabc", "-MF", "foo.o.d", "-o", "foo.o", "-MD"
         ];
         let ParsedArguments {
             input,
@@ -2561,7 +2612,7 @@ mod test {
             )
         );
         assert_eq!(
-            ovec!["-MF", "foo.o.d", "-MD", "-MT", "depfile"],
+            ovec!["-MF", "foo.o.d", "-MD", "-Wp,-MT,foo.o"],
             dependency_args
         );
         assert!(preprocessor_args.is_empty());
@@ -2572,7 +2623,7 @@ mod test {
     #[test]
     fn test_parse_arguments_explicit_mq_dep_target_needed() {
         let args = stringvec![
-            "-c", "foo.c", "-MQ", "depfile", "-fabc", "-MF", "foo.o.d", "-o", "foo.o", "-MD"
+            "-c", "foo.c", "-MQ", "foo.o", "-fabc", "-MF", "foo.o.d", "-o", "foo.o", "-MD"
         ];
         let ParsedArguments {
             input,
@@ -2609,7 +2660,7 @@ mod test {
             )
         );
         assert_eq!(
-            ovec!["-MF", "foo.o.d", "-MD", "-MQ", "depfile"],
+            ovec!["-MF", "foo.o.d", "-MD", "-Wp,-MQ,foo.o"],
             dependency_args
         );
         assert!(preprocessor_args.is_empty());
@@ -2820,7 +2871,7 @@ mod test {
             )
         );
         assert_eq!(
-            ovec!["-MF", "foo.o.d", "-MD", "-MT", "foo.o"],
+            ovec!["-MF", "foo.o.d", "-MD", "-Wp,-MT,foo.o"],
             dependency_args
         );
         assert_eq!(ovec!["-fabc"], common_args);
@@ -2864,7 +2915,7 @@ mod test {
             )
         );
         assert_eq!(
-            ovec!["-MMD", "-MT", "foo/bar.o", "-MF", "foo/bar.d"],
+            ovec!["-MMD", "-Wp,-MT,foo/bar.o", "-Wp,-MF,foo/bar.d"],
             dependency_args
         );
         assert_eq!(ovec!["-fabc"], common_args);
