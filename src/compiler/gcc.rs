@@ -2424,7 +2424,7 @@ mod test {
                 }
             )
         );
-        assert_eq!(ovec!["-MF", "foo.o.d"], dependency_args);
+        assert_eq!(ovec!["-Wp,-MF,foo.o.d"], dependency_args);
         assert_eq!(ovec!["-nostdinc"], preprocessor_args);
         assert_eq!(ovec!["-fabc"], common_args);
         assert!(!msvc_show_includes);
@@ -2573,7 +2573,7 @@ mod test {
                 }
             )
         );
-        assert_eq!(ovec!["-MF", "foo.o.d"], dependency_args);
+        assert_eq!(ovec!["-Wp,-MF,foo.o.d"], dependency_args);
         assert_eq!(ovec!["-fabc"], common_args);
         assert!(!msvc_show_includes);
     }
@@ -2618,7 +2618,7 @@ mod test {
             )
         );
         assert_eq!(
-            ovec!["-MF", "foo.o.d", "-MD", "-Wp,-MT,foo.o"],
+            ovec!["-Wp,-MF,foo.o.d", "-MD", "-Wp,-MT,foo.o"],
             dependency_args
         );
         assert!(preprocessor_args.is_empty());
@@ -2666,7 +2666,7 @@ mod test {
             )
         );
         assert_eq!(
-            ovec!["-MF", "foo.o.d", "-MD", "-Wp,-MQ,foo.o"],
+            ovec!["-Wp,-MF,foo.o.d", "-MD", "-Wp,-MQ,foo.o"],
             dependency_args
         );
         assert!(preprocessor_args.is_empty());
@@ -2877,7 +2877,7 @@ mod test {
             )
         );
         assert_eq!(
-            ovec!["-MF", "foo.o.d", "-MD", "-Wp,-MT,foo.o"],
+            ovec!["-Wp,-MF,foo.o.d", "-MD", "-Wp,-MT,foo.o"],
             dependency_args
         );
         assert_eq!(ovec!["-fabc"], common_args);
