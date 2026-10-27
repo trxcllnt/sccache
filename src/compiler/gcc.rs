@@ -1372,13 +1372,9 @@ where
         .clone()
         .filter(|_| !generate_user_dependencies);
 
-    let structured_depfile_format = parsed_args
-        .structured_depfile_format
-        .as_deref()
-        .and_then(|s| s.to_str());
-
-    let (deps_arg, depfile) = match structured_depfile_format {
-        Some("p1689r5") => (
+    // gcc -fmodules-ts modules cannot generate makefile dependencies to stdout with -M, must use -MD -E
+    let (deps_arg, depfile) = if parsed_args.cxx20_modules {
+        (
             OsStr::new("-MD"),
             depfile.or_else(|| {
                 Some({
@@ -1388,8 +1384,9 @@ where
                     }
                 })
             }),
-        ),
-        _ => (OsStr::new("-M"), depfile),
+        )
+    } else {
+        (OsStr::new("-M"), depfile)
     };
 
     let cmd = {
