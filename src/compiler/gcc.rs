@@ -841,7 +841,16 @@ where
                 preprocessor_args.push(path.into());
                 continue;
             }
-            Some(DepArgumentPath(_))
+            Some(DepArgumentPath(path)) => {
+                if matches!(kind, CCompilerKind::Gcc) {
+                    let mut mf = OsString::new();
+                    mf.push("-Wp,-MF,");
+                    mf.push(path.clone().into_os_string());
+                    dependency_args.push(mf);
+                    continue;
+                }
+                &mut dependency_args
+            },
             | Some(NeedDepTarget)
             | Some(StructuredDepFormat(_))
             | Some(StructuredDepArgumentPath(_)) => &mut dependency_args,
