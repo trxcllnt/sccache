@@ -841,16 +841,7 @@ where
                 preprocessor_args.push(path.into());
                 continue;
             }
-            Some(DepArgumentPath(path)) => {
-                if matches!(kind, CCompilerKind::Gcc) {
-                    let mut mf = OsString::new();
-                    mf.push("-Wp,-MF,");
-                    mf.push(path.clone().into_os_string());
-                    dependency_args.push(mf);
-                    continue;
-                }
-                &mut dependency_args
-            },
+            Some(DepArgumentPath(_))
             | Some(NeedDepTarget)
             | Some(StructuredDepFormat(_))
             | Some(StructuredDepArgumentPath(_)) => &mut dependency_args,
@@ -1053,38 +1044,16 @@ where
     if language.needs_c_preprocessing() {
         if need_explicit_dep_target {
             let dep_target = dep_target.unwrap_or_else(|| output.clone().into_os_string());
-            let mut arg = OsString::new();
-            if matches!(kind, CCompilerKind::Gcc) {
-                arg.push("-Wp,");
-            }
-            arg.push(dep_flag);
-            if matches!(kind, CCompilerKind::Gcc) {
-                arg.push(",");
-                arg.push(dep_target);
-                dependency_args.push(arg);
-            } else {
-                dependency_args.push(arg);
-                dependency_args.push(dep_target);
-            }
+            dependency_args.push(dep_flag);
+            dependency_args.push(dep_target);
         }
 
         if let DepArgumentRequirePath::Missing = need_explicit_dep_argument_path {
             let dep_path = depfile
                 .clone()
                 .unwrap_or_else(|| Path::new(&output).with_extension("d"));
-            let mut arg = OsString::new();
-            if matches!(kind, CCompilerKind::Gcc) {
-                arg.push("-Wp,");
-            }
-            arg.push("-MF");
-            if matches!(kind, CCompilerKind::Gcc) {
-                arg.push(",");
-                arg.push(dep_path.as_os_str());
-                dependency_args.push(arg);
-            } else {
-                dependency_args.push(arg);
-                dependency_args.push(dep_path.as_os_str().into());
-            }
+            dependency_args.push("-MF".into());
+            dependency_args.push(dep_path.as_os_str().into());
             depfile = Some(dep_path);
         }
 
@@ -1247,23 +1216,187 @@ where
 {
     let mut elapsed = Duration::default();
 
-    let generate_user_dependencies = parsed_args.dependency_args.iter().any(|arg| {
-        arg.contains("-MMD")
-            || arg.contains("--write-user-dependencies")
-            || arg.contains("--generate-nonsystem-dependencies-with-compile")
-    });
+    let generate_nonsystem_dependencies = parsed_args.depfile.is_some()
+        && parsed_args.dependency_args.iter().any(|arg| {
+            arg.contains("-MMD")
+                || arg.contains("--write-user-dependencies")
+                || arg.contains("--generate-nonsystem-dependencies-with-compile")
+        });
+
+    let generate_module_dependencies = parsed_args.cxx20_modules
+        && parsed_args.structured_depfile_format.is_some()
+        && parsed_args.structured_depfile.is_some();
+
+    let system_depsfile = parsed_args
+        .depfile
+        .clone()
+        .filter(|_| !generate_nonsystem_dependencies)
+        .or_else(|| {
+            // `gcc -fmodules-ts` cannot generate makefile dependencies to stdout with -M, so
+            // synthesize a depfile path (to be read below) from the object or input path name
+            if parsed_args.cxx20_modules {
+                Some(
+                    parsed_args
+                        .outputs
+                        .get("obj")
+                        .map(|obj| obj.path.as_path())
+                        .unwrap_or(parsed_args.input.as_path())
+                        .with_added_extension("sccache.d"),
+                )
+            } else {
+                None
+            }
+        });
+
+    let (
+        common_dependency_args,
+        system_dependency_args,
+        nonsystem_dependency_args,
+        extra_dependency_args,
+    ) = {
+        let mut common_dependency_args = vec![];
+        let mut system_dependency_args = vec![];
+        let mut nonsystem_dependency_args = vec![];
+        let mut extra_dependency_args: Vec<OsString> = vec![];
+
+        let (system_deps_flag, nonsystem_deps_flag) = if parsed_args.cxx20_modules {
+            (OsString::from("-MD"), OsString::from("-MMD"))
+        } else {
+            (OsString::from("-M"), OsString::from("-MM"))
+        };
+
+        for arg in parsed_args.dependency_args.iter().cloned() {
+            if arg.ends_with("-M")
+                || arg.ends_with("--dependencies")
+                || arg.contains("-MD")
+                || arg.contains("--write-dependencies")
+                || arg.contains("--generate-dependencies-with-compile")
+            {
+                if !system_dependency_args.contains(&system_deps_flag) {
+                    system_dependency_args.push(system_deps_flag.clone());
+                }
+            } else if arg.ends_with("-MM")
+                || arg.ends_with("--user-dependencies")
+                || arg.contains("-MMD")
+                || arg.contains("--write-user-dependencies")
+                || arg.contains("--generate-nonsystem-dependencies-with-compile")
+            {
+                if !nonsystem_dependency_args.contains(&nonsystem_deps_flag) {
+                    nonsystem_dependency_args.push(nonsystem_deps_flag.clone());
+                }
+            } else {
+                common_dependency_args.push(arg);
+            }
+        }
+
+        let (dep_args, dep_flag) = if !generate_nonsystem_dependencies {
+            (&mut system_dependency_args, system_deps_flag)
+        } else {
+            (&mut nonsystem_dependency_args, nonsystem_deps_flag)
+        };
+
+        if dep_args.is_empty() {
+            dep_args.push(dep_flag);
+        }
+
+        system_dependency_args.dedup();
+        nonsystem_dependency_args.dedup();
+
+        if parsed_args.cxx20_modules {
+            // gcc -fmodules-ts modules cannot generate makefile dependencies to stdout with -M, must use -MD -E
+            extra_dependency_args.push("-E".into());
+            extra_dependency_args.push("-P".into());
+            extra_dependency_args.push("-o".into());
+            extra_dependency_args.push(if cfg!(windows) { "nul" } else { "/dev/null" }.into());
+        } else if matches!(kind, CCompilerKind::Gcc | CCompilerKind::Nvhpc) {
+            // NVHPC requires -E with -M, gcc requires -E with -Wp,-M
+            extra_dependency_args.push("-E".into());
+        }
+
+        let (
+            common_dependency_args,
+            system_dependency_args,
+            nonsystem_dependency_args, //
+        ) = if matches!(kind, CCompilerKind::Gcc) {
+            let transform_for_qnx_qcc_and_qxx = |args: Vec<OsString>| -> Vec<OsString> {
+                let mut qnx_args = vec![];
+                let mut it = args.into_iter();
+                while let Some(mut arg) = it.next() {
+                    if !arg.starts_with("-Xpreprocessor") && !arg.starts_with("-Wp") {
+                        let mut wp = OsString::new();
+                        wp.push("-Wp,");
+                        match arg.to_str() {
+                            Some("-MD") => {
+                                if let Some(val) = system_depsfile.as_deref() {
+                                    wp.push(arg);
+                                    wp.push(",");
+                                    wp.push(val);
+                                    arg = wp;
+                                } else {
+                                    continue;
+                                }
+                            }
+                            Some("-MMD") => {
+                                if let Some(val) = parsed_args.depfile.as_deref() {
+                                    wp.push(arg);
+                                    wp.push(",");
+                                    wp.push(val);
+                                    arg = wp;
+                                } else {
+                                    continue;
+                                }
+                            }
+                            Some("-MF" | "-MT" | "-MQ") => {
+                                if let Some(val) = it.next() {
+                                    wp.push(arg);
+                                    wp.push(",");
+                                    wp.push(val);
+                                    arg = wp;
+                                } else {
+                                    continue;
+                                }
+                            }
+                            _ => {
+                                wp.push(arg);
+                                arg = wp;
+                            }
+                        }
+                    }
+                    qnx_args.push(arg);
+                }
+
+                qnx_args
+            };
+
+            (
+                transform_for_qnx_qcc_and_qxx(common_dependency_args),
+                transform_for_qnx_qcc_and_qxx(system_dependency_args),
+                transform_for_qnx_qcc_and_qxx(nonsystem_dependency_args),
+            )
+        } else {
+            (
+                common_dependency_args,
+                system_dependency_args,
+                nonsystem_dependency_args,
+            )
+        };
+
+        (
+            common_dependency_args,
+            system_dependency_args,
+            nonsystem_dependency_args,
+            extra_dependency_args,
+        )
+    };
 
     let args_without_dependency_flags = {
-        let mut iter = std::iter::empty()
-            .chain(
-                // Set the langauge flag
-                parsed_args
-                    .language
-                    .as_compiler_str(kind.into())
-                    .into_iter()
-                    .flat_map(|lang| ["-x", lang])
-                    .map(OsStr::new),
-            )
+        let mut iter = parsed_args
+            .language
+            .as_compiler_str(kind.into())
+            .into_iter()
+            // Set the langauge flag
+            .flat_map(|lang| ["-x", lang])
+            .map(OsStr::new)
             .chain(
                 std::iter::empty()
                     .chain(parsed_args.preprocessor_args.iter())
@@ -1305,30 +1438,14 @@ where
     // dependencies with system includes to compute the hash key, but the
     // user requested dependencies *without* system includes be written
     // to `parsed_args.depfile`
-    if generate_user_dependencies && parsed_args.depfile.is_some() {
+
+    if generate_nonsystem_dependencies {
         let args = args_without_dependency_flags
             .clone()
             .into_iter()
-            .chain(
-                std::iter::once(OsStr::new("-MM"))
-                    .chain(parsed_args.dependency_args.iter().map(|arg| {
-                        // Map all depflags to `-MM`
-                        if arg.ends_with("-M")
-                            || arg.contains("-MD")
-                            || arg.contains("-MMD")
-                            || arg.contains("--dependencies")
-                            || arg.contains("--write-dependencies")
-                            || arg.contains("--write-user-dependencies")
-                            || arg.contains("--generate-dependencies-with-compile")
-                            || arg.contains("--generate-nonsystem-dependencies-with-compile")
-                        {
-                            OsStr::new("-MM")
-                        } else {
-                            arg.as_os_str()
-                        }
-                    }))
-                    .unique(),
-            )
+            .chain(common_dependency_args.iter().map(|arg| arg.as_os_str()))
+            .chain(nonsystem_dependency_args.iter().map(|arg| arg.as_os_str()))
+            .chain(extra_dependency_args.iter().map(|arg| arg.as_os_str()))
             .chain(parsed_args.double_dash_input.then_some(OsStr::new("--")))
             .chain(std::iter::once(parsed_args.input.as_os_str()));
 
@@ -1363,103 +1480,21 @@ where
         elapsed += duration;
     }
 
-    let generate_module_dependencies = parsed_args.cxx20_modules
-        && parsed_args.structured_depfile_format.is_some()
-        && parsed_args.structured_depfile.is_some();
-
-    let depfile = parsed_args
-        .depfile
-        .clone()
-        .filter(|_| !generate_user_dependencies);
-
-    // gcc -fmodules-ts modules cannot generate makefile dependencies to stdout with -M, must use -MD -E
-    let (deps_arg, depfile) = if parsed_args.cxx20_modules {
-        (
-            OsStr::new("-MD"),
-            depfile.or_else(|| {
-                Some({
-                    match parsed_args.outputs.get("obj") {
-                        Some(obj) => obj.path.with_added_extension("d"),
-                        None => parsed_args.input.with_added_extension("d"),
-                    }
-                })
-            }),
-        )
-    } else {
-        (OsStr::new("-M"), depfile)
-    };
-
     let cmd = {
         let args = args_without_dependency_flags
+            .clone()
             .into_iter()
-            .map(|arg| arg.to_owned())
             .chain(
-                std::iter::once(deps_arg)
-                    .chain(
-                        parsed_args
-                            .dependency_args
-                            .iter()
-                            // If this is generating the real dependency file,
-                            // pass all the user's other dependency flags.
-                            .filter(|_| depfile.is_some())
-                            .map(|arg| {
-                                // Map all depflags to `-M`
-                                if arg.ends_with("-MM")
-                                    || arg.contains("-MD")
-                                    || arg.contains("-MMD")
-                                    || arg.contains("--dependencies")
-                                    || arg.contains("--write-dependencies")
-                                    || arg.contains("--write-user-dependencies")
-                                    || arg.contains("--generate-dependencies-with-compile")
-                                    || arg
-                                        .contains("--generate-nonsystem-dependencies-with-compile")
-                                {
-                                    deps_arg
-                                } else {
-                                    arg.as_os_str()
-                                }
-                            }),
-                    )
-                    .unique()
-                    .map(|arg| arg.to_owned())
-                    .map(|mut arg| {
-                        if matches!(kind, CCompilerKind::Gcc) && !arg.starts_with("-Wp") {
-                            let mut wp = OsString::new();
-                            wp.push("-Wp,");
-                            wp.push(&arg);
-                            if arg == "-MD"
-                                && let Some(depfile) = depfile.as_deref()
-                            {
-                                wp.push(",");
-                                wp.push(depfile.as_os_str());
-                            }
-                            arg = wp;
-                        }
-                        arg
-                    }),
+                (!generate_nonsystem_dependencies)
+                    .then_some(common_dependency_args.iter())
+                    .into_iter()
+                    .flatten()
+                    .chain(system_dependency_args.iter())
+                    .map(|arg| arg.as_os_str()),
             )
-            .chain(if parsed_args.cxx20_modules {
-                vec![
-                    "-E".into(),
-                    "-P".into(),
-                    "-o".into(),
-                    if cfg!(windows) {
-                        "nul".into()
-                    } else {
-                        "/dev/null".into()
-                    },
-                ]
-            } else if matches!(kind, CCompilerKind::Gcc | CCompilerKind::Nvhpc) {
-                vec!["-E".into()]
-            } else {
-                vec![]
-            })
-            .chain(
-                parsed_args
-                    .double_dash_input
-                    .then_some(OsString::from("--")),
-            )
-            .chain(std::iter::once(parsed_args.input.clone().into_os_string()));
+            .chain(extra_dependency_args.iter().map(|arg| arg.as_os_str()))
+            .chain(parsed_args.double_dash_input.then_some(OsStr::new("--")))
+            .chain(std::iter::once(parsed_args.input.as_os_str()));
 
         let mut cmd = creator.clone().new_command_sync(executable.as_ref());
 
@@ -1508,7 +1543,7 @@ where
         parse_dependencies(
             &parsed_args.input,
             None,
-            &if let Some(depfile) = depfile {
+            &if let Some(depfile) = system_depsfile {
                 read_depfile(cwd.as_ref().join(depfile)).await?
             } else {
                 bytes_to_str(output.stdout)?
@@ -2424,7 +2459,7 @@ mod test {
                 }
             )
         );
-        assert_eq!(ovec!["-Wp,-MF,foo.o.d"], dependency_args);
+        assert_eq!(ovec!["-MF", "foo.o.d"], dependency_args);
         assert_eq!(ovec!["-nostdinc"], preprocessor_args);
         assert_eq!(ovec!["-fabc"], common_args);
         assert!(!msvc_show_includes);
@@ -2573,7 +2608,7 @@ mod test {
                 }
             )
         );
-        assert_eq!(ovec!["-Wp,-MF,foo.o.d"], dependency_args);
+        assert_eq!(ovec!["-MF", "foo.o.d"], dependency_args);
         assert_eq!(ovec!["-fabc"], common_args);
         assert!(!msvc_show_includes);
     }
@@ -2618,7 +2653,7 @@ mod test {
             )
         );
         assert_eq!(
-            ovec!["-Wp,-MF,foo.o.d", "-MD", "-Wp,-MT,foo.o"],
+            ovec!["-MF", "foo.o.d", "-MD", "-MT", "foo.o"],
             dependency_args
         );
         assert!(preprocessor_args.is_empty());
@@ -2666,7 +2701,7 @@ mod test {
             )
         );
         assert_eq!(
-            ovec!["-Wp,-MF,foo.o.d", "-MD", "-Wp,-MQ,foo.o"],
+            ovec!["-MF", "foo.o.d", "-MD", "-MQ", "foo.o"],
             dependency_args
         );
         assert!(preprocessor_args.is_empty());
@@ -2877,7 +2912,7 @@ mod test {
             )
         );
         assert_eq!(
-            ovec!["-Wp,-MF,foo.o.d", "-MD", "-Wp,-MT,foo.o"],
+            ovec!["-MF", "foo.o.d", "-MD", "-MT", "foo.o"],
             dependency_args
         );
         assert_eq!(ovec!["-fabc"], common_args);
@@ -2921,7 +2956,7 @@ mod test {
             )
         );
         assert_eq!(
-            ovec!["-MMD", "-Wp,-MT,foo/bar.o", "-Wp,-MF,foo/bar.d"],
+            ovec!["-MMD", "-MT", "foo/bar.o", "-MF", "foo/bar.d"],
             dependency_args
         );
         assert_eq!(ovec!["-fabc"], common_args);
