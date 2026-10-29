@@ -122,6 +122,17 @@ impl Nvcc {
             })
             .collect::<Vec<_>>();
 
+        let mut args = args.map(|arg| arg.as_ref().to_owned()).collect::<Vec<_>>();
+
+        if !args
+            .iter()
+            .any(|arg| arg.starts_with("-ccbin") || arg.starts_with("--compiler-bindir"))
+        {
+            if let Some((_, cc)) = env_vars.iter().find(|(key, _)| key == "CC") {
+                args.push(format!("-ccbin={}", cc.display()).into());
+            }
+        }
+
         #[cfg(unix)]
         let pragma_once_fix = Arc::new(if matches!(host_compiler, NvccHostCompiler::Gcc) {
             crate::compiler::util::build_gcc_pragma_once_fix(
@@ -144,7 +155,7 @@ impl Nvcc {
         let archs_all = Self::read_all_archs(
             creator,
             executable.as_ref(),
-            args.clone(),
+            args.iter(),
             env_vars.iter().cloned(),
             &host_compiler,
         )
@@ -154,7 +165,7 @@ impl Nvcc {
         let archs_major = Self::read_major_archs(
             creator,
             executable.as_ref(),
-            args.clone(),
+            args.iter(),
             env_vars.iter().cloned(),
             &host_compiler,
         )
@@ -164,7 +175,7 @@ impl Nvcc {
         let archs_native = Self::read_native_archs(
             creator,
             executable.as_ref(),
-            args.clone(),
+            args.iter(),
             env_vars.iter().cloned(),
             &host_compiler,
         )
@@ -177,11 +188,12 @@ impl Nvcc {
         let nvcc_tools = Self::find_internal_tools(
             creator,
             executable.as_ref(),
-            args,
+            args.iter(),
             env_vars.iter().cloned(),
             &host_compiler,
         )
-        .await?;
+        .await
+        .unwrap_or_default();
 
         Ok(Self {
             archs_all,
