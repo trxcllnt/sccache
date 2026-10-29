@@ -50,7 +50,7 @@ use tokio::io::AsyncWriteExt;
 #[cfg(feature = "dist-client")]
 use crate::{
     compiler::{DistPackagers, NoopOutputsRewriter},
-    dist::pkg,
+    dist::pkg::{self, JobInput},
 };
 
 /// A generic implementation of the `Compiler` trait for C/C++ compilers.
@@ -275,6 +275,7 @@ struct CCompilation<I: CCompilerImpl, T: CommandCreatorSync> {
     env_vars: Vec<(OsString, OsString)>,
     dist_files: Vec<PathBuf>,
     deps_args: Option<GetDependenciesArgs<I, T>>,
+    compile_timestamp: DateTime<Utc>,
 }
 
 /// Supported C compilers.
@@ -804,6 +805,7 @@ where
                         deps_args.hidden_includes = hidden_includes;
                         deps_args
                     }),
+                    compile_timestamp,
                 }),
                 weak_toolchain_key,
             },
@@ -1567,93 +1569,130 @@ where
 #[cfg(feature = "dist-client")]
 #[async_trait]
 impl<I: CCompilerImpl, T: CommandCreatorSync> pkg::InputsPackager for CCompilation<I, T> {
-    fn write_inputs(
+    async fn describe_inputs(
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
-        compressor: &mut (dyn std::io::Write + Send),
-    ) -> Result<()> {
+    ) -> Result<(dist::JobInputs, BTreeMap<String, JobInput>)> {
+        use crate::util::path_to_str;
+        use futures::{StreamExt, TryStreamExt};
+        use itertools::Itertools;
+
+        let mut output_dirs = self.outputs().map(|obj| obj.dir).collect::<Vec<_>>();
+
         let CCompilation {
+            cwd,
             parsed_args,
             mut dist_files,
             env_vars,
             deps_args,
+            compile_timestamp,
             ..
         } = *self;
 
-        if let Some(deps_args) = deps_args {
-            dist_files.extend(
-                deps_args
-                    .runtime
-                    .clone()
-                    .block_on(async { get_dependencies_dist(&self.obj_key, deps_args).await })?,
-            );
-        }
-
-        // use itertools::Itertools;
-        // trace!(
-        //     "Dist inputs:\n{}",
-        //     std::iter::empty()
-        //         .chain(dist_files.iter().unique())
-        //         .chain(parsed_args.extra_dist_files.iter())
-        //         .unique()
-        //         .map(|path| format!("  {}", path.display()))
-        //         .collect::<Vec<_>>()
-        //         .join("\n")
-        // );
-
-        let mut package = pkg::ArchiveBuilder::new(path_transformer);
-
-        // Add the input files and dependencies
-        for paths in [&dist_files[..], &parsed_args.extra_dist_files[..]] {
-            for path in paths {
-                package.add_path(&env_vars, path)?;
-            }
-        }
-
-        // Finish and compress the archive
-        package.build()?.compress(compressor)
-    }
-
-    async fn write_inputs_async(
-        self: Box<Self>,
-        path_transformer: &mut dist::PathTransformer,
-        sink: &mut (dyn futures::io::AsyncWrite + Unpin + Send + Sync),
-    ) -> Result<()> {
-        let CCompilation {
-            parsed_args,
-            mut dist_files,
-            env_vars,
-            deps_args,
-            ..
-        } = *self;
+        output_dirs.push(cwd);
 
         if let Some(deps_args) = deps_args {
             dist_files.extend(get_dependencies_dist(&self.obj_key, deps_args).await?);
         }
 
-        // use itertools::Itertools;
+        let (dirs, files, links, pt) = tokio::task::spawn_blocking({
+            let mut pt = path_transformer.clone();
+            move || {
+                let mut package = pkg::ArchiveBuilder::new(&mut pt);
+
+                // Add the input files and dependencies
+                for paths in [
+                    &output_dirs[..],
+                    &dist_files[..],
+                    &parsed_args.extra_dist_files[..],
+                ] {
+                    for path in paths {
+                        package.add_path(&env_vars, path)?;
+                    }
+                }
+
+                // Get the inputs after simplifying and transforming paths
+                let (dirs, files, links) = package.describe()?;
+
+                Ok::<_, anyhow::Error>((dirs, files, links, pt))
+            }
+        })
+        .await??;
+
+        *path_transformer = pt;
+
+        let (mut digest, files, inputs) = futures::stream::iter(files)
+            .flat_map_unordered(None, |(dist_path, file_path)| {
+                futures::stream::once(Box::pin(async move {
+                    let dist_path = path_to_str(dist_path)?.into_owned();
+                    let file_hash = match SOURCE_FILE_CACHE.get(&file_path, compile_timestamp).await
+                    {
+                        Ok(entry) => entry.meta.digest.clone(),
+                        _ => Digest::from_file(&file_path).await?.finish(),
+                    };
+                    Ok::<_, anyhow::Error>((dist_path, (file_hash, file_path)))
+                }))
+            })
+            .try_collect::<BTreeMap<_, _>>()
+            .await?
+            .into_iter()
+            .fold(
+                (Digest::new(), BTreeMap::new(), BTreeMap::new()),
+                |(mut digest, mut files, mut inputs), (dist_path, (file_hash, file_path))| {
+                    digest.update(file_hash.as_bytes());
+                    digest.update(dist_path.as_bytes());
+                    if let Ok(file_path) = path_to_str(&file_path) {
+                        digest.update(file_path.as_bytes());
+                    }
+                    files.insert(dist_path, file_hash.clone());
+                    inputs.insert(file_hash, JobInput::File(file_path));
+                    (digest, files, inputs)
+                },
+            );
+
+        let dirs = dirs
+            .into_iter()
+            .map(|(dist_path, dir_path)| {
+                let dist_path = path_to_str(dist_path)?;
+                let dir_path = path_to_str(dir_path)?;
+                digest.update(dist_path.as_bytes());
+                digest.update(dir_path.as_bytes());
+                Ok::<_, anyhow::Error>(dist_path.into_owned())
+            })
+            .try_collect::<_, Vec<_>, _>()?;
+
+        let links = links
+            .into_iter()
+            .map(|(dist_path, (link_name, link_path))| {
+                let dist_path = path_to_str(dist_path)?;
+                let link_name = path_to_str(link_name)?;
+                let link_path = path_to_str(link_path)?;
+                digest.update(dist_path.as_bytes());
+                digest.update(link_name.as_bytes());
+                digest.update(link_path.as_bytes());
+                Ok::<_, anyhow::Error>((dist_path.into_owned(), link_path.into_owned()))
+            })
+            .try_collect::<_, BTreeMap<_, _>, _>()?;
+
         // trace!(
         //     "Dist inputs:\n{}",
         //     std::iter::empty()
-        //         .chain(dist_files.iter().unique())
-        //         .chain(parsed_args.extra_dist_files.iter())
+        //         .chain(dirs.iter().map(|p| format!("  dir: {p}")))
+        //         .chain(links.iter().map(|(s, t)| format!("  link: {s} -> {t}")))
+        //         .chain(files.iter().map(|(p, h)| format!("  file: {p} ({h})")))
         //         .unique()
-        //         .map(|path| format!("  {}", path.display()))
         //         .collect::<Vec<_>>()
         //         .join("\n")
         // );
 
-        let mut package = pkg::ArchiveBuilder::new(path_transformer);
+        let manifest = dist::JobInputs::Manifest {
+            hash: digest.finish(),
+            dirs,
+            files,
+            links,
+        };
 
-        // Add the input files and dependencies
-        for paths in [&dist_files[..], &parsed_args.extra_dist_files[..]] {
-            for path in paths {
-                package.add_path(&env_vars, path)?;
-            }
-        }
-
-        // Finish and compress the archive
-        package.build()?.build_async(sink).await
+        Ok::<_, anyhow::Error>((manifest, inputs))
     }
 }
 

@@ -14,7 +14,6 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use bytes::Buf;
 use fs_err as fs;
 use futures::lock::Mutex;
 use itertools::Itertools;
@@ -30,7 +29,9 @@ use std::process::{Output, Stdio};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::process::ChildStdin;
-use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
+use tokio_util::compat::{
+    FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt,
+};
 use version_compare::Version;
 
 pub type BuildResult = std::result::Result<BuildOutput, BuildError>;
@@ -107,6 +108,7 @@ fn join_suffix<P: AsRef<Path>>(path: &Path, suffix: P) -> PathBuf {
 #[derive(Clone, Debug)]
 struct OverlaySpec {
     build_dir: PathBuf,
+    inputs_dir: PathBuf,
     toolchain_dir: PathBuf,
 }
 
@@ -211,6 +213,7 @@ impl OverlayBuilder {
     async fn prepare_overlay_dirs(
         &self,
         job_id: &str,
+        inputs_dir: &Path,
         toolchain_dir: &Path,
     ) -> Result<OverlaySpec> {
         let build_dir = self.dir.join(uuid::Uuid::new_v4().as_simple().to_string());
@@ -226,6 +229,7 @@ impl OverlayBuilder {
 
         Ok(OverlaySpec {
             build_dir,
+            inputs_dir: inputs_dir.to_owned(),
             toolchain_dir: toolchain_dir.to_owned(),
         })
     }
@@ -243,7 +247,6 @@ impl OverlayBuilder {
             env_vars,
             cwd,
         }: CompileCommand,
-        inputs: opendal::Buffer,
         output_paths: Vec<String>,
         overlay: OverlaySpec,
         job_queue: Arc<tokio::sync::Semaphore>,
@@ -272,43 +275,27 @@ impl OverlayBuilder {
 
                 let job_id = job_id_1.clone();
                 let job_id_1 = job_id.clone();
-                let build_dir = overlay_1.build_dir;
-                let inputs_dir = build_dir.join("inputs");
-                let toolchain_dir = overlay_1.toolchain_dir;
 
-                tracing::debug!("[perform_build({job_id})]: copying in inputs");
-                // Note that we don't unpack directly into the upperdir since there overlayfs has some
-                // special marker files that we don't want to create by accident (or malicious intent)
-                tar::Archive::new(flate2::read::ZlibDecoder::new(inputs.reader()))
-                    .unpack(&inputs_dir)
-                    .context("Failed to unpack inputs to overlay")
-                    .map_err(BuildError::UnpackInputs)?;
+                let build_dir = overlay_1.build_dir;
+                let inputs_dir = overlay_1.inputs_dir;
+                let toolchain_dir = overlay_1.toolchain_dir;
+                let work_dir = build_dir.join("work");
+                let output_dir = build_dir.join("output");
+                let target_dir = build_dir.join("target");
+                fs::create_dir_all(&work_dir)
+                    .map_err(|e| BuildError::MakeOverlayDir(work_dir.clone(), e))?;
+                fs::create_dir_all(&output_dir)
+                    .map_err(|e| BuildError::MakeOverlayDir(output_dir.clone(), e))?;
+                fs::create_dir_all(&target_dir)
+                    .map_err(|e| BuildError::MakeOverlayDir(target_dir.clone(), e))?;
 
                 let cwd = Path::new(&cwd);
-
-                tracing::debug!("[perform_build({job_id})]: creating output directories");
 
                 // Canonicalize output path as either absolute or relative to cwd
                 let output_paths_absolute = output_paths
                     .iter()
-                    .map(|path| cwd.join(Path::new(path)))
+                    .map(|output_path| cwd.join(output_path))
                     .collect::<Vec<_>>();
-
-                {
-                    let h_cwd = join_suffix(&inputs_dir, cwd);
-                    tracing::debug!("[perform_build({job_id})]: creating dir: {h_cwd:?}");
-                    fs::create_dir_all(&h_cwd).map_err(|e| BuildError::MakeOutputDir(h_cwd, e))?;
-                }
-
-                for path in output_paths_absolute.iter() {
-                    // If it doesn't have a parent, nothing needs creating
-                    if let Some(path) = path.parent() {
-                        let h_path = join_suffix(&inputs_dir, path);
-                        tracing::debug!("[perform_build({job_id})]: creating dir: {h_path:?}");
-                        fs::create_dir_all(&h_path)
-                            .map_err(|e| BuildError::MakeOutputDir(h_path, e))?;
-                    }
-                }
 
                 tracing::debug!("[perform_build({job_id})]: Creating overlayfs");
 
@@ -326,22 +313,11 @@ impl OverlayBuilder {
                 )
                 .map_err(BuildError::MountNsRoot)?;
 
-                let work_dir = build_dir.join("work");
-                let output_dir = build_dir.join("output");
-                let target_dir = build_dir.join("target");
-                fs::create_dir_all(&work_dir)
-                    .map_err(|e| BuildError::MakeOverlayDir(work_dir.clone(), e))?;
-                fs::create_dir_all(&output_dir)
-                    .map_err(|e| BuildError::MakeOverlayDir(output_dir.clone(), e))?;
-                fs::create_dir_all(&target_dir)
-                    .map_err(|e| BuildError::MakeOverlayDir(target_dir.clone(), e))?;
-
                 let () = Overlay::writable(
                     // Inputs and toolchain first so they're the leftmost lower
                     // dirs i.e. will take precedence over the other lower dirs
-                    [inputs_dir]
-                        .iter()
-                        .chain([&toolchain_dir])
+                    [&inputs_dir, &toolchain_dir]
+                        .into_iter()
                         .chain(lower_dirs.iter())
                         .map(|p| p.as_path()),
                     &output_dir, // upper dir
@@ -582,10 +558,7 @@ impl OverlayBuilder {
     }
 
     async fn finish_overlay(job_id: &str, overlay: &OverlaySpec) {
-        let OverlaySpec {
-            build_dir,
-            toolchain_dir: _,
-        } = overlay;
+        let OverlaySpec { build_dir, .. } = overlay;
 
         tracing::debug!(
             "[finish_build({job_id})]: Finishing with overlay {:?}",
@@ -609,7 +582,7 @@ impl BuilderIncoming for OverlayBuilder {
         &self,
         job_id: &str,
         toolchain_dir: &Path,
-        inputs: opendal::Buffer,
+        inputs_dir: &Path,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> BuildResult {
@@ -621,7 +594,7 @@ impl BuilderIncoming for OverlayBuilder {
         tracing::debug!("[run_build({job_id})]: Preparing overlay");
 
         let overlay = self
-            .prepare_overlay_dirs(job_id, toolchain_dir)
+            .prepare_overlay_dirs(job_id, inputs_dir, toolchain_dir)
             .await
             .map_err(BuildError::PrepareOverlay)?;
 
@@ -640,7 +613,6 @@ impl BuilderIncoming for OverlayBuilder {
             self.lower_dirs.clone(),
             self.overlay_env.clone(),
             command,
-            inputs,
             outputs,
             overlay.clone(),
             self.job_queue.clone(),
@@ -716,7 +688,7 @@ impl DockerBuilder {
             cwd,
         }: CompileCommand,
         output_paths: Vec<String>,
-        inputs: opendal::Buffer,
+        inputs_dir: &Path,
         job_queue: &tokio::sync::Semaphore,
     ) -> BuildResult {
         // Bail early if job_queue is closed while this job is running
@@ -818,11 +790,16 @@ impl DockerBuilder {
                     "/",
                 ])
                 .kill_on_drop(true)
-                .check_piped(|mut stdin| async move {
-                    let inputs = async_compression::futures::bufread::ZlibDecoder::new(
-                        futures::io::BufReader::new(futures::io::AllowStdIo::new(inputs.reader())),
-                    );
-                    tokio::io::copy(&mut inputs.compat(), &mut stdin).await?;
+                .check_piped(|stdin| async move {
+                    let mut inputs = async_tar::Builder::new(stdin.compat_write());
+                    inputs.follow_symlinks(false);
+                    inputs.mode(async_tar::HeaderMode::Deterministic);
+                    inputs.append_dir_all("", &inputs_dir).await?;
+                    let _ = inputs.into_inner().await?;
+                    // let inputs = async_compression::futures::bufread::ZlibDecoder::new(
+                    //     futures::io::BufReader::new(futures::io::AllowStdIo::new(inputs.reader())),
+                    // );
+                    // tokio::io::copy(&mut inputs.compat(), &mut stdin).await?;
                     Ok(())
                 })
                 .await
@@ -1049,7 +1026,7 @@ impl BuilderIncoming for DockerBuilder {
         &self,
         job_id: &str,
         toolchain_tgz: &Path,
-        inputs: opendal::Buffer,
+        inputs_dir: &Path,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> BuildResult {
@@ -1079,7 +1056,7 @@ impl BuilderIncoming for DockerBuilder {
             toolchain_tgz,
             command,
             outputs,
-            inputs,
+            inputs_dir,
             self.job_queue.as_ref(),
         )
         .await;

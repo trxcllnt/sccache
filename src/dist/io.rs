@@ -17,10 +17,12 @@ use bytes::Buf;
 use crate::{
     cache::{Cache, Storage},
     dist::{
-        RunJobResponse, RunJobStatus, Toolchain,
+        RunJobStatus, Toolchain,
         http::bincode_deserialize,
         job_inputs_key, job_result_key, job_status_key,
         metrics::{JobsMetrics, ToolchainsMetrics},
+        v3,
+        v3::RunJobResponse,
     },
     errors::*,
 };
@@ -35,6 +37,31 @@ pub struct Jobs {
 impl Jobs {
     pub fn new(storage: Arc<dyn Storage>, metrics: JobsMetrics) -> Self {
         Self { metrics, storage }
+    }
+
+    /// Check if a job inputs exists
+    pub async fn missing_job_inputs<'a, I: Iterator<Item = &'a str>>(
+        &self,
+        inputs: I,
+    ) -> Option<Vec<String>> {
+        let missing_inputs =
+            futures::future::join_all(inputs.into_iter().map(|digest| async move {
+                if !self.has_job_inputs(digest).await {
+                    Some(digest.to_owned())
+                } else {
+                    None
+                }
+            }))
+            .await
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+
+        if missing_inputs.is_empty() {
+            None
+        } else {
+            Some(missing_inputs)
+        }
     }
 
     /// Check if a job inputs exists
@@ -123,7 +150,7 @@ impl Jobs {
     }
 
     /// Load the job result
-    pub async fn get_job_result(&self, job_id: &str) -> Result<RunJobResponse> {
+    pub async fn get_job_result(&self, job_id: &str) -> Result<v3::RunJobResponse> {
         // Record get_job_result time
         let _timer = self.metrics.get_job_result_timer();
         let result = self
@@ -280,7 +307,7 @@ impl Toolchains {
             .await
             .and_then(|res| match res {
                 Cache::Hit(buffer) => Ok(buffer),
-                _ => Err(anyhow!("Missing job inputs")),
+                _ => Err(anyhow!("Missing toolchain")),
             })
             .map_err(|err| {
                 // Record toolchain errors

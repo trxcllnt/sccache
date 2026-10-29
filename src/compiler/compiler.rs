@@ -754,7 +754,6 @@ where
             out_pretty.clone(),
             runtime.clone(),
             service,
-            use_async_io,
         );
 
         let lookup = lookup_or_compile
@@ -906,7 +905,6 @@ struct CacheLookupOrCompile<'a, T: CommandCreatorSync> {
     runtime: tokio::runtime::Handle,
     sccache_service: &'a server::SccacheService<T>,
     weak_toolchain_key: String,
-    use_async_io: bool,
 }
 
 impl<'a, T> CacheLookupOrCompile<'a, T>
@@ -923,7 +921,6 @@ where
         out_pretty: String,
         runtime: tokio::runtime::Handle,
         sccache_service: &'a server::SccacheService<T>,
-        use_async_io: bool,
     ) -> Self {
         let HashResult {
             compilation,
@@ -973,7 +970,6 @@ where
             runtime,
             sccache_service,
             weak_toolchain_key,
-            use_async_io,
         }
     }
 
@@ -1059,7 +1055,6 @@ where
             outputs,
             sccache_service,
             weak_toolchain_key,
-            use_async_io,
             ..
         } = self;
 
@@ -1075,7 +1070,6 @@ where
                 out_pretty: out_pretty.clone(),
                 path_transformer: Default::default(),
                 weak_toolchain_key,
-                use_async_io,
             })
         });
 
@@ -1332,7 +1326,6 @@ struct DistCompile<T: CommandCreatorSync> {
     #[cfg(feature = "dist-client")]
     path_transformer: dist::PathTransformer,
     weak_toolchain_key: String,
-    use_async_io: bool,
 }
 
 #[cfg(feature = "dist-client")]
@@ -1346,7 +1339,7 @@ where
         outputs: &[FileObjectSource],
         service: &server::SccacheService<T>,
     ) -> Result<(DistType, ProcessOutput)> {
-        use dist::RunJobResponse;
+        use dist::v3::RunJobResponse;
         use itertools::Itertools;
         use std::io;
         use tokio_retry2::strategy::FibonacciBackoff;
@@ -1358,7 +1351,6 @@ where
             ref out_pretty,
             mut path_transformer,
             weak_toolchain_key,
-            use_async_io,
             ..
         } = self;
 
@@ -1371,73 +1363,11 @@ where
         let (inputs_packager, toolchain_packager, outputs_rewriter) =
             compilation.into_dist_packagers()?;
 
-        let job_inputs = {
-            trace!("[{out_pretty}]: Serializing dist inputs");
-
-            // Write the job inputs to a tempfile because they can be huge
-            // and we don't want to OOM the server during parallel builds.
-            let job_inputs = crate::util::tempfile()?;
-
-            if use_async_io {
-                use futures::AsyncWriteExt;
-                let mut inputs_writer =
-                    async_compression::futures::write::ZlibEncoder::with_quality(
-                        futures::io::AllowStdIo::new(job_inputs.reopen()?),
-                        // Optimize for size since bandwidth costs more than client CPU cycles
-                        async_compression::core::Level::Best,
-                        // async_compression::core::Level::Default,
-                    );
-
-                inputs_packager
-                    .write_inputs_async(&mut path_transformer, &mut inputs_writer)
-                    .await?;
-
-                inputs_writer
-                    .flush()
-                    .await
-                    .context("failed to flush compressor")?;
-
-                trace!(
-                    "Compressed inputs from {} MiB -> {} MiB",
-                    (inputs_writer.total_in() as f64 / (1024.0 * 1024.0)),
-                    (inputs_writer.total_out() as f64 / (1024.0 * 1024.0))
-                );
-
-                inputs_writer
-                    .close()
-                    .await
-                    .context("failed to finish compressor")?;
-            } else {
-                let mut inputs_writer = flate2::write::ZlibEncoder::new(
-                    job_inputs.reopen()?,
-                    // Optimize for size since bandwidth costs more than client CPU cycles
-                    flate2::Compression::best(),
-                    // flate2::Compression::default(),
-                );
-
-                path_transformer = tokio::task::spawn_blocking(move || {
-                    inputs_packager
-                        .write_inputs(&mut path_transformer, &mut inputs_writer)
-                        .and_then(|_| {
-                            inputs_writer
-                                .flush()
-                                .context("failed to flush compressor")?;
-                            trace!(
-                                "Compressed inputs from {} MiB -> {} MiB",
-                                (inputs_writer.total_in() as f64 / (1024.0 * 1024.0)),
-                                (inputs_writer.total_out() as f64 / (1024.0 * 1024.0))
-                            );
-                            inputs_writer
-                                .finish()
-                                .context("failed to finish compressor")
-                        })
-                        .context("Could not write inputs for compilation")
-                        .map(|_| path_transformer)
-                })
-                .await??;
-            }
-
-            job_inputs
+        let (inputs_manifest, hashed_inputs) = {
+            trace!("[{out_pretty}]: Hashing dist inputs");
+            inputs_packager
+                .describe_inputs(&mut path_transformer)
+                .await?
         };
 
         drop(pending);
@@ -1479,8 +1409,8 @@ where
 
         let dist_retry_limit = dist_client.max_retries() + 1.0;
         let mut num_dist_attempts = 1.0f64;
+        let mut missing_inputs = vec![];
         let mut has_toolchain = false;
-        let mut has_inputs = false;
         let mut job = None;
 
         let mut should_retry = |err: &Error, job_id: Option<&str>, server_id: Option<&str>| {
@@ -1539,12 +1469,15 @@ where
                 trace!("[{out_pretty}]: Requesting job allocation");
 
                 match dist_client
-                    .new_job(dist_toolchain.clone(), job_inputs.reopen()?)
+                    .new_job(
+                        dist_toolchain.clone(),
+                        hashed_inputs.keys().cloned().collect(),
+                    )
                     .await
                 {
                     Ok(res) => {
                         trace!("[{out_pretty}, {}]: Received job allocation", res.job_id);
-                        has_inputs = res.has_inputs;
+                        missing_inputs = res.missing_inputs;
                         has_toolchain = res.has_toolchain;
                         job = Some((res.job_id, res.timeout.min(dist_client.request_timeout())));
                         continue;
@@ -1554,15 +1487,24 @@ where
                 }
             };
 
-            if !has_inputs {
-                debug!("[{out_pretty}, {job_id}]: Resubmitting job inputs");
+            if !missing_inputs.is_empty() {
+                debug!("[{out_pretty}, {job_id}]: Submitting job inputs: {missing_inputs:?}");
                 match dist_client
-                    .put_job(job_id, job_inputs.reopen()?)
+                    .put_job(
+                        missing_inputs
+                            .iter()
+                            .filter_map(|hash| {
+                                hashed_inputs
+                                    .get(hash)
+                                    .map(|input| (hash.clone(), input.clone()))
+                            })
+                            .collect(),
+                    )
                     .await
                     .map_err(|e| e.context("Could not submit job inputs"))
                 {
                     Ok(_) => {
-                        has_inputs = true;
+                        missing_inputs = vec![];
                     }
                     // Maybe retry network errors
                     Err(err) => retry_or_bail!(err, Some(job_id.as_str())),
@@ -1593,6 +1535,7 @@ where
                 Duration::from_secs(timeout as u64),
                 dist_toolchain.clone(),
                 dist_compile_cmd.clone(),
+                inputs_manifest.clone(),
                 dist_output_paths.clone(),
             );
 
@@ -1635,9 +1578,13 @@ where
                 }
                 // Missing inputs (S3 cleared, Redis rebooted, etc.)
                 // Can be retried.
-                Ok(RunJobResponse::MissingJobInputs { server_id }) => {
+                Ok(RunJobResponse::MissingJobInputs { server_id, inputs }) => {
                     // If we retry, send the inputs again
-                    has_inputs = false;
+                    if inputs.is_empty() {
+                        missing_inputs = hashed_inputs.keys().cloned().collect();
+                    } else {
+                        missing_inputs = inputs;
+                    }
                     debug!(
                         "[{out_pretty}, {job_id}, {server_id}]: Missing distributed compilation job inputs"
                     );
@@ -4899,8 +4846,10 @@ LLVM version: 6.0",
 #[cfg(feature = "dist-client")]
 mod test_dist {
     use crate::dist::{
-        self, CompileCommand, NewJobResponse, OutputData, RunJobResponse, SchedulerStatus,
-        SubmitToolchainResult, Toolchain,
+        self, CompileCommand, JobInputs, OutputData, SchedulerStatus, SubmitToolchainResult,
+        Toolchain,
+        pkg::JobInput,
+        v3::{NewJobResponse, RunJobResponse},
     };
     use crate::dist::{
         BuildResult, PathTransformer,
@@ -4909,6 +4858,7 @@ mod test_dist {
     use crate::mock_command::ProcessOutput;
     use async_trait::async_trait;
     use std::{
+        collections::HashMap,
         io::Write,
         path::{Path, PathBuf},
         sync::{Arc, atomic::AtomicBool},
@@ -4947,10 +4897,10 @@ mod test_dist {
     }
     #[async_trait]
     impl dist::Client for ErrorPutToolchainClient {
-        async fn new_job(&self, _: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
+        async fn new_job(&self, _: Toolchain, _: Vec<String>) -> Result<NewJobResponse> {
             unreachable!()
         }
-        async fn put_job(&self, _: &str, _: std::fs::File) -> Result<()> {
+        async fn put_job(&self, _: HashMap<String, JobInput>) -> Result<()> {
             unreachable!()
         }
         async fn del_job(&self, _: &str) -> Result<()> {
@@ -4972,6 +4922,7 @@ mod test_dist {
             _: Duration,
             _: Toolchain,
             _: CompileCommand,
+            _: JobInputs,
             _: Vec<String>,
         ) -> Result<RunJobResponse> {
             unreachable!()
@@ -5018,11 +4969,11 @@ mod test_dist {
     }
     #[async_trait]
     impl dist::Client for ErrorAllocJobClient {
-        async fn new_job(&self, tc: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
+        async fn new_job(&self, tc: Toolchain, _: Vec<String>) -> Result<NewJobResponse> {
             assert_eq!(self.tc, tc);
             Err(anyhow!("MOCK: alloc job failure"))
         }
-        async fn put_job(&self, _: &str, _: std::fs::File) -> Result<()> {
+        async fn put_job(&self, _: HashMap<String, JobInput>) -> Result<()> {
             unreachable!()
         }
         async fn del_job(&self, _: &str) -> Result<()> {
@@ -5044,6 +4995,7 @@ mod test_dist {
             _: Duration,
             _: Toolchain,
             _: CompileCommand,
+            _: JobInputs,
             _: Vec<String>,
         ) -> Result<RunJobResponse> {
             unreachable!()
@@ -5093,7 +5045,7 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for ErrorSubmitToolchainClient {
-        async fn new_job(&self, tc: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
+        async fn new_job(&self, tc: Toolchain, _: Vec<String>) -> Result<NewJobResponse> {
             assert!(
                 !self
                     .has_started
@@ -5102,13 +5054,13 @@ mod test_dist {
             assert_eq!(self.tc, tc);
 
             Ok(NewJobResponse {
-                has_inputs: true,
                 has_toolchain: false,
+                missing_inputs: vec![],
                 job_id: "job_id".into(),
                 timeout: 10,
             })
         }
-        async fn put_job(&self, _: &str, _: std::fs::File) -> Result<()> {
+        async fn put_job(&self, _: HashMap<String, JobInput>) -> Result<()> {
             unreachable!()
         }
         async fn del_job(&self, _: &str) -> Result<()> {
@@ -5131,6 +5083,7 @@ mod test_dist {
             _: Duration,
             _: Toolchain,
             _: CompileCommand,
+            _: JobInputs,
             _: Vec<String>,
         ) -> Result<RunJobResponse> {
             unreachable!("fn run_job is not used for this test. qed")
@@ -5180,7 +5133,7 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for ErrorRunJobClient {
-        async fn new_job(&self, tc: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
+        async fn new_job(&self, tc: Toolchain, _: Vec<String>) -> Result<NewJobResponse> {
             assert!(
                 !self
                     .has_started
@@ -5189,13 +5142,13 @@ mod test_dist {
             assert_eq!(self.tc, tc);
 
             Ok(NewJobResponse {
-                has_inputs: true,
                 has_toolchain: false,
+                missing_inputs: vec![],
                 job_id: "job_id".into(),
                 timeout: 10,
             })
         }
-        async fn put_job(&self, _: &str, _: std::fs::File) -> Result<()> {
+        async fn put_job(&self, _: HashMap<String, JobInput>) -> Result<()> {
             unreachable!()
         }
         async fn del_job(&self, _: &str) -> Result<()> {
@@ -5218,6 +5171,7 @@ mod test_dist {
             timeout: Duration,
             tc: Toolchain,
             command: CompileCommand,
+            _: JobInputs,
             _: Vec<String>,
         ) -> Result<RunJobResponse> {
             assert_eq!(job_id, "job_id");
@@ -5288,7 +5242,7 @@ mod test_dist {
 
     #[async_trait]
     impl dist::Client for OneshotClient {
-        async fn new_job(&self, tc: Toolchain, _: std::fs::File) -> Result<NewJobResponse> {
+        async fn new_job(&self, tc: Toolchain, _: Vec<String>) -> Result<NewJobResponse> {
             assert!(
                 !self
                     .has_started
@@ -5296,13 +5250,13 @@ mod test_dist {
             );
             assert_eq!(self.tc, tc);
             Ok(NewJobResponse {
-                has_inputs: true,
+                missing_inputs: vec![],
                 has_toolchain: self.has_toolchain,
                 job_id: "job_id".into(),
                 timeout: 10,
             })
         }
-        async fn put_job(&self, _: &str, _: std::fs::File) -> Result<()> {
+        async fn put_job(&self, _: HashMap<String, JobInput>) -> Result<()> {
             unreachable!()
         }
         async fn del_job(&self, _: &str) -> Result<()> {
@@ -5329,6 +5283,7 @@ mod test_dist {
             timeout: Duration,
             tc: Toolchain,
             command: CompileCommand,
+            _: JobInputs,
             outputs: Vec<String>,
         ) -> Result<RunJobResponse> {
             assert_eq!(job_id, "job_id");

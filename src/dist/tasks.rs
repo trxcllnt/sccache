@@ -21,12 +21,12 @@ use celery::{
     task::{AsyncResult, Task},
 };
 
-use std::{boxed::Box, sync::Arc};
+use std::sync::Arc;
 
 use crate::{
     config::dist::MessageBroker,
     dist::{
-        CompileCommand, SchedulerService, ServerService, StatusUpdate, Toolchain,
+        CompileCommand, JobInputs, SchedulerService, ServerService, StatusUpdate, Toolchain,
         scheduler_to_servers_queue, server_to_schedulers_queue, to_scheduler_queue,
         to_server_queue,
     },
@@ -227,6 +227,7 @@ pub trait SchedulerTasks: AppTasks + Send + Sync {
         reply_to: &str,
         toolchain: &Toolchain,
         command: &CompileCommand,
+        inputs: JobInputs,
         outputs: &[String],
     ) -> std::result::Result<AsyncResult, CeleryError>;
 }
@@ -247,6 +248,7 @@ impl SchedulerTasks for Tasks {
         reply_to: &str,
         toolchain: &Toolchain,
         command: &CompileCommand,
+        inputs: JobInputs,
         outputs: &[String],
     ) -> std::result::Result<AsyncResult, CeleryError> {
         self.app()
@@ -256,6 +258,7 @@ impl SchedulerTasks for Tasks {
                     reply_to.to_owned(),
                     toolchain.to_owned(),
                     command.to_owned(),
+                    inputs,
                     outputs.to_owned(),
                 )
                 .with_time_limit(self.job_time_limit.saturating_sub(30))
@@ -306,14 +309,14 @@ mod task_impls {
     use super::{SCHEDULER, SERVER};
     use crate::{
         dist::{
-            CompileCommand, RunJobError, RunJobResponse, SchedulerService, ServerService,
-            StatusUpdate, Toolchain,
+            CompileCommand, JobInputs, RunJobError, SchedulerService, ServerService, StatusUpdate,
+            Toolchain, v3::RunJobResponse,
         },
         errors::*,
     };
     use celery::prelude::*;
     use futures::FutureExt;
-    use std::{boxed::Box, sync::Arc};
+    use std::sync::Arc;
 
     fn scheduler_service<'a>() -> Result<&'a Arc<dyn SchedulerService>> {
         SCHEDULER.get().ok_or_else(|| {
@@ -341,6 +344,7 @@ mod task_impls {
         reply_to: String,
         toolchain: Toolchain,
         command: CompileCommand,
+        inputs: JobInputs,
         outputs: Vec<String>,
     ) -> TaskResult<RunJobResponse> {
         tracing::trace!(
@@ -351,22 +355,16 @@ mod task_impls {
         );
 
         server_service()
-            .map(|svc| svc.run_job(&job_id, &reply_to, toolchain, command, outputs))
+            .map(|svc| svc.run_job(&job_id, &reply_to, toolchain, command, inputs, outputs))
             .unwrap_or_else(|err| futures::future::err(err).boxed())
             .await
-            .map_err(|err| match err.downcast_ref::<RunJobError>() {
-                Some(RunJobError::MissingJobInputs) => {
-                    TaskError::ExpectedError("MissingJobInputs".into())
-                }
-                Some(RunJobError::MissingToolchain) => {
-                    TaskError::ExpectedError("MissingToolchain".into())
-                }
-                Some(RunJobError::MissingJobResult) => {
-                    TaskError::ExpectedError("MissingJobResult".into())
-                }
-                // RunJobError::Fatal and RunJobError::Retryable errors
-                Some(err) => TaskError::ExpectedError(err.to_string()),
-                _ => TaskError::ExpectedError(err.to_string()),
+            .map_err(|err| match err.downcast::<RunJobError>() {
+                Ok(RunJobError::MissingJobInputs { inputs }) => TaskError::ExpectedError(
+                    serde_json::to_string(&RunJobError::MissingJobInputs { inputs }).unwrap(),
+                ),
+                // Other RunJobError types
+                Ok(err) => TaskError::ExpectedError(serde_json::to_string(&err).unwrap()),
+                Err(err) => TaskError::UnexpectedError(err.to_string()),
             })
     }
 
@@ -376,13 +374,11 @@ mod task_impls {
         let err = match err {
             // The client can choose to retry these or compile locally.
             // Matching strings because that's the only type in TaskError.
-            TaskError::ExpectedError(msg) => match msg.as_ref() {
-                "MissingJobInputs" => RunJobError::MissingJobInputs,
-                "MissingToolchain" => RunJobError::MissingToolchain,
-                "MissingJobResult" => RunJobError::MissingJobResult,
-                msg => RunJobError::Retryable(anyhow!(msg.to_owned())),
+            TaskError::ExpectedError(msg) => match serde_json::from_str(msg) {
+                Ok(err) => err,
+                _ => RunJobError::Retryable(msg.to_owned()),
             },
-            TaskError::UnexpectedError(msg) => RunJobError::Retryable(anyhow!(msg.to_owned())),
+            TaskError::UnexpectedError(msg) => RunJobError::Retryable(msg.to_owned()),
             // Report task timeouts as a fatal errors, since this means the
             // compilation took longer than the scheduler's `job_time_limit`.
             //
@@ -391,8 +387,8 @@ mod task_impls {
             // see their build fail and can either increase the job time limit,
             // or apply source optimizations so their files compile in a
             // reasonable amount of time.
-            TaskError::TimeoutError => RunJobError::Fatal(anyhow!("Job {job_id} timed out")),
-            TaskError::Retry(_) => RunJobError::Fatal(anyhow!("Job {job_id} retries exceeded")),
+            TaskError::TimeoutError => RunJobError::Fatal(format!("Job {job_id} timed out")),
+            TaskError::Retry(_) => RunJobError::Fatal(format!("Job {job_id} retries exceeded")),
         };
 
         if let Err(err) = server_service()

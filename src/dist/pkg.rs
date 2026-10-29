@@ -18,6 +18,7 @@ use crate::{
     util::{SimplifyPath, bytes_to_str, path_to_bytes},
 };
 use async_trait::async_trait;
+use bytes::Buf;
 use fs_err as fs;
 use is_executable::IsExecutable;
 use std::{
@@ -25,6 +26,7 @@ use std::{
     ffi::OsString,
     io::{self, Write},
     path::{Component, Path, PathBuf},
+    pin::Pin,
     process, str,
     sync::Arc,
 };
@@ -54,16 +56,35 @@ pub trait ArchivePackager: Send + Sync {
 
 #[async_trait]
 pub trait InputsPackager: Send {
-    fn write_inputs(
+    async fn describe_inputs(
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
-        inputs_writer: &mut (dyn Write + Send),
-    ) -> Result<()>;
-    async fn write_inputs_async(
-        self: Box<Self>,
-        path_transformer: &mut dist::PathTransformer,
-        sink: &mut (dyn futures::io::AsyncWrite + Unpin + Send + Sync),
-    ) -> Result<()>;
+    ) -> Result<(dist::JobInputs, BTreeMap<String, JobInput>)>;
+}
+
+#[derive(Clone)]
+pub enum JobInput {
+    Data(opendal::Buffer),
+    File(PathBuf),
+}
+
+impl JobInput {
+    pub fn into_async_read(self) -> Result<Pin<Box<dyn futures::io::AsyncBufRead + Send>>> {
+        Ok(match self {
+            Self::Data(data) => Box::pin(futures::io::BufReader::new(
+                futures::io::AllowStdIo::new(data.reader()),
+            )),
+            Self::File(ref path) => {
+                let file = fs_err::OpenOptions::new()
+                    .read(true)
+                    .open(path)
+                    .with_context(|| format!("Failed to open file for uploading: {path:?}"))?;
+                Box::pin(futures::io::BufReader::new(futures::io::AllowStdIo::new(
+                    file,
+                )))
+            }
+        })
+    }
 }
 
 pub struct ArchiveBuilder<'a> {
@@ -247,7 +268,13 @@ impl<'a> ArchiveBuilder<'a> {
         .simplify(path.as_ref())
     }
 
-    pub fn build(self) -> Result<Arc<dyn ArchivePackager>> {
+    pub fn describe(
+        self,
+    ) -> Result<(
+        BTreeMap<PathBuf, PathBuf>,
+        BTreeMap<PathBuf, PathBuf>,
+        BTreeMap<PathBuf, (PathBuf, PathBuf)>,
+    )> {
         use itertools::Itertools;
 
         // Adjust the archive paths with the PathTransformer
@@ -259,9 +286,7 @@ impl<'a> ArchiveBuilder<'a> {
                 self.path_transformer
                     .as_dist(&dir_path)
                     .with_context(|| format!("Unable to transform directory path {dir_path:?}"))
-                    // Strip the leading slash
-                    .map(tar_safe_path)
-                    .map(|tar_path| (tar_path, dir_path))
+                    .map(|dist_path| (dist_path, dir_path))
             })
             .try_collect()
             .context("Failed transforming intermediate directory paths")?;
@@ -273,9 +298,7 @@ impl<'a> ArchiveBuilder<'a> {
                 self.path_transformer
                     .as_dist(&src_path)
                     .with_context(|| format!("Unable to transform file path {src_path:?}"))
-                    // Strip the leading slash
-                    .map(tar_safe_path)
-                    .map(|tar_path| (tar_path, src_path))
+                    .map(|dist_path| (dist_path, src_path))
             })
             .try_collect()
             .context("Failed transforming file paths")?;
@@ -287,11 +310,9 @@ impl<'a> ArchiveBuilder<'a> {
                 self.path_transformer
                     .as_dist(&src_path)
                     .with_context(|| format!("Unable to transform symlink path {src_path:?}"))
-                    // Strip the leading slash
-                    .map(tar_safe_path)
-                    .map(|tar_path| {
+                    .map(|dist_path| {
                         (
-                            tar_path,
+                            dist_path,
                             // Leave `dst_path` as absolute, assuming the tar will
                             // be used in a chroot-like environment.
                             (src_path, dst_path),
@@ -301,10 +322,27 @@ impl<'a> ArchiveBuilder<'a> {
             .try_collect()
             .context("Failed transforming symlink paths")?;
 
+        Ok((dirs_set, file_set, symlinks))
+    }
+
+    pub fn build(self) -> Result<Arc<dyn ArchivePackager>> {
+        let (dirs_set, file_set, symlinks) = self.describe()?;
         Ok(Arc::new(ArchivePackagerImpl {
-            dirs_set,
-            file_set,
-            symlinks,
+            dirs_set: dirs_set
+                .into_iter()
+                // Strip the leading slash
+                .map(|(k, v)| (tar_safe_path(k), v))
+                .collect(),
+            file_set: file_set
+                .into_iter()
+                // Strip the leading slash
+                .map(|(k, v)| (tar_safe_path(k), v))
+                .collect(),
+            symlinks: symlinks
+                .into_iter()
+                // Strip the leading slash
+                .map(|(k, v)| (tar_safe_path(k), v))
+                .collect(),
         }))
     }
 }

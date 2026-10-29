@@ -15,6 +15,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use bytes::Buf;
+use fs_err as fs;
 use futures::lock::Mutex;
 use itertools::Itertools;
 use sccache::dist::{
@@ -308,7 +309,7 @@ impl PotBuilder {
                 tracing::trace!("[make_image({job_id})]: creating toolchain dir {j_path:?}");
                 tokio::fs::create_dir_all(&j_path)
                     .await
-                    .context(format!("Failed to create toolchain directory {j_path:?}"))?;
+                    .with_context(|| format!("Failed to create toolchain directory {j_path:?}"))?;
             }
         }
 
@@ -329,7 +330,7 @@ impl PotBuilder {
             );
             tokio::fs::copy(h_path, j_path)
                 .await
-                .context(format!("Failed to copy toolchain file {c_path:?}"))?;
+                .with_context(|| format!("Failed to copy toolchain file {c_path:?}"))?;
         }
 
         let mut cmd = tokio::process::Command::new(pot_cmd);
@@ -383,7 +384,7 @@ impl PotBuilder {
             cwd,
         }: CompileCommand,
         output_paths: Vec<String>,
-        inputs: opendal::Buffer,
+        inputs_dir: &Path,
         cid: &str,
         pot_fs_root: &Path,
         job_queue: &tokio::sync::Semaphore,
@@ -406,10 +407,38 @@ impl PotBuilder {
             let jail_root = pot_fs_root.join("jails").join(cid).join("m");
             tokio::task::spawn_blocking(move || {
                 // Copy inputs to jail_root
-                tar::Archive::new(flate2::read::ZlibDecoder::new(inputs.reader()))
-                    .unpack(&jail_root)
-                    .context("Failed to unpack inputs to tempdir")
-                    .map_err(BuildError::UnpackInputs)
+                for j_path in list_dirs(inputs_dir)
+                    .iter()
+                    .filter_map(|h_path| h_path.strip_prefix(inputs_dir).ok())
+                    .map(|c_path| jail_root.join(c_path))
+                    .sorted_by(|a, b| b.cmp(a))
+                {
+                    if !j_path.exists() {
+                        tracing::trace!("[make_image({job_id})]: creating input dir {j_path:?}");
+                        fs::create_dir_all(&j_path).with_context(|| {
+                            format!("Failed to create input directory {j_path:?}")
+                        })?;
+                    }
+                }
+
+                for (h_path, j_path, c_path) in list_files(inputs_dir).iter().filter_map(|h_path| {
+                    h_path.strip_prefix(inputs_dir).ok().map(|c_path| {
+                        (
+                            // (src) host path
+                            h_path.as_path(),
+                            // (dst) host path in the jail root
+                            jail_root.join(c_path),
+                            // (dst) container path for debugging
+                            Path::new("/").join(c_path),
+                        )
+                    })
+                }) {
+                    tracing::trace!(
+                        "[make_image({job_id})]: copying input file {h_path:?} -> {j_path:?}"
+                    );
+                    fs::copy(h_path, j_path)
+                        .with_context(|| format!("Failed to copy input file {c_path:?}"))?;
+                }
             })
             .await
             .map_err(anyhow::Error::new)
@@ -421,7 +450,7 @@ impl PotBuilder {
         // Canonicalize output path as either absolute or relative to cwd
         let output_paths_absolute = output_paths
             .iter()
-            .map(|path| cwd.join(Path::new(path)))
+            .map(|output_path| cwd.join(output_path))
             .collect::<Vec<_>>();
 
         {
@@ -563,7 +592,7 @@ impl BuilderIncoming for PotBuilder {
         &self,
         job_id: &str,
         toolchain_dir: &Path,
-        inputs: opendal::Buffer,
+        inputs_dir: &Path,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> BuildResult {
@@ -593,7 +622,7 @@ impl BuilderIncoming for PotBuilder {
             job_id,
             command,
             outputs,
-            inputs,
+            inputs_dir,
             &cid,
             &self.pot_fs_root,
             self.job_queue.as_ref(),

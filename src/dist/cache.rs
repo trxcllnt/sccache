@@ -1,7 +1,7 @@
 #[cfg(feature = "dist-client")]
 pub use self::client::ClientToolchains;
 #[cfg(feature = "dist-server")]
-pub use self::server::ServerToolchains;
+pub use self::server::{ServerInputs, ServerToolchains};
 
 #[cfg(feature = "dist-client")]
 mod client {
@@ -542,18 +542,310 @@ mod client {
 #[cfg(feature = "dist-server")]
 mod server {
     use crate::{
-        cache::{Storage, disk::DiskCache},
-        dist::{Toolchain, ToolchainService, io::Toolchains, metrics::ToolchainsMetrics},
+        cache::{Cache, Storage, disk::DiskCache},
+        dist::{
+            InputsService, JobInputs, RunJobError, Toolchain, ToolchainService,
+            io::{Jobs, Toolchains},
+            metrics::ToolchainsMetrics,
+        },
         errors::*,
+        util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
     };
     use async_trait::async_trait;
-    use flate2::bufread::MultiGzDecoder as GzipDecoder;
+    use flate2::bufread::{MultiGzDecoder as GzipDecoder, ZlibDecoder};
     use fs_err as fs;
+    use itertools::Itertools;
     use std::{
+        collections::{BTreeMap, BTreeSet},
         io::BufReader,
         path::{Path, PathBuf},
         sync::Arc,
     };
+
+    fn join_suffix<P: AsRef<Path>>(path: &Path, suffix: P) -> PathBuf {
+        let suffixpath = suffix.as_ref();
+        let mut components = suffixpath.components();
+        if suffixpath.has_root() {
+            assert_eq!(components.next(), Some(std::path::Component::RootDir));
+        }
+        path.join(components)
+    }
+
+    fn is_special_tokio_shutdown_io_error(err: &anyhow::Error) -> bool {
+        if let Some(io_error) = err.downcast_ref::<std::io::Error>() {
+            // tokio::fs returns an io::ErrorKind::Other error when a future
+            // representing an IO operation is cancelled. This usually only
+            // happens during server shutdown, so don't warn about this error
+            // and bail early.
+            if io_error.kind() == std::io::ErrorKind::Other {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn gzip_inflate(deflated_path: PathBuf, inflated_path: PathBuf) -> std::io::Result<u64> {
+        let deflated_file = fs::File::open(&deflated_path)?;
+
+        // Unpack the tgz into the inflated dir
+        // Manually implement `tar::Archive::unpack` in order to compute the inflated size
+        let mut archive = tar::Archive::new(GzipDecoder::new(BufReader::new(deflated_file)));
+
+        let mut inflated_size = 0;
+        let mut dirs = Vec::new();
+        let dst = &inflated_path.canonicalize().unwrap_or(inflated_path);
+
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            inflated_size += entry.size();
+            if entry.header().entry_type() == tar::EntryType::Directory {
+                dirs.push(entry);
+            } else {
+                entry.unpack_in(dst)?;
+            }
+        }
+
+        dirs.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
+        for mut dir in dirs {
+            dir.unpack_in(dst)?;
+        }
+
+        Ok(inflated_size)
+    }
+
+    fn zlib_inflate(deflated_path: PathBuf, inflated_path: PathBuf) -> std::io::Result<u64> {
+        let deflated_file = fs::File::open(&deflated_path)?;
+
+        // Unpack the tgz into the inflated dir
+        // Manually implement `tar::Archive::unpack` in order to compute the inflated size
+        let mut archive = tar::Archive::new(ZlibDecoder::new(BufReader::new(deflated_file)));
+
+        let mut inflated_size = 0;
+        let mut dirs = Vec::new();
+        let dst = &inflated_path.canonicalize().unwrap_or(inflated_path);
+
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            inflated_size += entry.size();
+            if entry.header().entry_type() == tar::EntryType::Directory {
+                dirs.push(entry);
+            } else {
+                entry.unpack_in(dst)?;
+            }
+        }
+
+        dirs.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
+        for mut dir in dirs {
+            dir.unpack_in(dst)?;
+        }
+
+        Ok(inflated_size)
+    }
+
+    #[derive(Clone)]
+    struct InputFileHash(String);
+
+    impl AsyncMulticastArgs for InputFileHash {
+        type Key = String;
+        fn hash(&self) -> Self::Key {
+            self.0.clone()
+        }
+    }
+
+    struct LoadInputFileFn {
+        jobs_io: Jobs,
+    }
+
+    #[async_trait]
+    impl AsyncMulticastFunc<InputFileHash, opendal::Buffer> for LoadInputFileFn {
+        async fn call(&self, inputs: &InputFileHash) -> Result<opendal::Buffer> {
+            self.jobs_io.get_job_inputs(&inputs.0).await
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct ServerInputs {
+        cache: Arc<DiskCache>,
+        files: AsyncMulticast<InputFileHash, opendal::Buffer>,
+    }
+
+    #[async_trait]
+    impl InputsService for ServerInputs {
+        async fn get_inputs(&self, inputs: &JobInputs) -> Result<PathBuf> {
+            self.load(inputs.clone()).await
+        }
+    }
+
+    impl ServerInputs {
+        pub fn new(cache: Arc<DiskCache>, jobs_io: Jobs) -> Self {
+            Self {
+                cache,
+                files: AsyncMulticast::new(LoadInputFileFn { jobs_io }),
+            }
+        }
+
+        async fn load(&self, inputs: JobInputs) -> Result<PathBuf> {
+            let hash = match inputs {
+                JobInputs::TarGZ { ref job_id } => job_id,
+                JobInputs::Manifest { ref hash, .. } => hash,
+            };
+
+            if let Ok((inflated_path, _)) = self.cache.entry(hash).await {
+                // Return early if the inputs are already loaded and unpacked
+                Ok(inflated_path)
+            } else {
+                match inputs {
+                    JobInputs::TarGZ { ref job_id } => self.load_tar_gz(job_id).await,
+                    JobInputs::Manifest {
+                        ref hash,
+                        dirs,
+                        files,
+                        links,
+                    } => self.load_manifest(hash, dirs, files, links).await,
+                }
+            }
+        }
+
+        async fn load_tar_gz(&self, job_id: &str) -> Result<PathBuf> {
+            let deflated_key = format!("{job_id}.tgz");
+            if !self.cache.has(&deflated_key).await {
+                let (_, entry) = self.files.call(InputFileHash(job_id.to_owned())).await?;
+                self.cache.put(&deflated_key, entry).await?;
+            }
+            let (deflated_path, deflated_size) = self.cache.entry(job_id).await?;
+            self.cache
+                .insert_with(job_id, deflated_size, |inflated_path: &Path| {
+                    let inflated_path = inflated_path.to_owned();
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            // Ensure the inflated dir exists first
+                            fs::create_dir_all(&inflated_path)?;
+                            zlib_inflate(deflated_path, inflated_path)
+                        })
+                        .await?
+                    }
+                })
+                .await
+                .map(|(path, _)| path)
+        }
+
+        async fn load_manifest(
+            &self,
+            hash: &str,
+            dirs: Vec<String>,
+            files: BTreeMap<String, String>,
+            links: BTreeMap<String, String>,
+        ) -> Result<PathBuf> {
+            if let Ok((inflated_path, _)) = self.cache.entry(hash).await {
+                return Ok(inflated_path);
+            }
+
+            let (misses, inputs) = futures::future::join_all(files.values().unique().cloned().map(
+                |hash| async move {
+                    self.load_file(hash.clone()).await.map_err(|err| {
+                        error!("Error loading input file: {err:?}");
+                        hash
+                    })
+                },
+            ))
+            .await
+            .into_iter()
+            .fold(
+                (BTreeSet::new(), BTreeMap::new()),
+                |(mut misses, mut inputs), result| {
+                    match result {
+                        Ok((hash, file)) => {
+                            inputs.insert(hash, file);
+                        }
+                        Err(hash) => {
+                            misses.insert(hash);
+                        }
+                    }
+                    (misses, inputs)
+                },
+            );
+
+            if !misses.is_empty() {
+                // error!("Misses: {misses:?}");
+                return Err(RunJobError::MissingJobInputs {
+                    inputs: misses.into_iter().collect(),
+                }
+                .into());
+            }
+
+            // trace!("Unpacking input files: {files:?}");
+
+            self.cache
+                .insert_with(hash, 0, |inflated_path: &Path| {
+                    let base = inflated_path.to_owned();
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            // Ensure the inflated dir exists first
+                            fs::create_dir_all(&base)?;
+
+                            let mut inflated_size = 0;
+
+                            for path in dirs {
+                                let path = Path::new(&path);
+                                inflated_size += path.components().count() as u64 * 4096;
+                                fs::create_dir_all(join_suffix(&base, path))?;
+                            }
+
+                            for (name, target) in links {
+                                let path = Path::new(&name);
+                                if let Some(path) = path.parent() {
+                                    inflated_size += path.components().count() as u64 * 4096;
+                                    fs::create_dir_all(join_suffix(&base, path))?;
+                                }
+                                inflated_size += target.len() as u64;
+                                std::os::unix::fs::symlink(target, join_suffix(&base, name))?;
+                            }
+
+                            let inflated_size = files
+                                .iter()
+                                .filter_map(|(path, hash)| {
+                                    inputs.get(hash).map(|data| (Path::new(path), data))
+                                })
+                                .try_fold(inflated_size, |mut inflated_size, (path, data)| {
+                                    if let Some(path) = path.parent() {
+                                        inflated_size += path.components().count() as u64 * 4096;
+                                        fs::create_dir_all(join_suffix(&base, path))?;
+                                    }
+                                    let path = join_suffix(&base, path);
+                                    let mut inflated_file = fs::File::create(path)?;
+                                    let mut reader = ZlibDecoder::new(data.clone());
+                                    std::io::copy(&mut reader, &mut inflated_file)
+                                        .map(|file_size| inflated_size + file_size)
+                                })?;
+
+                            Ok(inflated_size)
+                        })
+                        .await?
+                    }
+                })
+                .await
+                .map(|(inflated_path, _)| inflated_path)
+                .inspect_err(|err| {
+                    error!("Error unpacking files: {err:?}");
+                })
+        }
+
+        async fn load_file(&self, hash: String) -> Result<(String, opendal::Buffer)> {
+            if !self.cache.has(&hash).await {
+                let (InputFileHash(hash), data) = self.files.call(InputFileHash(hash)).await?;
+                self.cache.put(&hash, data.clone()).await?;
+                Ok((hash, data))
+            } else {
+                let data = match self.cache.get(&hash).await? {
+                    Cache::Hit(data) => data,
+                    Cache::Miss => {
+                        bail!("Missing input: {hash}")
+                    }
+                };
+                Ok((hash, data))
+            }
+        }
+    }
 
     #[derive(Clone)]
     pub struct ServerToolchains {
@@ -568,19 +860,6 @@ mod server {
         async fn get_toolchain(&self, toolchain: &Toolchain) -> Result<PathBuf> {
             self.load(toolchain).await
         }
-    }
-
-    fn is_special_tokio_shutdown_io_error(err: &anyhow::Error) -> bool {
-        if let Some(io_error) = err.downcast_ref::<std::io::Error>() {
-            // tokio::fs returns an io::ErrorKind::Other error when a future
-            // representing an IO operation is cancelled. This usually only
-            // happens during server shutdown, so don't warn about this error
-            // and bail early.
-            if io_error.kind() == std::io::ErrorKind::Other {
-                return true;
-            }
-        }
-        false
     }
 
     impl ServerToolchains {
@@ -660,34 +939,7 @@ mod server {
                         tokio::task::spawn_blocking(move || {
                             // Ensure the inflated dir exists first
                             fs::create_dir_all(&inflated_path)?;
-
-                            let deflated_file = fs::File::open(&deflated_path)?;
-
-                            // Unpack the tgz into the inflated dir
-                            // Manually implement `tar::Archive::unpack` in order to compute the inflated size
-                            let mut archive =
-                                tar::Archive::new(GzipDecoder::new(BufReader::new(deflated_file)));
-
-                            let mut inflated_size = 0;
-                            let mut dirs = Vec::new();
-                            let dst = &inflated_path.canonicalize().unwrap_or(inflated_path);
-
-                            for entry in archive.entries()? {
-                                let mut entry = entry?;
-                                inflated_size += entry.size();
-                                if entry.header().entry_type() == tar::EntryType::Directory {
-                                    dirs.push(entry);
-                                } else {
-                                    entry.unpack_in(dst)?;
-                                }
-                            }
-
-                            dirs.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
-                            for mut dir in dirs {
-                                dir.unpack_in(dst)?;
-                            }
-
-                            Ok(inflated_size)
+                            gzip_inflate(deflated_path, inflated_path)
                         })
                         .await?
                     }

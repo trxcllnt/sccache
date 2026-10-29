@@ -271,7 +271,7 @@ fn run(command: Command) -> Result<()> {
                         .with_server_id(server_id)
                         .with_tasks(tasks)
                         .with_toolchains_storage(toolchains)
-                        .with_toolchains_cache(Arc::new(DiskCache::new(
+                        .with_disk_cache(Arc::new(DiskCache::new(
                             cache_dir.join("tc"), // root
                             toolchain_cache_size, // max_size,
                             crate::config::CacheMode::ReadWrite,

@@ -20,7 +20,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     ffi::OsString,
     fmt,
     path::{Path, PathBuf},
@@ -28,7 +28,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{errors::*, mock_command::ProcessOutput};
+use crate::{dist::pkg::JobInput, errors::*, mock_command::ProcessOutput};
 
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 mod cache;
@@ -50,7 +50,10 @@ pub mod tasks;
 pub mod token_check;
 
 #[cfg(feature = "dist-server")]
-pub use crate::{cache::BufReadSeek, dist::cache::ServerToolchains};
+pub use crate::{
+    cache::BufReadSeek,
+    dist::cache::{ServerInputs, ServerToolchains},
+};
 
 #[cfg(feature = "dist-server")]
 pub(crate) fn job_inputs_key(job_id: &str) -> String {
@@ -717,33 +720,33 @@ pub struct RunJobRequestV2 {
     pub labels: Option<HashMap<String, String>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum RunJobError {
-    Fatal(Error),
-    MissingJobInputs,
+    Fatal(String),
+    MissingJobInputs { inputs: Vec<String> },
     MissingJobResult,
     MissingToolchain,
-    Retryable(Error),
+    Retryable(String),
 }
 
 impl fmt::Display for RunJobError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Fatal(e) => write!(f, "Fatal error: {e:?}"),
-            Self::MissingJobInputs => write!(f, "Missing job inputs"),
+            Self::MissingJobInputs { inputs } => write!(f, "Missing job inputs: {inputs:?}"),
             Self::MissingJobResult => write!(f, "Missing job result"),
             Self::MissingToolchain => write!(f, "Missing toolchain"),
-            Self::Retryable(e) => write!(f, "Retryable error: {e:?}"),
+            Self::Retryable(e) => write!(f, "Retryable error: {e}"),
         }
     }
 }
 
 impl RunJobError {
     pub fn job_cancelled() -> Self {
-        Self::Retryable(anyhow!("Job cancelled"))
+        Self::Retryable("Job cancelled".into())
     }
     pub fn server_terminated() -> Self {
-        Self::Retryable(anyhow!("Server terminated"))
+        Self::Retryable("Server terminated".into())
     }
 }
 
@@ -795,7 +798,7 @@ impl RunJobResponse {
                 message: format!("{e:#}"),
                 server_id: server_id.into(),
             },
-            RunJobError::MissingJobInputs => RunJobResponse::MissingJobInputs {
+            RunJobError::MissingJobInputs { .. } => RunJobResponse::MissingJobInputs {
                 server_id: server_id.into(),
             },
             RunJobError::MissingJobResult => RunJobResponse::MissingJobResult {
@@ -821,6 +824,141 @@ impl RunJobResponse {
     pub fn server_terminated(server_id: &str) -> Self {
         Self::from_run_job_error(server_id, &RunJobError::server_terminated())
     }
+}
+
+pub mod v3 {
+    use super::*;
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct NewJobRequest {
+        pub toolchain: Toolchain,
+        // List of hashes to input files (headers, modules, etc.)
+        pub inputs: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct NewJobResponse {
+        pub has_toolchain: bool,
+        // List of hashes to input files (headers, modules, etc.)
+        pub missing_inputs: Vec<String>,
+        pub job_id: String,
+        pub timeout: u32,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct RunJobRequest {
+        pub command: CompileCommand,
+        // Map of input file hashes to paths
+        pub inputs: JobInputs,
+        pub outputs: Vec<String>,
+        pub toolchain: Toolchain,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub enum RunJobResponse {
+        Complete {
+            result: BuildResult,
+            server_id: String,
+        },
+        FatalError {
+            message: String,
+            server_id: String,
+        },
+        MissingJobInputs {
+            inputs: Vec<String>,
+            server_id: String,
+        },
+        MissingJobResult {
+            server_id: String,
+        },
+        MissingToolchain {
+            server_id: String,
+        },
+        RetryableError {
+            message: String,
+            server_id: String,
+        },
+    }
+
+    impl From<RunJobResponse> for super::RunJobResponse {
+        fn from(res: RunJobResponse) -> Self {
+            match res {
+                v3::RunJobResponse::Complete { result, server_id } => {
+                    Self::Complete { result, server_id }
+                }
+                v3::RunJobResponse::FatalError { message, server_id } => {
+                    Self::FatalError { message, server_id }
+                }
+                v3::RunJobResponse::MissingJobInputs { server_id, .. } => {
+                    Self::MissingJobInputs { server_id }
+                }
+                v3::RunJobResponse::MissingJobResult { server_id } => {
+                    Self::MissingJobResult { server_id }
+                }
+                v3::RunJobResponse::MissingToolchain { server_id } => {
+                    Self::MissingToolchain { server_id }
+                }
+                v3::RunJobResponse::RetryableError { message, server_id } => {
+                    Self::RetryableError { message, server_id }
+                }
+            }
+        }
+    }
+
+    impl RunJobResponse {
+        pub fn from_run_job_error(server_id: &str, err: &RunJobError) -> Self {
+            match err {
+                // Unrecoverable errors
+                RunJobError::Fatal(e) => RunJobResponse::FatalError {
+                    message: format!("{e:#}"),
+                    server_id: server_id.into(),
+                },
+                // Retryable errors
+                RunJobError::Retryable(e) => RunJobResponse::RetryableError {
+                    message: format!("{e:#}"),
+                    server_id: server_id.into(),
+                },
+                RunJobError::MissingJobInputs { inputs } => RunJobResponse::MissingJobInputs {
+                    inputs: inputs.clone(),
+                    server_id: server_id.into(),
+                },
+                RunJobError::MissingJobResult => RunJobResponse::MissingJobResult {
+                    server_id: server_id.into(),
+                },
+                RunJobError::MissingToolchain => RunJobResponse::MissingToolchain {
+                    server_id: server_id.into(),
+                },
+            }
+        }
+
+        pub fn build_process_killed(server_id: &str) -> Self {
+            RunJobResponse::RetryableError {
+                message: "Build process killed".into(),
+                server_id: server_id.to_owned(),
+            }
+        }
+
+        pub fn job_cancelled(server_id: &str) -> Self {
+            Self::from_run_job_error(server_id, &RunJobError::job_cancelled())
+        }
+
+        pub fn server_terminated(server_id: &str) -> Self {
+            Self::from_run_job_error(server_id, &RunJobError::server_terminated())
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum JobInputs {
+    TarGZ {
+        job_id: String,
+    },
+    Manifest {
+        hash: String,
+        dirs: Vec<String>,
+        files: BTreeMap<String, String>,
+        links: BTreeMap<String, String>,
+    },
 }
 
 // Toolchain
@@ -963,7 +1101,14 @@ pub trait SchedulerService: Send + Sync {
         toolchain: Toolchain,
         inputs: opendal::Buffer,
     ) -> Result<NewJobResponse>;
-    async fn run_job(&self, job_id: &str, request: RunJobRequestV2) -> Result<RunJobResponse>;
+
+    async fn new_job_with_inputs(
+        &self,
+        toolchain: Toolchain,
+        inputs: Vec<String>,
+    ) -> Result<v3::NewJobResponse>;
+    async fn run_job(&self, job_id: &str, request: v3::RunJobRequest)
+    -> Result<v3::RunJobResponse>;
     async fn put_job(&self, job_id: &str, inputs: opendal::Buffer) -> Result<()>;
     async fn del_job(&self, job_id: &str) -> Result<()>;
 
@@ -985,13 +1130,20 @@ pub trait ServerService: Send + Sync {
         reply_to: &str,
         toolchain: Toolchain,
         command: CompileCommand,
+        inputs: JobInputs,
         outputs: Vec<String>,
-    ) -> Result<RunJobResponse>;
+    ) -> Result<v3::RunJobResponse>;
 
     async fn notify_run_job_err(&self, job_id: &str, err: RunJobError) -> Result<()>;
-    async fn notify_run_job_res(&self, job_id: &str, res: &RunJobResponse) -> Result<()>;
+    async fn notify_run_job_res(&self, job_id: &str, res: &v3::RunJobResponse) -> Result<()>;
 
     async fn update_scheduler_status(&self, status: StatusUpdate) -> Result<()>;
+}
+
+#[cfg(feature = "dist-server")]
+#[async_trait]
+pub trait InputsService: Send + Sync {
+    async fn get_inputs(&self, inputs: &JobInputs) -> Result<PathBuf>;
 }
 
 #[cfg(feature = "dist-server")]
@@ -1008,7 +1160,7 @@ pub trait BuilderIncoming: Send + Sync {
         &self,
         job_id: &str,
         toolchain_dir: &Path,
-        inputs: opendal::Buffer,
+        inputs_dir: &Path,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> std::result::Result<BuildResult, BuildError>;
@@ -1022,9 +1174,13 @@ pub trait BuilderIncoming: Send + Sync {
 #[async_trait]
 pub trait Client: Send + Sync {
     // To Scheduler
-    async fn new_job(&self, toolchain: Toolchain, inputs: std::fs::File) -> Result<NewJobResponse>;
+    async fn new_job(
+        &self,
+        toolchain: Toolchain,
+        inputs: Vec<String>,
+    ) -> Result<v3::NewJobResponse>;
     // To Scheduler
-    async fn put_job(&self, job_id: &str, inputs: std::fs::File) -> Result<()>;
+    async fn put_job(&self, inputs: HashMap<String, JobInput>) -> Result<()>;
     // To Scheduler
     async fn del_job(&self, job_id: &str) -> Result<()>;
     // To Scheduler
@@ -1034,8 +1190,9 @@ pub trait Client: Send + Sync {
         timeout: Duration,
         toolchain: Toolchain,
         command: CompileCommand,
+        inputs: JobInputs,
         outputs: Vec<String>,
-    ) -> Result<RunJobResponse>;
+    ) -> Result<v3::RunJobResponse>;
     // To Scheduler
     async fn get_status(&self) -> Result<SchedulerStatus>;
     // Write to local toolchain cache if not already written, then upload to Scheduler

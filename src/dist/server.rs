@@ -15,11 +15,12 @@
 use crate::{
     cache::{Storage, disk::DiskCache},
     dist::{
-        self, BuildError, BuildResult, BuilderIncoming, CompileCommand, RunJobError,
-        RunJobResponse, RunJobStatus, ServerService, ServerToolchains, StatusUpdate, Toolchain,
-        ToolchainService,
+        self, BuildError, BuildResult, BuilderIncoming, CompileCommand, InputsService, JobInputs,
+        RunJobError, RunJobStatus, ServerInputs, ServerService, ServerToolchains, StatusUpdate,
+        Toolchain, ToolchainService,
         io::{Jobs, Toolchains},
         metrics::{JobsMetrics, Metrics, ServerMetrics, ToolchainsMetrics},
+        v3::RunJobResponse,
     },
     errors::*,
     util::{self, AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc},
@@ -47,7 +48,7 @@ pub struct ServerBuilder {
     server_id: Option<String>,
     should_inflate_toolchains: Option<bool>,
     tasks: Option<Arc<dyn dist::tasks::ServerTasks>>,
-    toolchains_cache: Option<Arc<DiskCache>>,
+    disk_cache: Option<Arc<DiskCache>>,
     toolchains_storage: Option<Arc<dyn Storage>>,
 }
 
@@ -112,9 +113,9 @@ impl ServerBuilder {
             ..self
         }
     }
-    pub fn with_toolchains_cache(self, toolchains_cache: Arc<DiskCache>) -> Self {
+    pub fn with_disk_cache(self, disk_cache: Arc<DiskCache>) -> Self {
         Self {
-            toolchains_cache: Some(toolchains_cache),
+            disk_cache: Some(disk_cache),
             ..self
         }
     }
@@ -137,7 +138,7 @@ impl ServerBuilder {
             server_id,
             should_inflate_toolchains,
             tasks,
-            toolchains_cache,
+            disk_cache,
             toolchains_storage,
         } = self;
 
@@ -162,9 +163,9 @@ impl ServerBuilder {
         let toolchains_storage = toolchains_storage
             .map(Ok)
             .unwrap_or_else(|| bail!("Missing required field `toolchains_storage`"))?;
-        let toolchains_cache = toolchains_cache
+        let disk_cache = disk_cache
             .map(Ok)
-            .unwrap_or_else(|| bail!("Missing required field `toolchains_cache`"))?;
+            .unwrap_or_else(|| bail!("Missing required field `disk_cache`"))?;
         let should_inflate_toolchains = should_inflate_toolchains
             .map(Ok)
             .unwrap_or_else(|| bail!("Missing required field `should_inflate_toolchains`"))?;
@@ -190,9 +191,13 @@ impl ServerBuilder {
         let toolchains_metrics = ToolchainsMetrics::new("sccache::server", metrics.clone());
         let toolchains = Toolchains::new(toolchains_storage, toolchains_metrics.clone());
 
+        let load_inputs = AsyncMulticast::new(LoadInputsFn {
+            inputs: Arc::new(ServerInputs::new(disk_cache.clone(), jobs_io.clone())),
+        });
+
         let load_toolchain = AsyncMulticast::new(LoadToolchainFn {
             toolchains: Arc::new(ServerToolchains::new(
-                toolchains_cache,
+                disk_cache,
                 toolchains,
                 toolchains_metrics,
                 should_inflate_toolchains,
@@ -213,6 +218,7 @@ impl ServerBuilder {
             schedulers: Default::default(),
             server_id,
             tasks,
+            load_inputs,
             load_toolchain,
             run_job: AsyncMulticast::new(RunJobFunc {}),
         });
@@ -236,6 +242,7 @@ pub struct Server {
     schedulers: Arc<Mutex<HashMap<String, Instant>>>,
     server_id: String,
     tasks: Arc<dyn dist::tasks::ServerTasks>,
+    load_inputs: AsyncMulticast<JobInputs, PathBuf>,
     load_toolchain: AsyncMulticast<Toolchain, PathBuf>,
     run_job: AsyncMulticast<RunJobArgs, RunJobResponse>,
 }
@@ -603,6 +610,7 @@ impl Server {
         job_id: &str,
         toolchain: Toolchain,
         command: CompileCommand,
+        inputs: JobInputs,
         outputs: Vec<String>,
     ) -> std::result::Result<RunJobResponse, RunJobError> {
         // Record total run_job time
@@ -612,7 +620,7 @@ impl Server {
         self.metrics.inc_job_accepted_count();
 
         // Load the job toolchain and inputs
-        let (toolchain_dir, inputs) = self.load_job(job_id, toolchain).await?;
+        let (toolchain_dir, inputs_dir) = self.load_job(inputs, toolchain).await?;
 
         // Increment the job_loaded counter
         self.metrics.inc_job_loaded_count();
@@ -621,7 +629,7 @@ impl Server {
         let _pending = self.metrics.jobs_pending.increment();
 
         // Run the build
-        self.run_build(job_id, toolchain_dir, inputs, command, outputs)
+        self.run_build(job_id, toolchain_dir, inputs_dir, command, outputs)
             .await
             .map(|result| {
                 if !result.output.success() && !result.output.exit() {
@@ -634,18 +642,18 @@ impl Server {
             })
             .map_err(|err| {
                 if let BuildError::UnpackInputs(_) = err {
-                    RunJobError::MissingJobInputs
+                    RunJobError::MissingJobInputs { inputs: vec![] }
                 } else {
-                    RunJobError::Retryable(err.into())
+                    RunJobError::Retryable(err.to_string())
                 }
             })
     }
 
     async fn load_job(
         &self,
-        job_id: &str,
+        inputs: JobInputs,
         toolchain: Toolchain,
-    ) -> std::result::Result<(PathBuf, opendal::Buffer), RunJobError> {
+    ) -> std::result::Result<(PathBuf, PathBuf), RunJobError> {
         // Record load_job time
         let _timer = self.metrics.load_job_timer();
         let _loading = self.metrics.jobs_loading.increment();
@@ -658,28 +666,32 @@ impl Server {
             .map(|(_, res)| res)
             .map_err(|_| RunJobError::MissingToolchain)?;
 
-        // Load job inputs into memory
-        let inputs = self
-            .jobs_io
-            .get_job_inputs(job_id)
+        // Load and unpack the job inputs
+        let inputs_dir = self
+            .load_inputs
+            .call(inputs)
             .await
-            .map_err(|_| RunJobError::MissingJobInputs)?;
+            .map(|(_, inputs_dir)| inputs_dir)
+            .map_err(|err| match err.downcast::<RunJobError>() {
+                Ok(err) => err,
+                Err(_) => RunJobError::MissingJobInputs { inputs: vec![] },
+            })?;
 
-        Ok((toolchain_dir, inputs))
+        Ok((toolchain_dir, inputs_dir))
     }
 
     async fn run_build(
         &self,
         job_id: &str,
         toolchain_dir: PathBuf,
-        inputs: opendal::Buffer,
+        inputs_dir: PathBuf,
         command: CompileCommand,
         outputs: Vec<String>,
     ) -> std::result::Result<BuildResult, BuildError> {
         // Record build time
         let _timer = self.metrics.run_build_timer();
         self.builder
-            .run_build(job_id, &toolchain_dir, inputs, command, outputs)
+            .run_build(job_id, &toolchain_dir, &inputs_dir, command, outputs)
             .await
             .map_err(|err| {
                 // Record run_build errors
@@ -779,6 +791,7 @@ impl ServerService for Server {
         reply_to: &str,
         toolchain: Toolchain,
         command: CompileCommand,
+        inputs: JobInputs,
         outputs: Vec<String>,
     ) -> Result<RunJobResponse> {
         self.run_job
@@ -787,6 +800,7 @@ impl ServerService for Server {
                 reply_to: reply_to.to_owned(),
                 toolchain,
                 command,
+                inputs,
                 outputs,
                 server: self.clone(),
             })
@@ -837,6 +851,27 @@ impl ServerService for Server {
     }
 }
 
+impl AsyncMulticastArgs for JobInputs {
+    type Key = String;
+    fn hash(&self) -> Self::Key {
+        match self {
+            JobInputs::TarGZ { job_id } => job_id.clone(),
+            JobInputs::Manifest { hash, .. } => hash.clone(),
+        }
+    }
+}
+
+struct LoadInputsFn {
+    inputs: Arc<dyn InputsService>,
+}
+
+#[async_trait]
+impl AsyncMulticastFunc<JobInputs, PathBuf> for LoadInputsFn {
+    async fn call(&self, inputs: &JobInputs) -> Result<PathBuf> {
+        self.inputs.get_inputs(inputs).await
+    }
+}
+
 impl AsyncMulticastArgs for Toolchain {
     type Key = String;
     fn hash(&self) -> Self::Key {
@@ -861,6 +896,7 @@ struct RunJobArgs {
     reply_to: String,
     toolchain: Toolchain,
     command: CompileCommand,
+    inputs: JobInputs,
     outputs: Vec<String>,
     server: Server,
 }
@@ -882,6 +918,7 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFunc {
             reply_to,
             toolchain,
             command,
+            inputs,
             outputs,
             server,
         } = args;
@@ -923,6 +960,7 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFunc {
                                 job_id,
                                 toolchain.clone(),
                                 command.clone(),
+                                inputs.clone(),
                                 outputs.clone(),
                             )
                             .await

@@ -16,14 +16,14 @@
 use {
     crate::{
         compiler::{DistPackagers, OutputsRewriter},
-        dist::pkg,
+        dist::pkg::{self, JobInput},
         lru_disk_cache::{LruCache, Meter},
-        util::{path_to_str, simplify_path},
+        util::path_to_str,
     },
     semver::Version,
     std::{
         borrow::Borrow,
-        collections::hash_map::RandomState,
+        collections::{BTreeMap, hash_map::RandomState},
         env::consts::{DLL_PREFIX, EXE_EXTENSION},
         io,
         sync::{Arc, Mutex},
@@ -48,8 +48,6 @@ use crate::{
 use async_trait::async_trait;
 use filetime::FileTime;
 use fs_err as fs;
-#[cfg(feature = "dist-client")]
-use futures::AsyncWriteExt;
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
@@ -1925,7 +1923,12 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
 
     #[cfg(feature = "dist-client")]
     fn into_dist_packagers(self: Box<Self>) -> Result<DistPackagers> {
+        let mut output_dirs = <RustCompilation as Compilation<T>>::outputs(&self)
+            .map(|obj| obj.dir)
+            .collect::<Vec<_>>();
+
         let RustCompilation {
+            cwd,
             inputs,
             crate_link_paths,
             sysroot,
@@ -1935,13 +1938,17 @@ impl<T: CommandCreatorSync> Compilation<T> for RustCompilation {
             env_vars,
             ..
         } = *{ self };
+
         trace!("Dist inputs: inputs={inputs:?} crate_link_paths={crate_link_paths:?}");
+
+        output_dirs.push(cwd);
 
         let inputs_packager = Box::new(RustInputsPackager {
             env_vars: env_vars.clone(),
             crate_link_paths,
             crate_types,
             inputs,
+            output_dirs,
             rlib_dep_reader,
         });
         let toolchain_packager = Box::new(RustToolchainPackager { env_vars, sysroot });
@@ -1989,6 +1996,7 @@ struct RustInputsPackager {
     crate_link_paths: Vec<PathBuf>,
     crate_types: CrateTypes,
     inputs: Vec<PathBuf>,
+    output_dirs: Vec<PathBuf>,
     rlib_dep_reader: Option<Arc<RlibDepReader>>,
 }
 
@@ -2121,221 +2129,284 @@ fn test_maybe_add_cargo_toml() {
 #[cfg(feature = "dist-client")]
 #[async_trait]
 impl pkg::InputsPackager for RustInputsPackager {
-    #[allow(clippy::cognitive_complexity)] // TODO simplify this method.
-    fn write_inputs(
+    async fn describe_inputs(
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
-        compressor: &mut (dyn std::io::Write + Send),
-    ) -> Result<()> {
+    ) -> Result<(dist::JobInputs, BTreeMap<String, JobInput>)> {
+        use crate::util::path_to_str;
+        use futures::{StreamExt, TryStreamExt};
+        use itertools::Itertools;
+
         debug!("Packaging compile inputs for compile");
+
         let RustInputsPackager {
             crate_link_paths,
             crate_types,
             inputs,
+            output_dirs,
             rlib_dep_reader,
             env_vars,
         } = *{ self };
 
-        // If this is a cargo build, we can assume all immediate `extern crate` dependencies
-        // have been passed on the command line, allowing us to scan them all and find the
-        // complete list of crates we might need.
-        // If it's not a cargo build, we can't to extract the `extern crate` statements and
-        // so have no way to build a list of necessary crates - send all rlibs.
-        let is_cargo = env_vars.iter().any(|(k, _)| k == "CARGO_PKG_NAME");
-        let mut rlib_dep_reader_and_names = if is_cargo {
-            rlib_dep_reader.map(|r| (r, HashSet::new()))
-        } else {
-            None
-        };
-
-        let mut tar_inputs = vec![];
-        for input_path in inputs {
-            let input_path = simplify_path(&input_path)?;
-            if let Some(ext) = input_path.extension() {
-                if !super::CAN_DIST_DYLIBS && ext == DLL_EXTENSION {
-                    bail!(
-                        "Cannot distribute dylib input {} on this platform",
-                        input_path.display()
-                    )
-                } else if (ext == RLIB_EXTENSION || ext == RMETA_EXTENSION)
-                    && let Some((ref rlib_dep_reader, ref mut dep_crate_names)) =
-                        rlib_dep_reader_and_names
-                {
-                    dep_crate_names.extend(
-                        rlib_dep_reader
-                            .discover_rlib_deps(&env_vars, &input_path)
-                            .with_context(|| {
-                                format!("Failed to read deps of {}", input_path.display())
-                            })?,
-                    );
+        let (dirs, files, links, inputs, pt) = tokio::task::spawn_blocking({
+            let mut pt = path_transformer.clone();
+            move || {
+                let mut package = pkg::ArchiveBuilder::new(&mut pt);
+                for dir in output_dirs {
+                    package.add_dir(&dir)?;
                 }
-            }
 
-            if let Some(cargo_toml_path) = maybe_add_cargo_toml(&input_path, true) {
-                let dist_cargo_toml_path = path_transformer
-                    .as_dist(&cargo_toml_path)
-                    .with_context(|| {
-                        format!(
-                            "unable to transform input path {}",
-                            cargo_toml_path.display()
-                        )
-                    })?;
-                tar_inputs.push((cargo_toml_path, dist_cargo_toml_path));
-            }
-
-            let dist_input_path = path_transformer.as_dist(&input_path).with_context(|| {
-                format!("unable to transform input path {}", input_path.display())
-            })?;
-
-            tar_inputs.push((input_path, dist_input_path));
-        }
-
-        if log_enabled!(log::Level::Trace)
-            && let Some((_, ref dep_crate_names)) = rlib_dep_reader_and_names
-        {
-            trace!("Identified dependency crate names: {dep_crate_names:?}");
-        }
-
-        // Given the link paths, find the things we need to send over the wire to the remote machine. If
-        // we've been able to use a dependency searcher then we can filter down just candidates for that
-        // crate, otherwise we need to send everything.
-        let mut tar_crate_libs = vec![];
-        for crate_link_path in crate_link_paths {
-            let crate_link_path = simplify_path(&crate_link_path)?;
-            let dir_entries = match fs::read_dir(crate_link_path) {
-                Ok(iter) => iter,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e).context("Failed to read dir entries in crate link path"),
-            };
-            for entry in dir_entries {
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(e) => return Err(e).context("Error during iteration over crate link path"),
+                // If this is a cargo build, we can assume all immediate `extern crate` dependencies
+                // have been passed on the command line, allowing us to scan them all and find the
+                // complete list of crates we might need.
+                // If it's not a cargo build, we can't to extract the `extern crate` statements and
+                // so have no way to build a list of necessary crates - send all rlibs.
+                let is_cargo = env_vars.iter().any(|(k, _)| k == "CARGO_PKG_NAME");
+                let mut rlib_dep_reader_and_names = if is_cargo {
+                    rlib_dep_reader.map(|r| (r, HashSet::new()))
+                } else {
+                    None
                 };
-                let path = entry.path();
 
+                for input_path in inputs {
+                    if let Some(ext) = input_path.extension() {
+                        if !super::CAN_DIST_DYLIBS && ext == DLL_EXTENSION {
+                            bail!(
+                                "Cannot distribute dylib input {} on this platform",
+                                input_path.display()
+                            )
+                        } else if (ext == RLIB_EXTENSION || ext == RMETA_EXTENSION)
+                            && let Some((ref rlib_dep_reader, ref mut dep_crate_names)) =
+                                rlib_dep_reader_and_names
+                        {
+                            dep_crate_names.extend(
+                                rlib_dep_reader
+                                    .discover_rlib_deps(&env_vars, &input_path)
+                                    .with_context(|| {
+                                        format!("Failed to read deps of {}", input_path.display())
+                                    })?,
+                            );
+                        }
+                    }
+
+                    if let Some(cargo_toml_path) = maybe_add_cargo_toml(&input_path, true) {
+                        package.add_file(&env_vars, cargo_toml_path)?;
+                    }
+
+                    package.add_file(&env_vars, input_path)?;
+                }
+
+                if log_enabled!(log::Level::Trace)
+                    && let Some((_, ref dep_crate_names)) = rlib_dep_reader_and_names
                 {
-                    // Take a look at the path and see if it's something we care about
-                    let libname: &str = match path.file_name().and_then(|s| s.to_str()) {
-                        Some(name) => {
-                            let mut rev_name_split = name.rsplitn(2, '-');
-                            let _extra_filename_and_ext = rev_name_split.next();
-                            let libname = if let Some(libname) = rev_name_split.next() {
-                                libname
-                            } else {
-                                continue;
+                    trace!("Identified dependency crate names: {dep_crate_names:?}");
+                }
+
+                // Given the link paths, find the things we need to send over the wire to the remote machine. If
+                // we've been able to use a dependency searcher then we can filter down just candidates for that
+                // crate, otherwise we need to send everything.
+                // let mut tar_crate_libs = vec![];
+                for crate_link_path in crate_link_paths {
+                    // let crate_link_path = simplify_path(&crate_link_path)?;
+                    let dir_entries = match fs::read_dir(crate_link_path) {
+                        Ok(iter) => iter,
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                        Err(e) => {
+                            return Err(e).context("Failed to read dir entries in crate link path");
+                        }
+                    };
+
+                    for entry in dir_entries {
+                        let entry = match entry {
+                            Ok(entry) => entry,
+                            Err(e) => {
+                                return Err(e)
+                                    .context("Error during iteration over crate link path");
+                            }
+                        };
+                        let path = entry.path();
+
+                        {
+                            // Take a look at the path and see if it's something we care about
+                            let libname: &str = match path.file_name().and_then(|s| s.to_str()) {
+                                Some(name) => {
+                                    let mut rev_name_split = name.rsplitn(2, '-');
+                                    let _extra_filename_and_ext = rev_name_split.next();
+                                    let libname = if let Some(libname) = rev_name_split.next() {
+                                        libname
+                                    } else {
+                                        continue;
+                                    };
+                                    assert!(rev_name_split.next().is_none());
+                                    libname
+                                }
+                                None => continue,
                             };
-                            assert!(rev_name_split.next().is_none());
-                            libname
+                            let (crate_name, ext): (&str, _) = match path.extension() {
+                                Some(ext)
+                                    if libname.starts_with(DLL_PREFIX) && ext == DLL_EXTENSION =>
+                                {
+                                    (&libname[DLL_PREFIX.len()..], ext)
+                                }
+                                Some(ext)
+                                    if libname.starts_with(RLIB_PREFIX)
+                                        && ext == RLIB_EXTENSION =>
+                                {
+                                    (&libname[RLIB_PREFIX.len()..], ext)
+                                }
+                                Some(ext)
+                                    if libname.starts_with(RLIB_PREFIX)
+                                        && ext == RMETA_EXTENSION =>
+                                {
+                                    (&libname[RLIB_PREFIX.len()..], ext)
+                                }
+                                _ => continue,
+                            };
+                            if let Some((_, ref dep_crate_names)) = rlib_dep_reader_and_names {
+                                // We have a list of crate names we care about, see if this lib is a candidate
+                                if !dep_crate_names.contains(crate_name) {
+                                    continue;
+                                }
+                            }
+                            if !path.is_file() {
+                                continue;
+                            } else if !super::CAN_DIST_DYLIBS && ext == DLL_EXTENSION {
+                                bail!(
+                                    "Cannot distribute dylib input {} on this platform",
+                                    path.display()
+                                )
+                            }
                         }
-                        None => continue,
-                    };
-                    let (crate_name, ext): (&str, _) = match path.extension() {
-                        Some(ext) if libname.starts_with(DLL_PREFIX) && ext == DLL_EXTENSION => {
-                            (&libname[DLL_PREFIX.len()..], ext)
-                        }
-                        Some(ext) if libname.starts_with(RLIB_PREFIX) && ext == RLIB_EXTENSION => {
-                            (&libname[RLIB_PREFIX.len()..], ext)
-                        }
-                        Some(ext) if libname.starts_with(RLIB_PREFIX) && ext == RMETA_EXTENSION => {
-                            (&libname[RLIB_PREFIX.len()..], ext)
-                        }
-                        _ => continue,
-                    };
-                    if let Some((_, ref dep_crate_names)) = rlib_dep_reader_and_names {
-                        // We have a list of crate names we care about, see if this lib is a candidate
-                        if !dep_crate_names.contains(crate_name) {
-                            continue;
-                        }
-                    }
-                    if !path.is_file() {
-                        continue;
-                    } else if !super::CAN_DIST_DYLIBS && ext == DLL_EXTENSION {
-                        bail!(
-                            "Cannot distribute dylib input {} on this platform",
-                            path.display()
-                        )
+
+                        // This is a lib that may be of interest during compilation
+                        package.add_file(&env_vars, path)?;
                     }
                 }
 
-                // This is a lib that may be of interest during compilation
-                let dist_path = path_transformer
-                    .as_dist(&path)
-                    .with_context(|| format!("unable to transform lib path {}", path.display()))?;
-                tar_crate_libs.push((path, dist_path));
-            }
-        }
-
-        let mut all_tar_inputs: Vec<_> = tar_inputs.into_iter().chain(tar_crate_libs).collect();
-        all_tar_inputs.sort();
-        // There are almost certainly duplicates from explicit externs also within the lib search paths
-        all_tar_inputs.dedup();
-
-        // If we're just creating an rlib then the only thing inspected inside dependency rlibs is the
-        // metadata, in which case we can create a trimmed rlib (which is actually a .a) with the metadata
-        let can_trim_rlibs = matches!(
-            crate_types,
-            CrateTypes {
-                rlib: true,
-                staticlib: false,
-            }
-        );
-
-        let mut builder = tar::Builder::new(compressor);
-        for (input_path, dist_input_path) in all_tar_inputs.iter() {
-            let (mut file_header, dist_input_path) =
-                pkg::make_tar_header(input_path, dist_input_path)?;
-            let file = fs::File::open(input_path)?;
-            if can_trim_rlibs && can_trim_this(input_path) {
-                let mut archive = ar::Archive::new(file);
-
-                while let Some(entry_result) = archive.next_entry() {
-                    let mut entry = entry_result?;
-                    if entry.header().identifier() != b"rust.metadata.bin" {
-                        continue;
+                // If we're just creating an rlib then the only thing inspected inside dependency rlibs is the
+                // metadata, in which case we can create a trimmed rlib (which is actually a .a) with the metadata
+                let can_trim_rlibs = matches!(
+                    crate_types,
+                    CrateTypes {
+                        rlib: true,
+                        staticlib: false,
                     }
-                    let mut metadata_ar = vec![];
-                    {
-                        let mut ar_builder = ar::Builder::new(&mut metadata_ar);
-                        let header = entry.header().clone();
-                        ar_builder.append(&header, &mut entry)?;
+                );
+
+                // Get the inputs after simplifying and transforming paths
+                let (dirs, mut files, links) = package.describe()?;
+
+                let mut inputs = BTreeMap::new();
+
+                files.retain(|_, file_path| {
+                    if can_trim_rlibs && can_trim_this(file_path) {
+                        let Ok(file) = fs::File::open(file_path.as_path()) else {
+                            // This error will surface to the user later
+                            return true;
+                        };
+                        let mut archive = ar::Archive::new(file);
+
+                        while let Some(entry_result) = archive.next_entry() {
+                            let Ok(mut entry) = entry_result else {
+                                // If this errors, send the entire archive
+                                return true;
+                            };
+                            if entry.header().identifier() != b"rust.metadata.bin" {
+                                continue;
+                            }
+                            let mut metadata_ar = vec![];
+                            {
+                                let mut ar_builder = ar::Builder::new(&mut metadata_ar);
+                                let header = entry.header().clone();
+                                if ar_builder.append(&header, &mut entry).is_err() {
+                                    // If this errors, send the entire archive
+                                    return true;
+                                }
+                            }
+                            let mut digest = Digest::new();
+                            digest.update(&metadata_ar);
+                            inputs.insert(digest.finish(), JobInput::Data(metadata_ar.into()));
+                            return false;
+                        }
                     }
-                    file_header.set_size(metadata_ar.len() as u64);
-                    file_header.set_cksum();
-                    builder.append_data(
-                        &mut file_header,
-                        dist_input_path,
-                        metadata_ar.as_slice(),
-                    )?;
-                    break;
-                }
-            } else {
-                file_header.set_cksum();
-                builder.append_data(&mut file_header, dist_input_path, file)?;
+                    true
+                });
+
+                Ok::<_, anyhow::Error>((dirs, files, links, inputs, pt))
             }
-        }
-
-        // Finish archive
-        builder.finish()?;
-
-        Ok(())
-    }
-
-    async fn write_inputs_async(
-        self: Box<Self>,
-        path_transformer: &mut dist::PathTransformer,
-        sink: &mut (dyn futures::io::AsyncWrite + Unpin + Send + Sync),
-    ) -> Result<()> {
-        let mut pt = path_transformer.clone();
-        let (buf, pt) = tokio::task::spawn_blocking(move || {
-            let mut buf = vec![];
-            self.write_inputs(&mut pt, &mut buf)?;
-            Ok::<_, anyhow::Error>((buf, pt))
         })
         .await??;
-        sink.write_all(&buf).await?;
+
         *path_transformer = pt;
-        Ok(())
+
+        let (mut digest, files, inputs) = futures::stream::iter(files)
+            .flat_map_unordered(None, |(dist_path, file_path)| {
+                futures::stream::once(Box::pin(async move {
+                    let dist_path = path_to_str(dist_path)?.into_owned();
+                    let file_hash = Digest::from_file(&file_path).await?.finish();
+                    Ok::<_, anyhow::Error>((dist_path, (file_hash, file_path)))
+                }))
+            })
+            .try_collect::<BTreeMap<_, _>>()
+            .await?
+            .into_iter()
+            .fold(
+                (Digest::new(), BTreeMap::new(), inputs),
+                |(mut digest, mut files, mut inputs), (dist_path, (file_hash, file_path))| {
+                    digest.update(file_hash.as_bytes());
+                    digest.update(dist_path.as_bytes());
+                    if let Ok(file_path) = path_to_str(&file_path) {
+                        digest.update(file_path.as_bytes());
+                    }
+                    files.insert(dist_path, file_hash.clone());
+                    inputs.insert(file_hash, JobInput::File(file_path));
+                    (digest, files, inputs)
+                },
+            );
+
+        let dirs = dirs
+            .into_iter()
+            .map(|(dist_path, dir_path)| {
+                let dist_path = path_to_str(dist_path)?;
+                let dir_path = path_to_str(dir_path)?;
+                digest.update(dist_path.as_bytes());
+                digest.update(dir_path.as_bytes());
+                Ok::<_, anyhow::Error>(dist_path.into_owned())
+            })
+            .try_collect::<_, Vec<_>, _>()?;
+
+        let links = links
+            .into_iter()
+            .map(|(dist_path, (link_name, link_path))| {
+                let dist_path = path_to_str(dist_path)?;
+                let link_name = path_to_str(link_name)?;
+                let link_path = path_to_str(link_path)?;
+                digest.update(dist_path.as_bytes());
+                digest.update(link_name.as_bytes());
+                digest.update(link_path.as_bytes());
+                Ok::<_, anyhow::Error>((dist_path.into_owned(), link_path.into_owned()))
+            })
+            .try_collect::<_, BTreeMap<_, _>, _>()?;
+
+        // trace!(
+        //     "Dist inputs:\n{}",
+        //     std::iter::empty()
+        //         .chain(dirs.iter().map(|p| format!("  dir: {p}")))
+        //         .chain(links.iter().map(|(s, t)| format!("  link: {s} -> {t}")))
+        //         .chain(files.iter().map(|(p, h)| format!("  file: {p} ({h})")))
+        //         .unique()
+        //         .collect::<Vec<_>>()
+        //         .join("\n")
+        // );
+
+        let manifest = dist::JobInputs::Manifest {
+            hash: digest.finish(),
+            dirs,
+            files,
+            links,
+        };
+
+        Ok::<_, anyhow::Error>((manifest, inputs))
     }
 }
 

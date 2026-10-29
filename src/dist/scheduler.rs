@@ -12,21 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use async_trait::async_trait;
-
-use futures::lock::Mutex;
-
 use crate::{
     cache::Storage,
     dist::{
-        self, JobStats, NewJobResponse, RunJobRequestV2, RunJobResponse, RunJobStatus,
-        SchedulerService, SchedulerStatus, ServerStatus, StatusUpdate, SysStats, Toolchain,
+        self, JobInputs, JobStats, NewJobResponse, RunJobStatus, SchedulerService, SchedulerStatus,
+        ServerStatus, StatusUpdate, SysStats, Toolchain,
         io::{Jobs, Toolchains},
         metrics::{JobsMetrics, Metrics, SchedulerMetrics, ToolchainsMetrics},
+        v3::{NewJobResponse as NewJobResponseV3, RunJobRequest, RunJobResponse},
     },
     errors::*,
 };
-
+use async_trait::async_trait;
+use futures::lock::Mutex;
+use itertools::Itertools;
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -366,6 +365,7 @@ impl Scheduler {
     async fn run_job_early_exit(
         &self,
         job_id: &str,
+        inputs: &JobInputs,
         toolchain: &Toolchain,
     ) -> Result<Option<RunJobResponse>> {
         if self.jobs_io.has_job_result(job_id).await {
@@ -390,11 +390,29 @@ impl Scheduler {
             }));
         }
 
-        if !self.jobs_io.has_job_inputs(job_id).await {
-            tracing::warn!("[run_job({job_id})]: Missing job inputs");
-            return Ok(Some(RunJobResponse::MissingJobInputs {
-                server_id: self.scheduler_id.clone(),
-            }));
+        match inputs {
+            JobInputs::TarGZ { job_id } => {
+                if !self.jobs_io.has_job_inputs(job_id).await {
+                    tracing::warn!("[run_job({job_id})]: Missing job inputs");
+                    return Ok(Some(RunJobResponse::MissingJobInputs {
+                        server_id: self.scheduler_id.clone(),
+                        inputs: vec![],
+                    }));
+                }
+            }
+            JobInputs::Manifest { files, .. } => {
+                if let Some(missing_inputs) = self
+                    .jobs_io
+                    .missing_job_inputs(files.values().unique().map(|s| s.as_str()))
+                    .await
+                {
+                    tracing::warn!("[run_job({job_id})]: Missing job inputs");
+                    return Ok(Some(RunJobResponse::MissingJobInputs {
+                        server_id: self.scheduler_id.clone(),
+                        inputs: missing_inputs,
+                    }));
+                }
+            }
         }
 
         Ok(None)
@@ -498,7 +516,13 @@ impl SchedulerService for Scheduler {
         let job_id = uuid::Uuid::new_v4().as_simple().to_string();
         let (has_toolchain, has_inputs) = futures::future::join(
             async { Ok::<bool, anyhow::Error>(self.has_toolchain(&toolchain).await) },
-            async { self.jobs_io.put_job_inputs(&job_id, inputs).await },
+            async {
+                if inputs.is_empty() {
+                    Ok(())
+                } else {
+                    self.jobs_io.put_job_inputs(&job_id, inputs).await
+                }
+            },
         )
         .await;
 
@@ -507,6 +531,32 @@ impl SchedulerService for Scheduler {
             has_toolchain: has_toolchain.unwrap_or_default(),
             job_id,
             timeout: self.tasks.get_job_time_limit(),
+        })
+    }
+
+    async fn new_job_with_inputs(
+        &self,
+        toolchain: Toolchain,
+        inputs: Vec<String>,
+    ) -> Result<NewJobResponseV3> {
+        let res = self.new_job(toolchain, Default::default()).await?;
+        let missing_inputs = futures::future::join_all(inputs.into_iter().map(|digest| async {
+            if !self.jobs_io.has_job_inputs(&digest).await {
+                Some(digest)
+            } else {
+                None
+            }
+        }))
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+
+        Ok(NewJobResponseV3 {
+            job_id: res.job_id,
+            timeout: res.timeout,
+            has_toolchain: res.has_toolchain,
+            missing_inputs,
         })
     }
 
@@ -527,15 +577,16 @@ impl SchedulerService for Scheduler {
     async fn run_job(
         &self,
         job_id: &str,
-        RunJobRequestV2 {
+        RunJobRequest {
             toolchain,
             command,
+            inputs,
             outputs,
             ..
-        }: RunJobRequestV2,
+        }: RunJobRequest,
     ) -> Result<RunJobResponse> {
         // Early exit if possible
-        if let Some(res) = self.run_job_early_exit(job_id, &toolchain).await? {
+        if let Some(res) = self.run_job_early_exit(job_id, &inputs, &toolchain).await? {
             return Ok(res);
         }
 
@@ -563,7 +614,7 @@ impl SchedulerService for Scheduler {
             RunJobStatus::Active { ref schedulers } => {
                 if schedulers.first() == Some(reply_to) {
                     self.tasks
-                        .run_job(job_id, reply_to, &toolchain, &command, &outputs)
+                        .run_job(job_id, reply_to, &toolchain, &command, inputs, &outputs)
                         .await
                         .map_err(anyhow::Error::new)?;
                 }

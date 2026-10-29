@@ -128,7 +128,7 @@ pub mod urls {
     }
     pub fn scheduler_new_job(scheduler_url: &reqwest::Url) -> reqwest::Url {
         scheduler_url
-            .join("/api/v2/jobs/new")
+            .join("/api/v3/jobs/new")
             .expect("failed to create new job url")
     }
     pub fn scheduler_put_job(scheduler_url: &reqwest::Url, job_id: &str) -> reqwest::Url {
@@ -138,7 +138,7 @@ pub mod urls {
     }
     pub fn scheduler_run_job(scheduler_url: &reqwest::Url, job_id: &str) -> reqwest::Url {
         scheduler_url
-            .join(&format!("/api/v2/job/{job_id}"))
+            .join(&format!("/api/v3/job/{job_id}"))
             .expect("failed to create run job url")
     }
     pub fn scheduler_del_job(scheduler_url: &reqwest::Url, job_id: &str) -> reqwest::Url {
@@ -205,9 +205,11 @@ mod scheduler {
     use crate::{
         config,
         dist::{
-            RunJobRequest, RunJobRequestV2, SchedulerService, SubmitToolchainResult, Toolchain,
+            JobInputs, RunJobRequest, RunJobRequestV2, RunJobResponse, SchedulerService,
+            SubmitToolchainResult, Toolchain,
             http::{bincode_deserialize, bincode_serialize},
             metrics::{GaugeRecorder, Metrics},
+            v3,
         },
         errors::*,
     };
@@ -863,6 +865,22 @@ mod scheduler {
                         },
                     ),
                 )
+                .route(
+                    "/api/v3/jobs/new",
+                    routing::post(
+                        |TypedHeader(AcceptedMimeTypes(mime)),
+                         Extension::<Arc<SchedulerState>>(state),
+                         Bincode::<v3::NewJobRequest>(req)| async move {
+                            state
+                                .service
+                                .clone()
+                                .new_job_with_inputs(req.toolchain, req.inputs)
+                                .and_then(|res| mime.serialize(res))
+                                .map_err(|e| AppError(e).into_response())
+                                .await
+                        },
+                    ),
+                )
                 // PUT
                 .route(
                     "/api/v2/job/{job_id}",
@@ -911,6 +929,34 @@ mod scheduler {
                          Extension::<Arc<SchedulerState>>(state),
                          Path::<String>(job_id),
                          RunJobBody(job): RunJobBody| async move {
+                            state
+                                .service
+                                .run_job(
+                                    &job_id,
+                                    v3::RunJobRequest {
+                                        command: job.command,
+                                        toolchain: job.toolchain,
+                                        outputs: job.outputs,
+                                        inputs: JobInputs::TarGZ {
+                                            job_id: job_id.clone(),
+                                        },
+                                    },
+                                )
+                                .and_then(|res| futures::future::ok(res.into()))
+                                .and_then(|res: RunJobResponse| mime.serialize(res))
+                                .map_err(|err| AppError(err).into_response())
+                                .await
+                        },
+                    ),
+                )
+                // POST
+                .route(
+                    "/api/v3/job/{job_id}",
+                    routing::post(
+                        |TypedHeader(AcceptedMimeTypes(mime)),
+                         Extension::<Arc<SchedulerState>>(state),
+                         Path::<String>(job_id),
+                         Bincode(job): Bincode<v3::RunJobRequest>| async move {
                             state
                                 .service
                                 .run_job(&job_id, job)
@@ -1035,9 +1081,9 @@ mod client {
 
     use reqwest::Body;
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::compat::FuturesAsyncReadCompatExt;
 
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::Duration;
@@ -1047,18 +1093,22 @@ mod client {
         common::{ReqwestRequestBuilderExt, bincode_req_fut},
         urls,
     };
+    use crate::dist::pkg::JobInput;
     use crate::{
         config,
         dist::{
-            self, CompileCommand, NewJobResponse, RunJobRequest, RunJobResponse, SchedulerStatus,
-            SubmitToolchainResult, Toolchain,
+            self, CompileCommand, SchedulerStatus, SubmitToolchainResult, Toolchain,
             pkg::{ArchivePackager, ToolchainPackager},
+            v3::{NewJobRequest, NewJobResponse, RunJobRequest, RunJobResponse},
         },
         errors::*,
         util::{AsyncMulticast, AsyncMulticastArgs, AsyncMulticastFunc, new_reqwest_client},
     };
 
-    impl AsyncMulticastArgs for (Toolchain, Option<Arc<dyn ArchivePackager + '_>>) {
+    #[derive(Clone)]
+    struct SubmitToolchainArgs(Toolchain, Option<Arc<dyn ArchivePackager>>);
+
+    impl AsyncMulticastArgs for SubmitToolchainArgs {
         type Key = String;
         fn hash(&self) -> Self::Key {
             self.0.archive_id.clone()
@@ -1073,12 +1123,10 @@ mod client {
     }
 
     #[async_trait]
-    impl AsyncMulticastFunc<(Toolchain, Option<Arc<dyn ArchivePackager>>), SubmitToolchainResult>
-        for SubmitToolchainFn
-    {
+    impl AsyncMulticastFunc<SubmitToolchainArgs, SubmitToolchainResult> for SubmitToolchainFn {
         async fn call(
             &self,
-            (tc, package): &(Toolchain, Option<Arc<dyn ArchivePackager>>),
+            SubmitToolchainArgs(tc, package): &SubmitToolchainArgs,
         ) -> Result<SubmitToolchainResult> {
             let id = &tc.archive_id;
 
@@ -1122,6 +1170,49 @@ mod client {
                 }
                 Err(err) => Err(err.context(format!("Could not submit toolchain {id:?}:"))),
             }
+        }
+    }
+
+    struct PutInputFn {
+        client: Arc<ReqwestClients>,
+        auth_token: String,
+        scheduler_url: reqwest::Url,
+    }
+
+    #[derive(Clone)]
+    struct PutInputArgs(String, JobInput);
+
+    impl AsyncMulticastArgs for PutInputArgs {
+        type Key = String;
+        fn hash(&self) -> Self::Key {
+            self.0.clone()
+        }
+    }
+
+    #[async_trait]
+    impl AsyncMulticastFunc<PutInputArgs, ()> for PutInputFn {
+        async fn call(&self, PutInputArgs(hash, input): &PutInputArgs) -> Result<()> {
+            let Self {
+                client,
+                auth_token,
+                scheduler_url,
+            } = self;
+
+            let body = input.clone().into_async_read()?;
+            let body = async_compression::futures::bufread::ZlibEncoder::with_quality(
+                body,
+                // Optimize for size since bandwidth costs more than client CPU cycles
+                async_compression::core::Level::Best,
+            );
+            let body = tokio_util::io::ReaderStream::new(body.compat());
+
+            let req = client
+                .put(urls::scheduler_put_job(scheduler_url, hash))
+                .header(http::header::ACCEPT, "application/octet-stream")
+                .bearer_auth(auth_token)
+                .body(Body::wrap_stream(body));
+
+            bincode_req_fut::<()>(req).await
         }
     }
 
@@ -1186,8 +1277,8 @@ mod client {
         max_retries: f64,
         request_timeout: u32,
         scheduler_url: reqwest::Url,
-        submit_toolchain_reqs:
-            AsyncMulticast<(Toolchain, Option<Arc<dyn ArchivePackager>>), SubmitToolchainResult>,
+        put_toolchain: AsyncMulticast<SubmitToolchainArgs, SubmitToolchainResult>,
+        put_job_input: AsyncMulticast<PutInputArgs, ()>,
         tc_cache: Arc<cache::ClientToolchains>,
     }
 
@@ -1210,7 +1301,13 @@ mod client {
                     .context("failed to initialise client toolchains")?,
             );
 
-            let submit_toolchain_reqs = AsyncMulticast::new(SubmitToolchainFn {
+            let put_job_input = AsyncMulticast::new(PutInputFn {
+                client: client.clone(),
+                auth_token: auth_token.clone(),
+                scheduler_url: scheduler_url.clone(),
+            });
+
+            let put_toolchain = AsyncMulticast::new(SubmitToolchainFn {
                 client: client.clone(),
                 auth_token: auth_token.clone(),
                 scheduler_url: scheduler_url.clone(),
@@ -1224,7 +1321,8 @@ mod client {
                 max_retries,
                 request_timeout,
                 scheduler_url: scheduler_url.clone(),
-                submit_toolchain_reqs,
+                put_toolchain,
+                put_job_input,
                 tc_cache: client_toolchains,
             })
         }
@@ -1235,44 +1333,27 @@ mod client {
         async fn new_job(
             &self,
             toolchain: Toolchain,
-            inputs: std::fs::File,
+            inputs: Vec<String>,
         ) -> Result<NewJobResponse> {
             bincode_req_fut(
                 self.client
                     .post(urls::scheduler_new_job(&self.scheduler_url))
                     .header(http::header::ACCEPT, "application/octet-stream")
                     .bearer_auth(self.auth_token.clone())
-                    .body(Body::wrap_stream({
-                        let bincode = bincode::serialize(&toolchain)?;
-                        let (body, mut writer) = tokio::io::simplex(bincode.len() + 4);
-                        writer
-                            .write_u32(bincode.len() as u32)
-                            .await
-                            .expect("Infallible write of bincode length to stream failed");
-                        writer
-                            .write_all(&bincode)
-                            .await
-                            .expect("Infallible write of bincode body to stream failed");
-                        writer.shutdown().await?;
-                        let inputs = tokio::fs::File::from_std(inputs);
-                        let inputs = tokio::io::BufReader::new(inputs);
-                        tokio_util::io::ReaderStream::new(body.chain(inputs))
-                    })),
+                    .bincode(&NewJobRequest { toolchain, inputs })?,
             )
             .await
         }
 
-        async fn put_job(&self, job_id: &str, inputs: std::fs::File) -> Result<()> {
-            let body = futures::io::AllowStdIo::new(inputs);
-            let body = tokio_util::io::ReaderStream::new(body.compat());
-            bincode_req_fut(
-                self.client
-                    .put(urls::scheduler_put_job(&self.scheduler_url, job_id))
-                    .header(http::header::ACCEPT, "application/octet-stream")
-                    .bearer_auth(self.auth_token.clone())
-                    .body(Body::wrap_stream(body)),
-            )
+        async fn put_job(&self, inputs: HashMap<String, JobInput>) -> Result<()> {
+            futures::future::try_join_all(inputs.into_iter().map(|(hash, input)| async move {
+                self.put_job_input
+                    .call(PutInputArgs(hash, input))
+                    .await
+                    .map(|(_, res)| res)
+            }))
             .await
+            .map(|_| ())
         }
 
         async fn run_job(
@@ -1281,6 +1362,7 @@ mod client {
             timeout: Duration,
             toolchain: Toolchain,
             command: CompileCommand,
+            inputs: dist::JobInputs,
             outputs: Vec<String>,
         ) -> Result<RunJobResponse> {
             bincode_req_fut(
@@ -1291,6 +1373,7 @@ mod client {
                     .timeout(timeout)
                     .bincode(&RunJobRequest {
                         command,
+                        inputs,
                         outputs,
                         toolchain,
                     })?,
@@ -1323,8 +1406,8 @@ mod client {
             toolchain: Toolchain,
             packaged: Option<Arc<dyn ArchivePackager>>,
         ) -> Result<SubmitToolchainResult> {
-            self.submit_toolchain_reqs
-                .call((toolchain, packaged))
+            self.put_toolchain
+                .call(SubmitToolchainArgs(toolchain, packaged))
                 .await
                 .map(|(_, res)| res)
         }
