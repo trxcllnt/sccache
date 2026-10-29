@@ -309,6 +309,7 @@ jobs:
       - name: Test
         env:
           SCCACHE_RECACHE: 1
+          SCCACHE_RECACHE_DEPENDENCIES: 1
         run: |
           export LD_PRELOAD=$PWD/target/debug/librandomize_readdir.so
           rm "$RANDOMIZE_READDIR_LOG".*
@@ -375,6 +376,7 @@ jobs:
         working-directory: tests/integration/xcode
         env:
           SCCACHE_RECACHE: 1
+          SCCACHE_RECACHE_DEPENDENCIES: 1
         run: |
           xcodebuild -version
           xcodebuild -xcconfig sccache.xcconfig
