@@ -1783,7 +1783,8 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
-                hashed: Some(3),
+                hashed: Some(4),
+                preprocessed: Some(1),
                 cache_writes: Some(2),
                 compilations: Some(2),
                 compile_requests: Some(1),
@@ -1814,7 +1815,8 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
-                hashed: Some(3),
+                hashed: Some(4),
+                preprocessed: Some(1),
                 cache_writes: Some(2),
                 compilations: Some(2),
                 compile_requests: Some(1),
@@ -1843,7 +1845,8 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
-                hashed: Some(7),
+                hashed: Some(8),
+                preprocessed: Some(1),
                 cache_writes: Some(3),
                 compilations: Some(4),
                 compile_requests: Some(1),
@@ -1876,7 +1879,8 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
-                hashed: Some(7),
+                hashed: Some(8),
+                preprocessed: Some(1),
                 cache_writes: Some(2),
                 compilations: Some(3),
                 compile_requests: Some(1),
@@ -1907,7 +1911,8 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
-                hashed: Some(5),
+                hashed: Some(6),
+                preprocessed: Some(1),
                 cache_writes: Some(1),
                 compilations: Some(2),
                 compile_requests: Some(1),
@@ -1944,7 +1949,8 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
-                hashed: Some(6),
+                hashed: Some(9),
+                preprocessed: Some(3),
                 cache_writes: Some(6),
                 compilations: Some(7),
                 compile_requests: Some(1),
@@ -1974,7 +1980,8 @@ int main(int argc, char** argv) {
             ]
             .concat(),
             AdditionalStats {
-                hashed: Some(9),
+                hashed: Some(13),
+                preprocessed: Some(4),
                 cache_writes: Some(4),
                 compilations: Some(5),
                 compile_requests: Some(1),

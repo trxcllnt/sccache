@@ -127,10 +127,9 @@ impl Nvcc {
         if !args
             .iter()
             .any(|arg| arg.starts_with("-ccbin") || arg.starts_with("--compiler-bindir"))
+            && let Some((_, cc)) = env_vars.iter().find(|(key, _)| key == "CC")
         {
-            if let Some((_, cc)) = env_vars.iter().find(|(key, _)| key == "CC") {
-                args.push(format!("-ccbin={}", cc.display()).into());
-            }
+            args.push(format!("-ccbin={}", cc.display()).into());
         }
 
         #[cfg(unix)]
