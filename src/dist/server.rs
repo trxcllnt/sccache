@@ -31,7 +31,7 @@ use itertools::Itertools;
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -242,7 +242,7 @@ pub struct Server {
     schedulers: Arc<Mutex<HashMap<String, Instant>>>,
     server_id: String,
     tasks: Arc<dyn dist::tasks::ServerTasks>,
-    load_inputs: AsyncMulticast<JobInputs, PathBuf>,
+    load_inputs: AsyncMulticast<JobInputsOutputs, PathBuf>,
     load_toolchain: AsyncMulticast<Toolchain, PathBuf>,
     run_job: AsyncMulticast<RunJobArgs, RunJobResponse>,
 }
@@ -620,7 +620,14 @@ impl Server {
         self.metrics.inc_job_accepted_count();
 
         // Load the job toolchain and inputs
-        let (toolchain_dir, inputs_dir) = self.load_job(inputs, toolchain).await?;
+        let cwd = Path::new(&command.cwd);
+        let (toolchain_dir, inputs_dir) = self
+            .load_job(
+                inputs,
+                outputs.iter().map(|path| cwd.join(path)).collect(),
+                toolchain,
+            )
+            .await?;
 
         // Increment the job_loaded counter
         self.metrics.inc_job_loaded_count();
@@ -652,6 +659,7 @@ impl Server {
     async fn load_job(
         &self,
         inputs: JobInputs,
+        outputs: Vec<PathBuf>,
         toolchain: Toolchain,
     ) -> std::result::Result<(PathBuf, PathBuf), RunJobError> {
         // Record load_job time
@@ -669,7 +677,7 @@ impl Server {
         // Load and unpack the job inputs
         let inputs_dir = self
             .load_inputs
-            .call(inputs)
+            .call(JobInputsOutputs { inputs, outputs })
             .await
             .map(|(_, inputs_dir)| inputs_dir)
             .map_err(|err| match err.downcast::<RunJobError>() {
@@ -851,10 +859,16 @@ impl ServerService for Server {
     }
 }
 
-impl AsyncMulticastArgs for JobInputs {
+#[derive(Clone)]
+struct JobInputsOutputs {
+    inputs: JobInputs,
+    outputs: Vec<PathBuf>,
+}
+
+impl AsyncMulticastArgs for JobInputsOutputs {
     type Key = String;
     fn hash(&self) -> Self::Key {
-        match self {
+        match &self.inputs {
             JobInputs::TarGZ { job_id } => job_id.clone(),
             JobInputs::Manifest { hash, .. } => hash.clone(),
         }
@@ -866,9 +880,12 @@ struct LoadInputsFn {
 }
 
 #[async_trait]
-impl AsyncMulticastFunc<JobInputs, PathBuf> for LoadInputsFn {
-    async fn call(&self, inputs: &JobInputs) -> Result<PathBuf> {
-        self.inputs.get_inputs(inputs).await
+impl AsyncMulticastFunc<JobInputsOutputs, PathBuf> for LoadInputsFn {
+    async fn call(
+        &self,
+        JobInputsOutputs { inputs, outputs }: &JobInputsOutputs,
+    ) -> Result<PathBuf> {
+        self.inputs.get_inputs(inputs, outputs).await
     }
 }
 

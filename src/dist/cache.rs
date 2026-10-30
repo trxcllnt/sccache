@@ -613,7 +613,7 @@ mod server {
         Ok(inflated_size)
     }
 
-    fn zlib_inflate(deflated_path: PathBuf, inflated_path: PathBuf) -> std::io::Result<u64> {
+    fn zlib_inflate(deflated_path: PathBuf, inflated_path: &Path) -> std::io::Result<u64> {
         let deflated_file = fs::File::open(&deflated_path)?;
 
         // Unpack the tgz into the inflated dir
@@ -622,7 +622,9 @@ mod server {
 
         let mut inflated_size = 0;
         let mut dirs = Vec::new();
-        let dst = &inflated_path.canonicalize().unwrap_or(inflated_path);
+        let dst = inflated_path
+            .canonicalize()
+            .unwrap_or_else(|_| inflated_path.to_owned());
 
         for entry in archive.entries()? {
             let mut entry = entry?;
@@ -630,13 +632,13 @@ mod server {
             if entry.header().entry_type() == tar::EntryType::Directory {
                 dirs.push(entry);
             } else {
-                entry.unpack_in(dst)?;
+                entry.unpack_in(&dst)?;
             }
         }
 
         dirs.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
         for mut dir in dirs {
-            dir.unpack_in(dst)?;
+            dir.unpack_in(&dst)?;
         }
 
         Ok(inflated_size)
@@ -671,8 +673,12 @@ mod server {
 
     #[async_trait]
     impl InputsService for ServerInputs {
-        async fn get_inputs(&self, inputs: &JobInputs) -> Result<PathBuf> {
-            self.load(inputs.clone()).await
+        async fn get_inputs(&self, inputs: &JobInputs, outputs: &[PathBuf]) -> Result<PathBuf> {
+            self.load(inputs.clone(), outputs.to_vec())
+                .await
+                .inspect_err(|err| {
+                    error!("Error loading inputs: {err:?}");
+                })
         }
     }
 
@@ -684,7 +690,7 @@ mod server {
             }
         }
 
-        async fn load(&self, inputs: JobInputs) -> Result<PathBuf> {
+        async fn load(&self, inputs: JobInputs, outputs: Vec<PathBuf>) -> Result<PathBuf> {
             let hash = match inputs {
                 JobInputs::TarGZ { ref job_id } => job_id,
                 JobInputs::Manifest { ref hash, .. } => hash,
@@ -695,7 +701,7 @@ mod server {
                 Ok(inflated_path)
             } else {
                 match inputs {
-                    JobInputs::TarGZ { ref job_id } => self.load_tar_gz(job_id).await,
+                    JobInputs::TarGZ { ref job_id } => self.load_tar_gz(job_id, outputs).await,
                     JobInputs::Manifest {
                         ref hash,
                         dirs,
@@ -706,13 +712,13 @@ mod server {
             }
         }
 
-        async fn load_tar_gz(&self, job_id: &str) -> Result<PathBuf> {
+        async fn load_tar_gz(&self, job_id: &str, output_dirs: Vec<PathBuf>) -> Result<PathBuf> {
             let deflated_key = format!("{job_id}.tgz");
             if !self.cache.has(&deflated_key).await {
                 let (_, entry) = self.files.call(InputFileHash(job_id.to_owned())).await?;
                 self.cache.put(&deflated_key, entry).await?;
             }
-            let (deflated_path, deflated_size) = self.cache.entry(job_id).await?;
+            let (deflated_path, deflated_size) = self.cache.entry(&deflated_key).await?;
             self.cache
                 .insert_with(job_id, deflated_size, |inflated_path: &Path| {
                     let inflated_path = inflated_path.to_owned();
@@ -720,13 +726,24 @@ mod server {
                         tokio::task::spawn_blocking(move || {
                             // Ensure the inflated dir exists first
                             fs::create_dir_all(&inflated_path)?;
-                            zlib_inflate(deflated_path, inflated_path)
+                            let size = zlib_inflate(deflated_path, &inflated_path)?;
+                            // Create output dirs
+                            for output_dir in output_dirs.iter() {
+                                // If it doesn't have a parent, nothing needs creating
+                                if let Some(path) = output_dir.parent() {
+                                    fs::create_dir_all(join_suffix(&inflated_path, path))?;
+                                }
+                            }
+                            Ok(size)
                         })
                         .await?
                     }
                 })
                 .await
                 .map(|(path, _)| path)
+                .inspect_err(|err| {
+                    error!("Error unpacking inputs: {err:?}");
+                })
         }
 
         async fn load_manifest(

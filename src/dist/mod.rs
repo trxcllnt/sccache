@@ -1165,7 +1165,7 @@ pub trait ServerService: Send + Sync {
 #[cfg(feature = "dist-server")]
 #[async_trait]
 pub trait InputsService: Send + Sync {
-    async fn get_inputs(&self, inputs: &JobInputs) -> Result<PathBuf>;
+    async fn get_inputs(&self, inputs: &JobInputs, outputs: &[PathBuf]) -> Result<PathBuf>;
 }
 
 #[cfg(feature = "dist-server")]
