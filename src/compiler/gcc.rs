@@ -1289,14 +1289,12 @@ where
             }
         }
 
-        let (dep_args, dep_flag) = if !generate_nonsystem_dependencies {
-            (&mut system_dependency_args, system_deps_flag)
-        } else {
-            (&mut nonsystem_dependency_args, nonsystem_deps_flag)
-        };
+        if system_dependency_args.is_empty() {
+            system_dependency_args.push(system_deps_flag);
+        }
 
-        if dep_args.is_empty() {
-            dep_args.push(dep_flag);
+        if generate_nonsystem_dependencies && nonsystem_dependency_args.is_empty() {
+            nonsystem_dependency_args.push(nonsystem_deps_flag);
         }
 
         system_dependency_args.dedup();
