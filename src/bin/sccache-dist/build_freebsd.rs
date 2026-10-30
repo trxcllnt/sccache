@@ -14,7 +14,6 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use bytes::Buf;
 use fs_err as fs;
 use futures::lock::Mutex;
 use itertools::Itertools;
@@ -404,41 +403,50 @@ impl PotBuilder {
             }
 
             tracing::trace!("[perform_build({job_id})]: copying in inputs");
+
+            let job_id = job_id.to_owned();
+            let inputs_dir = inputs_dir.to_owned();
             let jail_root = pot_fs_root.join("jails").join(cid).join("m");
+
             tokio::task::spawn_blocking(move || {
                 // Copy inputs to jail_root
-                for j_path in list_dirs(inputs_dir)
+                for j_path in list_dirs(&inputs_dir)
                     .iter()
-                    .filter_map(|h_path| h_path.strip_prefix(inputs_dir).ok())
+                    .filter_map(|h_path| h_path.strip_prefix(&inputs_dir).ok())
                     .map(|c_path| jail_root.join(c_path))
                     .sorted_by(|a, b| b.cmp(a))
                 {
                     if !j_path.exists() {
                         tracing::trace!("[make_image({job_id})]: creating input dir {j_path:?}");
-                        fs::create_dir_all(&j_path).with_context(|| {
-                            format!("Failed to create input directory {j_path:?}")
-                        })?;
+                        fs::create_dir_all(&j_path)
+                            .with_context(|| format!("Failed to create input directory {j_path:?}"))
+                            .map_err(BuildError::UnpackInputs)?;
                     }
                 }
 
-                for (h_path, j_path, c_path) in list_files(inputs_dir).iter().filter_map(|h_path| {
-                    h_path.strip_prefix(inputs_dir).ok().map(|c_path| {
-                        (
-                            // (src) host path
-                            h_path.as_path(),
-                            // (dst) host path in the jail root
-                            jail_root.join(c_path),
-                            // (dst) container path for debugging
-                            Path::new("/").join(c_path),
-                        )
+                for (h_path, j_path, c_path) in
+                    list_files(&inputs_dir).iter().filter_map(|h_path| {
+                        h_path.strip_prefix(&inputs_dir).ok().map(|c_path| {
+                            (
+                                // (src) host path
+                                h_path.as_path(),
+                                // (dst) host path in the jail root
+                                jail_root.join(c_path),
+                                // (dst) container path for debugging
+                                Path::new("/").join(c_path),
+                            )
+                        })
                     })
-                }) {
+                {
                     tracing::trace!(
                         "[make_image({job_id})]: copying input file {h_path:?} -> {j_path:?}"
                     );
                     fs::copy(h_path, j_path)
-                        .with_context(|| format!("Failed to copy input file {c_path:?}"))?;
+                        .with_context(|| format!("Failed to copy input file {c_path:?}"))
+                        .map_err(BuildError::UnpackInputs)?;
                 }
+
+                Ok(())
             })
             .await
             .map_err(anyhow::Error::new)

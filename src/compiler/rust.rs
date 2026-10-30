@@ -16,7 +16,7 @@
 use {
     crate::{
         compiler::{DistPackagers, OutputsRewriter},
-        dist::pkg::{self, JobInput},
+        dist::{JobInput, pkg},
         lru_disk_cache::{LruCache, Meter},
         util::path_to_str,
     },

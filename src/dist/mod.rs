@@ -12,23 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::{errors::*, mock_command::ProcessOutput};
 use async_trait::async_trait;
-
-#[cfg(feature = "dist-server")]
-use itertools::Itertools;
-
+use bytes::Buf;
 use serde::{Deserialize, Serialize};
-
 use std::{
     collections::{BTreeMap, HashMap},
     ffi::OsString,
     fmt,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
     time::Duration,
 };
-
-use crate::{dist::pkg::JobInput, errors::*, mock_command::ProcessOutput};
 
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 mod cache;
@@ -97,6 +93,7 @@ pub fn queue_name_with_env_info(prefix: &str) -> String {
 
 #[cfg(feature = "dist-server")]
 pub fn env_info() -> String {
+    use itertools::Itertools;
     // "{os}-{arch}-{deployment}"
     // "linux-amd64-redis_zone_a" etc.
     [
@@ -532,6 +529,31 @@ pub fn strings_to_osstrings(strings: &[String]) -> Vec<OsString> {
         .iter()
         .map(|arg| std::ffi::OsStr::new(arg).to_os_string())
         .collect::<Vec<_>>()
+}
+
+#[derive(Clone)]
+pub enum JobInput {
+    Data(opendal::Buffer),
+    File(PathBuf),
+}
+
+impl JobInput {
+    pub fn into_async_read(self) -> Result<Pin<Box<dyn futures::io::AsyncBufRead + Send>>> {
+        Ok(match self {
+            Self::Data(data) => Box::pin(futures::io::BufReader::new(
+                futures::io::AllowStdIo::new(data.reader()),
+            )),
+            Self::File(ref path) => {
+                let file = fs_err::OpenOptions::new()
+                    .read(true)
+                    .open(path)
+                    .with_context(|| format!("Failed to open file for uploading: {path:?}"))?;
+                Box::pin(futures::io::BufReader::new(futures::io::AllowStdIo::new(
+                    file,
+                )))
+            }
+        })
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

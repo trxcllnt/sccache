@@ -1093,11 +1093,10 @@ mod client {
         common::{ReqwestRequestBuilderExt, bincode_req_fut},
         urls,
     };
-    use crate::dist::pkg::JobInput;
     use crate::{
         config,
         dist::{
-            self, CompileCommand, SchedulerStatus, SubmitToolchainResult, Toolchain,
+            self, CompileCommand, JobInput, SchedulerStatus, SubmitToolchainResult, Toolchain,
             pkg::{ArchivePackager, ToolchainPackager},
             v3::{NewJobRequest, NewJobResponse, RunJobRequest, RunJobResponse},
         },

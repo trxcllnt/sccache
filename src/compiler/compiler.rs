@@ -4846,9 +4846,8 @@ LLVM version: 6.0",
 #[cfg(feature = "dist-client")]
 mod test_dist {
     use crate::dist::{
-        self, CompileCommand, JobInputs, OutputData, SchedulerStatus, SubmitToolchainResult,
-        Toolchain,
-        pkg::JobInput,
+        self, CompileCommand, JobInput, JobInputs, OutputData, SchedulerStatus,
+        SubmitToolchainResult, Toolchain,
         v3::{NewJobResponse, RunJobResponse},
     };
     use crate::dist::{

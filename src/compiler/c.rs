@@ -50,7 +50,7 @@ use tokio::io::AsyncWriteExt;
 #[cfg(feature = "dist-client")]
 use crate::{
     compiler::{DistPackagers, NoopOutputsRewriter},
-    dist::pkg::{self, JobInput},
+    dist::{JobInput, pkg},
 };
 
 /// A generic implementation of the `Compiler` trait for C/C++ compilers.

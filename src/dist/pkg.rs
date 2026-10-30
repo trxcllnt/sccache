@@ -13,12 +13,11 @@
 // limitations under the License.
 
 use crate::{
-    dist,
+    dist::{self, JobInput},
     errors::*,
     util::{SimplifyPath, bytes_to_str, path_to_bytes},
 };
 use async_trait::async_trait;
-use bytes::Buf;
 use fs_err as fs;
 use is_executable::IsExecutable;
 use std::{
@@ -26,7 +25,6 @@ use std::{
     ffi::OsString,
     io::{self, Write},
     path::{Component, Path, PathBuf},
-    pin::Pin,
     process, str,
     sync::Arc,
 };
@@ -60,31 +58,6 @@ pub trait InputsPackager: Send {
         self: Box<Self>,
         path_transformer: &mut dist::PathTransformer,
     ) -> Result<(dist::JobInputs, BTreeMap<String, JobInput>)>;
-}
-
-#[derive(Clone)]
-pub enum JobInput {
-    Data(opendal::Buffer),
-    File(PathBuf),
-}
-
-impl JobInput {
-    pub fn into_async_read(self) -> Result<Pin<Box<dyn futures::io::AsyncBufRead + Send>>> {
-        Ok(match self {
-            Self::Data(data) => Box::pin(futures::io::BufReader::new(
-                futures::io::AllowStdIo::new(data.reader()),
-            )),
-            Self::File(ref path) => {
-                let file = fs_err::OpenOptions::new()
-                    .read(true)
-                    .open(path)
-                    .with_context(|| format!("Failed to open file for uploading: {path:?}"))?;
-                Box::pin(futures::io::BufReader::new(futures::io::AllowStdIo::new(
-                    file,
-                )))
-            }
-        })
-    }
 }
 
 pub struct ArchiveBuilder<'a> {

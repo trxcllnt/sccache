@@ -12,14 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(any(
+    feature = "azure",
+    feature = "gcs",
+    feature = "gha",
+    feature = "memcached",
+    feature = "redis",
+    feature = "s3",
+    feature = "webdav",
+    feature = "oss",
+    feature = "cos",
+    feature = "watcher"
+))]
+use crate::cache;
+#[cfg(any(
+    feature = "azure",
+    feature = "gcs",
+    feature = "gha",
+    feature = "memcached",
+    feature = "redis",
+    feature = "s3",
+    feature = "webdav",
+    feature = "oss",
+    feature = "cos"
+))]
+use crate::cache::utils::normalize_key;
 use crate::{
     cache::{
-        self,
         disk::DiskCache,
         multilevel::{MultiLevelStats, MultiLevelStorage},
         rate_limit::RateLimitStorage,
         readonly::ReadOnlyStorage,
-        utils::normalize_key,
     },
     config::{self, CacheMode, CacheType, Caches, WriteErrorPolicy, cache::RateLimits},
     errors::*,

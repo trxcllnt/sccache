@@ -643,8 +643,6 @@ pub mod defaults {
 #[cfg(test)]
 mod test {
     use super::*;
-    #[cfg(any(feature = "dist-client", feature = "dist-server"))]
-    use crate::config::utils::HTTPUrl;
     use crate::config::{
         WriteErrorPolicy,
         cache::{
@@ -652,8 +650,9 @@ mod test {
             Redis, S3, Webdav,
         },
     };
-    use serial_test::serial;
-    use std::{collections::BTreeMap, ffi::OsString, str::FromStr};
+    use std::{collections::BTreeMap, ffi::OsString};
+    #[cfg(any(feature = "dist-client", feature = "dist-server"))]
+    use {crate::config::utils::HTTPUrl, std::str::FromStr};
 
     #[test]
     fn config_from_vars() -> Result<()> {
@@ -2182,6 +2181,7 @@ mod test {
     mod s3 {
 
         use super::*;
+        use serial_test::serial;
 
         #[test]
         fn config_from_env() -> Result<()> {
