@@ -133,7 +133,7 @@ fn test_dependency_changes(
     client: &SccacheClient,
     compiler: &Compiler,
     tempdir: &Path,
-    clang_plusplus: bool,
+    plusplus: bool,
 ) -> sccache::errors::Result<()> {
     let Compiler {
         name,
@@ -150,11 +150,7 @@ fn test_dependency_changes(
     let dep_b = "pp_test_b.h";
 
     let kind = (*name).into();
-    let lang = if clang_plusplus {
-        Language::Cxx
-    } else {
-        Language::C
-    };
+    let lang = if plusplus { Language::Cxx } else { Language::C };
 
     client.zero_stats();
     client.clear_disk_cache()?;
@@ -325,7 +321,7 @@ fn test_time_macros(
     client: &SccacheClient,
     compiler: &Compiler,
     tempdir: &Path,
-    clang_plusplus: bool,
+    plusplus: bool,
 ) -> sccache::errors::Result<()> {
     let Compiler {
         name,
@@ -342,11 +338,7 @@ fn test_time_macros(
     let dep_b = "time_macros_test_b.h";
 
     let kind = (*name).into();
-    let lang = if clang_plusplus {
-        Language::Cxx
-    } else {
-        Language::C
-    };
+    let lang = if plusplus { Language::Cxx } else { Language::C };
 
     client.zero_stats();
     client.clear_disk_cache()?;
@@ -574,7 +566,7 @@ fn test_date_macros(
     client: &SccacheClient,
     compiler: &Compiler,
     tempdir: &Path,
-    clang_plusplus: bool,
+    plusplus: bool,
 ) -> sccache::errors::Result<()> {
     if (compiler.name == "clang" || compiler.name == "clang++")
         && !compiler
@@ -603,11 +595,7 @@ fn test_date_macros(
     let dep_b = "date_macros_test_b.h";
 
     let kind = (*name).into();
-    let lang = if clang_plusplus {
-        Language::Cxx
-    } else {
-        Language::C
-    };
+    let lang = if plusplus { Language::Cxx } else { Language::C };
 
     client.zero_stats();
     client.clear_disk_cache()?;
@@ -1095,7 +1083,7 @@ fn test_timestamp_macros(
     client: &SccacheClient,
     compiler: &Compiler,
     tempdir: &Path,
-    clang_plusplus: bool,
+    plusplus: bool,
 ) -> sccache::errors::Result<()> {
     use sccache::errors::Result;
 
@@ -1114,11 +1102,7 @@ fn test_timestamp_macros(
     let dep_b = "timestamp_macro_test_b.h";
 
     let kind = (*name).into();
-    let lang = if clang_plusplus {
-        Language::Cxx
-    } else {
-        Language::C
-    };
+    let lang = if plusplus { Language::Cxx } else { Language::C };
 
     client.zero_stats();
     client.clear_disk_cache()?;
@@ -1534,7 +1518,7 @@ macro_rules! sccache_macro_tests {
                         &client.start(),
                         &compiler,
                         &tempdir_path,
-                        $compiler_name == "clang++"
+                        $compiler_name.contains("++")
                     )
                     .unwrap();
                 }
@@ -1554,7 +1538,7 @@ macro_rules! sccache_macro_tests {
                         &client.start(),
                         &compiler,
                         &tempdir_path,
-                        $compiler_name == "clang++"
+                        $compiler_name.contains("++")
                     )
                     .unwrap();
                 }
@@ -1576,7 +1560,7 @@ macro_rules! sccache_macro_tests {
                             &client.start(),
                             &compiler,
                             &tempdir_path,
-                            $compiler_name == "clang++"
+                            $compiler_name.contains("++")
                         )
                         .unwrap();
                     }
@@ -1597,7 +1581,7 @@ macro_rules! sccache_macro_tests {
                         &client.start(),
                         &compiler,
                         &tempdir_path,
-                        $compiler_name == "clang++"
+                        $compiler_name.contains("++")
                     )
                     .unwrap();
                 }

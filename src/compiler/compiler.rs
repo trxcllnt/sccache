@@ -2675,7 +2675,11 @@ compiler_id=msvc-clang
 compiler_version=_MSC_VER
 #endif
 #elif defined(__NVCOMPILER)
-compiler_id=nvhpc
+#if defined(__cplusplus)
+compiler_id=nvc++
+#else
+compiler_id=nvc
+#endif
 compiler_version=__NVCOMPILER_MAJOR__ . __NVCOMPILER_MINOR__ . __NVCOMPILER_PATCHLEVEL__
 #elif defined(__clang__) && defined(__cplusplus) && defined(__apple_build_version__)
 compiler_id=apple-clang++
@@ -2853,7 +2857,7 @@ compiler_version=__VERSION__
                 let hashes = crate::util::hash_all(&nvcc.compiler().nvcc_tools).await?;
                 return Ok(Box::new(nvcc.with_extra_hashes(hashes)) as Box<dyn Compiler<T>>);
             }
-            "nvhpc" => {
+            "nvc++" | "nvc" => {
                 let version = version.map(|s| s.replace(' ', ""));
                 trace!("Found {kind} (version: {})", version.as_ref().unwrap());
                 let native_arch = Nvhpc::read_native_arch(&mut creator, &executable, env).await;
@@ -3334,7 +3338,7 @@ mod test {
         next_command(&creator, Ok(MockChild::new(exit_status(1), "", "no -vV")));
         next_command(
             &creator,
-            Ok(MockChild::new(exit_status(0), "compiler_id=nvhpc\n", "")),
+            Ok(MockChild::new(exit_status(0), "compiler_id=nvc++\n", "")),
         );
         // Try to read native -tp= value
         next_command(&creator, Ok(MockChild::new(exit_status(0), "nvc++", "")));

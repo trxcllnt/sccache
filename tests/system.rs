@@ -211,6 +211,15 @@ fn test_basic_compile(client: &SccacheClient, compiler: &Compiler, tempdir: &Pat
     copy_to_tempdir(&[INPUT, INPUT_ERR], tempdir);
 
     let out_file = tempdir.join(OUTPUT);
+    let adv_key = adv_key_kind(
+        if compiler.name.contains("++") {
+            "c++"
+        } else {
+            "c"
+        },
+        compiler.name,
+    );
+
     trace!("compile");
     client
         .cmd()
@@ -227,7 +236,6 @@ fn test_basic_compile(client: &SccacheClient, compiler: &Compiler, tempdir: &Pat
     assert_eq!(0, stats.cache_hits.all());
     assert_eq!(1, stats.cache_misses.all());
     assert_eq!(&1, stats.cache_misses.get("C/C++").unwrap());
-    let adv_key = adv_key_kind("c", compiler.name);
     assert_eq!(&1, stats.cache_misses.get_adv(&adv_key).unwrap());
     trace!("compile");
     fs::remove_file(&out_file).unwrap();
@@ -247,7 +255,6 @@ fn test_basic_compile(client: &SccacheClient, compiler: &Compiler, tempdir: &Pat
     assert_eq!(1, stats.cache_misses.all());
     assert_eq!(&1, stats.cache_hits.get("C/C++").unwrap());
     assert_eq!(&1, stats.cache_misses.get("C/C++").unwrap());
-    let adv_key = adv_key_kind("c", compiler.name);
     assert_eq!(&1, stats.cache_hits.get_adv(&adv_key).unwrap());
     assert_eq!(&1, stats.cache_misses.get_adv(&adv_key).unwrap());
 }
@@ -262,6 +269,15 @@ fn test_basic_compile_into_null(client: &SccacheClient, compiler: &Compiler, tem
     client.zero_stats();
     // Compile a source file.
     copy_to_tempdir(&[INPUT, INPUT_ERR], tempdir);
+
+    let adv_key = adv_key_kind(
+        if compiler.name.contains("++") {
+            "c++"
+        } else {
+            "c"
+        },
+        compiler.name,
+    );
 
     trace!("compile");
     client
@@ -278,7 +294,6 @@ fn test_basic_compile_into_null(client: &SccacheClient, compiler: &Compiler, tem
     assert_eq!(1, stats.cache_hits.all());
     assert_eq!(0, stats.cache_misses.all());
     assert!(stats.cache_misses.get("C/C++").is_none());
-    let adv_key = adv_key_kind("c", compiler.name);
     assert!(stats.cache_misses.get_adv(&adv_key).is_none());
     trace!("compile");
     client
@@ -296,7 +311,6 @@ fn test_basic_compile_into_null(client: &SccacheClient, compiler: &Compiler, tem
     assert_eq!(0, stats.cache_misses.all());
     assert_eq!(&2, stats.cache_hits.get("C/C++").unwrap());
     assert!(stats.cache_misses.get("C/C++").is_none());
-    let adv_key = adv_key_kind("c", compiler.name);
     assert_eq!(&2, stats.cache_hits.get_adv(&adv_key).unwrap());
     assert!(stats.cache_misses.get_adv(&adv_key).is_none());
 }
@@ -313,6 +327,15 @@ fn test_basic_compile_into_dev_stdout(client: &SccacheClient, compiler: &Compile
     // Compile a source file.
     copy_to_tempdir(&[INPUT, INPUT_ERR], tempdir);
 
+    let adv_key = adv_key_kind(
+        if compiler.name.contains("++") {
+            "c++"
+        } else {
+            "c"
+        },
+        compiler.name,
+    );
+
     trace!("compile");
     client
         .cmd()
@@ -328,7 +351,6 @@ fn test_basic_compile_into_dev_stdout(client: &SccacheClient, compiler: &Compile
     assert_eq!(1, stats.cache_hits.all());
     assert_eq!(0, stats.cache_misses.all());
     assert!(stats.cache_misses.get("C/C++").is_none());
-    let adv_key = adv_key_kind("c", compiler.name);
     assert!(stats.cache_misses.get_adv(&adv_key).is_none());
     trace!("compile");
     client
@@ -346,7 +368,6 @@ fn test_basic_compile_into_dev_stdout(client: &SccacheClient, compiler: &Compile
     assert_eq!(0, stats.cache_misses.all());
     assert_eq!(&2, stats.cache_hits.get("C/C++").unwrap());
     assert!(stats.cache_misses.get("C/C++").is_none());
-    let adv_key = adv_key_kind("c", compiler.name);
     assert_eq!(&2, stats.cache_hits.get_adv(&adv_key).unwrap());
     assert!(stats.cache_misses.get_adv(&adv_key).is_none());
 }
@@ -744,25 +765,25 @@ fn test_gcc_clang_depfile(client: &SccacheClient, compiler: &Compiler, tempdir: 
 }
 
 fn run_sccache_command_tests(client: &SccacheClient, compiler: &Compiler, tempdir: &Path) {
-    if !matches!(compiler.name, "clang++") {
-        test_basic_compile(client, compiler, tempdir);
-        test_basic_compile_into_null(client, compiler, tempdir);
-        test_basic_compile_into_dev_stdout(client, compiler, tempdir);
-    }
+    test_basic_compile(client, compiler, tempdir);
+    test_basic_compile_into_null(client, compiler, tempdir);
+    test_basic_compile_into_dev_stdout(client, compiler, tempdir);
     test_compile_with_define(client, compiler, tempdir);
     if matches!(compiler.name, "cl") {
         test_msvc_deps(client, compiler, tempdir);
         test_msvc_responsefile(client, compiler, tempdir);
     }
-    if matches!(compiler.name, "gcc") {
+    if matches!(compiler.name, "gcc" | "nvc" | "nvc++") {
         test_gcc_mp_werror(client, compiler, tempdir);
+    }
+    if matches!(compiler.name, "gcc") {
         test_gcc_fprofile_generate_source_changes(client, compiler, tempdir);
     }
-    if matches!(compiler.name, "clang" | "gcc" | "nvcxx") {
+    if matches!(compiler.name, "clang" | "clang++" | "gcc" | "nvc" | "nvc++") {
         test_gcc_clang_depfile(client, compiler, tempdir);
-        test_gcc_clang_no_warnings_from_macro_expansion(client, compiler, tempdir);
     }
-    if matches!(compiler.name, "clang" | "gcc") {
+    if matches!(compiler.name, "clang" | "clang++" | "gcc") {
+        test_gcc_clang_no_warnings_from_macro_expansion(client, compiler, tempdir);
         test_split_dwarf_object_generate_output_dir_changes(client, compiler, tempdir);
     }
     if matches!(compiler.name, "clang++") {
