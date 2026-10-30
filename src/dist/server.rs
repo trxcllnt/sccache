@@ -624,7 +624,9 @@ impl Server {
         let (toolchain_dir, inputs_dir) = self
             .load_job(
                 inputs,
-                outputs.iter().map(|path| cwd.join(path)).collect(),
+                std::iter::once(cwd.join("x"))
+                    .chain(outputs.iter().map(|path| cwd.join(path)))
+                    .collect(),
                 toolchain,
             )
             .await?;

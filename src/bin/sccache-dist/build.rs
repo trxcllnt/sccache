@@ -241,20 +241,25 @@ impl OverlayBuilder {
         exec_cmd: Arc<Vec<String>>,
         lower_dirs: Arc<Vec<PathBuf>>,
         overlay_env: Arc<HashMap<String, String>>,
-        CompileCommand {
-            executable,
-            arguments,
-            env_vars,
-            cwd,
-        }: CompileCommand,
+        command: CompileCommand,
         output_paths: Vec<String>,
         overlay: OverlaySpec,
         job_queue: Arc<tokio::sync::Semaphore>,
         children: &OverlayChildren,
     ) -> BuildResult {
-        tracing::trace!("[perform_build({job_id})]: Compile environment: {env_vars:?}");
-        tracing::debug!("[perform_build({job_id})]: Compile command: {executable:?} {arguments:?}");
+        tracing::trace!(
+            "[perform_build({job_id})]: Compile environment: {:?}",
+            command.env_vars
+        );
+        tracing::debug!("[perform_build({job_id})]: Compile command: {command}");
         tracing::debug!("[perform_build({job_id})]: Output paths: {output_paths:?}");
+
+        let CompileCommand {
+            executable,
+            arguments,
+            env_vars,
+            cwd,
+        } = command;
 
         if output_paths.is_empty() {
             return Err(BuildError::Unknown(anyhow!("Output paths is empty")));
