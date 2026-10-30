@@ -2703,7 +2703,7 @@ compiler_id=unknown
 compiler_version=__VERSION__
 "
     .to_vec();
-    let (tempdir, src) = write_temp_file(&pool, "testfile.c".as_ref(), test).await?;
+    let (_tempdir, src) = write_temp_file(&pool, "testfile.c".as_ref(), test).await?;
 
     let executable = executable.as_ref().to_owned();
 
@@ -2718,8 +2718,6 @@ compiler_version=__VERSION__
     let output = run_input_output(cmd, None)
         .await
         .context("failed to read child output")?;
-
-    drop(tempdir);
 
     let status = output.desc();
     let stdout = bytes_to_str(output.stdout).context("Failed to parse output")?;
@@ -2861,9 +2859,41 @@ compiler_version=__VERSION__
                 let version = version.map(|s| s.replace(' ', ""));
                 trace!("Found {kind} (version: {})", version.as_ref().unwrap());
                 let native_arch = Nvhpc::read_native_arch(&mut creator, &executable, env).await;
+
+                let openmpi = {
+                    let mut cmd = creator.clone().new_command_sync(&executable);
+                    cmd.stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .envs(env.iter().map(|s| (&s.0, &s.1)))
+                        .args(arguments)
+                        .arg("-dD")
+                        .arg("-c")
+                        .arg(&src);
+
+                    trace!("{cmd}");
+
+                    let stdout = match run_input_output(cmd, None).await {
+                        Ok(output) => Some(output.stdout),
+                        Err(err) => match err.downcast::<ProcessError>() {
+                            Ok(ProcessError(output)) => Some(output.stdout),
+                            Err(err) => {
+                                warn!("{kind} error: {err:#}");
+                                None
+                            }
+                        },
+                    };
+
+                    if let Some(stdout) = stdout.and_then(|stdout| bytes_to_str(stdout).ok()) {
+                        stdout.contains("#define _REENTRANT")
+                    } else {
+                        false
+                    }
+                };
+
                 return CCompiler::new(
                     Nvhpc {
                         nvcplusplus: kind == "nvc++",
+                        openmpi,
                         version,
                         native_arch,
                     },
@@ -3359,11 +3389,20 @@ mod test {
                 "",
             )),
         );
+        // Test whether NVHPC is mpicc/mpic++ (yes)
+        next_command(
+            &creator,
+            Ok(MockChild::new(exit_status(1), "#define _REENTRANT 1", "")),
+        );
         let c = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &[], pool, None)
             .wait()
             .unwrap()
             .0;
         assert_eq!(CompilerKind::C(CCompilerKind::Nvhpc), c.kind());
+        if let Ok(nvcxx) = c.into_any().downcast::<CCompiler<Nvhpc>>() {
+            assert!(nvcxx.compiler().openmpi, "openmpi is true");
+            assert!(nvcxx.compiler().nvcplusplus, "nvcplusplus is true");
+        }
     }
 
     #[test]

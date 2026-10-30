@@ -40,6 +40,7 @@ use std::{
 pub struct Nvhpc {
     /// true iff this is nvc++.
     pub nvcplusplus: bool,
+    pub openmpi: bool,
     pub version: Option<String>,
     pub native_arch: Option<String>,
 }
@@ -174,6 +175,21 @@ impl CCompilerImpl for Nvhpc {
     where
         T: CommandCreatorSync,
     {
+        let parsed_args = if self.openmpi {
+            // mpicc and mpic++ define `-D_REENTRANT=1` in compilations, but don't
+            // define it when preprocessing. This leads to generating incorrect
+            // dependencies and failing dist-compiles, so pass it here.
+            &ParsedArguments {
+                dependency_args: [
+                    &["-D_REENTRANT=1".into()][..],
+                    &parsed_args.dependency_args[..],
+                ]
+                .concat(),
+                ..parsed_args.clone()
+            }
+        } else {
+            parsed_args
+        };
         gcc::generate_dependencies(
             creator,
             executable,
@@ -252,6 +268,7 @@ mod test {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
         Nvhpc {
             nvcplusplus: false,
+            openmpi: false,
             version: None,
             native_arch: None,
         }
