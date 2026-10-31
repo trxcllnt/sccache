@@ -15,7 +15,7 @@
 use crate::{
     cache::{Storage, disk::DiskCache},
     dist::{
-        self, BuildError, BuildResult, BuilderIncoming, CompileCommand, InputsService, JobInputs,
+        self, BuildError, BuildOutput, BuilderIncoming, CompileCommand, InputsService, JobInputs,
         RunJobError, RunJobStatus, ServerInputs, ServerService, ServerToolchains, StatusUpdate,
         Toolchain, ToolchainService,
         io::{Jobs, Toolchains},
@@ -612,6 +612,7 @@ impl Server {
         command: CompileCommand,
         inputs: JobInputs,
         outputs: Vec<String>,
+        save_outputs_as_job_input: bool,
     ) -> std::result::Result<RunJobResponse, RunJobError> {
         // Record total run_job time
         let _timer = self.metrics.run_job_timer();
@@ -638,24 +639,41 @@ impl Server {
         let _pending = self.metrics.jobs_pending.increment();
 
         // Run the build
-        self.run_build(job_id, toolchain_dir, inputs_dir, command, outputs)
+        let result = self
+            .run_build(
+                job_id,
+                toolchain_dir,
+                inputs_dir,
+                command,
+                outputs,
+                save_outputs_as_job_input,
+            )
             .await
-            .map(|result| {
-                if !result.output.success() && !result.output.exit() {
-                    return RunJobResponse::build_process_killed(&self.server_id);
-                }
-                RunJobResponse::Complete {
-                    result,
-                    server_id: self.server_id.clone(),
-                }
-            })
             .map_err(|err| {
                 if let BuildError::UnpackInputs(_) = err {
                     RunJobError::MissingJobInputs { inputs: vec![] }
                 } else {
                     RunJobError::Retryable(err.to_string())
                 }
-            })
+            })?;
+
+        if !result.output.success() && !result.output.exit() {
+            return Ok(RunJobResponse::build_process_killed(&self.server_id));
+        }
+
+        if save_outputs_as_job_input {
+            for (_, hash, data) in result.hashed.iter() {
+                self.jobs_io
+                    .put_job_inputs(hash, data.compressed().into())
+                    .await
+                    .map_err(|err| RunJobError::Retryable(err.to_string()))?;
+            }
+        }
+
+        Ok(RunJobResponse::Complete {
+            result: result.into(),
+            server_id: self.server_id.clone(),
+        })
     }
 
     async fn load_job(
@@ -697,11 +715,19 @@ impl Server {
         inputs_dir: PathBuf,
         command: CompileCommand,
         outputs: Vec<String>,
-    ) -> std::result::Result<BuildResult, BuildError> {
+        save_outputs_as_job_input: bool,
+    ) -> std::result::Result<BuildOutput, BuildError> {
         // Record build time
         let _timer = self.metrics.run_build_timer();
         self.builder
-            .run_build(job_id, &toolchain_dir, &inputs_dir, command, outputs)
+            .run_build(
+                job_id,
+                &toolchain_dir,
+                &inputs_dir,
+                command,
+                outputs,
+                save_outputs_as_job_input,
+            )
             .await
             .map_err(|err| {
                 // Record run_build errors
@@ -803,6 +829,7 @@ impl ServerService for Server {
         command: CompileCommand,
         inputs: JobInputs,
         outputs: Vec<String>,
+        save_outputs_as_job_input: bool,
     ) -> Result<RunJobResponse> {
         self.run_job
             .call(RunJobArgs {
@@ -813,6 +840,7 @@ impl ServerService for Server {
                 inputs,
                 outputs,
                 server: self.clone(),
+                save_outputs_as_job_input,
             })
             .await
             .map(|(_, res)| res)
@@ -918,6 +946,7 @@ struct RunJobArgs {
     inputs: JobInputs,
     outputs: Vec<String>,
     server: Server,
+    save_outputs_as_job_input: bool,
 }
 
 impl AsyncMulticastArgs for RunJobArgs {
@@ -940,6 +969,7 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFunc {
             inputs,
             outputs,
             server,
+            save_outputs_as_job_input,
         } = args;
 
         // Add job
@@ -981,6 +1011,7 @@ impl AsyncMulticastFunc<RunJobArgs, RunJobResponse> for RunJobFunc {
                                 command.clone(),
                                 inputs.clone(),
                                 outputs.clone(),
+                                *save_outputs_as_job_input,
                             )
                             .await
                             .map_err(anyhow::Error::new)

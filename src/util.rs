@@ -81,12 +81,30 @@ impl Digest {
         Ok(BufReader::new(AllowStdIo::new(file)))
     }
 
+    fn open_file_sync<T>(path: T) -> Result<std::io::BufReader<fs::File>>
+    where
+        T: AsRef<Path>,
+    {
+        let path = path.as_ref();
+        let file = fs::File::open(path)
+            .with_context(|| format!("Failed to open file for hashing: {path:?}"))?;
+        Ok(std::io::BufReader::new(file))
+    }
+
     /// Calculate the BLAKE3 digest of the contents of `path`.
     pub async fn from_file<T>(path: T) -> Result<Self>
     where
         T: AsRef<Path>,
     {
         Self::new().with_file(path).await
+    }
+
+    /// Calculate the BLAKE3 digest of the contents of `path`.
+    pub fn from_file_sync<T>(path: T) -> Result<Self>
+    where
+        T: AsRef<Path>,
+    {
+        Self::new().with_file_sync(path)
     }
 
     /// Calculate the BLAKE3 digest of the contents of `path`, while
@@ -171,6 +189,32 @@ impl Digest {
         }
     }
 
+    /// Update the BLAKE3 digest of the contents of `path` into this digest.
+    pub fn with_file_sync<T>(self, path: T) -> Result<Self>
+    where
+        T: AsRef<Path>,
+    {
+        let path = path.as_ref();
+        if path.is_dir() {
+            // For directories (e.g., from
+            // proc_macro::tracked_path::path()), recursively hash all file
+            // names and contents in sorted order.
+            let mut entries = Vec::new();
+            Self::collect_dir_entries(path, &mut entries)?;
+            entries.sort();
+            let mut digest = self;
+            for entry in entries {
+                let entry = entry.as_path();
+                let rel = entry.strip_prefix(path).unwrap_or(entry);
+                digest.delimiter(&path_to_bytes(rel)?);
+                digest = digest.with_reader_sync(Self::open_file_sync(entry)?)?;
+            }
+            Ok(digest)
+        } else {
+            self.with_reader_sync(Self::open_file_sync(path)?)
+        }
+    }
+
     /// Update the BLAKE3 digest of the contents of `path` into this digest, while
     /// also checking for the presence of time macros.
     /// See [`TimeMacroFinder`] for more details.
@@ -235,9 +279,8 @@ impl Digest {
 
         let path = path.as_ref();
 
-        let (mut digest, time_finder, hinc_finder) = self.with_reader_and_macro_finders_sync(
-            std::io::BufReader::new(Self::open_file(path)?.into_inner().into_inner()),
-        )?;
+        let (mut digest, time_finder, hinc_finder) =
+            self.with_reader_and_macro_finders_sync(Self::open_file_sync(path)?)?;
 
         // If __DATE__ or __TIMESTAMP__ found, make sure that the digest changes
         // if the (potential) expansion of those macros changes by computing a new

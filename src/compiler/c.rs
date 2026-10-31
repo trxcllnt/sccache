@@ -275,7 +275,6 @@ struct CCompilation<I: CCompilerImpl, T: CommandCreatorSync> {
     env_vars: Vec<(OsString, OsString)>,
     dist_files: Vec<PathBuf>,
     deps_args: Option<GetDependenciesArgs<I, T>>,
-    compile_timestamp: DateTime<Utc>,
 }
 
 /// Supported C compilers.
@@ -805,7 +804,6 @@ where
                         deps_args.hidden_includes = hidden_includes;
                         deps_args
                     }),
-                    compile_timestamp,
                 }),
                 weak_toolchain_key,
             },
@@ -1494,6 +1492,19 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compilation<T> for CCompilation<I,
         self.is_locally_preprocessed
     }
 
+    fn save_outputs_as_job_input(&self) -> bool {
+        if matches!(
+            self.parsed_args.language,
+            Language::Assembler | Language::CudaFE | Language::Ptx
+        ) {
+            true
+        } else if matches!(self.compiler.kind(), CCompilerKind::Msvc) {
+            self.parsed_args.compilation_flag == "-P"
+        } else {
+            self.parsed_args.compilation_flag == "-E"
+        }
+    }
+
     fn outputs<'a>(&'a self) -> Box<dyn Iterator<Item = FileObjectSource> + 'a> {
         Box::new(self.parsed_args.outputs.iter().map(|(k, output)| {
             let dir = self
@@ -1585,7 +1596,6 @@ impl<I: CCompilerImpl, T: CommandCreatorSync> pkg::InputsPackager for CCompilati
             mut dist_files,
             env_vars,
             deps_args,
-            compile_timestamp,
             ..
         } = *self;
 
@@ -1625,11 +1635,7 @@ impl<I: CCompilerImpl, T: CommandCreatorSync> pkg::InputsPackager for CCompilati
             .flat_map_unordered(None, |(dist_path, file_path)| {
                 futures::stream::once(Box::pin(async move {
                     let dist_path = path_to_str(dist_path)?.into_owned();
-                    let file_hash = match SOURCE_FILE_CACHE.get(&file_path, compile_timestamp).await
-                    {
-                        Ok(entry) => entry.meta.digest.clone(),
-                        _ => Digest::from_file(&file_path).await?.finish(),
-                    };
+                    let file_hash = Digest::from_file(&file_path).await?.finish();
                     Ok::<_, anyhow::Error>((dist_path, (file_hash, file_path)))
                 }))
             })

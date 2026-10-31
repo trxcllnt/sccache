@@ -940,6 +940,7 @@ mod scheduler {
                                         inputs: JobInputs::TarGZ {
                                             job_id: job_id.clone(),
                                         },
+                                        save_outputs_as_job_input: false,
                                     },
                                 )
                                 .and_then(|res| futures::future::ok(res.into()))
@@ -1363,6 +1364,7 @@ mod client {
             command: CompileCommand,
             inputs: dist::JobInputs,
             outputs: Vec<String>,
+            save_outputs_as_job_input: bool,
         ) -> Result<RunJobResponse> {
             bincode_req_fut(
                 self.client
@@ -1375,6 +1377,7 @@ mod client {
                         inputs,
                         outputs,
                         toolchain,
+                        save_outputs_as_job_input,
                     })?,
             )
             .await

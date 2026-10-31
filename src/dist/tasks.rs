@@ -221,6 +221,7 @@ pub trait SchedulerTasks: AppTasks + Send + Sync {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_job(
         &self,
         job_id: &str,
@@ -229,6 +230,7 @@ pub trait SchedulerTasks: AppTasks + Send + Sync {
         command: &CompileCommand,
         inputs: JobInputs,
         outputs: &[String],
+        save_outputs_as_job_input: bool,
     ) -> std::result::Result<AsyncResult, CeleryError>;
 }
 
@@ -250,6 +252,7 @@ impl SchedulerTasks for Tasks {
         command: &CompileCommand,
         inputs: JobInputs,
         outputs: &[String],
+        save_outputs_as_job_input: bool,
     ) -> std::result::Result<AsyncResult, CeleryError> {
         self.app()
             .send_task(
@@ -260,6 +263,7 @@ impl SchedulerTasks for Tasks {
                     command.to_owned(),
                     inputs,
                     outputs.to_owned(),
+                    save_outputs_as_job_input,
                 )
                 .with_time_limit(self.job_time_limit.saturating_sub(30))
                 .with_expires_in(self.job_time_limit.saturating_sub(30)),
@@ -346,6 +350,7 @@ mod task_impls {
         command: CompileCommand,
         inputs: JobInputs,
         outputs: Vec<String>,
+        save_outputs_as_job_input: bool,
     ) -> TaskResult<RunJobResponse> {
         tracing::trace!(
             "[run_job({job_id}, {}, {:?}, {:?}, {outputs:?})]",
@@ -355,7 +360,17 @@ mod task_impls {
         );
 
         server_service()
-            .map(|svc| svc.run_job(&job_id, &reply_to, toolchain, command, inputs, outputs))
+            .map(|svc| {
+                svc.run_job(
+                    &job_id,
+                    &reply_to,
+                    toolchain,
+                    command,
+                    inputs,
+                    outputs,
+                    save_outputs_as_job_input,
+                )
+            })
             .unwrap_or_else(|err| futures::future::err(err).boxed())
             .await
             .map_err(|err| match err.downcast::<RunJobError>() {

@@ -18,17 +18,18 @@ use fs_err as fs;
 use futures::lock::Mutex;
 use itertools::Itertools;
 use libmount::Overlay;
-use sccache::dist::{
-    BuildError, BuildResult as BuildOutput, BuilderIncoming, CompileCommand, OutputData,
+use sccache::{
+    dist::{BuildError, BuildOutput, BuilderIncoming, CompileCommand, OutputData},
+    mock_command::ProcessOutput,
 };
-use sccache::mock_command::ProcessOutput;
-use std::collections::HashMap;
-use std::io;
-use std::path::{self, Path, PathBuf};
-use std::process::{Output, Stdio};
-use std::sync::Arc;
-use tokio::io::AsyncReadExt;
-use tokio::process::ChildStdin;
+use std::{
+    collections::HashMap,
+    io,
+    path::{self, Path, PathBuf},
+    process::{Output, Stdio},
+    sync::Arc,
+};
+use tokio::{io::AsyncReadExt, process::ChildStdin};
 use tokio_util::compat::{
     FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt,
 };
@@ -246,6 +247,7 @@ impl OverlayBuilder {
         overlay: OverlaySpec,
         job_queue: Arc<tokio::sync::Semaphore>,
         children: &OverlayChildren,
+        save_outputs_as_job_input: bool,
     ) -> BuildResult {
         tracing::trace!(
             "[perform_build({job_id})]: Compile environment: {:?}",
@@ -483,14 +485,23 @@ impl OverlayBuilder {
                     for (path, abs_path) in output_paths.into_iter().zip(output_paths_absolute) {
                         let host_path = join_suffix(&output_dir, &abs_path);
                         match fs::File::open(&host_path) {
-                            Ok(file) => match OutputData::try_from_reader(file) {
-                                Ok(data) => outputs.push((path, data)),
-                                Err(err) => {
-                                    tracing::error!(
-                                        "[perform_build({job_id})]: Failed to read and compress output file host={host_path:?}, overlay={abs_path:?}: {err}"
-                                    );
+                            Ok(file) => {
+                                let hash = if save_outputs_as_job_input {
+                                    sccache::util::Digest::from_file_sync(&host_path)
+                                        .map_err(BuildError::Unknown)?
+                                        .finish()
+                                } else {
+                                    String::new()
+                                };
+                                match OutputData::try_from_reader(file) {
+                                    Ok(data) => outputs.push((path, hash, data)),
+                                    Err(err) => {
+                                        tracing::error!(
+                                            "[perform_build({job_id})]: Failed to read and compress output file host={host_path:?}, overlay={abs_path:?}: {err}"
+                                        );
+                                    }
                                 }
-                            },
+                            }
                             Err(err) => {
                                 if err.kind() == io::ErrorKind::NotFound {
                                     tracing::debug!(
@@ -504,7 +515,10 @@ impl OverlayBuilder {
                     }
                 }
 
-                BuildResult::Ok(BuildOutput { output, outputs })
+                BuildResult::Ok(BuildOutput {
+                    output,
+                    hashed: outputs,
+                })
             };
 
         let runtime = tokio::runtime::Handle::current();
@@ -590,6 +604,7 @@ impl BuilderIncoming for OverlayBuilder {
         inputs_dir: &Path,
         command: CompileCommand,
         outputs: Vec<String>,
+        save_outputs_as_job_input: bool,
     ) -> BuildResult {
         // Bail early if job_queue is closed while this job is running
         if self.job_queue.is_closed() {
@@ -622,6 +637,7 @@ impl BuilderIncoming for OverlayBuilder {
             overlay.clone(),
             self.job_queue.clone(),
             self.children.as_ref(),
+            save_outputs_as_job_input,
         )
         .await;
 
@@ -695,6 +711,7 @@ impl DockerBuilder {
         output_paths: Vec<String>,
         inputs_dir: &Path,
         job_queue: &tokio::sync::Semaphore,
+        save_outputs_as_job_input: bool,
     ) -> BuildResult {
         // Bail early if job_queue is closed while this job is running
         if job_queue.is_closed() {
@@ -983,14 +1000,24 @@ impl DockerBuilder {
                     let host_path = join_suffix(host_root, &output_path_abs);
 
                     match fs::File::open(&host_path) {
-                        Ok(file) => match OutputData::try_from_reader(file) {
-                            Ok(data) => outputs.push((output_path, data)),
-                            Err(err) => {
-                                tracing::error!(
-                                    "[perform_build({job_id})]: Failed to read and compress output file host={host_path:?}, container={output_path:?}: {err}"
-                                );
+                        Ok(file) => {
+                            let hash = if save_outputs_as_job_input {
+                                sccache::util::Digest::from_file_sync(&host_path)
+                                    .map_err(BuildError::Unknown)?
+                                    .finish()
+                            } else {
+                                String::new()
+                            };
+
+                            match OutputData::try_from_reader(file) {
+                                Ok(data) => outputs.push((output_path, hash, data)),
+                                Err(err) => {
+                                    tracing::error!(
+                                        "[perform_build({job_id})]: Failed to read and compress output file host={host_path:?}, container={output_path:?}: {err}"
+                                    );
+                                }
                             }
-                        },
+                        }
                         Err(err) => {
                             if err.kind() == io::ErrorKind::NotFound {
                                 tracing::debug!(
@@ -1007,7 +1034,10 @@ impl DockerBuilder {
             outputs
         };
 
-        BuildResult::Ok(BuildOutput { output, outputs })
+        BuildResult::Ok(BuildOutput {
+            output,
+            hashed: outputs,
+        })
     }
 
     async fn finish_container(job_id: &str, c_name: &str) {
@@ -1034,6 +1064,7 @@ impl BuilderIncoming for DockerBuilder {
         inputs_dir: &Path,
         command: CompileCommand,
         outputs: Vec<String>,
+        save_outputs_as_job_input: bool,
     ) -> BuildResult {
         // Bail early if job_queue is closed while this job is running
         if self.job_queue.is_closed() {
@@ -1063,6 +1094,7 @@ impl BuilderIncoming for DockerBuilder {
             outputs,
             inputs_dir,
             self.job_queue.as_ref(),
+            save_outputs_as_job_input,
         )
         .await;
 

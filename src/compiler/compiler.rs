@@ -1358,6 +1358,7 @@ where
 
         let pending = service.increment_pending_compilations();
 
+        let save_outputs_as_job_input = compilation.save_outputs_as_job_input();
         let mut dist_compile_cmd = dist_compile_cmd.as_dist(&mut path_transformer)?;
 
         let (inputs_packager, toolchain_packager, outputs_rewriter) =
@@ -1369,8 +1370,6 @@ where
                 .describe_inputs(&mut path_transformer)
                 .await?
         };
-
-        drop(pending);
 
         trace!("[{out_pretty}]: Identifying dist toolchain for {executable:?}");
 
@@ -1438,13 +1437,13 @@ where
             .max_delay(Duration::from_secs(10))
             .map(tokio_retry2::strategy::jitter);
 
+        drop(pending);
+
         let dist_compile_res = loop {
             use futures::TryStreamExt;
 
             let job_id: &String;
             let timeout: u32;
-
-            let active = service.increment_active_compilations();
 
             macro_rules! retry_or_bail {
                 ($err:ident, $job_id:expr, $server_id:expr) => {{
@@ -1462,6 +1461,8 @@ where
                     retry_or_bail!($err, $job_id, None);
                 }};
             }
+
+            let pending = service.increment_pending_compilations();
 
             (job_id, timeout) = if let Some((ref job_id, timeout)) = job {
                 (job_id, timeout)
@@ -1537,7 +1538,12 @@ where
                 dist_compile_cmd.clone(),
                 inputs_manifest.clone(),
                 dist_output_paths.clone(),
+                save_outputs_as_job_input,
             );
+
+            drop(pending);
+
+            let active = service.increment_active_compilations();
 
             let run_job = run_job.await;
 
@@ -1830,6 +1836,10 @@ where
 
     fn is_locally_preprocessed(&self) -> bool {
         true
+    }
+
+    fn save_outputs_as_job_input(&self) -> bool {
+        false
     }
 
     /// Returns an iterator over the results of this compilation.
@@ -4966,6 +4976,7 @@ mod test_dist {
             _: CompileCommand,
             _: JobInputs,
             _: Vec<String>,
+            _: bool,
         ) -> Result<RunJobResponse> {
             unreachable!()
         }
@@ -5039,6 +5050,7 @@ mod test_dist {
             _: CompileCommand,
             _: JobInputs,
             _: Vec<String>,
+            _: bool,
         ) -> Result<RunJobResponse> {
             unreachable!()
         }
@@ -5127,6 +5139,7 @@ mod test_dist {
             _: CompileCommand,
             _: JobInputs,
             _: Vec<String>,
+            _: bool,
         ) -> Result<RunJobResponse> {
             unreachable!("fn run_job is not used for this test. qed")
         }
@@ -5215,6 +5228,7 @@ mod test_dist {
             command: CompileCommand,
             _: JobInputs,
             _: Vec<String>,
+            _: bool,
         ) -> Result<RunJobResponse> {
             assert_eq!(job_id, "job_id");
             assert_eq!(timeout, Duration::from_secs(10));
@@ -5327,6 +5341,7 @@ mod test_dist {
             command: CompileCommand,
             _: JobInputs,
             outputs: Vec<String>,
+            _: bool,
         ) -> Result<RunJobResponse> {
             assert_eq!(job_id, "job_id");
             assert_eq!(timeout, Duration::from_secs(10));

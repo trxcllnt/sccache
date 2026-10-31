@@ -16,6 +16,7 @@ use crate::{errors::*, mock_command::ProcessOutput};
 use async_trait::async_trait;
 use bytes::Buf;
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use std::{
     collections::{BTreeMap, HashMap},
     ffi::OsString,
@@ -556,9 +557,10 @@ impl JobInput {
     }
 }
 
+#[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OutputData(Vec<u8>, u64);
+pub struct OutputData(#[serde_as(as = "serde_with::Bytes")] Vec<u8>, u64);
 impl OutputData {
     #[cfg(any(feature = "dist-server", all(feature = "dist-client", test)))]
     pub fn try_from_reader<R: std::io::Read>(reader: R) -> std::io::Result<Self> {
@@ -576,6 +578,9 @@ impl OutputData {
             actual: self.1,
             compressed: self.0.len() as u64,
         }
+    }
+    pub fn compressed(&self) -> Vec<u8> {
+        self.0.clone()
     }
     #[cfg(feature = "dist-client")]
     pub fn into_reader(self) -> impl std::io::Read {
@@ -606,6 +611,24 @@ impl fmt::Display for OutputDataLens {
 pub struct BuildResult {
     pub output: ProcessOutput,
     pub outputs: Vec<(String, OutputData)>,
+}
+
+pub struct BuildOutput {
+    pub output: ProcessOutput,
+    pub hashed: Vec<(String, String, OutputData)>,
+}
+
+impl From<BuildOutput> for BuildResult {
+    fn from(build: BuildOutput) -> Self {
+        let mut outputs = vec![];
+        for (path, _, data) in build.hashed {
+            outputs.push((path, data));
+        }
+        Self {
+            output: build.output,
+            outputs,
+        }
+    }
 }
 
 #[cfg(feature = "dist-server")]
@@ -874,6 +897,7 @@ pub mod v3 {
         pub inputs: JobInputs,
         pub outputs: Vec<String>,
         pub toolchain: Toolchain,
+        pub save_outputs_as_job_input: bool,
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1146,6 +1170,7 @@ pub trait SchedulerService: Send + Sync {
 #[cfg(feature = "dist-server")]
 #[async_trait]
 pub trait ServerService: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     async fn run_job(
         &self,
         job_id: &str,
@@ -1154,6 +1179,7 @@ pub trait ServerService: Send + Sync {
         command: CompileCommand,
         inputs: JobInputs,
         outputs: Vec<String>,
+        save_outputs_as_job_input: bool,
     ) -> Result<v3::RunJobResponse>;
 
     async fn notify_run_job_err(&self, job_id: &str, err: RunJobError) -> Result<()>;
@@ -1185,7 +1211,8 @@ pub trait BuilderIncoming: Send + Sync {
         inputs_dir: &Path,
         command: CompileCommand,
         outputs: Vec<String>,
-    ) -> std::result::Result<BuildResult, BuildError>;
+        save_outputs_as_job_input: bool,
+    ) -> std::result::Result<BuildOutput, BuildError>;
     // From Server
     async fn finish_build(&self, job_id: &str);
     // From Server
@@ -1206,6 +1233,7 @@ pub trait Client: Send + Sync {
     // To Scheduler
     async fn del_job(&self, job_id: &str) -> Result<()>;
     // To Scheduler
+    #[allow(clippy::too_many_arguments)]
     async fn run_job(
         &self,
         job_id: &str,
@@ -1214,6 +1242,7 @@ pub trait Client: Send + Sync {
         command: CompileCommand,
         inputs: JobInputs,
         outputs: Vec<String>,
+        save_outputs_as_job_input: bool,
     ) -> Result<v3::RunJobResponse>;
     // To Scheduler
     async fn get_status(&self) -> Result<SchedulerStatus>;

@@ -578,11 +578,11 @@ impl SchedulerService for Scheduler {
         &self,
         job_id: &str,
         RunJobRequest {
-            toolchain,
             command,
             inputs,
             outputs,
-            ..
+            toolchain,
+            save_outputs_as_job_input,
         }: RunJobRequest,
     ) -> Result<RunJobResponse> {
         // Early exit if possible
@@ -614,7 +614,15 @@ impl SchedulerService for Scheduler {
             RunJobStatus::Active { ref schedulers } => {
                 if schedulers.first() == Some(reply_to) {
                     self.tasks
-                        .run_job(job_id, reply_to, &toolchain, &command, inputs, &outputs)
+                        .run_job(
+                            job_id,
+                            reply_to,
+                            &toolchain,
+                            &command,
+                            inputs,
+                            &outputs,
+                            save_outputs_as_job_input,
+                        )
                         .await
                         .map_err(anyhow::Error::new)?;
                 }

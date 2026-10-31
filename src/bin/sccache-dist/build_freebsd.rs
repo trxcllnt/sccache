@@ -17,14 +17,16 @@ use async_trait::async_trait;
 use fs_err as fs;
 use futures::lock::Mutex;
 use itertools::Itertools;
-use sccache::dist::{
-    BuildError, BuildResult as BuildOutput, BuilderIncoming, CompileCommand, OutputData,
+use sccache::{
+    dist::{BuildError, BuildOutput, BuilderIncoming, CompileCommand, OutputData},
+    mock_command::ProcessOutput,
 };
-use sccache::mock_command::ProcessOutput;
-use std::collections::{HashMap, hash_map};
-use std::path::{Path, PathBuf};
-use std::process::Output;
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, hash_map},
+    path::{Path, PathBuf},
+    process::Output,
+    sync::Arc,
+};
 use uuid::Uuid;
 
 pub type BuildResult = std::result::Result<BuildOutput, BuildError>;
@@ -387,6 +389,7 @@ impl PotBuilder {
         cid: &str,
         pot_fs_root: &Path,
         job_queue: &tokio::sync::Semaphore,
+        save_outputs_as_job_input: bool,
     ) -> BuildResult {
         tracing::trace!("[perform_build({job_id})]: Compile environment: {env_vars:?}");
         tracing::trace!("[perform_build({job_id})]: Compile command: {executable:?} {arguments:?}");
@@ -565,8 +568,17 @@ impl PotBuilder {
                     match output {
                         Ok(output) => {
                             if output.status.success() {
+                                let hash = if save_outputs_as_job_input {
+                                    sccache::util::Digest::new()
+                                        .with_reader_sync(&*output.stdout)
+                                        .map_err(BuildError::Unknown)?
+                                        .finish()
+                                } else {
+                                    String::new()
+                                };
+
                                 match OutputData::try_from_reader(&*output.stdout) {
-                                    Ok(data) => outputs.push((path, data)),
+                                    Ok(data) => outputs.push((path, hash, data)),
                                     Err(err) => {
                                         tracing::error!(
                                             "[perform_build({job_id})]: Failed to read and compress output file host={abs_path:?}, container={path:?}: {err}"
@@ -589,7 +601,10 @@ impl PotBuilder {
             outputs
         };
 
-        BuildResult::Ok(BuildOutput { output, outputs })
+        BuildResult::Ok(BuildOutput {
+            output,
+            hashed: outputs,
+        })
     }
 }
 
@@ -603,6 +618,7 @@ impl BuilderIncoming for PotBuilder {
         inputs_dir: &Path,
         command: CompileCommand,
         outputs: Vec<String>,
+        save_outputs_as_job_input: bool,
     ) -> BuildResult {
         // Guard compiling until we get a token from the job queue
         let _job_slot = self
@@ -634,6 +650,7 @@ impl BuilderIncoming for PotBuilder {
             &cid,
             &self.pot_fs_root,
             self.job_queue.as_ref(),
+            save_outputs_as_job_input,
         )
         .await;
 

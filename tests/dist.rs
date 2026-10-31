@@ -222,11 +222,10 @@ async fn test_dist_cargo_build(message_broker: &str) -> Result<()> {
     // This test is flaky on github's small runners,
     // so run a few times before reporting failure
     for i in 1..=5 {
-        let client = system.new_client(&dist_test_sccache_client_cfg(
-            system.data_dir(),
-            system.scheduler(0)?.url(),
-            0,
-        ));
+        let mut cfg =
+            dist_test_sccache_client_cfg(system.data_dir(), system.scheduler(0)?.url(), 0);
+        cfg.dist.fallback_to_local_compile = false;
+        let client = system.new_client(&cfg);
 
         let output = rust_compile(&client, system.test_dir()).await?;
 
@@ -282,11 +281,9 @@ async fn test_dist_cpp_disk_storage(message_broker: &str) -> Result<()> {
         .build()
         .await?;
 
-    let client = system.new_client(&dist_test_sccache_client_cfg(
-        system.data_dir(),
-        system.scheduler(0)?.url(),
-        0,
-    ));
+    let mut cfg = dist_test_sccache_client_cfg(system.data_dir(), system.scheduler(0)?.url(), 0);
+    cfg.dist.fallback_to_local_compile = false;
+    let client = system.new_client(&cfg);
 
     cc_compile(&client, system.test_dir()).await?;
 
@@ -319,11 +316,10 @@ async fn test_dist_cpp_toolchain(message_broker: &str) -> Result<()> {
 
     // Run twice to verify toolchain is only uploaded once
     for i in 0..2 {
-        let client = system.new_client(&dist_test_sccache_client_cfg(
-            system.data_dir(),
-            system.scheduler(0)?.url(),
-            0,
-        ));
+        let mut cfg =
+            dist_test_sccache_client_cfg(system.data_dir(), system.scheduler(0)?.url(), 0);
+        cfg.dist.fallback_to_local_compile = false;
+        let client = system.new_client(&cfg);
 
         let tc_dir = client.clear_toolchains_cache()?;
 
@@ -367,11 +363,9 @@ async fn test_dist_cpp_cloud_storage(message_broker: &str) -> Result<()> {
         .build()
         .await?;
 
-    let client = system.new_client(&dist_test_sccache_client_cfg(
-        system.data_dir(),
-        system.scheduler(0)?.url(),
-        0,
-    ));
+    let mut cfg = dist_test_sccache_client_cfg(system.data_dir(), system.scheduler(0)?.url(), 0);
+    cfg.dist.fallback_to_local_compile = false;
+    let client = system.new_client(&cfg);
 
     cc_compile(&client, system.test_dir()).await?;
 
@@ -480,11 +474,9 @@ async fn test_dist_cpp_two_servers(message_broker: &str) -> Result<()> {
         .build()
         .await?;
 
-    let client = system.new_client(&dist_test_sccache_client_cfg(
-        system.data_dir(),
-        system.scheduler(0)?.url(),
-        0,
-    ));
+    let mut cfg = dist_test_sccache_client_cfg(system.data_dir(), system.scheduler(0)?.url(), 0);
+    cfg.dist.fallback_to_local_compile = false;
+    let client = system.new_client(&cfg);
 
     let _ = tokio::try_join!(
         cc_compile(&client, system.test_dir()),
@@ -599,11 +591,13 @@ async fn test_dist_cpp_preprocesspr_cache_bug_2173(message_broker: &str) -> Resu
         .build()
         .await?;
 
-    let client = system.new_client(&dist_test_sccache_client_cfg(
+    let mut cfg = dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0)?.url(),
         10_000_000, // enough for one tiny object file
-    ));
+    );
+    cfg.dist.fallback_to_local_compile = false;
+    let client = system.new_client(&cfg);
 
     let _ = client.clear_disk_cache()?;
 
@@ -666,11 +660,13 @@ async fn test_dist_cuda_compiles(
         .build()
         .await?;
 
-    let client = system.new_client(&dist_test_sccache_client_cfg(
+    let mut cfg = dist_test_sccache_client_cfg(
         system.data_dir(),
         system.scheduler(0)?.url(),
         10_000_000, // enough for one tiny object file
-    ));
+    );
+    cfg.dist.fallback_to_local_compile = false;
+    let client = system.new_client(&cfg);
 
     let _ = client.clear_disk_cache()?;
 
@@ -743,11 +739,9 @@ async fn test_dist_stdpar_compiles(compiler: &Compiler, message_broker: &str) ->
         .build()
         .await?;
 
-    let client = system.new_client(&dist_test_sccache_client_cfg(
-        system.data_dir(),
-        system.scheduler(0)?.url(),
-        0,
-    ));
+    let mut cfg = dist_test_sccache_client_cfg(system.data_dir(), system.scheduler(0)?.url(), 0);
+    cfg.dist.fallback_to_local_compile = false;
+    let client = system.new_client(&cfg);
 
     stdpar_compile(&client, compiler, system.test_dir()).await?;
 
