@@ -12,3 +12,5 @@ simplelog = "0.12"
 
 [lib]
 crate-type = ["cdylib"]
+
+[lints]
