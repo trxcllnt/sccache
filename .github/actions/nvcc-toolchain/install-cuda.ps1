@@ -1,7 +1,7 @@
 Param(
     [Parameter(Mandatory=$false)]
     [string]
-    $cudaVersion="12.8.0"
+    $cudaVersion="12.9.0"
 )
 
 # Use System.Version to tokenize version
@@ -11,7 +11,7 @@ $major = $version.Major
 $minor = $version.Minor
 $build = $version.Build
 
-# Minimum build is 0, not -1 as default in case "12.5" is passed
+# Minimum build is 0, not -1 as default in case "12.9" is passed
 if ($build -lt 0) {
     $build = 0
 }
@@ -21,7 +21,15 @@ $mmbVersionTag = "${major}.${minor}.${build}"
 # mm = major minor
 $mmVersionTag = "${major}.${minor}"
 
-$cudaVersionUrl = "https://developer.download.nvidia.com/compute/cuda/${mmbVersionTag}/network_installers/cuda_${mmbVersionTag}_windows_network.exe"
+# The _x86_64 arch suffix was introduced in the network installer filename at 13.4.
+if ($major -gt 13 -or ($major -eq 13 -and $minor -ge 4)) {
+    $arch = "_x86_64"
+}
+else {
+    $arch = ""
+}
+
+$cudaVersionUrl = "https://developer.download.nvidia.com/compute/cuda/${mmbVersionTag}/network_installers/cuda_${mmbVersionTag}_windows${arch}_network.exe"
 
 ###
 # `cuda_${mmbVersionTag}_windows_network.exe` name only valid back to CUDA v11.5.1.
@@ -64,6 +72,14 @@ if ([int]$major -ge 13) {
     $cudaComponents += "nvvm_$mmVersionTag"
     $cudaComponents += "nvptxcompiler_$mmVersionTag"
 }
+
+# The following components first appeared in 13.3.
+if ($major -gt 13 -or ($major -eq 13 -and $minor -ge 3)) {
+    $cudaComponents += "tileiras_$mmVersionTag"
+}
+
+Write-Output "Installing CUDA Components: $($cudaComponents -join ', ')"
+Write-Output "CUDA Toolkit Installer URL: $cudaVersionUrl"
 
 Invoke-WebRequest -Uri "$cudaVersionUrl" -OutFile "./cuda_network.exe" -UseBasicParsing
 Start-Process -Wait -PassThru -FilePath .\cuda_network.exe -ArgumentList "-s $cudaComponents"
