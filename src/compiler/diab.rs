@@ -926,7 +926,9 @@ mod test {
         next_command(&creator, Ok(MockChild::new(exit_status(0), "", "")));
         let (command, _, cacheable) =
             generate_compile_commands(compiler, &parsed_args, f.tempdir.path(), &[]).unwrap();
-        let _ = command.execute(&service, &creator).wait();
+        let _ = command
+            .execute(&service, &creator, Default::default())
+            .wait();
         assert_eq!(Cacheable::Yes, cacheable);
         // Ensure that we ran all processes.
         assert_eq!(0, creator.lock().unwrap().children.len());

@@ -910,7 +910,12 @@ impl CompileCommandImpl for NvccCompileCommand {
         self.cwd.clone()
     }
 
-    async fn execute<T>(&self, service: &SccacheService<T>, creator: &T) -> Result<ProcessOutput>
+    async fn execute<T>(
+        &self,
+        service: &SccacheService<T>,
+        creator: &T,
+        pending: crate::server::SccacheGaugeIncrement,
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
@@ -928,8 +933,6 @@ impl CompileCommandImpl for NvccCompileCommand {
             ..
         } = self;
 
-        let pending = service.increment_pending_compilations();
-
         let (nvcc_internal_files, nvcc_subcommand_groups) =
             group_nvcc_subcommands_by_compilation_stage(
                 creator,
@@ -944,8 +947,6 @@ impl CompileCommandImpl for NvccCompileCommand {
                 output_path,
             )
             .await?;
-
-        drop(pending);
 
         let maybe_keep_temps_then_clean = |mut nvcc_internal_files: HashMap<String, String>| async move {
             let _active = service.increment_active_compilations();
@@ -1009,37 +1010,46 @@ impl CompileCommandImpl for NvccCompileCommand {
         let num_parallel = device_compile_range.len().min(*num_parallel).max(1);
 
         let run_command_groups =
-            |mut output: ProcessOutput, chunks: Vec<Vec<Vec<NvccGeneratedSubcommand>>>| async {
-                for chunk in chunks {
-                    let results = crate::util::join_all(chunk.into_iter().map(|commands| {
-                        run_nvcc_subcommands_group(
-                            service,
-                            creator,
-                            commands,
-                            output_path,
-                            out_dir.as_ref().path(),
-                            keep_dir.as_deref(),
-                            &nvcc_internal_files,
-                        )
-                    }))
-                    .await;
+            |mut output: ProcessOutput,
+             chunks: Vec<Vec<Vec<NvccGeneratedSubcommand>>>,
+             pending: Option<crate::server::SccacheGaugeIncrement>| {
+                async {
+                    let mut pending = pending;
+                    for chunk in chunks {
+                        let results = crate::util::join_all(chunk.into_iter().map(|commands| {
+                            run_nvcc_subcommands_group(
+                                service,
+                                creator,
+                                commands,
+                                output_path,
+                                out_dir.as_ref().path(),
+                                keep_dir.as_deref(),
+                                &nvcc_internal_files,
+                                pending.take(),
+                            )
+                        }))
+                        .await;
 
-                    for result in results {
-                        output = aggregate_output(output, result.unwrap_or_else(error_to_output));
-                    }
+                        for result in results {
+                            output =
+                                aggregate_output(output, result.unwrap_or_else(error_to_output));
+                        }
 
-                    if !output.success() {
-                        output.stdout.shrink_to_fit();
-                        output.stderr.shrink_to_fit();
-                        return Err(anyhow!(ProcessError(output)));
+                        if !output.success() {
+                            output.stdout.shrink_to_fit();
+                            output.stderr.shrink_to_fit();
+                            return Err(anyhow!(ProcessError(output)));
+                        }
                     }
+                    Ok(output)
                 }
-                Ok(output)
             };
 
         let mut cudafe_commands_group = nvcc_subcommand_groups;
         let mut device_compile_groups = cudafe_commands_group.split_off(cuda_front_end_range.len());
         let final_host_compiler_group = device_compile_groups.split_off(device_compile_range.len());
+
+        let mut pending = Some(pending);
 
         for command_groups in [
             // Run the `cudafe++` command group first
@@ -1070,7 +1080,7 @@ impl CompileCommandImpl for NvccCompileCommand {
             },
         ] {
             if !command_groups.is_empty() {
-                output = match run_command_groups(output, command_groups).await {
+                output = match run_command_groups(output, command_groups, pending.take()).await {
                     Ok(output) => output,
                     Err(err) => {
                         return maybe_keep_temps_then_clean(nvcc_internal_files)
@@ -2343,6 +2353,7 @@ where
     run_input_output(cmd, None).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_nvcc_subcommands_group<T>(
     service: &SccacheService<T>,
     creator: &T,
@@ -2351,6 +2362,7 @@ async fn run_nvcc_subcommands_group<T>(
     obj_dir: &Path,
     keep_dir: Option<&Path>,
     nvcc_internal_files: &HashMap<String, String>,
+    mut pending: Option<crate::server::SccacheGaugeIncrement>,
 ) -> Result<ProcessOutput>
 where
     T: CommandCreatorSync,
@@ -2381,7 +2393,9 @@ where
                     ..
                 } = &cmd;
 
-                let pending = service.increment_pending_compilations();
+                let pending = pending
+                    .take()
+                    .unwrap_or_else(|| service.increment_pending_compilations());
 
                 match service.compiler_info(exe, cwd, args, env_vars).await {
                     Err(err) => error_to_output(err),

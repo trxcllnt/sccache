@@ -890,6 +890,7 @@ impl util::AsyncMulticastArgs for Compile {
 #[derive(Clone, Default)]
 pub struct SccacheGauge {
     value: Arc<AtomicU64>,
+    notifier: Arc<tokio::sync::Notify>,
 }
 
 impl SccacheGauge {
@@ -897,6 +898,7 @@ impl SccacheGauge {
         self.increment_if(|_| true)
             .unwrap_or_else(|_| SccacheGaugeIncrement {
                 value: self.value.clone(),
+                notifier: self.notifier.clone(),
             })
     }
 
@@ -918,7 +920,10 @@ impl SccacheGauge {
                     }
                 },
             )
-            .map(|_| SccacheGaugeIncrement { value })
+            .map(|_| SccacheGaugeIncrement {
+                value,
+                notifier: self.notifier.clone(),
+            })
     }
 
     pub fn value(&self) -> u64 {
@@ -929,6 +934,13 @@ impl SccacheGauge {
 #[derive(Clone, Default)]
 pub struct SccacheGaugeIncrement {
     value: Arc<AtomicU64>,
+    notifier: Arc<tokio::sync::Notify>,
+}
+
+impl SccacheGaugeIncrement {
+    pub fn notify(&self) {
+        self.notifier.notify_one();
+    }
 }
 
 impl Drop for SccacheGaugeIncrement {
@@ -939,6 +951,7 @@ impl Drop for SccacheGaugeIncrement {
             std::sync::atomic::Ordering::SeqCst,
             |value| Some(value.saturating_sub(1)),
         );
+        self.notify();
     }
 }
 
@@ -1028,22 +1041,20 @@ where
 
     pub async fn increment_pending_compilations_guarded(&self) -> SccacheGaugeIncrement {
         loop {
-            match self
+            let retry = self.pending_compilations.notifier.notified();
+            tokio::pin!(retry);
+            // Register before checking the counter so releases cannot be missed or coalesced
+            retry.as_mut().enable();
+            if let Ok(pending) = self
                 .pending_compilations
                 .increment_if(|pending_compilations| {
-                    pending_compilations < self.pending_compilations_limit
-                }) {
-                Ok(pending) => {
-                    break pending;
-                }
-                Err(_) => {
-                    // Jitter so not every task retries at the same time
-                    tokio::time::sleep(tokio_retry2::strategy::jitter_range(0.0, 5.0)(
-                        Duration::from_secs(1),
-                    ))
-                    .await;
-                }
+                    pending_compilations.saturating_sub(self.pending_cache_lookups.value())
+                        < self.pending_compilations_limit
+                })
+            {
+                return pending;
             }
+            retry.await;
         }
     }
 

@@ -760,7 +760,7 @@ where
 ///
 /// This was lifted from `std::process::Child::wait_with_output` and modified
 /// to also write to stdin.
-async fn wait_with_input_output<T>(
+pub async fn wait_with_input_output<T>(
     mut child: T,
     input: Option<Vec<u8>>,
 ) -> Result<(ProcessOutput, Duration)>

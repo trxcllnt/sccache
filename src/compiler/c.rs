@@ -528,11 +528,16 @@ impl CompileCommandImpl for AnyCompileCommand {
     fn get_cwd(&self) -> PathBuf {
         dispatch_compile_command!(self, c => c.get_cwd())
     }
-    async fn execute<T>(&self, service: &SccacheService<T>, creator: &T) -> Result<ProcessOutput>
+    async fn execute<T>(
+        &self,
+        service: &SccacheService<T>,
+        creator: &T,
+        pending: crate::server::SccacheGaugeIncrement,
+    ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
     {
-        dispatch_compile_command!(self, c => c.execute(service, creator).await)
+        dispatch_compile_command!(self, c => c.execute(service, creator, pending).await)
     }
 }
 
@@ -1548,8 +1553,13 @@ where
         self.cmd.get_cwd()
     }
 
-    async fn execute(&self, service: &SccacheService<T>, creator: &T) -> Result<ProcessOutput> {
-        self.cmd.execute(service, creator).await
+    async fn execute(
+        &self,
+        service: &SccacheService<T>,
+        creator: &T,
+        pending: crate::server::SccacheGaugeIncrement,
+    ) -> Result<ProcessOutput> {
+        self.cmd.execute(service, creator, pending).await
     }
 
     fn box_clone(&self) -> Box<dyn CompileCommand<T>> {

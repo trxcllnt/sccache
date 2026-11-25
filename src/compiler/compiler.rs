@@ -41,7 +41,7 @@ use crate::{
     server,
     util::{
         Digest, bytes_to_str, fmt_duration_as_secs, resolve_compiler_avoiding_wrapper,
-        run_input_output,
+        run_input_output, wait_with_input_output,
     },
 };
 
@@ -107,6 +107,7 @@ where
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
+        pending: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput>;
 
     fn get_executable(&self) -> PathBuf;
@@ -166,8 +167,9 @@ where
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
+        pending: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput> {
-        self.cmd.execute(service, creator).await
+        self.cmd.execute(service, creator, pending).await
     }
 
     fn box_clone(&self) -> Box<dyn CompileCommand<T>> {
@@ -186,6 +188,7 @@ pub trait CompileCommandImpl: Send + Sync + Clone + 'static {
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
+        pending: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync;
@@ -241,6 +244,7 @@ impl CompileCommandImpl for SingleCompileCommand {
         &self,
         service: &server::SccacheService<T>,
         creator: &T,
+        pending: crate::server::SccacheGaugeIncrement,
     ) -> Result<ProcessOutput>
     where
         T: CommandCreatorSync,
@@ -267,10 +271,21 @@ impl CompileCommandImpl for SingleCompileCommand {
             cmd.share_jobserver();
         }
 
-        // Increment active_compilations after spawn() acquires the jobserver token
+        let child = cmd
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .await?;
+
+        // Decrement pending_compilations + increment active_compilations
+        // after spawn() acquires the jobserver token
+        drop(pending);
         let _active = service.increment_active_compilations();
 
-        run_input_output(cmd, None).await
+        wait_with_input_output(child, None)
+            .await
+            .and_then(|(output, _)| output.into())
     }
 }
 
@@ -739,8 +754,8 @@ impl<T: CommandCreatorSync> dyn CompilerHasher<T> {
             fmt_duration_as_secs(&hash_time)
         );
 
-        // Decrement pending_compilations as soon as we're done preprocessing
-        drop(pending);
+        // Unblock the compile requests queue as soon as we're done preprocessing
+        pending.notify();
 
         let (hash_result, deps_cache_write) = match hash_result {
             Ok((hash_result, deps_cache_write)) => (
@@ -795,7 +810,7 @@ impl<T: CommandCreatorSync> dyn CompilerHasher<T> {
             }
             // Cache miss, compile
             CacheLookupResult::Miss(miss_type) => {
-                let compile = lookup_or_compile.into_compile()?;
+                let compile = lookup_or_compile.into_compile(pending)?;
                 // Do the compilation (either local or distributed)
                 let (compile, duration) = {
                     let start = Instant::now();
@@ -1024,7 +1039,7 @@ where
     }
 
     #[cfg(not(feature = "dist-client"))]
-    fn into_compile(self) -> Result<Compile<'a, T>> {
+    fn into_compile(self, pending: crate::server::SccacheGaugeIncrement) -> Result<Compile<'a, T>> {
         let Self {
             command_creator,
             compilation,
@@ -1051,11 +1066,12 @@ where
             dist: None,
             out_pretty,
             sccache_service,
+            pending,
         })
     }
 
     #[cfg(feature = "dist-client")]
-    fn into_compile(self) -> Result<Compile<'a, T>> {
+    fn into_compile(self, pending: crate::server::SccacheGaugeIncrement) -> Result<Compile<'a, T>> {
         let Self {
             dist_cache_control,
             command_creator,
@@ -1096,6 +1112,7 @@ where
             dist,
             out_pretty,
             sccache_service,
+            pending,
         })
     }
 }
@@ -1209,6 +1226,7 @@ struct Compile<'a, T: CommandCreatorSync> {
     local: LocalCompile<T>,
     out_pretty: String,
     sccache_service: &'a server::SccacheService<T>,
+    pending: crate::server::SccacheGaugeIncrement,
 }
 
 impl<T> Compile<'_, T>
@@ -1229,6 +1247,7 @@ where
             command_creator,
             hash_key,
             sccache_service: service,
+            pending,
             ..
         } = self;
 
@@ -1244,7 +1263,9 @@ where
             outputs,
             cacheable,
             DistType::NoDist,
-            compile_cmd.execute(service, command_creator).await?,
+            compile_cmd
+                .execute(service, command_creator, pending)
+                .await?,
         ))
     }
 
@@ -1263,6 +1284,7 @@ where
             hash_key,
             out_pretty,
             sccache_service: service,
+            pending,
             ..
         } = self;
 
@@ -1273,6 +1295,7 @@ where
             ..
         } = self.local;
 
+        let mut pending = Some(pending);
         let mut dist_type = DistType::NoDist;
 
         if let Some(dist) = self.dist {
@@ -1280,7 +1303,16 @@ where
             let fallback_to_local = dist.dist_client.fallback_to_local_compile();
 
             // Do the distributed compilation
-            let dist_compile_res = dist.into_result(&executable, &outputs, service).await;
+            let dist_compile_res = dist
+                .into_result(
+                    &executable,
+                    &outputs,
+                    service,
+                    pending
+                        .take()
+                        .unwrap_or_else(|| service.increment_pending_compilations()),
+                )
+                .await;
 
             match dist_compile_res {
                 // Distributed compilation succeeded
@@ -1319,7 +1351,15 @@ where
             outputs,
             cacheable,
             dist_type,
-            compile_cmd.execute(service, command_creator).await?,
+            compile_cmd
+                .execute(
+                    service,
+                    command_creator,
+                    pending
+                        .take()
+                        .unwrap_or_else(|| service.increment_pending_compilations()),
+                )
+                .await?,
         ))
     }
 }
@@ -1351,6 +1391,7 @@ where
         executable: &Path,
         outputs: &[FileObjectSource],
         service: &server::SccacheService<T>,
+        pending: crate::server::SccacheGaugeIncrement,
     ) -> Result<(DistType, ProcessOutput)> {
         use dist::v3::RunJobResponse;
         use itertools::Itertools;
@@ -1369,9 +1410,6 @@ where
         } = self;
 
         use crate::util::path_to_str;
-
-        let mut pending = Some(service.increment_pending_compilations());
-        let mut uploading = None;
 
         let save_outputs_as_job_input = compilation.save_outputs_as_job_input();
         let mut dist_compile_cmd = dist_compile_cmd.as_dist(&mut path_transformer)?;
@@ -1468,6 +1506,9 @@ where
             .max_delay(Duration::from_secs(10))
             .map(tokio_retry2::strategy::jitter);
 
+        drop(pending);
+        let mut uploading = None;
+
         let dist_compile_res = loop {
             use futures::TryStreamExt;
 
@@ -1494,7 +1535,6 @@ where
             (job_id, timeout) = if let Some((ref job_id, timeout)) = job {
                 (job_id, timeout)
             } else {
-                pending.get_or_insert_with(|| service.increment_pending_compilations());
                 uploading.get_or_insert_with(|| service.increment_uploading_compilations());
 
                 trace!("[{out_pretty}]: Requesting job allocation");
@@ -1520,7 +1560,6 @@ where
             };
 
             if !missing_inputs.is_empty() {
-                pending.get_or_insert_with(|| service.increment_pending_compilations());
                 uploading.get_or_insert_with(|| service.increment_uploading_compilations());
 
                 debug!("[{out_pretty}, {job_id}]: Uploading job inputs: {missing_inputs:?}");
@@ -1548,7 +1587,6 @@ where
             }
 
             if !has_toolchain {
-                pending.get_or_insert_with(|| service.increment_pending_compilations());
                 uploading.get_or_insert_with(|| service.increment_uploading_compilations());
 
                 debug!("[{out_pretty}, {job_id}]: Uploading toolchain: {dist_toolchain}");
@@ -1569,6 +1607,8 @@ where
                 }
             }
 
+            uploading.get_or_insert_with(|| service.increment_uploading_compilations());
+
             debug!("[{out_pretty}, {job_id}]: Running job");
 
             let run_job = dist_client.run_job(
@@ -1581,7 +1621,7 @@ where
                 save_outputs_as_job_input,
             );
 
-            let _ = (pending.take(), uploading.take());
+            uploading.take();
 
             let active = service.increment_active_compilations();
 
